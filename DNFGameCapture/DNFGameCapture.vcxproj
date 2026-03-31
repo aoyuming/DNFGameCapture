@@ -186,6 +186,7 @@
     <ClInclude Include="DNFGameCapture.h" />
     <ClInclude Include="DNFGameCaptureDlg.h" />
     <ClInclude Include="framework.h" />
+    <ClInclude Include="NameMatcher.hpp" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="Resource.h" />
     <ClInclude Include="targetver.h" />
