@@ -13,7 +13,7 @@ std::mutex g_bmpMutex;
 const float WINDOW_SCALE = 1.6f;
 const int ID_BTN_START = 1005;
 const int ID_BTN_APPLY = 1006;
-const int ID_CHK_FLIP = 1007; // 翻转复选框ID
+const int ID_CHK_FLIP = 1007;
 
 struct ScorePointF { float x, y; };
 ScorePointF g_scorePts[16] = {
@@ -35,38 +35,57 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     ON_WM_LBUTTONDOWN()
     ON_BN_CLICKED(ID_BTN_START, OnBnClickedStart)
     ON_BN_CLICKED(ID_BTN_APPLY, OnBnClickedApply)
-    ON_BN_CLICKED(ID_CHK_FLIP, OnBnClickedFlip) // 绑定翻转事件
+    ON_BN_CLICKED(ID_CHK_FLIP, OnBnClickedFlip)
 END_MESSAGE_MAP()
 
 CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
-    m_bmp = NULL;
-    m_w = m_h = 0;
-    m_bIsRunning = FALSE;
-    m_bCanTrigger = TRUE;
-    m_bCanTriggerTeamScore = TRUE;
-    m_bMatchingInProgress = false;
+    m_bmp = NULL; m_w = m_h = 0;
+    m_bIsRunning = FALSE; m_bCanTrigger = TRUE; m_bCanTriggerTeamScore = TRUE;
     m_historyIdx = 0;
-    m_totalScoreRed = 0;
-    m_totalScoreBlue = 0;
-    m_lastKillerTeam = -1;
-    m_bFlipSides = false; // 默认不翻转（红左蓝右）
+    m_totalScoreRed = 0; m_totalScoreBlue = 0; m_lastKillerTeam = -1; m_bFlipSides = false;
     for (int i = 0; i < 6; i++) m_historyBmps[i] = NULL;
     AfxInitRichEdit2();
 
-    m_players[0].name = L"王大枪"; m_players[0].aliases.push_back({ L"大枪小号",0,0 }); m_players[0].team = 0;
-    m_players[1].name = L"堕落"; m_players[1].team = 0;
-    m_players[2].name = L"Scul"; m_players[2].aliases.push_back({ L"小S",0,0 }); m_players[2].aliases.push_back({ L"S哥",0,0 }); m_players[2].team = 0;
-    m_players[3].name = L"卫敢"; m_players[3].aliases.push_back({ L"敢敢",0,0 }); m_players[3].team = 0;
-
-    m_players[4].name = L"59"; m_players[4].aliases.push_back({ L"59小号",0,0 }); m_players[4].team = 1;
-    m_players[5].name = L"45"; m_players[5].team = 1;
-    m_players[6].name = L"夜风"; m_players[6].team = 1;
-    m_players[7].name = L"好好"; m_players[7].team = 1;
+    m_players[0].name = L"温柔（刀仞刀)"; m_players[0].team = 0;
+    m_players[1].name = L"发哥（卫敢）"; m_players[1].team = 0;
+    m_players[2].name = L"旋律（王大枪）"; m_players[2].team = 0;
+    m_players[3].name = L"虎牙直播堕落"; m_players[3].team = 0;
+    m_players[4].name = L"堕落不如我"; m_players[4].team = 1;
+    m_players[5].name = L"桐镜"; m_players[5].team = 1;
+    m_players[6].name = L"BBQ"; m_players[6].team = 1;
+    m_players[7].name = L"翠花"; m_players[7].team = 1;
 
     LPCTSTR cls = AfxRegisterWndClass(CS_HREDRAW | CS_VREDRAW, ::LoadCursor(NULL, IDC_ARROW), (HBRUSH)(COLOR_WINDOW + 1));
-    CreateEx(0, cls, L"DNF击杀统计 - 导播专用版", WS_OVERLAPPEDWINDOW,
-        100, 100, (int)(850 * WINDOW_SCALE), (int)(750 * WINDOW_SCALE), NULL, NULL);
+    CreateEx(0, cls, L"DNF击杀统计 - 并发无漏版", WS_OVERLAPPEDWINDOW, 100, 100, (int)(850 * WINDOW_SCALE), (int)(750 * WINDOW_SCALE), NULL, NULL);
 }
+
+#include <ctime> // 确保文件顶部有这个头文件
+
+void WriteMatchLog(const CString& logLine) {
+    CFile file;
+    // 使用 CFile 以二进制模式追加，手动处理编码
+    if (file.Open(L"match_debug.log", CFile::modeCreate | CFile::modeNoTruncate | CFile::modeWrite | CFile::shareDenyWrite)) {
+        if (file.GetLength() == 0) {
+            // 如果是新文件，写入 UTF-8 BOM 头 (EF BB BF)
+            unsigned char bom[] = { 0xEF, 0xBB, 0xBF };
+            file.Write(bom, 3);
+        }
+        file.SeekToEnd();
+
+        // 获取时间
+        time_t now = time(0);
+        tm t;
+        localtime_s(&t, &now);
+        CString fullLine;
+        fullLine.Format(L"[%02d:%02d:%02d] %s\r\n", t.tm_hour, t.tm_min, t.tm_sec, (LPCTSTR)logLine);
+
+        // 将 Unicode (UTF-16) 转换为 UTF-8 字符串
+        std::string utf8Line = CW2A(fullLine, CP_UTF8);
+        file.Write(utf8Line.c_str(), (UINT)utf8Line.length());
+        file.Close();
+    }
+}
+
 
 CDNFGameCaptureDlg::~CDNFGameCaptureDlg() {
     if (m_bmp) ::DeleteObject(m_bmp);
@@ -74,8 +93,7 @@ CDNFGameCaptureDlg::~CDNFGameCaptureDlg() {
 }
 
 void CDNFGameCaptureDlg::OnClose() {
-    m_bIsRunning = FALSE;
-    KillTimer(1); KillTimer(2); KillTimer(3); KillTimer(4);
+    m_bIsRunning = FALSE; KillTimer(1); KillTimer(2); KillTimer(3); KillTimer(4);
     DestroyWindow(); PostQuitMessage(0);
 }
 
@@ -83,32 +101,19 @@ BOOL CDNFGameCaptureDlg::OnEraseBkgnd(CDC* pDC) { return TRUE; }
 
 void CDNFGameCaptureDlg::OnBnClickedStart() {
     if (!m_bIsRunning) {
-        UpdatePlayersFromUI();
-        m_bIsRunning = TRUE;
+        UpdatePlayersFromUI(); m_bIsRunning = TRUE;
         m_btnStart.SetWindowText(L"停止监控");
-        SetTimer(1, 50, NULL);
-        SetTimer(3, 1000, NULL);
+        SetTimer(1, 50, NULL); SetTimer(3, 1000, NULL);
         m_status.SetWindowText(L"监控中...");
     }
     else {
-        m_bIsRunning = FALSE;
-        KillTimer(1); KillTimer(3);
-        m_btnStart.SetWindowText(L"开始监控");
-        m_status.SetWindowText(L"已停止");
+        m_bIsRunning = FALSE; KillTimer(1); KillTimer(3);
+        m_btnStart.SetWindowText(L"开始监控"); m_status.SetWindowText(L"已停止");
     }
 }
 
-void CDNFGameCaptureDlg::OnBnClickedApply() {
-    UpdatePlayersFromUI();
-    m_status.SetWindowText(L"修改已实时生效！");
-}
-
-// 核心翻转逻辑
-void CDNFGameCaptureDlg::OnBnClickedFlip() {
-    m_bFlipSides = (m_chkFlip.GetCheck() == BST_CHECKED);
-    WriteScoreToFile(); // 更新文件输出
-    RefreshDisplay();   // 刷新UI显示
-}
+void CDNFGameCaptureDlg::OnBnClickedApply() { UpdatePlayersFromUI(); m_status.SetWindowText(L"修改已生效！"); }
+void CDNFGameCaptureDlg::OnBnClickedFlip() { m_bFlipSides = (m_chkFlip.GetCheck() == BST_CHECKED); WriteScoreToFile(); RefreshDisplay(); }
 
 void CDNFGameCaptureDlg::Capture() {
     HWND hGame = ::FindWindow(NULL, DNF_WINDOW_NAME);
@@ -118,9 +123,7 @@ void CDNFGameCaptureDlg::Capture() {
     m_w = rc.right - rc.left; m_h = rc.bottom - rc.top;
     if (m_w <= 0 || m_h <= 0) return;
     if (!m_bmp) {
-        HDC hdc = ::GetDC(hGame);
-        m_bmp = ::CreateCompatibleBitmap(hdc, m_w, m_h);
-        ::ReleaseDC(hGame, hdc);
+        HDC hdc = ::GetDC(hGame); m_bmp = ::CreateCompatibleBitmap(hdc, m_w, m_h); ::ReleaseDC(hGame, hdc);
     }
     HDC hGameDC = ::GetDC(hGame); HDC hMem = ::CreateCompatibleDC(hGameDC);
     HGDIOBJ old = ::SelectObject(hMem, m_bmp);
@@ -128,81 +131,59 @@ void CDNFGameCaptureDlg::Capture() {
     CRect client; GetClientRect(&client);
     m_previewRect = client; m_previewRect.bottom -= (int)(290 * WINDOW_SCALE);
     CClientDC dc(this); dc.SetStretchBltMode(HALFTONE);
-    dc.StretchBlt(m_previewRect.left, m_previewRect.top, m_previewRect.Width(), m_previewRect.Height(),
-        CDC::FromHandle(hMem), 0, 0, m_w, m_h, SRCCOPY);
+    dc.StretchBlt(m_previewRect.left, m_previewRect.top, m_previewRect.Width(), m_previewRect.Height(), CDC::FromHandle(hMem), 0, 0, m_w, m_h, SRCCOPY);
     Draw(dc);
     ::SelectObject(hMem, old); ::DeleteDC(hMem); ::ReleaseDC(hGame, hGameDC);
 }
 
 void CDNFGameCaptureDlg::CheckColorTrigger() {
     if (!m_bmp || !m_bIsRunning) return;
-
-    COLORREF c_kill[4];
-    COLORREF c_team[16];
-
+    COLORREF c_k[4], c_t[16];
     {
         std::lock_guard<std::mutex> lock(g_bmpMutex);
-        HDC hMem = ::CreateCompatibleDC(NULL);
-        HGDIOBJ old = ::SelectObject(hMem, m_bmp);
-
-        c_kill[0] = ::GetPixel(hMem, (int)(m_w * 0.187f), (int)(m_h * 0.036f));
-        c_kill[1] = ::GetPixel(hMem, (int)(m_w * 0.157f), (int)(m_h * 0.034f));
-        c_kill[2] = ::GetPixel(hMem, (int)(m_w * 0.840f), (int)(m_h * 0.039f));
-        c_kill[3] = ::GetPixel(hMem, (int)(m_w * 0.810f), (int)(m_h * 0.039f));
-
-        for (int i = 0; i < 16; i++) {
-            c_team[i] = ::GetPixel(hMem, (int)(m_w * g_scorePts[i].x), (int)(m_h * g_scorePts[i].y));
-        }
-        ::SelectObject(hMem, old);
-        ::DeleteDC(hMem);
+        HDC hMem = ::CreateCompatibleDC(NULL); HGDIOBJ old = ::SelectObject(hMem, m_bmp);
+        c_k[0] = ::GetPixel(hMem, (int)(m_w * 0.187f), (int)(m_h * 0.036f));
+        c_k[1] = ::GetPixel(hMem, (int)(m_w * 0.157f), (int)(m_h * 0.034f));
+        c_k[2] = ::GetPixel(hMem, (int)(m_w * 0.840f), (int)(m_h * 0.039f));
+        c_k[3] = ::GetPixel(hMem, (int)(m_w * 0.810f), (int)(m_h * 0.039f));
+        for (int i = 0; i < 16; i++) c_t[i] = ::GetPixel(hMem, (int)(m_w * g_scorePts[i].x), (int)(m_h * g_scorePts[i].y));
+        ::SelectObject(hMem, old); ::DeleteDC(hMem);
     }
+    auto eq = [](COLORREF a, COLORREF b) { return abs(GetRValue(a) - GetRValue(b)) < 25 && abs(GetGValue(a) - GetGValue(b)) < 25 && abs(GetBValue(a) - GetBValue(b)) < 25; };
+    auto mk = [&](int p1, int p2) { return (eq(c_k[p1], COLOR_BLUE) && eq(c_k[p2], COLOR_RED)) || (eq(c_k[p1], COLOR_RED) && eq(c_k[p2], COLOR_BLUE)); };
+    auto mt = [&](int p1, int p2) { return (eq(c_t[p1], COLOR_BLUE) && eq(c_t[p2], COLOR_RED)) || (eq(c_t[p1], COLOR_RED) && eq(c_t[p2], COLOR_BLUE)); };
 
-    auto eq = [](COLORREF a, COLORREF b) {
-        return abs(GetRValue(a) - GetRValue(b)) < 25 &&
-            abs(GetGValue(a) - GetGValue(b)) < 25 &&
-            abs(GetBValue(a) - GetBValue(b)) < 25;
-        };
-
-    auto matchKillPair = [&](int p1, int p2) { return (eq(c_kill[p1], COLOR_BLUE) && eq(c_kill[p2], COLOR_RED)) || (eq(c_kill[p1], COLOR_RED) && eq(c_kill[p2], COLOR_BLUE)); };
-    auto matchTeamPair = [&](int p1, int p2) { return (eq(c_team[p1], COLOR_BLUE) && eq(c_team[p2], COLOR_RED)) || (eq(c_team[p1], COLOR_RED) && eq(c_team[p2], COLOR_BLUE)); };
-
-    bool leftTeamWipe = matchTeamPair(0, 1) && matchTeamPair(2, 3) && matchTeamPair(4, 5) && matchTeamPair(6, 7);
-    bool rightTeamWipe = matchTeamPair(8, 9) && matchTeamPair(10, 11) && matchTeamPair(12, 13) && matchTeamPair(14, 15);
-
-    if ((leftTeamWipe || rightTeamWipe) && m_bCanTriggerTeamScore) {
+    if ((mt(0, 1) && mt(2, 3) && mt(4, 5) && mt(6, 7) || mt(8, 9) && mt(10, 11) && mt(12, 13) && mt(14, 15)) && m_bCanTriggerTeamScore) {
         m_bCanTriggerTeamScore = FALSE;
-
-        if (m_lastKillerTeam == 0) m_totalScoreRed++;
-        else if (m_lastKillerTeam == 1) m_totalScoreBlue++;
-
-        SyncDataToInputBox();
-        RefreshDisplay();
-
         {
-            std::lock_guard<std::mutex> lk(m_debugMutex);
-            m_debugOcrResult = L"【队伍结算】检测到16点满足！已根据决斗者阵营加大比分！";
-            m_debugMatchDetails = L"";
+            std::lock_guard<std::mutex> dataLock(m_dataMutex); // 保护大比分修改
+            if (m_lastKillerTeam == 0) m_totalScoreRed++; else if (m_lastKillerTeam == 1) m_totalScoreBlue++;
+            SyncDataToInputBox(); RefreshDisplay(); WriteScoreToFile();
         }
-        InvalidateRect(&m_previewRect, FALSE);
         SetTimer(4, 10000, NULL);
     }
 
-    bool leftKill = matchKillPair(0, 1);
-    bool rightKill = matchKillPair(2, 3);
+    // ... 前面的颜色获取和 eq, mk, mt 判定逻辑保持不变 ...
 
-    if ((leftKill || rightKill) && m_bCanTrigger && !m_bMatchingInProgress) {
-        m_bCanTrigger = FALSE;
-        m_bMatchingInProgress = true;
-        int killTriggerSide = leftKill ? 0 : 1;
-
+        // ============ 大比分（团灭）判定 ============
+    if ((mt(0, 1) && mt(2, 3) && mt(4, 5) && mt(6, 7) || mt(8, 9) && mt(10, 11) && mt(12, 13) && mt(14, 15)) && m_bCanTriggerTeamScore) {
+        m_bCanTriggerTeamScore = FALSE;
         {
-            std::lock_guard<std::mutex> lk(m_debugMutex);
-            m_debugOcrResult.Format(L"【人头击杀】[%s]侧判定死亡(4点满足)，提取历史记录...", killTriggerSide == 0 ? L"左" : L"右");
-            m_debugMatchDetails = L"";
+            std::lock_guard<std::mutex> dataLock(m_dataMutex); // 保护大比分修改
+            if (m_lastKillerTeam == 0) m_totalScoreRed++; else if (m_lastKillerTeam == 1) m_totalScoreBlue++;
+            SyncDataToInputBox(); RefreshDisplay(); WriteScoreToFile();
         }
-        InvalidateRect(&m_previewRect, FALSE);
-        std::thread(&CDNFGameCaptureDlg::DoRetryMatchingTask, this, killTriggerSide).detach();
-        SetTimer(2, 4800, NULL);
+        // 【核心修改】：大比分冷却时间改为 2 分钟 (120000 毫秒)
+        SetTimer(4, 120000, NULL);
+    }
+
+    // ============ 单人击杀判定 ============
+    if ((mk(0, 1) || mk(2, 3)) && m_bCanTrigger) {
+        m_bCanTrigger = FALSE;
+        int killSide = mk(0, 1) ? 0 : 1;
+        std::thread(&CDNFGameCaptureDlg::DoRetryMatchingTask, this, killSide).detach();
+        // 【核心修改】：击杀冷却时间改为 13 秒 (000 毫秒)
+        SetTimer(2, 13000, NULL);
     }
 }
 
@@ -211,9 +192,12 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
     bool killerResolved = false; bool deadResolved = false;
     CString finalKillerName = L"待定", finalDeadName = L"待定";
 
-    // ============ 新增：阵营互斥锁 ============
-    int lockedKillerTeam = -1; // 已确认的击杀者阵营
-    int lockedDeadTeam = -1;   // 已确认的阵亡者阵营
+    // 用于暂存本线程识别出的目标ID，最终统一结算去重
+    int killerBestP = -1, killerBestA = -1;
+    int deadBestP = -1, deadBestA = -1;
+
+    int lockedKillerTeam = -1;
+    int lockedDeadTeam = -1;
 
     std::vector<HBITMAP> historyClones;
     {
@@ -256,62 +240,76 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
         if (!deadResolved) deadStr = RunOCR_Internal(hSnapshot, deadArea);
         if (!isHistory) DeleteObject(hSnapshot);
 
-        // ============ 核心重构：更加严格的匹配机制 ============
-        auto processMatch = [&](CString ocrResult, bool& resolved, CString& finalName, bool isKiller) {
+        auto processMatch = [&](CString ocrResult, bool& resolved, CString& finalName, bool isKiller, int& outBestP, int& outBestA) {
             if (resolved || ocrResult.IsEmpty()) return;
-            std::wstring ocrW = ocrResult.GetString();
 
-            // 【防误判 1】剔除过于零碎的 OCR 垃圾识别（通常是技能特效）
-            if (ocrW.length() < 2) return;
+            // --- 关键日志：记录 OCR 抓到了什么 ---
+            WriteMatchLog(L"------------------------------------");
+            WriteMatchLog(L"【新一轮匹配】OCR识别结果: " + ocrResult + (isKiller ? L" (寻找杀手)" : L" (寻找死者)"));
 
-            int maxS = 0, bestP = -1, bestA = -1; std::wstring bestN = L"";
+            int maxS = -1;
+            int bestP = -1;
+            int bestA = -1;
+            std::wstring bestN = L"";
 
+            m_dataMutex.lock();
             for (int p = 0; p < 8; p++) {
                 if (m_players[p].name.IsEmpty()) continue;
 
-                // 【防误判 2】阵营互斥逻辑：杀手和死者绝对不可能在同一个队！
+                // 阵营过滤日志（可选）
                 if (isKiller && lockedDeadTeam != -1 && m_players[p].team == lockedDeadTeam) continue;
                 if (!isKiller && lockedKillerTeam != -1 && m_players[p].team == lockedKillerTeam) continue;
 
-                std::wstring pN = m_players[p].name.GetString();
-                int s = m_matcher.GetMatchScore(pN, ocrW);
-                // 提高绝对包含的权重，防止把 “A” 错认为 “ABC”
-                if (ocrW.find(pN) != std::wstring::npos) s += 50;
+                // 1. 匹配主名字
+                int curScore = m_matcher.GetMatchScore(m_players[p].name.GetString(), ocrResult.GetString());
+                std::wstring curBestN = m_players[p].name.GetString();
+                int curBestA = -1;
 
-                int curPBestS = s; int curPBestA = -1; std::wstring curPBestN = pN;
+                // 2. 匹配小号
                 for (size_t a = 0; a < m_players[p].aliases.size(); a++) {
-                    std::wstring aN = m_players[p].aliases[a].name.GetString();
-                    int as = m_matcher.GetMatchScore(aN, ocrW);
-                    if (ocrW.find(aN) != std::wstring::npos) as += 50;
-                    if (as > curPBestS) { curPBestS = as; curPBestN = aN; curPBestA = (int)a; }
+                    int as = m_matcher.GetMatchScore(m_players[p].aliases[a].name.GetString(), ocrResult.GetString());
+                    if (as > curScore) {
+                        curScore = as;
+                        curBestN = m_players[p].aliases[a].name.GetString();
+                        curBestA = (int)a;
+                    }
                 }
 
-                // 【防误判 3】全面提高触发阈值（要求更高的相似度）
-                int threshold = (curPBestN.length() <= 2) ? 75 : (curPBestN.length() <= 4 ? 60 : 45);
+                // --- 关键日志：记录每个角色的得分 ---
+                CString scoreDetail;
+                scoreDetail.Format(L"  检查选手: %s, 最高匹配分: %d (匹配项: %s)", m_players[p].name, curScore, curBestN.c_str());
+                WriteMatchLog(scoreDetail);
 
-                if (curPBestS >= threshold && curPBestS > maxS) {
-                    maxS = curPBestS; bestP = p; bestA = curPBestA; bestN = curPBestN;
+                if (curScore > maxS) {
+                    maxS = curScore;
+                    bestP = p;
+                    bestA = curBestA;
+                    bestN = curBestN;
                 }
             }
+            m_dataMutex.unlock();
 
-            if (bestP != -1) {
-                if (isKiller) {
-                    if (bestA != -1) m_players[bestP].aliases[bestA].kills++; else m_players[bestP].kills++;
-                    m_lastKillerTeam = m_players[bestP].team;
-                    lockedKillerTeam = m_players[bestP].team; // 锁定杀手阵营，死者绝不可能是这队的
-                }
-                else {
-                    if (bestA != -1) m_players[bestP].aliases[bestA].deaths++; else m_players[bestP].deaths++;
-                    lockedDeadTeam = m_players[bestP].team;   // 锁定死者阵营，杀手绝不可能是这队的
-                }
-                resolved = true; finalName = bestN.c_str();
-                SyncDataToInputBox();
-                RefreshDisplay();
+            // --- 最终判定下限：30分 ---
+            if (bestP != -1 && maxS >= 30) {
+                resolved = true;
+                finalName = bestN.c_str();
+                outBestP = bestP;
+                outBestA = bestA;
+
+                WriteMatchLog(L"  >> [成功] 最终匹配到: " + finalName + L" (分数: " + std::to_wstring(maxS).c_str() + L")");
+
+                m_dataMutex.lock();
+                if (isKiller) lockedKillerTeam = m_players[bestP].team;
+                else lockedDeadTeam = m_players[bestP].team;
+                m_dataMutex.unlock();
+            }
+            else {
+                WriteMatchLog(L"  XX [失败] 最高分未达到30分下限");
             }
             };
 
-        processMatch(killerStr, killerResolved, finalKillerName, true);
-        processMatch(deadStr, deadResolved, finalDeadName, false);
+        processMatch(killerStr, killerResolved, finalKillerName, true, killerBestP, killerBestA);
+        processMatch(deadStr, deadResolved, finalDeadName, false, deadBestP, deadBestA);
 
         {
             std::lock_guard<std::mutex> lk(m_debugMutex);
@@ -323,13 +321,51 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
         }
         InvalidateRect(&m_previewRect, FALSE);
 
-        // 如果依然没有找齐双方，等待一段时间继续回溯下一帧
         if (!killerResolved || !deadResolved) std::this_thread::sleep_for(std::chrono::milliseconds(1800));
     }
-    for (HBITMAP hb : historyClones) DeleteObject(hb);
-    m_bMatchingInProgress = false;
-}
 
+    // ============ 【终极防御】：双向成对去重结算系统 ============
+    // 线程循环完毕后，统一评估并提交战绩，绝不重复算分！
+    if (killerResolved || deadResolved) {
+        std::lock_guard<std::mutex> dataLock(m_dataMutex);
+        DWORD now = GetTickCount();
+        bool isDuplicate = false;
+
+        // 检查记忆库：如果这 5 秒内，这对冤家（相同的杀手+死者）已经发生过命案，说明这是 UI 残留！
+        for (const auto& ev : m_recentEvents) {
+            if (ev.killer == finalKillerName && ev.dead == finalDeadName && (now - ev.time < 5000)) {
+                isDuplicate = true;
+                break;
+            }
+        }
+
+        if (!isDuplicate) {
+            // 这是全新的击杀，记入记忆库！
+            RecentEvent rev; rev.killer = finalKillerName; rev.dead = finalDeadName; rev.time = now;
+            m_recentEvents.push_back(rev);
+
+            // 清理10秒前的陈旧记忆
+            m_recentEvents.erase(std::remove_if(m_recentEvents.begin(), m_recentEvents.end(), [&](const RecentEvent& ev) {
+                return now - ev.time > 10000;
+                }), m_recentEvents.end());
+
+            // 兑现分数
+            if (killerResolved && killerBestP != -1) {
+                if (killerBestA != -1) m_players[killerBestP].aliases[killerBestA].kills++; else m_players[killerBestP].kills++;
+                m_lastKillerTeam = m_players[killerBestP].team;
+            }
+            if (deadResolved && deadBestP != -1) {
+                if (deadBestA != -1) m_players[deadBestP].aliases[deadBestA].deaths++; else m_players[deadBestP].deaths++;
+            }
+
+            SyncDataToInputBox();
+            RefreshDisplay();
+            WriteScoreToFile();
+        }
+    }
+
+    for (HBITMAP hb : historyClones) DeleteObject(hb);
+}
 
 CString CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaIndex) {
     RECT r_game;
@@ -340,16 +376,27 @@ CString CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaIndex) 
     HBITMAP hDstBmp = CreateCompatibleBitmap(GetDC()->GetSafeHdc(), sw * 2, sh * 2);
     SelectObject(hSrcDC, hTargetBmp); SelectObject(hDstDC, hDstBmp);
     SetStretchBltMode(hDstDC, HALFTONE); StretchBlt(hDstDC, 0, 0, sw * 2, sh * 2, hSrcDC, r_game.left, r_game.top, sw, sh, SRCCOPY);
-    DWORD t = GetTickCount(); int rd = rand() % 1000;
-    CString base = L"E:\\Umi-OCR_Paddle_v2.1.5\\", png, txt;
-    png.Format(L"%stmp_%u_%d.png", base, t, rd); txt.Format(L"%stmp_%u_%d.txt", base, t, rd);
+
+    BITMAP bm; GetObject(hDstBmp, sizeof(BITMAP), &bm);
+    BITMAPINFO bmi = { 0 }; bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER); bmi.bmiHeader.biWidth = bm.bmWidth; bmi.bmiHeader.biHeight = -bm.bmHeight;
+    bmi.bmiHeader.biPlanes = 1; bmi.bmiHeader.biBitCount = 32; bmi.bmiHeader.biCompression = BI_RGB;
+    std::vector<BYTE> px(bm.bmWidth * bm.bmHeight * 4);
+    GetDIBits(hDstDC, hDstBmp, 0, bm.bmHeight, px.data(), &bmi, DIB_RGB_COLORS);
+    for (size_t i = 0; i < px.size(); i += 4) {
+        int g = (px[i + 2] * 299 + px[i + 1] * 587 + px[i] * 114) / 1000; int inv = 255 - g;
+        inv = (inv < 140) ? 0 : 255; px[i] = px[i + 1] = px[i + 2] = inv;
+    }
+    SetDIBits(hDstDC, hDstBmp, 0, bm.bmHeight, px.data(), &bmi, DIB_RGB_COLORS);
+
+    DWORD t = GetTickCount(); CString base = L"E:\\Umi-OCR_Paddle_v2.1.5\\", png, txt;
+    png.Format(L"%stmp_%u.png", base, t); txt.Format(L"%stmp_%u.txt", base, t);
     ULONG_PTR gpt; GdiplusStartupInput gpi; GdiplusStartup(&gpt, &gpi, NULL);
     { Bitmap b(hDstBmp, NULL); CLSID id; CLSIDFromString(L"{557CF406-1A04-11D3-9A73-0000F81EF32E}", &id); b.Save(png, &id, NULL); }
     GdiplusShutdown(gpt); DeleteObject(hDstBmp); DeleteDC(hSrcDC); DeleteDC(hDstDC);
-    SHELLEXECUTEINFO sei = { sizeof(sei) }; sei.fMask = SEE_MASK_NOCLOSEPROCESS; sei.lpVerb = L"open";
-    CString exePath = base + L"Umi-OCR.exe"; sei.lpFile = exePath.GetString();
-    CString args; args.Format(L"--path \"%s\" --output \"%s\"", (LPCTSTR)png, (LPCTSTR)txt);
-    sei.lpParameters = args.GetString(); sei.nShow = SW_HIDE;
+    CString exePath = base + L"Umi-OCR.exe";
+    SHELLEXECUTEINFO sei = { sizeof(sei) }; sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = L"open"; sei.lpFile = exePath.GetString();
+    CString args; args.Format(L"--path \"%s\" --output \"%s\"", (LPCTSTR)png, (LPCTSTR)txt); sei.lpParameters = args.GetString(); sei.nShow = SW_HIDE;
     if (ShellExecuteEx(&sei)) { WaitForSingleObject(sei.hProcess, 4000); CloseHandle(sei.hProcess); }
     CString res = L""; FILE* f = NULL; Sleep(50);
     if (_wfopen_s(&f, txt, L"rb") == 0 && f) {
@@ -361,68 +408,39 @@ CString CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaIndex) 
 }
 
 void CDNFGameCaptureDlg::SyncDataToInputBox() {
-    CHARRANGE crSel;
-    m_editNamesInput.GetSel(crSel);
-
-    m_editNamesInput.SetWindowText(L"");
-
-    auto appendColorText = [&](const CString& text, COLORREF color, bool bold = false) {
-        int len = m_editNamesInput.GetWindowTextLength();
-        m_editNamesInput.SetSel(len, len);
-        CHARFORMAT cf; ZeroMemory(&cf, sizeof(cf)); cf.cbSize = sizeof(cf);
-        cf.dwMask = CFM_COLOR | CFM_BOLD;
-        cf.crTextColor = color;
-        cf.dwEffects = bold ? CFE_BOLD : 0;
-        m_editNamesInput.SetSelectionCharFormat(cf);
-        m_editNamesInput.ReplaceSel(text);
+    CHARRANGE cr; m_editNamesInput.GetSel(cr); m_editNamesInput.SetWindowText(L"");
+    auto ap = [&](const CString& t, COLORREF c, bool b = false) {
+        int l = m_editNamesInput.GetWindowTextLength(); m_editNamesInput.SetSel(l, l);
+        CHARFORMAT cf; ZeroMemory(&cf, sizeof(cf)); cf.cbSize = sizeof(cf); cf.dwMask = CFM_COLOR | CFM_BOLD;
+        cf.crTextColor = c; cf.dwEffects = b ? CFE_BOLD : 0; m_editNamesInput.SetSelectionCharFormat(cf); m_editNamesInput.ReplaceSel(t);
         };
-
-    appendColorText(L"============= 总比分 =============\r\n", RGB(150, 150, 150), true);
-    CString scoreLine; scoreLine.Format(L"               红 %d  :  %d 蓝\r\n\r\n", m_totalScoreRed, m_totalScoreBlue);
-    appendColorText(scoreLine, RGB(0, 150, 0), true);
-
-    appendColorText(L"【红队】\r\n", RGB(220, 0, 0), true);
+    ap(L"============= 总比分 =============\r\n", RGB(150, 150, 150), true);
+    CString sL; sL.Format(L"               红 %d  :  %d 蓝\r\n\r\n", m_totalScoreRed, m_totalScoreBlue); ap(sL, RGB(0, 150, 0), true);
+    ap(L"【红队】\r\n", RGB(220, 0, 0), true);
     for (int i = 0; i < 4; i++) {
-        if (m_players[i].name.IsEmpty()) { appendColorText(L"\r\n", RGB(0, 0, 0)); continue; }
-        CString line = L"  " + m_players[i].name;
-        for (auto& al : m_players[i].aliases) line += L"(" + al.name + L")";
-        line.AppendFormat(L" = %d/%d", m_players[i].kills, m_players[i].deaths);
-        for (auto& al : m_players[i].aliases) {
-            if (al.kills > 0 || al.deaths > 0) line.AppendFormat(L" [%s]=%d/%d", al.name, al.kills, al.deaths);
-        }
-        line += L"\r\n";
-        appendColorText(line, RGB(220, 0, 0));
+        if (m_players[i].name.IsEmpty()) continue;
+        CString l = L"  " + m_players[i].name; for (auto& a : m_players[i].aliases) l += L"(" + a.name + L")";
+        l.AppendFormat(L" = %d/%d", m_players[i].kills, m_players[i].deaths);
+        for (auto& a : m_players[i].aliases) if (a.kills > 0 || a.deaths > 0) l.AppendFormat(L" [%s]=%d/%d", a.name, a.kills, a.deaths);
+        ap(l + L"\r\n", RGB(220, 0, 0));
     }
-
-    appendColorText(L"\r\n【蓝队】\r\n", RGB(0, 0, 220), true);
+    ap(L"\r\n【蓝队】\r\n", RGB(0, 0, 220), true);
     for (int i = 4; i < 8; i++) {
-        if (m_players[i].name.IsEmpty()) { appendColorText(L"\r\n", RGB(0, 0, 0)); continue; }
-        CString line = L"  " + m_players[i].name;
-        for (auto& al : m_players[i].aliases) line += L"(" + al.name + L")";
-        line.AppendFormat(L" = %d/%d", m_players[i].kills, m_players[i].deaths);
-        for (auto& al : m_players[i].aliases) {
-            if (al.kills > 0 || al.deaths > 0) line.AppendFormat(L" [%s]=%d/%d", al.name, al.kills, al.deaths);
-        }
-        line += L"\r\n";
-        appendColorText(line, RGB(0, 0, 220));
+        if (m_players[i].name.IsEmpty()) continue;
+        CString l = L"  " + m_players[i].name; for (auto& a : m_players[i].aliases) l += L"(" + a.name + L")";
+        l.AppendFormat(L" = %d/%d", m_players[i].kills, m_players[i].deaths);
+        for (auto& a : m_players[i].aliases) if (a.kills > 0 || a.deaths > 0) l.AppendFormat(L" [%s]=%d/%d", a.name, a.kills, a.deaths);
+        ap(l + L"\r\n", RGB(0, 0, 220));
     }
-
-    m_editNamesInput.SetSel(crSel);
+    m_editNamesInput.SetSel(cr);
 }
 
 void CDNFGameCaptureDlg::UpdatePlayersFromUI() {
-    CString text; m_editNamesInput.GetWindowText(text);
-    int start = 0;
-    PlayerData oldData[8]; for (int i = 0; i < 8; i++) oldData[i] = m_players[i];
-
-    int currentTeam = 0;
-    int redIdx = 0, blueIdx = 4;
-
-    for (int i = 0; i < 8; i++) {
-        m_players[i].name = L""; m_players[i].aliases.clear();
-        m_players[i].kills = 0; m_players[i].deaths = 0;
-        m_players[i].team = (i < 4) ? 0 : 1;
-    }
+    std::lock_guard<std::mutex> dataLock(m_dataMutex); // 【安全更新】阻止解析冲突
+    CString text; m_editNamesInput.GetWindowText(text); int start = 0;
+    PlayerData old[8]; for (int i = 0; i < 8; i++) old[i] = m_players[i];
+    int cT = 0, rI = 0, bI = 4;
+    for (int i = 0; i < 8; i++) { m_players[i].name = L""; m_players[i].aliases.clear(); m_players[i].kills = 0; m_players[i].deaths = 0; m_players[i].team = (i < 4 ? 0 : 1); }
 
     while (start < text.GetLength()) {
         int newlinePos = text.Find(L'\n', start);
@@ -433,298 +451,158 @@ void CDNFGameCaptureDlg::UpdatePlayersFromUI() {
         if (line.IsEmpty() || line.Find(L"===") != -1) continue;
 
         if (line.Find(L"红") != -1 && line.Find(L"蓝") != -1 && line.Find(L":") != -1) {
-            int rPos = line.Find(L"红"), bPos = line.Find(L"蓝");
-            if (rPos < bPos) {
-                CString midStr = line.Mid(rPos + 1, bPos - rPos - 1);
-                int colon = midStr.Find(L":");
-                if (colon != -1) {
-                    m_totalScoreRed = _wtoi(midStr.Left(colon));
-                    m_totalScoreBlue = _wtoi(midStr.Mid(colon + 1));
+            int rP = line.Find(L"红"), bP = line.Find(L"蓝");
+            if (rP < bP) {
+                CString m = line.Mid(rP + 1, bP - rP - 1);
+                int c = m.Find(L":");
+                if (c != -1) {
+                    m_totalScoreRed = _wtoi(m.Left(c));
+                    m_totalScoreBlue = _wtoi(m.Mid(c + 1));
                 }
             }
             continue;
         }
 
-        if (line == L"【红队】" || line == L"[红队]" || line == L"红队") { currentTeam = 0; continue; }
-        if (line == L"【蓝队】" || line == L"[蓝队]" || line == L"蓝队") { currentTeam = 1; continue; }
+        if (line.Find(L"红队") != -1) { cT = 0; continue; }
+        if (line.Find(L"蓝队") != -1) { cT = 1; continue; }
 
-        int pIdx = (currentTeam == 0) ? redIdx : blueIdx;
-        if (currentTeam == 0 && redIdx >= 4) continue;
-        if (currentTeam == 1 && blueIdx >= 8) continue;
+        int pI = (cT == 0 ? rI : bI);
+        if ((cT == 0 && rI >= 4) || (cT == 1 && bI >= 8)) continue;
 
-        int eqPos = line.FindOneOf(L"=＝");
-        CString namePart = (eqPos != -1) ? line.Left(eqPos) : line;
+        int eP = line.FindOneOf(L"=＝");
+
+        // 【修复1】：之前把这里也命名成 nP 导致冲突，现在改为 namePart
+        CString namePart = (eP != -1 ? line.Left(eP) : line);
         namePart.Trim();
 
-        int firstP = namePart.FindOneOf(L"(（");
-        if (firstP != -1) {
-            m_players[pIdx].name = namePart.Left(firstP); m_players[pIdx].name.Trim();
-            CString aliasRaw = namePart.Mid(firstP); int cur = 0;
+        int fP = namePart.FindOneOf(L"(（");
+        if (fP != -1) {
+            m_players[pI].name = namePart.Left(fP); m_players[pI].name.Trim();
+            CString aR = namePart.Mid(fP);
+            int cur = 0;
             while (true) {
-                CString rem = aliasRaw.Mid(cur);
-                int L = rem.FindOneOf(L"(（"); if (L == -1) break;
-                int R = rem.FindOneOf(L")）"); if (R == -1) break;
-                CString aN = rem.Mid(L + 1, R - L - 1); aN.Trim();
+                // 【修复2】：CString::FindOneOf 不支持第二个参数，改用 Mid 截取后查找
+                CString tempStr = aR.Mid(cur);
+                int L_rel = tempStr.FindOneOf(L"(（");
+                int R_rel = tempStr.FindOneOf(L")）");
+
+                if (L_rel == -1 || R_rel == -1) break;
+
+                // 还原回绝对坐标
+                int L = cur + L_rel;
+                int R = cur + R_rel;
+
+                CString aN = aR.Mid(L + 1, R - L - 1); aN.Trim();
                 if (!aN.IsEmpty()) {
                     int ok = 0, od = 0;
-                    for (auto& oa : oldData[pIdx].aliases) if (oa.name == aN) { ok = oa.kills; od = oa.deaths; break; }
-                    m_players[pIdx].aliases.push_back({ aN, ok, od });
+                    for (auto& oa : old[pI].aliases) {
+                        if (oa.name == aN) { ok = oa.kills; od = oa.deaths; break; }
+                    }
+                    m_players[pI].aliases.push_back({ aN, ok, od });
                 }
-                cur += R + 1;
+                cur = R + 1;
             }
         }
         else {
-            m_players[pIdx].name = namePart;
+            m_players[pI].name = namePart;
         }
 
-        if (eqPos != -1) {
-            CString scorePart = line.Mid(eqPos + 1); scorePart.Trim();
-            int firstBracket = scorePart.Find(L'[');
-            CString mainScoreStr = (firstBracket != -1) ? scorePart.Left(firstBracket) : scorePart;
-            mainScoreStr.Trim();
-            int slash = mainScoreStr.FindOneOf(L"/\\-");
-            if (slash != -1) {
-                m_players[pIdx].kills = _wtoi(mainScoreStr.Left(slash));
-                m_players[pIdx].deaths = _wtoi(mainScoreStr.Mid(slash + 1));
+        if (eP != -1) {
+            CString sP = line.Mid(eP + 1); sP.Trim();
+            int sB = sP.Find(L'[');
+            CString mS = (sB != -1 ? sP.Left(sB) : sP); mS.Trim();
+            int sl = mS.FindOneOf(L"/-");
+            if (sl != -1) {
+                m_players[pI].kills = _wtoi(mS.Left(sl));
+                m_players[pI].deaths = _wtoi(mS.Mid(sl + 1));
             }
             else {
-                m_players[pIdx].kills = _wtoi(mainScoreStr);
+                m_players[pI].kills = _wtoi(mS);
             }
 
-            int bPos = line.Find(L'[');
-            while (bPos != -1) {
-                int eb = line.Find(L']', bPos);
+            int bP = line.Find(L'[');
+            while (bP != -1) {
+                int eb = line.Find(L']', bP);
                 if (eb != -1) {
-                    CString target = line.Mid(bPos + 1, eb - bPos - 1); target.Trim();
-                    CString remLine = line.Mid(eb + 1);
-                    int subEq = remLine.FindOneOf(L"=＝");
-                    if (subEq != -1) {
-                        CString v = remLine.Mid(subEq + 1); v.Trim();
-                        int nextB = v.Find(L'['); if (nextB != -1) v = v.Left(nextB);
-                        int s = v.FindOneOf(L"/\\-");
-                        int tk = (s != -1) ? _wtoi(v.Left(s)) : _wtoi(v);
-                        int td = (s != -1) ? _wtoi(v.Mid(s + 1)) : 0;
-                        for (auto& al : m_players[pIdx].aliases) {
-                            if (al.name == target) { al.kills = tk; al.deaths = td; break; }
+                    CString t = line.Mid(bP + 1, eb - bP - 1); t.Trim();
+                    CString rL = line.Mid(eb + 1);
+                    int sE = rL.FindOneOf(L"=＝");
+                    if (sE != -1) {
+                        CString v = rL.Mid(sE + 1); v.Trim();
+                        int nB = v.Find(L'[');
+                        if (nB != -1) v = v.Left(nB);
+                        int sl2 = v.FindOneOf(L"/-");
+                        int tk = (sl2 != -1 ? _wtoi(v.Left(sl2)) : _wtoi(v));
+                        int td = (sl2 != -1 ? _wtoi(v.Mid(sl2 + 1)) : 0);
+                        for (auto& al : m_players[pI].aliases) {
+                            if (al.name == t) { al.kills = tk; al.deaths = td; break; }
                         }
                     }
                 }
-                bPos = line.Find(L'[', eb != -1 ? eb : bPos + 1);
+                bP = line.Find(L'[', eb != -1 ? eb : bP + 1);
             }
         }
         else {
-            m_players[pIdx].kills = oldData[pIdx].kills;
-            m_players[pIdx].deaths = oldData[pIdx].deaths;
+            m_players[pI].kills = old[pI].kills;
+            m_players[pI].deaths = old[pI].deaths;
         }
 
-        if (currentTeam == 0) redIdx++; else blueIdx++;
+        if (cT == 0) rI++; else bI++;
     }
-
-    SyncDataToInputBox();
-    WriteScoreToFile();
-    RefreshDisplay();
+    SyncDataToInputBox(); WriteScoreToFile(); RefreshDisplay();
 }
-
-// ====================== 核心革新：独立纯净排版的文件输出 ======================
 void CDNFGameCaptureDlg::WriteScoreToFile() {
-    std::vector<PlayerData> red, blue;
-    for (int i = 0; i < 8; i++) {
-        if (m_players[i].name.IsEmpty()) continue;
-        if (m_players[i].team == 0) red.push_back(m_players[i]);
-        else blue.push_back(m_players[i]);
+    std::vector<PlayerData> r, b;
+    for (int i = 0; i < 8; i++) { if (m_players[i].name.IsEmpty()) continue; if (m_players[i].team == 0) r.push_back(m_players[i]); else b.push_back(m_players[i]); }
+    while (r.size() < 4) r.push_back({ L"",{},0,0,0 }); while (b.size() < 4) b.push_back({ L"",{},0,0,1 });
+    std::vector<PlayerData>& lT = m_bFlipSides ? b : r; std::vector<PlayerData>& rT = m_bFlipSides ? r : b;
+    FILE* fS = NULL; if (_wfopen_s(&fS, L"C:\\比分.txt", L"wt, ccs=UTF-8") == 0 && fS) {
+        fwprintf(fS, L"%d-%d\n", m_bFlipSides ? m_totalScoreBlue : m_totalScoreRed, m_bFlipSides ? m_totalScoreRed : m_totalScoreBlue); fclose(fS);
     }
-    while (red.size() < 4) red.push_back({ L"", {}, 0, 0, 0 });
-    while (blue.size() < 4) blue.push_back({ L"", {}, 0, 0, 1 });
-
-    // 根据是否翻转选项，决定左右队伍的归属
-    std::vector<PlayerData>& leftTeam = m_bFlipSides ? blue : red;
-    std::vector<PlayerData>& rightTeam = m_bFlipSides ? red : blue;
-
-    // 1. 写 比分.txt (纯净的 x-x 格式)
-    FILE* fScore = NULL;
-    if (_wfopen_s(&fScore, L"C:\\比分.txt", L"wt, ccs=UTF-8") == 0 && fScore) {
-        if (m_bFlipSides) fwprintf(fScore, L"%d-%d\n", m_totalScoreBlue, m_totalScoreRed);
-        else fwprintf(fScore, L"%d-%d\n", m_totalScoreRed, m_totalScoreBlue);
-        fclose(fScore);
-    }
-
-    // 2. 写 人头.txt (去除全部多余文字，纯"人名 击杀/死亡"对齐排版)
-    FILE* fKills = NULL;
-    if (_wfopen_s(&fKills, L"C:\\人头.txt", L"wt, ccs=UTF-8") == 0 && fKills) {
-        for (int i = 0; i < 4; ++i) {
-            auto getS = [](PlayerData& p) {
-                if (p.name.IsEmpty()) return CString(L"");
-                int tk = p.kills, td = p.deaths;
-                for (auto& a : p.aliases) { tk += a.kills; td += a.deaths; }
-                CString s; s.Format(L"%s %d/%d", p.name.GetString(), tk, td);
-                return s;
-                };
-            CString leftStr = getS(leftTeam[i]);
-            CString rightStr = getS(rightTeam[i]);
-
-            // 如果某一行左右都没人，则直接跳过避免输出空行
-            if (leftStr.IsEmpty() && rightStr.IsEmpty()) continue;
-
-            fwprintf(fKills, L"%s\t\t%s\n", leftStr.GetString(), rightStr.GetString());
-        }
-        fclose(fKills);
+    FILE* fK = NULL; if (_wfopen_s(&fK, L"C:\\人头.txt", L"wt, ccs=UTF-8") == 0 && fK) {
+        for (int i = 0; i < 4; i++) {
+            auto gs = [](PlayerData& p) { if (p.name.IsEmpty()) return CString(L""); int tk = p.kills, td = p.deaths; for (auto& a : p.aliases) { tk += a.kills;td += a.deaths; } CString s; s.Format(L"%s %d/%d", p.name.GetString(), tk, td); return s; };
+            CString ls = gs(lT[i]), rs = gs(rT[i]); if (!ls.IsEmpty() || !rs.IsEmpty()) fwprintf(fK, L"%s\t\t%s\n", ls.GetString(), rs.GetString());
+        } fclose(fK);
     }
 }
 
-void CDNFGameCaptureDlg::AppendResultText(const CString& text, COLORREF color) {
-    int len = m_editOcrResult.GetWindowTextLength(); m_editOcrResult.SetSel(len, len);
-    CHARFORMAT cf; ZeroMemory(&cf, sizeof(cf)); cf.cbSize = sizeof(cf); cf.dwMask = CFM_COLOR; cf.crTextColor = color;
-    m_editOcrResult.SetSelectionCharFormat(cf); m_editOcrResult.ReplaceSel(text);
+void CDNFGameCaptureDlg::AppendResultText(const CString& t, COLORREF c) {
+    int l = m_editOcrResult.GetWindowTextLength(); m_editOcrResult.SetSel(l, l);
+    CHARFORMAT cf; ZeroMemory(&cf, sizeof(cf)); cf.cbSize = sizeof(cf); cf.dwMask = CFM_COLOR; cf.crTextColor = c;
+    m_editOcrResult.SetSelectionCharFormat(cf); m_editOcrResult.ReplaceSel(t);
 }
 
-int GetVisualWidth(const CString& str) {
-    int width = 0;
-    for (int i = 0; i < str.GetLength(); i++) {
-        unsigned short c = str[i];
-        if (c >= 0x4E00 && c <= 0x9FFF) width += 2;
-        else width += 1;
-    }
-    return width;
-}
+int GetVisualWidth(const CString& s) { int w = 0; for (int i = 0; i < s.GetLength(); i++) w += (s[i] >= 0x4E00 && s[i] <= 0x9FFF) ? 2 : 1; return w; }
 
 void CDNFGameCaptureDlg::RefreshDisplay() {
     m_editOcrResult.SetWindowText(L"");
-
-    int leftScore = m_bFlipSides ? m_totalScoreBlue : m_totalScoreRed;
-    int rightScore = m_bFlipSides ? m_totalScoreRed : m_totalScoreBlue;
-
-    CString scoreStr;
-    scoreStr.Format(L"============= 总比分  %d : %d =============\r\n", leftScore, rightScore);
-    AppendResultText(scoreStr, RGB(0, 100, 0));
-
-    // 根据翻转状态动态显示表头
-    CString titleLeft = m_bFlipSides ? L"蓝 队 选 手" : L"红 队 选 手";
-    CString titleRight = m_bFlipSides ? L"红 队 选 手" : L"蓝 队 选 手";
-    CString headerLine; headerLine.Format(L"%-25s%s\r\n", titleLeft.GetString(), titleRight.GetString());
-
+    CString sS; sS.Format(L"============= 总比分  %d : %d =============\r\n", m_bFlipSides ? m_totalScoreBlue : m_totalScoreRed, m_bFlipSides ? m_totalScoreRed : m_totalScoreBlue);
+    AppendResultText(sS, RGB(0, 100, 0));
     AppendResultText(m_bFlipSides ? L"蓝 队 选 手                     红 队 选 手\r\n" : L"红 队 选 手                     蓝 队 选 手\r\n", RGB(0, 0, 0));
     AppendResultText(L"------------------------------------------\r\n", RGB(150, 150, 150));
-
-    std::vector<int> redIdx, blueIdx;
-    for (int i = 0; i < 8; i++) {
-        if (m_players[i].name.IsEmpty()) continue;
-        if (m_players[i].team == 0) redIdx.push_back(i);
-        else blueIdx.push_back(i);
-    }
-
-    std::vector<int>& leftIdx = m_bFlipSides ? blueIdx : redIdx;
-    std::vector<int>& rightIdx = m_bFlipSides ? redIdx : blueIdx;
-
-    COLORREF leftColor = m_bFlipSides ? RGB(0, 0, 200) : RGB(200, 0, 0);
-    COLORREF rightColor = m_bFlipSides ? RGB(200, 0, 0) : RGB(0, 0, 200);
-
-    const int COLUMN_VISUAL_WIDTH = 32;
-    size_t rowCount = max(leftIdx.size(), rightIdx.size());
-
-    for (size_t i = 0; i < rowCount; i++) {
-        CString leftText = L"";
-        if (i < leftIdx.size()) {
-            int p = leftIdx[i];
-            int tk = m_players[p].kills, td = m_players[p].deaths;
-            for (const auto& alt : m_players[p].aliases) { tk += alt.kills; td += alt.deaths; }
-            leftText.Format(L"%s : %d/%d", (LPCTSTR)m_players[p].name, tk, td);
-        }
-
-        AppendResultText(leftText, leftColor);
-        int currentW = GetVisualWidth(leftText);
-        CString spaces = L"";
-        for (int s = 0; s < (COLUMN_VISUAL_WIDTH - currentW); s++) spaces += L" ";
-        AppendResultText(spaces, RGB(0, 0, 0));
-
-        if (i < rightIdx.size()) {
-            int p = rightIdx[i];
-            int tk = m_players[p].kills, td = m_players[p].deaths;
-            for (const auto& alt : m_players[p].aliases) { tk += alt.kills; td += alt.deaths; }
-            CString rightText;
-            rightText.Format(L"%s : %d/%d\r\n", (LPCTSTR)m_players[p].name, tk, td);
-            AppendResultText(rightText, rightColor);
-        }
-        else {
-            AppendResultText(L"\r\n", RGB(0, 0, 0));
-        }
-
-        std::vector<int> leftV, rightV;
-        if (i < leftIdx.size()) {
-            for (size_t a = 0; a < m_players[leftIdx[i]].aliases.size(); a++)
-                if (m_players[leftIdx[i]].aliases[a].kills > 0 || m_players[leftIdx[i]].aliases[a].deaths > 0) leftV.push_back((int)a);
-        }
-        if (i < rightIdx.size()) {
-            for (size_t a = 0; a < m_players[rightIdx[i]].aliases.size(); a++)
-                if (m_players[rightIdx[i]].aliases[a].kills > 0 || m_players[rightIdx[i]].aliases[a].deaths > 0) rightV.push_back((int)a);
-        }
-
-        size_t maxAliasRow = max(leftV.size(), rightV.size());
-        for (size_t ar = 0; maxAliasRow > 0 && ar < maxAliasRow; ar++) {
-            CString lA = L"";
-            if (ar < leftV.size()) {
-                int p = leftIdx[i]; int a = leftV[ar];
-                lA.Format(L"  └ %s : %d/%d", (LPCTSTR)m_players[p].aliases[a].name, m_players[p].aliases[a].kills, m_players[p].aliases[a].deaths);
-            }
-            AppendResultText(lA, RGB(128, 128, 128));
-            int lW = GetVisualWidth(lA);
-            CString lS = L"";
-            for (int s = 0; s < (COLUMN_VISUAL_WIDTH - lW); s++) lS += L" ";
-            AppendResultText(lS, RGB(0, 0, 0));
-
-            if (ar < rightV.size()) {
-                int p = rightIdx[i]; int a = rightV[ar];
-                CString rA;
-                rA.Format(L"  └ %s : %d/%d\r\n", (LPCTSTR)m_players[p].aliases[a].name, m_players[p].aliases[a].kills, m_players[p].aliases[a].deaths);
-                AppendResultText(rA, RGB(128, 128, 128));
-            }
-            else {
-                AppendResultText(L"\r\n", RGB(0, 0, 0));
-            }
-        }
+    std::vector<int> rI, bI; for (int i = 0; i < 8; i++) { if (m_players[i].name.IsEmpty())continue; if (m_players[i].team == 0) rI.push_back(i); else bI.push_back(i); }
+    std::vector<int>& lIdx = m_bFlipSides ? bI : rI; std::vector<int>& rIdx = m_bFlipSides ? rI : bI;
+    COLORREF lC = m_bFlipSides ? RGB(0, 0, 200) : RGB(200, 0, 0), rC = m_bFlipSides ? RGB(200, 0, 0) : RGB(0, 0, 200);
+    size_t rows = max(lIdx.size(), rIdx.size());
+    for (size_t i = 0; i < rows; i++) {
+        CString lT = L""; if (i < lIdx.size()) { int p = lIdx[i]; int tk = m_players[p].kills, td = m_players[p].deaths; for (auto& a : m_players[p].aliases) { tk += a.kills;td += a.deaths; } lT.Format(L"%s : %d/%d", (LPCTSTR)m_players[p].name, tk, td); }
+        AppendResultText(lT, lC); int curW = GetVisualWidth(lT); for (int s = 0; s < (32 - curW); s++) AppendResultText(L" ", 0);
+        CString rT = L""; if (i < rIdx.size()) { int p = rIdx[i]; int tk = m_players[p].kills, td = m_players[p].deaths; for (auto& a : m_players[p].aliases) { tk += a.kills;td += a.deaths; } rT.Format(L"%s : %d/%d\r\n", (LPCTSTR)m_players[p].name, tk, td); }
+        else rT = L"\r\n";
+        AppendResultText(rT, rC);
     }
 }
 
 void CDNFGameCaptureDlg::Draw(CDC& dc) {
     if (m_w <= 0) return;
+    CPen p1(PS_SOLID, 2, RGB(255, 0, 0)); dc.SelectObject(&p1); dc.SelectStockObject(NULL_BRUSH);
+    float pX[4] = { 0.187f,0.157f,0.840f,0.810f }, pY[4] = { 0.036f,0.034f,0.039f,0.039f };
+    for (int i = 0; i < 4; i++) dc.Ellipse(m_previewRect.left + (int)(pX[i] * m_previewRect.Width()) - 5, m_previewRect.top + (int)(pY[i] * m_previewRect.Height()) - 5, m_previewRect.left + (int)(pX[i] * m_previewRect.Width()) + 5, m_previewRect.top + (int)(pY[i] * m_previewRect.Height()) + 5);
+    CPen p3(PS_SOLID, 2, RGB(255, 165, 0)); dc.SelectObject(&p3);
+    for (int i = 0; i < 16; i++) dc.Ellipse(m_previewRect.left + (int)(g_scorePts[i].x * m_previewRect.Width()) - 5, m_previewRect.top + (int)(g_scorePts[i].y * m_previewRect.Height()) - 5, m_previewRect.left + (int)(g_scorePts[i].x * m_previewRect.Width()) + 5, m_previewRect.top + (int)(g_scorePts[i].y * m_previewRect.Height()) + 5);
 
-    CPen p1(PS_SOLID, 2, RGB(255, 0, 0));
-    dc.SelectObject(&p1);
-    dc.SelectStockObject(NULL_BRUSH);
-    float ptsX[4] = { 0.187f, 0.157f, 0.840f, 0.810f };
-    float ptsY[4] = { 0.036f, 0.034f, 0.039f, 0.039f };
-    for (int i = 0; i < 4; i++) {
-        int cx = m_previewRect.left + (int)(ptsX[i] * m_previewRect.Width());
-        int cy = m_previewRect.top + (int)(ptsY[i] * m_previewRect.Height());
-        dc.Ellipse(cx - 5, cy - 5, cx + 5, cy + 5);
-    }
-
-    CPen p3(PS_SOLID, 2, RGB(255, 165, 0));
-    dc.SelectObject(&p3);
-    for (int i = 0; i < 16; i++) {
-        int cx = m_previewRect.left + (int)(g_scorePts[i].x * m_previewRect.Width());
-        int cy = m_previewRect.top + (int)(g_scorePts[i].y * m_previewRect.Height());
-        dc.Ellipse(cx - 5, cy - 5, cx + 5, cy + 5);
-    }
-
-    CPen p2(PS_SOLID, 2, RGB(0, 255, 0));
-    CBrush b2(RGB(0, 255, 0));
-    dc.SelectObject(&p2);
-    dc.SelectObject(&b2);
-    for (size_t i = 0; i < m_selectPts.size(); i++) {
-        int cx = m_previewRect.left + (int)((m_selectPts[i].x / 10000.0f) * m_previewRect.Width());
-        int cy = m_previewRect.top + (int)((m_selectPts[i].y / 10000.0f) * m_previewRect.Height());
-        dc.Ellipse(cx - 4, cy - 4, cx + 4, cy + 4);
-
-        CString num; num.Format(L"%d", i + 1);
-        dc.SetTextColor(RGB(0, 255, 0));
-        dc.SetBkMode(TRANSPARENT);
-        CFont numFont; numFont.CreatePointFont(90, L"Arial");
-        CFont* oldF = dc.SelectObject(&numFont);
-        dc.TextOutW(cx + 6, cy - 6, num);
-        dc.SelectObject(oldF);
-    }
-
-    CString h; { std::lock_guard<std::mutex> lk(m_debugMutex); if (!m_debugOcrResult.IsEmpty()) { h = m_debugOcrResult + L"\n" + m_debugMatchDetails; } }
+    CString h; { std::lock_guard<std::mutex> lk(m_debugMutex); h = m_debugOcrResult + L"\n" + m_debugMatchDetails; }
     if (!h.IsEmpty()) {
         dc.SetBkMode(TRANSPARENT); dc.SetTextColor(RGB(0, 255, 0));
         CFont f; f.CreatePointFont(105, L"黑体"); CFont* of = dc.SelectObject(&f);
@@ -738,32 +616,14 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
 
 void CDNFGameCaptureDlg::OnLButtonDown(UINT nFlags, CPoint point) {
     if (m_w <= 0 || m_h <= 0) return;
-
     if (m_previewRect.PtInRect(point)) {
-        if (m_selectPts.size() >= 16) {
-            m_selectPts.clear();
-        }
-
-        float ratioX = (float)(point.x - m_previewRect.left) / m_previewRect.Width();
-        float ratioY = (float)(point.y - m_previewRect.top) / m_previewRect.Height();
-
-        m_selectPts.push_back(CPoint((int)(ratioX * 10000.0f), (int)(ratioY * 10000.0f)));
+        if (m_selectPts.size() >= 16) m_selectPts.clear();
+        m_selectPts.push_back(CPoint((int)(((float)(point.x - m_previewRect.left) / m_previewRect.Width()) * 10000.0f), (int)(((float)(point.y - m_previewRect.top) / m_previewRect.Height()) * 10000.0f)));
         InvalidateRect(&m_previewRect, FALSE);
-
         if (m_selectPts.size() == 16) {
-            CString result = L"// 自动生成的 16 个比分判定点坐标(比例)：\r\n";
-            result += L"struct ScorePointF { float x, y; };\r\n";
-            result += L"ScorePointF g_scorePts[16] = {\r\n";
-            for (int i = 0; i < 16; i++) {
-                CString temp;
-                temp.Format(L"    { %.4ff, %.4ff }, // 第 %d 个点\r\n",
-                    m_selectPts[i].x / 10000.0f, m_selectPts[i].y / 10000.0f, i + 1);
-                result += temp;
-            }
-            result += L"};\r\n";
-
-            m_editOcrResult.SetWindowText(result);
-            MessageBox(L"16个坐标已采集完毕！\n请从右侧结果框中复制生成的代码并发给我。", L"采集成功");
+            CString res = L"ScorePointF g_scorePts[16] = {\r\n";
+            for (int i = 0; i < 16; i++) { CString t; t.Format(L"    { %.4ff, %.4ff },\r\n", m_selectPts[i].x / 10000.0f, m_selectPts[i].y / 10000.0f); res += t; }
+            res += L"};\r\n"; m_editOcrResult.SetWindowText(res); MessageBox(L"坐标已采集，见右侧框。");
         }
     }
     CWnd::OnLButtonDown(nFlags, point);
@@ -772,37 +632,27 @@ void CDNFGameCaptureDlg::OnLButtonDown(UINT nFlags, CPoint point) {
 void CDNFGameCaptureDlg::OnPaint() {
     CPaintDC dc(this); CRect r; GetClientRect(&r);
     if (!m_status.m_hWnd) {
-        m_font.CreatePointFont(105, L"微软雅黑");
-        int uY = r.bottom - (int)(280 * WINDOW_SCALE); int hW = (r.right - 30) / 2;
-
+        m_font.CreatePointFont(105, L"微软雅黑"); int uY = r.bottom - (int)(280 * WINDOW_SCALE); int hW = (r.right - 30) / 2;
         m_editNamesInput.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_WANTRETURN | WS_VSCROLL | ES_NOHIDESEL, CRect(10, uY, 10 + hW, r.bottom - 80), this, 1001);
         m_editNamesInput.SetFont(&m_font);
-
         m_editOcrResult.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY | WS_VSCROLL, CRect(10 + hW + 10, uY, r.right - 10, r.bottom - 80), this, 1002);
         m_editOcrResult.SetFont(&m_font);
-
         m_btnStart.Create(L"开始监控", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(10, r.bottom - 75, 10 + hW, r.bottom - 40), this, ID_BTN_START);
         m_btnApply.Create(L"应用修改", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(10 + hW + 10, r.bottom - 75, r.right - 10, r.bottom - 40), this, ID_BTN_APPLY);
-
-        // 新增复选框：翻转红蓝输出选项
-        m_chkFlip.Create(L"翻转红蓝输出 (勾选则蓝队在左，红队在右)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, CRect(10, r.bottom - 30, 260, r.bottom - 10), this, ID_CHK_FLIP);
-        m_chkFlip.SetFont(&m_font);
-        if (m_bFlipSides) m_chkFlip.SetCheck(BST_CHECKED);
-
-        m_status.Create(L"就绪", WS_CHILD | WS_VISIBLE | SS_CENTER, CRect(270, r.bottom - 30, r.right, r.bottom), this, 1003);
-
+        m_chkFlip.Create(L"翻转红蓝输出 (勾选则蓝左红右)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, CRect(10, r.bottom - 30, 260, r.bottom - 10), this, ID_CHK_FLIP);
+        m_chkFlip.SetFont(&m_font); m_status.Create(L"就绪", WS_CHILD | WS_VISIBLE | SS_CENTER, CRect(270, r.bottom - 30, r.right, r.bottom), this, 1003);
         SyncDataToInputBox();
     }
     Draw(dc);
 }
 
-void CDNFGameCaptureDlg::OnTimer(UINT_PTR nIDEvent) {
-    if (nIDEvent == 1 && m_bIsRunning) { Capture(); CheckColorTrigger(); }
-    else if (nIDEvent == 2) { m_bCanTrigger = TRUE; KillTimer(2); }
-    else if (nIDEvent == 4) { m_bCanTriggerTeamScore = TRUE; KillTimer(4); }
-    else if (nIDEvent == 3 && m_bIsRunning) {
+void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
+    if (nID == 1 && m_bIsRunning) { Capture(); CheckColorTrigger(); }
+    else if (nID == 2) { m_bCanTrigger = TRUE; KillTimer(2); }
+    else if (nID == 4) { m_bCanTriggerTeamScore = TRUE; KillTimer(4); }
+    else if (nID == 3 && m_bIsRunning) {
         std::lock_guard<std::mutex> lock(g_bmpMutex);
-        if (m_bmp && m_w > 0 && m_h > 0) {
+        if (m_bmp) {
             if (m_historyBmps[m_historyIdx]) DeleteObject(m_historyBmps[m_historyIdx]);
             HDC hDC = ::GetDC(NULL); HDC hSrc = CreateCompatibleDC(hDC); HDC hDst = CreateCompatibleDC(hDC);
             m_historyBmps[m_historyIdx] = CreateCompatibleBitmap(hDC, m_w, m_h);

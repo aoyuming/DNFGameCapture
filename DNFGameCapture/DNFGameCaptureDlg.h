@@ -3,7 +3,6 @@
 #include <afxwin.h>
 #include <afxcmn.h>   
 #include <thread>
-#include <atomic>
 #include <vector>
 #include <mutex>
 #include "NameMatcher.hpp"
@@ -27,6 +26,13 @@ struct PlayerData {
     int team = 0;
 };
 
+// ============ 新增：近期击杀事件记录（用于智能去重） ============
+struct RecentEvent {
+    CString killer;
+    CString dead;
+    DWORD time;
+};
+
 class CDNFGameCaptureDlg : public CWnd
 {
 public:
@@ -40,7 +46,7 @@ protected:
     afx_msg void OnClose();
     afx_msg void OnBnClickedStart();
     afx_msg void OnBnClickedApply();
-    afx_msg void OnBnClickedFlip(); // 新增：翻转复选框点击事件
+    afx_msg void OnBnClickedFlip();
     afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
     DECLARE_MESSAGE_MAP()
 
@@ -62,11 +68,8 @@ private:
     int m_w, m_h;
     BOOL m_bIsRunning;
 
-    // --- 独立的两套触发锁 ---
     BOOL m_bCanTrigger;
     BOOL m_bCanTriggerTeamScore;
-
-    std::atomic<bool> m_bMatchingInProgress;
 
     HBITMAP m_historyBmps[6];
     int m_historyIdx;
@@ -80,7 +83,7 @@ private:
 
     CButton m_btnStart;
     CButton m_btnApply;
-    CButton m_chkFlip; // 新增：翻转对阵复选框
+    CButton m_chkFlip;
 
     CFont   m_font;
 
@@ -97,5 +100,9 @@ private:
     int m_totalScoreBlue;
     int m_lastKillerTeam;
 
-    bool m_bFlipSides; // 新增：是否翻转红蓝输出状态
+    bool m_bFlipSides;
+
+    // ============ 新增：多线程数据保护锁与记忆库 ============
+    std::vector<RecentEvent> m_recentEvents;
+    std::mutex m_dataMutex; // 全局保护玩家数据，彻底防崩溃
 };
