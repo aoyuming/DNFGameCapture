@@ -105,4 +105,13 @@ private:
     // ============ 新增：多线程数据保护锁与记忆库 ============
     std::vector<RecentEvent> m_recentEvents;
     std::mutex m_dataMutex; // 全局保护玩家数据，彻底防崩溃
+
+    CButton m_btnReset;
+    afx_msg void OnBnClickedReset();
+
+    CButton m_btnBrowseOcr;   // 选择OCR路径的按钮
+    CEdit m_editOcrPath;      // 显示OCR路径的文本框
+    CString m_ocrExePath;     // 存储OCR的实际路径
+
+    afx_msg void OnBnClickedBrowseOcr(); // 按钮点击事件声明
 };
