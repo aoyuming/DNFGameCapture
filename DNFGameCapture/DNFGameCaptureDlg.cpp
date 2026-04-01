@@ -16,13 +16,16 @@
 
 using namespace Gdiplus;
 
+// ============================================================================
+// 全局变量与线程锁定义
+// ============================================================================
 std::mutex g_bmpMutex;
 
 struct VisualLogMsg {
     CString text;
     COLORREF color;
 };
-std::deque<VisualLogMsg> g_visualLogs;
+std::deque<VisualLogMsg> g_visualLogs; // 浮动日志队列
 std::mutex g_visualLogMutex;
 
 const float WINDOW_SCALE = 1.6f;
@@ -31,6 +34,7 @@ const int ID_BTN_APPLY = 1006;
 const int ID_CHK_FLIP = 1007;
 const int ID_BTN_RESET = 1008;
 
+// 计分板触发颜色检测坐标点
 struct ScorePointF { float x; float y; };
 ScorePointF g_scorePts[16] = {
     { 0.1594f, 0.0348f }, { 0.1922f, 0.0377f }, { 0.1761f, 0.1116f }, { 0.1957f, 0.1138f },
@@ -49,10 +53,13 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     ON_BN_CLICKED(ID_BTN_APPLY, OnBnClickedApply)
     ON_BN_CLICKED(ID_CHK_FLIP, OnBnClickedFlip)
     ON_BN_CLICKED(ID_BTN_RESET, OnBnClickedReset)
+    ON_MESSAGE(WM_UPDATE_OCR_DROPDOWNS, &CDNFGameCaptureDlg::OnUpdateOcrDropdowns)
+    ON_CBN_SELCHANGE(1010, &CDNFGameCaptureDlg::OnCbnSelchangeLeft)
+    ON_CBN_SELCHANGE(1009, &CDNFGameCaptureDlg::OnCbnSelchangeRight)
 END_MESSAGE_MAP()
 
 // ============================================================================
-// 构造与析构 (底层性能组件初始化)
+// 构造函数：初始化组件与 WinHttp
 // ============================================================================
 CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_bmp = NULL;
@@ -62,35 +69,44 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_totalScoreRed = 0; m_totalScoreBlue = 0;
     m_lastKillerTeam = -1; m_bFlipSides = false;
 
+    m_hDebugOcrBmp[0] = NULL;
+    m_hDebugOcrBmp[1] = NULL;
+
+    m_viewIndexLeft = -1;
+    m_viewIndexRight = -1;
+
     GdiplusStartupInput gpi;
     GdiplusStartup(&m_gdiplusToken, &gpi, NULL);
 
+    // [Optimize] 复用 HTTP 会话，直连 UmiOCR 本地端口
     m_hHttpSession = WinHttpOpen(L"DNF Capture UmiOCR", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (m_hHttpSession) {
         WinHttpSetTimeouts(m_hHttpSession, 1500, 1500, 2500, 2500);
-        m_hHttpConnect = WinHttpConnect(m_hHttpSession, L"127.0.0.1", 1224, 0); // 直连本地 1224 端口
+        m_hHttpConnect = WinHttpConnect(m_hHttpSession, L"127.0.0.1", 1224, 0);
     }
     else {
         m_hHttpConnect = NULL;
     }
 
-    m_lastLaunchOcrTime = 0; // 初始化防重入锁时间
-
-    // 锁定 Umi-OCR 路径为当前 EXE 所在目录
+    m_lastLaunchOcrTime = 0;
     wchar_t exePath[MAX_PATH];
     GetModuleFileName(NULL, exePath, MAX_PATH);
     CString appDir = exePath;
     int pos = appDir.ReverseFind(L'\\');
     if (pos != -1) appDir = appDir.Left(pos + 1);
-    m_ocrExePath = appDir + L"Umi-OCR.exe";
 
-    for (int i = 0; i < 6; i++) m_historyBmps[i] = NULL;
+    m_ocrExePath = appDir + L"Umi-OCR.exe";
+    m_configPath = appDir + L"players_config.txt";
+
+    // 初始化 25 帧时光回溯弹夹
+    for (int i = 0; i < 25; i++) m_historyBmps[i] = NULL;
     AfxInitRichEdit2();
 
     for (int i = 0; i < 8; i++) {
         m_players[i].kills = 0; m_players[i].deaths = 0; m_players[i].currentStreak = 0; m_players[i].akCount = 0;
     }
 
+    // 默认占位数据
     m_players[0].name = L"白羽"; m_players[0].team = 0; m_players[0].aliases.push_back({ L"抖音FSN白羽", 0, 1, 0, 0 });
     m_players[1].name = L"大崩"; m_players[1].team = 0; m_players[1].aliases.push_back({ L"流年兮", 0, 1, 0, 0 });
     m_players[2].name = L"夏法"; m_players[2].team = 0;
@@ -101,21 +117,54 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_players[7].name = L"九哥"; m_players[7].team = 1; m_players[7].aliases.push_back({ L"米叹米叹", 0, 0, 0, 0 });
 
     LPCTSTR cls = AfxRegisterWndClass(CS_HREDRAW | CS_VREDRAW, ::LoadCursor(NULL, IDC_ARROW), (HBRUSH)(COLOR_WINDOW + 1));
-    CreateEx(0, cls, L"DNF击杀统计 - Umi-OCR 并发版",
+
+    // 【UI 优化】：宽度 750(保证舒展)，高度 700(增加底部日志框容量)
+    CreateEx(0, cls, L"DNF击杀统计 - 终极完备版",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
-        100, 100, (int)(750 * WINDOW_SCALE), (int)(650 * WINDOW_SCALE), NULL, NULL);
+        100, 100, (int)(750 * WINDOW_SCALE), (int)(700 * WINDOW_SCALE), NULL, NULL);
 }
 
 CDNFGameCaptureDlg::~CDNFGameCaptureDlg() {
     if (m_bmp) ::DeleteObject(m_bmp);
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 25; i++) {
         if (m_historyBmps[i]) ::DeleteObject(m_historyBmps[i]);
     }
+    if (m_hDebugOcrBmp[0]) ::DeleteObject(m_hDebugOcrBmp[0]);
+    if (m_hDebugOcrBmp[1]) ::DeleteObject(m_hDebugOcrBmp[1]);
+
+    {
+        std::lock_guard<std::mutex> lk(m_ocrRecordMutex);
+        for (auto& r : m_ocrRecordsLeft) if (r.hBmp) DeleteObject(r.hBmp);
+        for (auto& r : m_ocrRecordsRight) if (r.hBmp) DeleteObject(r.hBmp);
+    }
+
     if (m_hHttpConnect) WinHttpCloseHandle(m_hHttpConnect);
     if (m_hHttpSession) WinHttpCloseHandle(m_hHttpSession);
     GdiplusShutdown(m_gdiplusToken);
 }
 
+// ============================================================================
+// 文件操作与辅助函数
+// ============================================================================
+
+// [Feature] 将当前队伍配置保存到文件，实现持久化
+void CDNFGameCaptureDlg::SaveConfigToFile() {
+    if (!m_editNamesInput.m_hWnd) return;
+    CString text;
+    m_editNamesInput.GetWindowText(text);
+    if (text.IsEmpty()) return;
+
+    CFile file;
+    if (file.Open(m_configPath, CFile::modeCreate | CFile::modeWrite)) {
+        unsigned char bom[] = { 0xEF, 0xBB, 0xBF }; // 写入 UTF-8 BOM，防止乱码
+        file.Write(bom, 3);
+        std::string utf8 = CW2A(text, CP_UTF8);
+        file.Write(utf8.c_str(), (UINT)utf8.length());
+        file.Close();
+    }
+}
+
+// [Feature] 将调试日志同时输出到本地 match_debug.log 文件中
 void WriteMatchLog(const CString& logLine) {
     CFile file;
     if (file.Open(L"match_debug.log", CFile::modeCreate | CFile::modeNoTruncate | CFile::modeWrite | CFile::shareDenyWrite)) {
@@ -128,6 +177,7 @@ void WriteMatchLog(const CString& logLine) {
     }
 }
 
+// 获取中英文字符的视觉宽度（中文算2，英文算1），用于排版对齐
 int GetVisualWidth(const CString& s) {
     int w = 0;
     for (int i = 0; i < s.GetLength(); i++) {
@@ -136,40 +186,27 @@ int GetVisualWidth(const CString& s) {
     return w;
 }
 
-// ============================================================================
-// 智能进程保活检测机制 (拉起同目录 Umi-OCR)
-// ============================================================================
+// [Feature] 守护进程：如果 HTTP 请求失败，尝试自动拉起本地的 Umi-OCR.exe
 void CDNFGameCaptureDlg::EnsureOcrRunning() {
     std::lock_guard<std::mutex> lock(m_launchMutex);
     DWORD now = GetTickCount();
-
-    // 防抖：10秒内只允许尝试拉起一次
-    if (now - m_lastLaunchOcrTime < 10000) return;
+    if (now - m_lastLaunchOcrTime < 10000) return; // 10秒防抖
     m_lastLaunchOcrTime = now;
+    if (GetFileAttributes(m_ocrExePath) == INVALID_FILE_ATTRIBUTES) return;
 
-    // 检查本 EXE 同目录下是否存在 Umi-OCR.exe，不存在则彻底不管
-    if (GetFileAttributes(m_ocrExePath) == INVALID_FILE_ATTRIBUTES) {
-        return;
-    }
-
-    // 存在的话，静默/最小化拉起它
     SHELLEXECUTEINFO sei = { sizeof(sei) };
     sei.fMask = SEE_MASK_FLAG_NO_UI;
     sei.lpVerb = L"open";
     sei.lpFile = m_ocrExePath.GetString();
-    sei.nShow = SW_SHOWMINNOACTIVE;
-
+    sei.nShow = SW_SHOWMINNOACTIVE; // 静默/最小化启动
     if (ShellExecuteEx(&sei)) {
-        CString msg = L"[系统恢复] HTTP连接失败，已自动拉起同目录下的 Umi-OCR.exe...";
+        CString msg = L"[系统恢复] HTTP连接失败，自动拉起 Umi-OCR.exe...";
         WriteMatchLog(msg);
         std::lock_guard<std::mutex> lk(g_visualLogMutex);
         g_visualLogs.push_back({ msg, RGB(0, 255, 255) });
     }
 }
 
-// ============================================================================
-// 界面与交互逻辑
-// ============================================================================
 void CDNFGameCaptureDlg::OnClose() {
     m_bIsRunning = FALSE;
     KillTimer(1); KillTimer(2); KillTimer(3); KillTimer(4);
@@ -178,12 +215,17 @@ void CDNFGameCaptureDlg::OnClose() {
 
 BOOL CDNFGameCaptureDlg::OnEraseBkgnd(CDC* pDC) { return TRUE; }
 
+// ============================================================================
+// 按钮事件处理
+// ============================================================================
 void CDNFGameCaptureDlg::OnBnClickedStart() {
     if (!m_bIsRunning) {
         UpdatePlayersFromUI();
         m_bIsRunning = TRUE;
         m_btnStart.SetWindowText(L"停止监控");
-        SetTimer(1, 50, NULL); SetTimer(3, 1000, NULL);
+        SetTimer(1, 50, NULL);
+        // 【核心机制】：每 300 毫秒截取一张高频历史快照
+        SetTimer(3, 300, NULL);
         m_status.SetWindowText(L"监控中...");
     }
     else {
@@ -205,12 +247,14 @@ void CDNFGameCaptureDlg::OnBnClickedReset() {
             m_players[i].kills = 0; m_players[i].deaths = 0; m_players[i].currentStreak = 0; m_players[i].akCount = 0;
             for (auto& a : m_players[i].aliases) { a.kills = 0; a.deaths = 0; a.currentStreak = 0; a.akCount = 0; }
         }
-        SyncDataToInputBox(); RefreshDisplay(); WriteScoreToFile(); m_status.SetWindowText(L"战绩已归零！");
+        SyncDataToInputBox(); RefreshDisplay(); WriteScoreToFile();
+        if (m_editVisualLogs.m_hWnd) m_editVisualLogs.SetWindowText(L"");
+        m_status.SetWindowText(L"战绩已归零！");
     }
 }
 
 // ============================================================================
-// 画面捕获与分析
+// 画面捕获与色彩触发检测
 // ============================================================================
 void CDNFGameCaptureDlg::Capture() {
     HWND hGame = ::FindWindow(NULL, DNF_WINDOW_NAME);
@@ -233,14 +277,22 @@ void CDNFGameCaptureDlg::Capture() {
         ::PrintWindow(hGame, hMem, 2);
         ::SelectObject(hMem, old); ::DeleteDC(hMem); ::ReleaseDC(hGame, hGameDC);
     }
+
     CRect client; GetClientRect(&client);
-    int splitY = max(100, client.bottom - (int)(340 * WINDOW_SCALE));
+    // 【UI 优化】：380 为下半部分预留高度（文本框高度增加），剩余归上半部分预览
+    int splitY = max(100, client.bottom - (int)(380 * WINDOW_SCALE));
     CRect topHalf(0, 0, client.right, splitY);
 
+    // 【修改点】：保持等比例缩放，绝不拉伸游戏画面致其变形
     float aspect = (float)m_w / (float)m_h;
     int drawW = topHalf.Width(), drawH = (int)(drawW / aspect);
-    if (drawH > topHalf.Height()) { drawH = topHalf.Height(); drawW = (int)(drawH * aspect); }
-    int dX = topHalf.left + (topHalf.Width() - drawW) / 2, dY = topHalf.top + (topHalf.Height() - drawH) / 2;
+    if (drawH > topHalf.Height()) {
+        drawH = topHalf.Height();
+        drawW = (int)(drawH * aspect);
+    }
+    // 居中放置画面
+    int dX = topHalf.left + (topHalf.Width() - drawW) / 2;
+    int dY = topHalf.top + (topHalf.Height() - drawH) / 2;
 
     m_previewRect = CRect(dX, dY, dX + drawW, dY + drawH);
     InvalidateRect(&topHalf, FALSE);
@@ -270,23 +322,67 @@ void CDNFGameCaptureDlg::CheckColorTrigger() {
         { std::lock_guard<std::mutex> dataLock(m_dataMutex); m_bPendingTeamScoreWin = true; }
         CString logMsg = L"★ [触发] 检测到团灭/结束特效，挂起等待最后击杀者结算...";
         WriteMatchLog(logMsg);
-        { std::lock_guard<std::mutex> lk(g_visualLogMutex); g_visualLogs.push_back({ logMsg, RGB(255, 140, 0) }); if (g_visualLogs.size() > 10) g_visualLogs.pop_front(); }
+        { std::lock_guard<std::mutex> lk(g_visualLogMutex); g_visualLogs.push_back({ logMsg, RGB(255, 140, 0) }); }
         SetTimer(4, 120000, NULL);
     }
 
     if ((mk(0, 1) || mk(2, 3)) && m_bCanTrigger) {
         m_bCanTrigger = FALSE;
-        int killSide = mk(0, 1) ? 0 : 1;
+        int killSide = mk(0, 1) ? 0 : 1; // 0=左，1=右
+        // 开启子线程进行历史帧溯源
         std::thread(&CDNFGameCaptureDlg::DoRetryMatchingTask, this, killSide).detach();
         SetTimer(2, 13000, NULL);
     }
 }
 
 // ============================================================================
-// OCR 重试、并发请求与核心匹配逻辑
+// OCR 下拉框互动机制
+// ============================================================================
+LRESULT CDNFGameCaptureDlg::OnUpdateOcrDropdowns(WPARAM wParam, LPARAM lParam) {
+    std::lock_guard<std::mutex> lk(m_ocrRecordMutex);
+
+    // wParam == 1 时清空下拉框
+    if (wParam == 1) {
+        m_cmbLeft.ResetContent();
+        m_cmbLeft.AddString(L"[红] 左侧自动追踪");
+        m_cmbLeft.SetCurSel(0);
+
+        m_cmbRight.ResetContent();
+        m_cmbRight.AddString(L"[蓝] 右侧自动追踪");
+        m_cmbRight.SetCurSel(0);
+        return 0;
+    }
+
+    // 动态追加，防止画面闪烁
+    while (m_cmbLeft.GetCount() - 1 < (int)m_ocrRecordsLeft.size()) {
+        m_cmbLeft.AddString(m_ocrRecordsLeft[m_cmbLeft.GetCount() - 1].displayText);
+    }
+    while (m_cmbRight.GetCount() - 1 < (int)m_ocrRecordsRight.size()) {
+        m_cmbRight.AddString(m_ocrRecordsRight[m_cmbRight.GetCount() - 1].displayText);
+    }
+    return 0;
+}
+
+void CDNFGameCaptureDlg::OnCbnSelchangeLeft() {
+    int sel = m_cmbLeft.GetCurSel();
+    m_viewIndexLeft = (sel == 0) ? -1 : (sel - 1);
+    InvalidateRect(&m_previewRect, FALSE); // 触发重绘查看特定历史帧
+}
+
+void CDNFGameCaptureDlg::OnCbnSelchangeRight() {
+    int sel = m_cmbRight.GetCurSel();
+    m_viewIndexRight = (sel == 0) ? -1 : (sel - 1);
+    InvalidateRect(&m_previewRect, FALSE);
+}
+
+// ============================================================================
+// 核心逻辑：纯净时光回溯与匹配重试机制
 // ============================================================================
 void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
-    int killerArea = (triggerSide == 0) ? 1 : 0, deadArea = triggerSide;
+    int killerArea = (triggerSide == 0) ? 1 : 0;
+    int deadArea = triggerSide;
+    bool killerIsLeft = (killerArea == 0);
+
     bool killerResolved = false, deadResolved = false;
     CString finalKillerName = L"待定", finalDeadName = L"待定";
     int killerBestP = -1, killerBestA = -1, deadBestP = -1, deadBestA = -1;
@@ -297,11 +393,13 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
     int globalDeadBestScore = -1, globalDeadBestP = -1, globalDeadBestA = -1, globalDeadPassLine = 999;
     CString globalDeadName = L"";
 
+    // 1. 【防跨回合架构】：一次性从内存拷贝过去 25 帧历史画面 (约 7.5 秒)。
+    // 绝不去读当前屏幕，这样哪怕后续屏幕切到下一个选手，我们的分析图也是绝对干净的。
     std::vector<HBITMAP> historyClones;
     {
         std::lock_guard<std::mutex> lock(g_bmpMutex);
-        for (int i = 1; i <= 6; i++) {
-            int idx = (m_historyIdx - i + 6) % 6;
+        for (int i = 1; i <= 25; i++) {
+            int idx = (m_historyIdx - i + 25) % 25;
             if (m_historyBmps[idx]) {
                 HDC hDC = ::GetDC(NULL); HDC hSrc = CreateCompatibleDC(hDC); HDC hDst = CreateCompatibleDC(hDC);
                 HBITMAP clone = CreateCompatibleBitmap(hDC, m_w, m_h);
@@ -313,68 +411,89 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
         }
     }
 
-    { std::lock_guard<std::mutex> lk(g_visualLogMutex); g_visualLogs.clear(); }
+    // 重置本轮可视化数据
+    {
+        std::lock_guard<std::mutex> lk(m_ocrRecordMutex);
+        for (auto& r : m_ocrRecordsLeft) if (r.hBmp) DeleteObject(r.hBmp);
+        for (auto& r : m_ocrRecordsRight) if (r.hBmp) DeleteObject(r.hBmp);
+        m_ocrRecordsLeft.clear();
+        m_ocrRecordsRight.clear();
+        m_viewIndexLeft = -1;
+        m_viewIndexRight = -1;
+    }
+    PostMessage(WM_UPDATE_OCR_DROPDOWNS, 1, 0);
 
-    for (int i = 1; i <= 12; i++) {
+    // 2. 遍历纯净的历史快照
+    for (size_t i = 0; i < historyClones.size(); i++) {
         if (!m_bIsRunning || (killerResolved && deadResolved)) break;
 
-        HBITMAP hSnapshot = NULL; bool isHistory = false;
-        if (i <= (int)historyClones.size()) { hSnapshot = historyClones[i - 1]; isHistory = true; }
-        else {
-            std::lock_guard<std::mutex> lock(g_bmpMutex);
-            if (m_bmp) {
-                HDC hDC = ::GetDC(NULL); HDC hSrc = CreateCompatibleDC(hDC); HDC hDst = CreateCompatibleDC(hDC);
-                hSnapshot = CreateCompatibleBitmap(hDC, m_w, m_h);
-                HGDIOBJ os = SelectObject(hSrc, m_bmp); HGDIOBJ od = SelectObject(hDst, hSnapshot);
-                BitBlt(hDst, 0, 0, m_w, m_h, hSrc, 0, 0, SRCCOPY);
-                SelectObject(hSrc, os); SelectObject(hDst, od); DeleteDC(hSrc); DeleteDC(hDst); ::ReleaseDC(NULL, hDC);
-            }
-        }
+        HBITMAP hSnapshot = historyClones[i];
+        std::future<OcrResultData> futKiller, futDead;
 
-        if (!hSnapshot) { std::this_thread::sleep_for(std::chrono::milliseconds(500)); continue; }
-
-        CString killerStr = L"", deadStr = L"";
-        std::future<CString> futKiller, futDead;
-
+        // 【多线程异步 OCR】：左右两边同时请求解析，加速处理
         if (!killerResolved) futKiller = std::async(std::launch::async, &CDNFGameCaptureDlg::RunOCR_Internal, this, hSnapshot, killerArea);
-        if (!deadResolved && (isHistory || i <= 6)) futDead = std::async(std::launch::async, &CDNFGameCaptureDlg::RunOCR_Internal, this, hSnapshot, deadArea);
+        if (!deadResolved) futDead = std::async(std::launch::async, &CDNFGameCaptureDlg::RunOCR_Internal, this, hSnapshot, deadArea);
 
-        if (futKiller.valid()) killerStr = futKiller.get();
-        if (futDead.valid()) deadStr = futDead.get();
+        OcrResultData resK = { L"", NULL };
+        OcrResultData resD = { L"", NULL };
 
-        if (!isHistory) DeleteObject(hSnapshot);
+        if (futKiller.valid()) resK = futKiller.get();
+        if (futDead.valid()) resD = futDead.get();
 
-        auto processMatch = [&](CString ocrResult, bool& resolved, CString& finalName, bool isKiller, int& outBestP, int& outBestA) {
-            if (resolved || ocrResult.IsEmpty() || ocrResult.Find(L"No text") != -1) return;
+        // 内部 Lambda 函数：封装单个名字的打分和锁定逻辑
+        auto processMatch = [&](CString ocrResult, bool& resolved, CString& finalName, bool isKiller, int& outBestP, int& outBestA, int& frameScore) -> bool {
+            frameScore = -2;
+            if (resolved || ocrResult.IsEmpty() || ocrResult.Find(L"No text") != -1) return false;
 
-            CString logMsg; logMsg.Format(L"▶ [%s] OCR提取: \"%s\"", isKiller ? L"找杀手" : L"找死者", (LPCTSTR)ocrResult);
+            CString logMsg; logMsg.Format(L"▶ [%s] 第%d帧 OCR提取: \"%s\"", isKiller ? L"找杀手" : L"找死者", i + 1, (LPCTSTR)ocrResult);
             WriteMatchLog(logMsg);
-            { std::lock_guard<std::mutex> lk(g_visualLogMutex); g_visualLogs.push_back({ logMsg, RGB(255, 215, 0) }); if (g_visualLogs.size() > 10) g_visualLogs.pop_front(); }
+            { std::lock_guard<std::mutex> lk(g_visualLogMutex); g_visualLogs.push_back({ logMsg, RGB(255, 215, 0) }); }
 
-            int maxS = -1, bestP = -1, bestA = -1, bestRealLen = 0; std::wstring bestN = L"";
+            int maxS = -2, bestP = -1, bestA = -1, bestRealLen = 0; std::wstring bestN = L"";
             m_dataMutex.lock();
             for (int p = 0; p < 8; p++) {
                 if (m_players[p].name.IsEmpty()) continue;
+
+                // 队伍互斥降权：如果是杀手，不能匹配死者的队伍，反之亦然
                 int teamPenalty = 0;
                 if (isKiller && lockedDeadTeam != -1 && m_players[p].team == lockedDeadTeam) teamPenalty = 20;
                 if (!isKiller && lockedKillerTeam != -1 && m_players[p].team == lockedKillerTeam) teamPenalty = 20;
 
-                int curScore = m_matcher.GetMatchScore(m_players[p].name.GetString(), ocrResult.GetString()) - teamPenalty;
+                int curScore = m_matcher.GetMatchScore(m_players[p].name.GetString(), ocrResult.GetString());
+                if (curScore == -1) { maxS = -1; break; } // 命中绝对防线：职业名干扰！
+
+                curScore -= teamPenalty;
                 std::wstring curBestN = m_players[p].name.GetString(); int curBestA = -1, curRealLen = m_players[p].name.GetLength();
 
+                // 小号匹配
                 for (size_t a = 0; a < m_players[p].aliases.size(); a++) {
-                    int as = m_matcher.GetMatchScore(m_players[p].aliases[a].name.GetString(), ocrResult.GetString()) - teamPenalty;
+                    int as = m_matcher.GetMatchScore(m_players[p].aliases[a].name.GetString(), ocrResult.GetString());
+                    if (as == -1) { maxS = -1; break; }
+                    as -= teamPenalty;
                     if (as > curScore) { curScore = as; curBestN = m_players[p].aliases[a].name.GetString(); curBestA = (int)a; curRealLen = m_players[p].aliases[a].name.GetLength(); }
                 }
+                if (maxS == -1) break;
 
+                // 取历史最高分
                 if (curScore > maxS || (curScore == maxS && maxS > 0 && curRealLen > bestRealLen)) {
                     maxS = curScore; bestP = p; bestA = curBestA; bestN = curBestN; bestRealLen = curRealLen;
                 }
             }
             m_dataMutex.unlock();
 
+            frameScore = maxS;
+
+            if (maxS == -1) {
+                CString jobLog = L"  └ [⚠️职业干扰] 检测到职业名，跳过比对...";
+                WriteMatchLog(jobLog);
+                { std::lock_guard<std::mutex> lk(g_visualLogMutex); g_visualLogs.push_back({ jobLog, RGB(180, 180, 180) }); }
+                return true;
+            }
+
+            // 获取长度动态及格线
             int passLine = CNameMatcher::GetDynamicThreshold(bestRealLen);
 
+            // 存入全局最优，以备超时降级录取
             if (bestP != -1) {
                 if (isKiller && maxS > globalKillerBestScore) {
                     globalKillerBestScore = maxS; globalKillerBestP = bestP; globalKillerBestA = bestA; globalKillerPassLine = passLine; globalKillerName = bestN.c_str();
@@ -384,11 +503,12 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
                 }
             }
 
+            // 达标则锁定
             if (bestP != -1 && maxS >= passLine) {
                 resolved = true; finalName = bestN.c_str(); outBestP = bestP; outBestA = bestA;
                 CString successLog; successLog.Format(L"  └ [✔匹配] 指向: %s (得分:%d, 达标:%d)", (LPCTSTR)finalName, maxS, passLine);
                 WriteMatchLog(successLog);
-                { std::lock_guard<std::mutex> lk(g_visualLogMutex); g_visualLogs.push_back({ successLog, (m_players[bestP].team == 0) ? RGB(255, 120, 120) : RGB(120, 180, 255) }); if (g_visualLogs.size() > 10) g_visualLogs.pop_front(); }
+                { std::lock_guard<std::mutex> lk(g_visualLogMutex); g_visualLogs.push_back({ successLog, (m_players[bestP].team == 0) ? RGB(255, 120, 120) : RGB(120, 180, 255) }); }
                 m_dataMutex.lock();
                 if (isKiller) lockedKillerTeam = m_players[bestP].team; else lockedDeadTeam = m_players[bestP].team;
                 m_dataMutex.unlock();
@@ -396,40 +516,95 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
             else {
                 CString failLog; failLog.Format(L"  └ [✖失败] 最高 %d 分，未及格 %d 分", maxS, passLine);
                 WriteMatchLog(failLog);
-                { std::lock_guard<std::mutex> lk(g_visualLogMutex); g_visualLogs.push_back({ failLog, RGB(180, 180, 180) }); if (g_visualLogs.size() > 10) g_visualLogs.pop_front(); }
+                { std::lock_guard<std::mutex> lk(g_visualLogMutex); g_visualLogs.push_back({ failLog, RGB(180, 180, 180) }); }
             }
+            return false;
             };
 
-        processMatch(killerStr, killerResolved, finalKillerName, true, killerBestP, killerBestA);
-        processMatch(deadStr, deadResolved, finalDeadName, false, deadBestP, deadBestA);
+        int kScore = -2, dScore = -2;
+        bool kIsJob = processMatch(resK.text, killerResolved, finalKillerName, true, killerBestP, killerBestA, kScore);
+        bool dIsJob = processMatch(resD.text, deadResolved, finalDeadName, false, deadBestP, deadBestA, dScore);
+
+        // ==========================================================
+        // 视觉映射：解绑杀手和死者概念，严格分配至左区(Left)和右区(Right)
+        // ==========================================================
+        OcrResultData& resL = killerIsLeft ? resK : resD;
+        OcrResultData& resR = killerIsLeft ? resD : resK;
+        int scoreL = killerIsLeft ? kScore : dScore;
+        int scoreR = killerIsLeft ? dScore : kScore;
+        bool isJobL = killerIsLeft ? kIsJob : dIsJob;
+        bool isJobR = killerIsLeft ? dIsJob : kIsJob;
+        bool resolvedL = killerIsLeft ? killerResolved : deadResolved;
+        bool resolvedR = killerIsLeft ? deadResolved : killerResolved;
+        CString finalNameL = killerIsLeft ? finalKillerName : finalDeadName;
+        CString finalNameR = killerIsLeft ? finalDeadName : finalKillerName;
+
+        {
+            std::lock_guard<std::mutex> lk(m_ocrRecordMutex);
+            if (resL.hBmp) {
+                CString shortT = resL.text; if (shortT.GetLength() > 8) shortT = shortT.Left(8) + L"..";
+                CString lbl;
+                if (resolvedL && scoreL == -2) lbl.Format(L"第%d帧 [已锁: %s]", i + 1, (LPCTSTR)finalNameL);
+                else if (isJobL) lbl.Format(L"第%d帧 [屏蔽职业]", i + 1);
+                else if (shortT.IsEmpty()) lbl.Format(L"第%d帧 [空/无识别]", i + 1);
+                else lbl.Format(L"第%d帧 %s(%d分)", i + 1, (LPCTSTR)shortT, scoreL);
+                m_ocrRecordsLeft.push_back({ resL.hBmp, lbl });
+            }
+            if (resR.hBmp) {
+                CString shortT = resR.text; if (shortT.GetLength() > 8) shortT = shortT.Left(8) + L"..";
+                CString lbl;
+                if (resolvedR && scoreR == -2) lbl.Format(L"第%d帧 [已锁: %s]", i + 1, (LPCTSTR)finalNameR);
+                else if (isJobR) lbl.Format(L"第%d帧 [屏蔽职业]", i + 1);
+                else if (shortT.IsEmpty()) lbl.Format(L"第%d帧 [空/无识别]", i + 1);
+                else lbl.Format(L"第%d帧 %s(%d分)", i + 1, (LPCTSTR)shortT, scoreR);
+                m_ocrRecordsRight.push_back({ resR.hBmp, lbl });
+            }
+        }
+        PostMessage(WM_UPDATE_OCR_DROPDOWNS, 0, 0);
 
         {
             std::lock_guard<std::mutex> lk(m_debugMutex);
-            m_debugOcrResult.Format(isHistory ? L"【时光倒流快照】当前锁定 - 杀:%s 亡:%s" : L"【实时重试第%d次】当前锁定 - 杀:%s 亡:%s",
-                isHistory ? 0 : i - (int)historyClones.size(), killerResolved ? finalKillerName : L"未定", deadResolved ? finalDeadName : L"未定");
+            m_debugOcrResult.Format(L"【时光倒流帧 %d/25】当前锁定 - 杀:%s 亡:%s",
+                (int)(i + 1), killerResolved ? finalKillerName : L"未定", deadResolved ? finalDeadName : L"未定");
         }
-        InvalidateRect(&m_previewRect, FALSE);
 
-        if (!killerResolved || !deadResolved) std::this_thread::sleep_for(std::chrono::milliseconds(1800));
+        InvalidateRect(&m_previewRect, FALSE);
+        UpdateWindow();
     }
 
+    // 3. 【降级录取防沉迷机制】
+    // 若 25 帧遍历完仍未破及格线，但最优帧差分不远（>=35），强制视为识别成功。
     if (!killerResolved && globalKillerBestP != -1 && globalKillerBestScore >= (globalKillerPassLine - 20) && globalKillerBestScore >= 35) {
         killerResolved = true; killerBestP = globalKillerBestP; killerBestA = globalKillerBestA; finalKillerName = globalKillerName;
         CString fallbackLog; fallbackLog.Format(L"  └ [⚠️降级录取] 勉强认出杀手: %s (得分:%d)", (LPCTSTR)finalKillerName, globalKillerBestScore);
         WriteMatchLog(fallbackLog);
-        { std::lock_guard<std::mutex> lk(g_visualLogMutex); g_visualLogs.push_back({ fallbackLog, RGB(255, 165, 0) }); if (g_visualLogs.size() > 10) g_visualLogs.pop_front(); }
+        { std::lock_guard<std::mutex> lk(g_visualLogMutex); g_visualLogs.push_back({ fallbackLog, RGB(255, 165, 0) }); }
     }
     if (!deadResolved && globalDeadBestP != -1 && globalDeadBestScore >= (globalDeadPassLine - 20) && globalDeadBestScore >= 35) {
         deadResolved = true; deadBestP = globalDeadBestP; deadBestA = globalDeadBestA; finalDeadName = globalDeadName;
         CString fallbackLog; fallbackLog.Format(L"  └ [⚠️降级录取] 勉强认出死者: %s (得分:%d)", (LPCTSTR)finalDeadName, globalDeadBestScore);
         WriteMatchLog(fallbackLog);
-        { std::lock_guard<std::mutex> lk(g_visualLogMutex); g_visualLogs.push_back({ fallbackLog, RGB(255, 165, 0) }); if (g_visualLogs.size() > 10) g_visualLogs.pop_front(); }
+        { std::lock_guard<std::mutex> lk(g_visualLogMutex); g_visualLogs.push_back({ fallbackLog, RGB(255, 165, 0) }); }
     }
 
+    // 4. 【单边结算兜底】：如果回溯完还是没抓到另一方，记录半边数据止损
+    if ((!killerResolved || !deadResolved) && (killerResolved || deadResolved)) {
+        CString timeoutLog;
+        timeoutLog.Format(L"  └ [⌛回溯完毕] 历史帧中未找到另一方，进行单边结算兜底 (杀手:%s, 死者:%s)",
+            killerResolved ? finalKillerName : L"未定",
+            deadResolved ? finalDeadName : L"未定");
+        WriteMatchLog(timeoutLog);
+        { std::lock_guard<std::mutex> lk(g_visualLogMutex); g_visualLogs.push_back({ timeoutLog, RGB(255, 140, 0) }); }
+    }
+
+    // ============================================================================
+    // 5. 数据结算、重置连杀及本地文件读写
+    // ============================================================================
     if (killerResolved || deadResolved) {
         std::lock_guard<std::mutex> dataLock(m_dataMutex);
         DWORD now = GetTickCount(); bool isDuplicate = false;
 
+        // 防连点：同一对击杀事件 5 秒内不再记录
         for (const auto& ev : m_recentEvents) {
             if (ev.killer == finalKillerName && ev.dead == finalDeadName && (now - ev.time < 5000)) { isDuplicate = true; break; }
         }
@@ -439,7 +614,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
             m_recentEvents.erase(std::remove_if(m_recentEvents.begin(), m_recentEvents.end(), [&](const RecentEvent& ev) { return now - ev.time > 10000; }), m_recentEvents.end());
 
             auto addEventLog = [&](const CString& msg, COLORREF color) {
-                WriteMatchLog(msg); std::lock_guard<std::mutex> lk(g_visualLogMutex); g_visualLogs.push_back({ msg, color }); if (g_visualLogs.size() > 10) g_visualLogs.pop_front();
+                WriteMatchLog(msg); std::lock_guard<std::mutex> lk(g_visualLogMutex); g_visualLogs.push_back({ msg, color });
                 };
 
             if (killerResolved && killerBestP != -1) {
@@ -501,33 +676,52 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
 
 
 // ============================================================================
-// 本地 Umi-OCR API 视觉处理核心
+// OCR 视觉强化与 HTTP API 交互中枢
 // ============================================================================
-CString CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaIndex) {
-    if (!m_hHttpConnect) return L"";
+OcrResultData CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaIndex) {
+    OcrResultData ret = { L"", NULL };
+    if (!m_hHttpConnect) return ret;
 
     RECT r_game = (nAreaIndex == 0) ?
         RECT{ (long)(m_w * 0.190f), (long)(m_h * 0.004f), (long)(m_w * 0.360f), (long)(m_h * 0.040f) } :
         RECT{ (long)(m_w * 0.655f), (long)(m_h * 0.004f), (long)(m_w * 0.815f), (long)(m_h * 0.040f) };
 
     int sw = r_game.right - r_game.left, sh = r_game.bottom - r_game.top;
+
+    // 【图像增强核心 1】：2 倍伸缩，降低 CPU 负担的同时保证清晰；增加纯白 Padding 防截断
+    int scale = 2;
+    int pad = 30;
+    int dstW = sw * scale + pad * 2;
+    int dstH = sh * scale + pad * 2;
+
     HDC hSrcDC = CreateCompatibleDC(NULL), hDstDC = CreateCompatibleDC(NULL);
-    HBITMAP hDstBmp = CreateCompatibleBitmap(GetDC()->GetSafeHdc(), sw * 2, sh * 2);
+    HBITMAP hDstBmp = CreateCompatibleBitmap(GetDC()->GetSafeHdc(), dstW, dstH);
     SelectObject(hSrcDC, hTargetBmp); SelectObject(hDstDC, hDstBmp);
+
+    RECT bgRect = { 0, 0, dstW, dstH };
+    HBRUSH hWhiteBrush = CreateSolidBrush(RGB(255, 255, 255));
+    FillRect(hDstDC, &bgRect, hWhiteBrush); // 铺白底
+    DeleteObject(hWhiteBrush);
+
     SetStretchBltMode(hDstDC, HALFTONE);
-    StretchBlt(hDstDC, 0, 0, sw * 2, sh * 2, hSrcDC, r_game.left, r_game.top, sw, sh, SRCCOPY);
+    StretchBlt(hDstDC, pad, pad, sw * scale, sh * scale, hSrcDC, r_game.left, r_game.top, sw, sh, SRCCOPY);
 
     BITMAP bm; GetObject(hDstBmp, sizeof(BITMAP), &bm);
     BITMAPINFO bmi = { { sizeof(BITMAPINFOHEADER), bm.bmWidth, -bm.bmHeight, 1, 32, BI_RGB } };
     std::vector<BYTE> px(bm.bmWidth * bm.bmHeight * 4);
     GetDIBits(hDstDC, hDstBmp, 0, bm.bmHeight, px.data(), &bmi, DIB_RGB_COLORS);
 
+    // 【图像增强核心 2】：激进的灰度二值化，阀值 90 挽救半透明死者名字
     for (size_t i = 0; i < px.size(); i += 4) {
         int g = (px[i + 2] * 299 + px[i + 1] * 587 + px[i] * 114) / 1000;
-        int inv = 255 - g; px[i] = px[i + 1] = px[i + 2] = (inv < 140) ? 0 : 255;
+        px[i] = px[i + 1] = px[i + 2] = (g > 90) ? 0 : 255;
     }
     SetDIBits(hDstDC, hDstBmp, 0, bm.bmHeight, px.data(), &bmi, DIB_RGB_COLORS);
 
+    // 深拷贝保留最终图像用于 UI 探测与历史下拉框显示
+    ret.hBmp = (HBITMAP)CopyImage(hDstBmp, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
+
+    // ===== 图像编码与请求发送 ======
     IStream* pStream = NULL; CreateStreamOnHGlobal(NULL, TRUE, &pStream);
     {
         Bitmap b(hDstBmp, NULL); CLSID pngClsid; CLSIDFromString(L"{557CF406-1A04-11D3-9A73-0000F81EF32E}", &pngClsid);
@@ -575,25 +769,34 @@ CString CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaIndex) 
                 }
             } while (dwSize > 0);
 
-            size_t textPos = responseStr.find("\"text\"");
-            if (textPos != std::string::npos) {
-                size_t colonPos = responseStr.find(":", textPos);
+            // ==============================================================================
+            // 【核心网络修复】：循环智能拼接 JSON 中所有的 "text" 字段！
+            // 防止长图大间距导致 UmiOCR 把 "上海1" 和 "名字" 切成了两段导致漏掉后半截
+            // ==============================================================================
+            size_t searchPos = 0;
+            while ((searchPos = responseStr.find("\"text\"", searchPos)) != std::string::npos) {
+                size_t colonPos = responseStr.find(":", searchPos);
+                if (colonPos == std::string::npos) break;
+
                 size_t startQuote = responseStr.find("\"", colonPos);
-                if (startQuote != std::string::npos) {
-                    size_t endQuote = responseStr.find("\"", startQuote + 1);
-                    while (endQuote != std::string::npos && responseStr[endQuote - 1] == '\\') {
-                        endQuote = responseStr.find("\"", endQuote + 1);
-                    }
-                    if (endQuote != std::string::npos && endQuote > startQuote) {
-                        std::string text = responseStr.substr(startQuote + 1, endQuote - startQuote - 1);
-                        int wideLen = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, NULL, 0);
-                        if (wideLen > 0) {
-                            std::vector<wchar_t> wideBuf(wideLen + 1, 0);
-                            MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wideBuf.data(), wideLen);
-                            res = wideBuf.data();
-                        }
+                if (startQuote == std::string::npos) break;
+
+                size_t endQuote = responseStr.find("\"", startQuote + 1);
+                while (endQuote != std::string::npos && responseStr[endQuote - 1] == '\\') {
+                    endQuote = responseStr.find("\"", endQuote + 1);
+                }
+
+                if (endQuote != std::string::npos && endQuote > startQuote) {
+                    std::string text = responseStr.substr(startQuote + 1, endQuote - startQuote - 1);
+                    // UTF-8 转宽字符
+                    int wideLen = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, NULL, 0);
+                    if (wideLen > 0) {
+                        std::vector<wchar_t> wideBuf(wideLen + 1, 0);
+                        MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wideBuf.data(), wideLen);
+                        res += wideBuf.data();
                     }
                 }
+                searchPos = (endQuote != std::string::npos) ? endQuote : searchPos + 6;
             }
         }
         WinHttpCloseHandle(hRequest);
@@ -616,14 +819,14 @@ CString CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaIndex) 
     res.Replace(L"\r", L""); res.Replace(L"\n", L""); res.Trim();
 
     if (res.Find(L"无") != -1 || res.Find(L"没有") != -1 || res.Find(L"无法") != -1) res = L"";
-    return res;
+
+    ret.text = res;
+    return ret;
 }
 
-// ============================================================================
-// 智能过滤、UI 同步与文件输出
-// ============================================================================
+// -------------------- 数据清洗与处理系列辅助函数 --------------------
 void CDNFGameCaptureDlg::FilterLivePlatformPrefixes() {
-    std::vector<CString> keywords = { L"FSN", L"TV", L"直播", L"抖音", L"快手", L"斗鱼", L"虎牙", L"B站", L"BILIBILI", L"企鹅", L"熊猫", L"战旗" };
+    std::vector<CString> keywords = { L"FSN", L"TV", L"直播", L"抖音", L"快手", L"斗鱼", L"虎牙", L"B站", L"BILIBILI", L"企冲", L"熊猫", L"战旗" };
     for (const CString& kw : keywords) {
         int count = 0;
         for (int i = 0; i < 8; i++) {
@@ -660,6 +863,7 @@ void CDNFGameCaptureDlg::FilterLivePlatformPrefixes() {
     }
 }
 
+// 【修改点：重写操作说明，干净清爽】
 void CDNFGameCaptureDlg::SyncDataToInputBox() {
     CHARRANGE cr; m_editNamesInput.GetSel(cr); m_editNamesInput.SetWindowText(L"");
     auto ap = [&](const CString& t, COLORREF c, bool b = false) {
@@ -668,9 +872,11 @@ void CDNFGameCaptureDlg::SyncDataToInputBox() {
         m_editNamesInput.SetSelectionCharFormat(cf); m_editNamesInput.ReplaceSel(t);
         };
 
-    ap(L"============= 💡 操 作 说 明 =============\r\n", RGB(150, 150, 150), true);
-    ap(L"* 格式举例：老王(旋律) ()内人头累计主号，[旋律]=4/3 可修改数据\r\n", RGB(150, 150, 150));
-    ap(L"========================================\r\n", RGB(150, 150, 150), true);
+    ap(L"💡 操作说明\r\n", RGB(150, 150, 150), true);
+    ap(L"1. 分队：输入“红队”或“蓝队”进行换行分组。\r\n", RGB(150, 150, 150));
+    ap(L"2. 绑定小号：主号(小号1)(小号2)，例如：老王(旋律)(曼珠沙华)..。小号的击杀会自动累计给主号。\r\n", RGB(150, 150, 150));
+    ap(L"3. 手动改分：[角色名]=杀/死，例如：(老王)=2/1,[旋律]=4/3。\r\n", RGB(150, 150, 150));
+    ap(L"4. 手动改AK：在战绩后加 A次数，例如：[旋律]=4/3 A2。\r\n\r\n", RGB(150, 150, 150));
 
     CString sL; sL.Format(L"               红 %d  :  %d 蓝\r\n", m_totalScoreRed, m_totalScoreBlue); ap(sL, RGB(0, 150, 0), true);
 
@@ -692,7 +898,9 @@ void CDNFGameCaptureDlg::SyncDataToInputBox() {
         }
         };
     renderTeam(0, 4, RGB(220, 0, 0), L"【红队】\r\n"); renderTeam(4, 8, RGB(0, 0, 220), L"【蓝队】\r\n");
+
     m_editNamesInput.SetSel(cr);
+    SaveConfigToFile();
 }
 
 void CDNFGameCaptureDlg::UpdatePlayersFromUI() {
@@ -709,7 +917,7 @@ void CDNFGameCaptureDlg::UpdatePlayersFromUI() {
     while (start < text.GetLength()) {
         int newlinePos = text.Find(L'\n', start); CString line = (newlinePos != -1) ? text.Mid(start, newlinePos - start) : text.Mid(start);
         start = (newlinePos != -1) ? newlinePos + 1 : (int)text.GetLength(); line.Remove(L'\r'); line.Trim();
-        if (line.IsEmpty() || line.Find(L"===") != -1 || line.Find(L"💡") != -1 || line.Find(L"*") != -1) continue;
+        if (line.IsEmpty() || line.Find(L"===") != -1 || line.Find(L"💡") != -1 || line.Find(L"操作说明") != -1 || line.Find(L"队伍分配") != -1 || line.Find(L"绑定小号") != -1 || line.Find(L"手动改分") != -1 || line.Find(L"手动改AK") != -1) continue;
 
         if (line.Find(L"红") != -1 && line.Find(L"蓝") != -1 && line.Find(L":") != -1) {
             int rP = line.Find(L"红"), bP = line.Find(L"蓝");
@@ -854,6 +1062,9 @@ void CDNFGameCaptureDlg::RefreshDisplay() {
     }
 }
 
+// ============================================================================
+// 视图重绘中枢
+// ============================================================================
 void CDNFGameCaptureDlg::Draw(CDC& dc) {
     if (m_w <= 0) return;
     CPen p1(PS_SOLID, 2, RGB(255, 0, 0)), p3(PS_SOLID, 2, RGB(255, 165, 0));
@@ -863,21 +1074,89 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
     dc.SelectObject(&p3);
     for (int i = 0; i < 16; i++) dc.Ellipse(m_previewRect.left + (int)(g_scorePts[i].x * m_previewRect.Width()) - 5, m_previewRect.top + (int)(g_scorePts[i].y * m_previewRect.Height()) - 5, m_previewRect.left + (int)(g_scorePts[i].x * m_previewRect.Width()) + 5, m_previewRect.top + (int)(g_scorePts[i].y * m_previewRect.Height()) + 5);
 
+    // 【排版修改：把状态锁定的提示字移到左下角，不遮挡主画面】
     CString h; { std::lock_guard<std::mutex> lk(m_debugMutex); h = m_debugOcrResult; }
     if (!h.IsEmpty()) {
         dc.SetBkMode(TRANSPARENT); dc.SetTextColor(RGB(0, 255, 0)); CFont f; f.CreatePointFont(105, L"黑体"); CFont* of = dc.SelectObject(&f);
-        CRect cr(m_previewRect.left + 15, m_previewRect.top + 15, m_previewRect.right - 15, m_previewRect.bottom - 15);
-        dc.DrawText(h, &cr, DT_LEFT | DT_TOP | DT_CALCRECT); cr.InflateRect(8, 8); dc.FillSolidRect(&cr, RGB(25, 25, 25)); dc.DrawText(h, &cr, DT_LEFT | DT_TOP); dc.SelectObject(of);
+
+        CRect textRect(0, 0, 0, 0);
+        dc.DrawText(h, &textRect, DT_LEFT | DT_TOP | DT_CALCRECT);
+
+        int paddingX = 15;
+        int paddingY = 25; // 距离底部边缘留点空隙
+
+        CRect cr(m_previewRect.left + paddingX,
+            m_previewRect.bottom - paddingY - textRect.Height(),
+            m_previewRect.left + paddingX + textRect.Width(),
+            m_previewRect.bottom - paddingY);
+
+        cr.InflateRect(8, 8);
+        dc.FillSolidRect(&cr, RGB(25, 25, 25));
+        dc.DrawText(h, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        dc.SelectObject(of);
     }
 
-    std::lock_guard<std::mutex> lkLog(g_visualLogMutex);
-    if (!g_visualLogs.empty()) {
-        dc.SetBkMode(TRANSPARENT); CFont f2; f2.CreatePointFont(100, L"微软雅黑"); CFont* of2 = dc.SelectObject(&f2);
-        int lineH = 20, curY = m_previewRect.bottom - ((int)g_visualLogs.size() * lineH + 10) - 15 + 5;
-        CRect bgRect(m_previewRect.left + 15, curY - 5, m_previewRect.right - 15, m_previewRect.bottom - 15);
-        dc.FillSolidRect(&bgRect, RGB(35, 35, 35));
-        for (const auto& log : g_visualLogs) { dc.SetTextColor(log.color); dc.TextOut(bgRect.left + 10, curY, log.text); curY += lineH; }
-        dc.SelectObject(of2);
+    HBITMAP hShowL = NULL, hShowR = NULL;
+    {
+        std::lock_guard<std::mutex> lkBmp(m_ocrRecordMutex);
+        if (m_viewIndexLeft >= 0 && m_viewIndexLeft < (int)m_ocrRecordsLeft.size()) {
+            hShowL = m_ocrRecordsLeft[m_viewIndexLeft].hBmp;
+        }
+        else if (!m_ocrRecordsLeft.empty()) {
+            hShowL = m_ocrRecordsLeft.back().hBmp;
+        }
+
+        if (m_viewIndexRight >= 0 && m_viewIndexRight < (int)m_ocrRecordsRight.size()) {
+            hShowR = m_ocrRecordsRight[m_viewIndexRight].hBmp;
+        }
+        else if (!m_ocrRecordsRight.empty()) {
+            hShowR = m_ocrRecordsRight.back().hBmp;
+        }
+    }
+
+    HBITMAP arrToDraw[2] = { hShowL, hShowR };
+
+    int paddingRight = 15;
+    int paddingBottom = 20;
+    int curDrawY = m_previewRect.bottom - paddingBottom;
+    int targetDrawW = m_previewRect.Width() / 4;
+    if (targetDrawW < 180) targetDrawW = 180;
+
+    for (int i = 1; i >= 0; i--) {
+        if (arrToDraw[i]) {
+            BITMAP bmOcr;
+            GetObject(arrToDraw[i], sizeof(BITMAP), &bmOcr);
+
+            int srcW = (int)(bmOcr.bmWidth * 0.70);
+            int srcH = bmOcr.bmHeight;
+            int srcX = (i == 0) ? 0 : (bmOcr.bmWidth - srcW);
+            int srcY = 0;
+
+            int drawW = targetDrawW;
+            int drawH = (int)((float)srcH / srcW * drawW);
+
+            curDrawY -= drawH;
+            int itemStartX = m_previewRect.right - paddingRight - drawW;
+
+            HDC hMemDC = CreateCompatibleDC(dc.GetSafeHdc());
+            HGDIOBJ oldBmp = SelectObject(hMemDC, arrToDraw[i]);
+
+            COLORREF borderColor = (i == 0) ? RGB(255, 80, 80) : RGB(80, 180, 255);
+
+            dc.FillSolidRect(itemStartX - 2, curDrawY - 2, drawW + 4, drawH + 4, borderColor);
+            dc.SetStretchBltMode(HALFTONE);
+            dc.StretchBlt(itemStartX, curDrawY, drawW, drawH, CDC::FromHandle(hMemDC), srcX, srcY, srcW, srcH, SRCCOPY);
+
+            dc.SetBkMode(TRANSPARENT);
+            dc.SetTextColor(borderColor);
+            CFont fMini; fMini.CreatePointFont(90, L"微软雅黑");
+            CFont* ofMini = dc.SelectObject(&fMini);
+            dc.TextOut(itemStartX, curDrawY - 18, i == 0 ? L"左侧(红队) 提取区" : L"右侧(蓝队) 提取区");
+            dc.SelectObject(ofMini);
+
+            curDrawY -= 25;
+            SelectObject(hMemDC, oldBmp); DeleteDC(hMemDC);
+        }
     }
 }
 
@@ -897,24 +1176,83 @@ void CDNFGameCaptureDlg::OnLButtonDown(UINT nFlags, CPoint point) {
 
 void CDNFGameCaptureDlg::OnPaint() {
     CPaintDC dc(this); CRect r; GetClientRect(&r);
-    int splitY = max(100, r.bottom - (int)(340 * WINDOW_SCALE));
+
+    // 【高度调整】：拉大 m_editVisualLogs 的容器高度，通过增加 380
+    int splitY = max(100, r.bottom - (int)(380 * WINDOW_SCALE));
     CRect topHalf(0, 0, r.right, splitY), uiRect(0, splitY, r.right, r.bottom);
 
     if (!m_status.m_hWnd) {
         m_font.CreatePointFont(95, L"微软雅黑"); int row1_Y = splitY + 5;
 
         m_chkFlip.Create(L"翻转红蓝(蓝左红右)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, CRect(10, row1_Y, 200, row1_Y + 25), this, ID_CHK_FLIP); m_chkFlip.SetFont(&m_font);
-        m_status.Create(L"就绪", WS_CHILD | WS_VISIBLE | SS_CENTER, CRect(210, row1_Y + 4, r.right - 10, row1_Y + 25), this, 1003); m_status.SetFont(&m_font);
+        m_status.Create(L"就绪", WS_CHILD | WS_VISIBLE | SS_CENTER, CRect(210, row1_Y + 4, 380, row1_Y + 25), this, 1003); m_status.SetFont(&m_font);
+
+        int cmbW = 150;
+        m_cmbRight.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, CRect(r.right - 10 - cmbW, row1_Y, r.right - 10, row1_Y + 300), this, 1009);
+        m_cmbRight.SetFont(&m_font);
+        m_cmbRight.AddString(L"[蓝]自动");
+        m_cmbRight.SetCurSel(0);
+
+        m_cmbLeft.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, CRect(r.right - 10 - cmbW * 2 - 10, row1_Y, r.right - 10 - cmbW - 10, row1_Y + 300), this, 1010);
+        m_cmbLeft.SetFont(&m_font);
+        m_cmbLeft.AddString(L"[红]自动");
+        m_cmbLeft.SetCurSel(0);
 
         int halfW = (r.right - 30) / 2;
         int row2_Y = row1_Y + 30, row2_Bottom = r.bottom - (int)(45 * WINDOW_SCALE);
+
         m_editNamesInput.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_WANTRETURN | WS_VSCROLL | ES_NOHIDESEL, CRect(10, row2_Y, 10 + halfW, row2_Bottom), this, 1001); m_editNamesInput.SetFont(&m_font);
-        m_editOcrResult.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY | WS_VSCROLL, CRect(20 + halfW, row2_Y, r.right - 10, row2_Bottom), this, 1002); m_editOcrResult.SetFont(&m_font);
+
+        int scoreH = (int)(150 * WINDOW_SCALE);
+        m_editOcrResult.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY | WS_VSCROLL, CRect(20 + halfW, row2_Y, r.right - 10, row2_Y + scoreH), this, 1002); m_editOcrResult.SetFont(&m_font);
+
+        m_editVisualLogs.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY | WS_VSCROLL, CRect(20 + halfW, row2_Y + scoreH + 5, r.right - 10, row2_Bottom), this, 1011);
+        m_editVisualLogs.SetFont(&m_font);
+        m_editVisualLogs.SetBackgroundColor(FALSE, RGB(30, 30, 30));
+
         int btnY = row2_Bottom + 8, btnH = (int)(28 * WINDOW_SCALE), bW = (r.right - 40) / 3;
         m_btnStart.Create(L"开始监控", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(10, btnY, 10 + bW, btnY + btnH), this, ID_BTN_START); m_btnStart.SetFont(&m_font);
         m_btnApply.Create(L"应用修改", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(20 + bW, btnY, 20 + bW * 2, btnY + btnH), this, ID_BTN_APPLY); m_btnApply.SetFont(&m_font);
         m_btnReset.Create(L"战绩归零", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(30 + bW * 2, btnY, r.right - 10, btnY + btnH), this, ID_BTN_RESET); m_btnReset.SetFont(&m_font);
-        SyncDataToInputBox(); RefreshDisplay(); WriteScoreToFile();
+
+        // ==========================================================
+        // 【初始化文件存取与数据还原】
+        // ==========================================================
+        bool configLoaded = false;
+        CFile file;
+        if (file.Open(m_configPath, CFile::modeRead)) {
+            int len = (int)file.GetLength();
+            if (len > 0) {
+                char* buf = new char[len + 1];
+                file.Read(buf, len);
+                buf[len] = 0;
+                char* start = buf;
+                // 去除 UTF-8 BOM
+                if (len >= 3 && (unsigned char)buf[0] == 0xEF && (unsigned char)buf[1] == 0xBB && (unsigned char)buf[2] == 0xBF) {
+                    start += 3;
+                }
+                int wLen = MultiByteToWideChar(CP_UTF8, 0, start, -1, NULL, 0);
+                if (wLen > 0) {
+                    wchar_t* wBuf = new wchar_t[wLen + 1];
+                    MultiByteToWideChar(CP_UTF8, 0, start, -1, wBuf, wLen);
+                    wBuf[wLen] = 0;
+                    m_editNamesInput.SetWindowText(wBuf);
+                    configLoaded = true;
+                    delete[] wBuf;
+                }
+                delete[] buf;
+            }
+            file.Close();
+        }
+
+        if (configLoaded) {
+            UpdatePlayersFromUI();
+        }
+        else {
+            SyncDataToInputBox();
+            RefreshDisplay();
+            WriteScoreToFile();
+        }
     }
 
     dc.FillSolidRect(&uiRect, GetSysColor(COLOR_BTNFACE));
@@ -929,7 +1267,11 @@ void CDNFGameCaptureDlg::OnPaint() {
             ::SelectObject(hBmpDC, oldBmp); ::DeleteDC(hBmpDC);
         }
     }
-    Draw(memDC); dc.BitBlt(0, 0, topHalf.Width(), topHalf.Height(), &memDC, 0, 0, SRCCOPY); memDC.SelectObject(pOldBmp);
+
+    Draw(memDC);
+
+    dc.BitBlt(0, 0, topHalf.Width(), topHalf.Height(), &memDC, 0, 0, SRCCOPY);
+    memDC.SelectObject(pOldBmp);
 }
 
 void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
@@ -937,14 +1279,34 @@ void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
     else if (nID == 2) { m_bCanTrigger = TRUE; KillTimer(2); }
     else if (nID == 4) { m_bCanTriggerTeamScore = TRUE; KillTimer(4); }
     else if (nID == 3 && m_bIsRunning) {
-        std::lock_guard<std::mutex> lock(g_bmpMutex);
-        if (m_bmp) {
-            HDC hDC = ::GetDC(NULL); HDC hSrc = CreateCompatibleDC(hDC); HDC hDst = CreateCompatibleDC(hDC);
-            if (!m_historyBmps[m_historyIdx]) m_historyBmps[m_historyIdx] = CreateCompatibleBitmap(hDC, m_w, m_h);
-            HGDIOBJ os = SelectObject(hSrc, m_bmp); HGDIOBJ od = SelectObject(hDst, m_historyBmps[m_historyIdx]);
-            BitBlt(hDst, 0, 0, m_w, m_h, hSrc, 0, 0, SRCCOPY);
-            SelectObject(hSrc, os); SelectObject(hDst, od); DeleteDC(hSrc); DeleteDC(hDst); ::ReleaseDC(NULL, hDC);
-            m_historyIdx = (m_historyIdx + 1) % 6;
+        {
+            std::lock_guard<std::mutex> lock(g_bmpMutex);
+            if (m_bmp) {
+                HDC hDC = ::GetDC(NULL); HDC hSrc = CreateCompatibleDC(hDC); HDC hDst = CreateCompatibleDC(hDC);
+
+                if (!m_historyBmps[m_historyIdx]) m_historyBmps[m_historyIdx] = CreateCompatibleBitmap(hDC, m_w, m_h);
+                HGDIOBJ os = SelectObject(hSrc, m_bmp); HGDIOBJ od = SelectObject(hDst, m_historyBmps[m_historyIdx]);
+                BitBlt(hDst, 0, 0, m_w, m_h, hSrc, 0, 0, SRCCOPY);
+                SelectObject(hSrc, os); SelectObject(hDst, od); DeleteDC(hSrc); DeleteDC(hDst); ::ReleaseDC(NULL, hDC);
+
+                m_historyIdx = (m_historyIdx + 1) % 25;
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lkLog(g_visualLogMutex);
+            if (!g_visualLogs.empty() && m_editVisualLogs.m_hWnd) {
+                for (const auto& log : g_visualLogs) {
+                    int len = m_editVisualLogs.GetWindowTextLength();
+                    m_editVisualLogs.SetSel(len, len);
+                    CHARFORMAT cf; ZeroMemory(&cf, sizeof(cf)); cf.cbSize = sizeof(cf);
+                    cf.dwMask = CFM_COLOR; cf.crTextColor = log.color;
+                    m_editVisualLogs.SetSelectionCharFormat(cf);
+                    m_editVisualLogs.ReplaceSel(log.text + L"\r\n");
+                }
+                m_editVisualLogs.SendMessage(WM_VSCROLL, SB_BOTTOM, 0);
+                g_visualLogs.clear();
+            }
         }
     }
 }
