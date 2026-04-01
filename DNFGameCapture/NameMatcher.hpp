@@ -146,7 +146,7 @@ private:
         m_confusableMap[L'暗'] = L'岸'; m_confusableMap[L'苍'] = L'枪'; m_confusableMap[L'抢'] = L'枪';
         m_confusableMap[L'虹'] = L'红'; m_confusableMap[L'逛'] = L'狂'; m_confusableMap[L'魄'] = L'魂';
         m_confusableMap[L'魁'] = L'鬼'; m_confusableMap[L'泣'] = L'立'; m_confusableMap[L'刀'] = L'刃';
-        m_confusableMap[L'刃'] = L'刀'; m_confusableMap[L'皇'] = L'星';
+        m_confusableMap[L'刃'] = L'刀'; m_confusableMap[L'皇'] = L'星';m_confusableMap[L'心'] = L'芯';
 
         // 堕落专属防错字
         m_confusableMap[L'坠'] = L'堕'; m_confusableMap[L'随'] = L'堕'; m_confusableMap[L'隋'] = L'堕';
