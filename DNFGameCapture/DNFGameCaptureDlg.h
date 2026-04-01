@@ -2,6 +2,7 @@
 #include "pch.h"
 #include <afxwin.h>
 #include <afxcmn.h>
+#include <afxdlgs.h>
 #include <thread>
 #include <atomic>
 #include <vector>
@@ -15,6 +16,7 @@
 #define COLOR_RED       RGB(255,0,0)
 
 #define WM_UPDATE_OCR_DROPDOWNS (WM_USER + 100)
+#define WM_TRAY_MESSAGE         (WM_USER + 101) // 托盘图标消息
 
 struct AliasData {
     CString name;
@@ -66,6 +68,12 @@ protected:
     afx_msg void OnBnClickedApply();
     afx_msg void OnBnClickedFlip();
     afx_msg void OnBnClickedReset();
+    afx_msg void OnBnClickedBrowseDir(); // 更改目录事件
+
+    // 【新增】系统指令拦截（处理最小化和关闭按钮）
+    afx_msg void OnSysCommand(UINT nID, LPARAM lParam);
+    // 【新增】托盘消息处理
+    afx_msg LRESULT OnTrayMessage(WPARAM wParam, LPARAM lParam);
 
     afx_msg LRESULT OnUpdateOcrDropdowns(WPARAM wParam, LPARAM lParam);
     afx_msg void OnCbnSelchangeLeft();
@@ -87,9 +95,12 @@ private:
     void AppendResultText(const CString& t, COLORREF c);
     void RefreshDisplay();
     void EnsureOcrRunning();
-
-    // 【新增】自动存读档机制
     void SaveConfigToFile();
+
+    // 托盘图标初始化与清理
+    void InitTrayIcon();
+    void RemoveTrayIcon();
+    void DoRealExit(); // 真正的退出逻辑
 
 private:
     HBITMAP m_bmp;
@@ -116,6 +127,8 @@ private:
     CButton         m_btnApply;
     CButton         m_btnReset;
     CButton         m_chkFlip;
+    CButton         m_btnBrowseDir; // 浏览目录按钮
+    CEdit           m_editOutDir;   // 显示当前目录
     CFont           m_font;
 
     CComboBox       m_cmbLeft;
@@ -141,12 +154,19 @@ private:
     std::mutex m_ocrBmpMutex;
 
     CString m_ocrExePath;
-    CString m_configPath; // 队伍配置文件路径
+    CString m_configPath;
+    CString m_iniPath;
+    CString m_outputDir;
 
     ULONG_PTR m_gdiplusToken;
     HINTERNET m_hHttpSession;
     HINTERNET m_hHttpConnect;
+    NOTIFYICONDATA m_nid; // 托盘图标结构体
 
     std::mutex m_launchMutex;
     DWORD m_lastLaunchOcrTime;
+
+    bool CheckLicense();
+    CString GetMachineID();
+    CString GenerateKey(CString machineID);
 };
