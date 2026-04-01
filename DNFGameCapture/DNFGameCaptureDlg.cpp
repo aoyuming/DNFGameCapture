@@ -7,6 +7,13 @@
 #include <ctime>
 #include <deque>
 
+// ========== 添加以下网络与编码库 ==========
+#include <winhttp.h>
+#include <wincrypt.h>
+#pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "Crypt32.lib")
+// ==========================================
+
 #pragma comment(lib, "Gdiplus.lib")
 using namespace Gdiplus;
 
@@ -818,6 +825,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
 // ============================================================================
 
 CString CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaIndex) {
+    // 1. 根据左右区域划定裁剪范围
     RECT r_game;
     if (nAreaIndex == 0) {
         r_game = { (long)(m_w * 0.190f), (long)(m_h * 0.004f), (long)(m_w * 0.360f), (long)(m_h * 0.040f) };
@@ -829,6 +837,7 @@ CString CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaIndex) 
     int sw = r_game.right - r_game.left;
     int sh = r_game.bottom - r_game.top;
 
+    // 2. 放大并拷贝位图
     HDC hSrcDC = CreateCompatibleDC(NULL);
     HDC hDstDC = CreateCompatibleDC(NULL);
     HBITMAP hDstBmp = CreateCompatibleBitmap(GetDC()->GetSafeHdc(), sw * 2, sh * 2);
@@ -838,6 +847,7 @@ CString CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaIndex) 
     SetStretchBltMode(hDstDC, HALFTONE);
     StretchBlt(hDstDC, 0, 0, sw * 2, sh * 2, hSrcDC, r_game.left, r_game.top, sw, sh, SRCCOPY);
 
+    // 3. 图像二值化增强对比度 (保留原有图像处理逻辑)
     BITMAP bm;
     GetObject(hDstBmp, sizeof(BITMAP), &bm);
     BITMAPINFO bmi = { 0 };
@@ -859,71 +869,159 @@ CString CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaIndex) 
     }
     SetDIBits(hDstDC, hDstBmp, 0, bm.bmHeight, px.data(), &bmi, DIB_RGB_COLORS);
 
-    DWORD t = GetTickCount();
+    CString res = L"";
 
-    CString exePath = m_ocrExePath;
-    if (exePath.IsEmpty()) {
-        exePath = L"E:\\Umi-OCR_Paddle_v2.1.5\\Umi-OCR.exe";
-    }
-
-    int lastSlash = exePath.ReverseFind(L'\\');
-    CString base = exePath.Left(lastSlash + 1);
-
-    CString png, txt;
-    png.Format(L"%stmp_%u.png", base, t);
-    txt.Format(L"%stmp_%u.txt", base, t);
+    // ==========================================================
+    // 4. 将处理后的位图直接在内存中转换为 Base64 (取代写出到硬盘)
+    // ==========================================================
+    IStream* pStream = NULL;
+    CreateStreamOnHGlobal(NULL, TRUE, &pStream);
 
     ULONG_PTR gpt;
     GdiplusStartupInput gpi;
     GdiplusStartup(&gpt, &gpi, NULL);
     {
         Bitmap b(hDstBmp, NULL);
-        CLSID id;
-        CLSIDFromString(L"{557CF406-1A04-11D3-9A73-0000F81EF32E}", &id);
-        b.Save(png, &id, NULL);
+        CLSID pngClsid;
+        CLSIDFromString(L"{557CF406-1A04-11D3-9A73-0000F81EF32E}", &pngClsid);
+        b.Save(pStream, &pngClsid, NULL); // 直接保存到内存流
     }
     GdiplusShutdown(gpt);
+
+    HGLOBAL hMem = NULL;
+    GetHGlobalFromStream(pStream, &hMem);
+    LPVOID pData = GlobalLock(hMem);
+    SIZE_T nSize = GlobalSize(hMem);
+
+    // 转 Base64 编码
+    DWORD dBase64Len = 0;
+    CryptBinaryToStringA((const BYTE*)pData, (DWORD)nSize, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, NULL, &dBase64Len);
+    std::string base64Str(dBase64Len, '\0');
+    CryptBinaryToStringA((const BYTE*)pData, (DWORD)nSize, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, &base64Str[0], &dBase64Len);
+
+    GlobalUnlock(hMem);
+    pStream->Release();
     DeleteObject(hDstBmp);
     DeleteDC(hSrcDC);
     DeleteDC(hDstDC);
 
-    SHELLEXECUTEINFO sei = { sizeof(sei) };
-    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
-    sei.lpVerb = L"open";
-    sei.lpFile = exePath.GetString();
-
-    CString args;
-    args.Format(L"--path \"%s\" --output \"%s\"", (LPCTSTR)png, (LPCTSTR)txt);
-    sei.lpParameters = args.GetString();
-    sei.nShow = SW_HIDE;
-
-    if (ShellExecuteEx(&sei)) {
-        WaitForSingleObject(sei.hProcess, 4000);
-        CloseHandle(sei.hProcess);
+    // 清除 Base64 字符串末尾可能多余的 \0
+    if (!base64Str.empty() && base64Str.back() == '\0') {
+        base64Str.pop_back();
     }
 
-    CString res = L"";
-    FILE* f = NULL;
-    Sleep(50);
+    // ==========================================================
+    // 5. 构建 JSON payload 并发送 HTTP POST 请求到 Umi-OCR
+    // ==========================================================
+    // 构造请求体：{"base64": "..."}
+    std::string jsonPayload = "{\"base64\": \"" + base64Str + "\"}";
 
-    if (_wfopen_s(&f, txt, L"rb") == 0 && f) {
-        char buf[1024] = { 0 };
-        fread(buf, 1, 1024, f);
-        fclose(f);
+    HINTERNET hSession = WinHttpOpen(L"DNF Capture", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (hSession) {
+        // 设置极短的超时时间，防止游戏卡顿 (连接1秒，发送/接收2秒)
+        WinHttpSetTimeouts(hSession, 1000, 1000, 2000, 2000);
 
-        int wl = MultiByteToWideChar(CP_UTF8, 0, buf, -1, NULL, 0);
-        if (wl > 1) {
-            wchar_t* wb = new wchar_t[wl];
-            MultiByteToWideChar(CP_UTF8, 0, buf, -1, wb, wl);
-            res = wb;
-            delete[] wb;
+        // 连接到本地 Umi-OCR 默认端口 1224
+        HINTERNET hConnect = WinHttpConnect(hSession, L"127.0.0.1", 1224, 0);
+        if (hConnect) {
+            HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", L"/api/ocr", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+            if (hRequest) {
+                std::wstring headers = L"Content-Type: application/json\r\n";
+                WinHttpAddRequestHeaders(hRequest, headers.c_str(), (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+
+                BOOL bResults = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, (LPVOID)jsonPayload.c_str(), (DWORD)jsonPayload.length(), (DWORD)jsonPayload.length(), 0);
+
+                if (bResults) {
+                    bResults = WinHttpReceiveResponse(hRequest, NULL);
+                }
+
+                // 读取返回的 JSON 字符串
+                std::string responseStr;
+                if (bResults) {
+                    DWORD dwSize = 0;
+                    DWORD dwDownloaded = 0;
+                    do {
+                        dwSize = 0;
+                        if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) break;
+                        if (dwSize == 0) break;
+                        char* pszOutBuffer = new char[dwSize + 1];
+                        if (WinHttpReadData(hRequest, (LPVOID)pszOutBuffer, dwSize, &dwDownloaded)) {
+                            pszOutBuffer[dwDownloaded] = '\0';
+                            responseStr += pszOutBuffer;
+                        }
+                        delete[] pszOutBuffer;
+                    } while (dwSize > 0);
+                }
+
+                // ==========================================================
+                // 6. 简单的 JSON 解析，提取识别出的文字
+                // ==========================================================
+                // Umi-OCR 成功时返回类似：{"code":100,"data":[{"text":"玩家名字", ...}]}
+                size_t textPos = responseStr.find("\"text\"");
+                if (textPos != std::string::npos) {
+                    size_t colonPos = responseStr.find(":", textPos);
+                    size_t startQuote = responseStr.find("\"", colonPos);
+                    if (startQuote != std::string::npos) {
+                        size_t endQuote = responseStr.find("\"", startQuote + 1);
+                        if (endQuote != std::string::npos) {
+                            std::string text = responseStr.substr(startQuote + 1, endQuote - startQuote - 1);
+
+                            // 解决返回中文的 UTF-8 乱码问题，转换为 CString (宽字符)
+                            int wideLen = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, NULL, 0);
+                            if (wideLen > 0) {
+                                wchar_t* wideBuf = new wchar_t[wideLen];
+                                MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wideBuf, wideLen);
+                                res = wideBuf;
+                                delete[] wideBuf;
+                            }
+                        }
+                    }
+                }
+                WinHttpCloseHandle(hRequest);
+            }
+            WinHttpCloseHandle(hConnect);
+        }
+        WinHttpCloseHandle(hSession);
+    }
+
+    res.Replace(L"\\n", L"");
+    res.Replace(L"\\r", L"");
+    res.Replace(L"\\\"", L"");
+
+    // =========================================================
+    // 【新增：自动将 JSON 里的 \uXXXX Unicode 编码还原为真正的中文】
+    // =========================================================
+    int uPos = 0;
+    while ((uPos = res.Find(L"\\u", uPos)) != -1) {
+        if (uPos + 5 < res.GetLength()) {
+            // 提取出 \u 后面的 4位 16进制字符
+            CString hexStr = res.Mid(uPos + 2, 4);
+            // 将 16 进制字符串转换为实际的宽字符 (中文)
+            wchar_t wc = (wchar_t)wcstol(hexStr.GetString(), NULL, 16);
+            CString replaceStr;
+            replaceStr.AppendChar(wc);
+
+            // 删掉原本的 \uXXXX (6个字符)，替换为真正的中文字符 (1个字符)
+            res.Delete(uPos, 6);
+            res.Insert(uPos, replaceStr);
+
+            // 指针向后移一位，继续找下一个
+            uPos += 1;
+        }
+        else {
+            uPos += 2;
         }
     }
+    // =========================================================
 
-    _wunlink(png);
-    _wunlink(txt);
     res.Replace(L"\r", L"");
     res.Replace(L"\n", L"");
+    res.Trim();
+
+    // 过滤大模型幻觉
+    if (res.Find(L"无") != -1 || res.Find(L"没有文字") != -1 || res.Find(L"无法识别") != -1) {
+        res = L"";
+    }
 
     return res;
 }
