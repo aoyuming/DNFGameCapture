@@ -68,11 +68,10 @@ protected:
     afx_msg void OnBnClickedApply();
     afx_msg void OnBnClickedFlip();
     afx_msg void OnBnClickedReset();
-    afx_msg void OnBnClickedBrowseDir(); // 更改目录事件
+    afx_msg void OnBnClickedBrowseDir();
 
-    // 【新增】系统指令拦截（处理最小化和关闭按钮）
+    // 系统指令拦截与托盘消息处理
     afx_msg void OnSysCommand(UINT nID, LPARAM lParam);
-    // 【新增】托盘消息处理
     afx_msg LRESULT OnTrayMessage(WPARAM wParam, LPARAM lParam);
 
     afx_msg LRESULT OnUpdateOcrDropdowns(WPARAM wParam, LPARAM lParam);
@@ -100,7 +99,7 @@ private:
     // 托盘图标初始化与清理
     void InitTrayIcon();
     void RemoveTrayIcon();
-    void DoRealExit(); // 真正的退出逻辑
+    void DoRealExit();
 
 private:
     HBITMAP m_bmp;
@@ -127,8 +126,8 @@ private:
     CButton         m_btnApply;
     CButton         m_btnReset;
     CButton         m_chkFlip;
-    CButton         m_btnBrowseDir; // 浏览目录按钮
-    CEdit           m_editOutDir;   // 显示当前目录
+    CButton         m_btnBrowseDir;
+    CEdit           m_editOutDir;
     CFont           m_font;
 
     CComboBox       m_cmbLeft;
@@ -161,17 +160,11 @@ private:
     ULONG_PTR m_gdiplusToken;
     HINTERNET m_hHttpSession;
     HINTERNET m_hHttpConnect;
-    NOTIFYICONDATA m_nid; // 托盘图标结构体
+    NOTIFYICONDATA m_nid;
 
     std::mutex m_launchMutex;
     DWORD m_lastLaunchOcrTime;
 
-<<<<<<< HEAD
-=======
-    // =======================================================
-    // 【新增】一机一码授权验证系统
-    // =======================================================
->>>>>>> a464b03d50369f444ba1102679ed49c3bd79cbae
     bool CheckLicense();
     CString GetMachineID();
     CString GenerateKey(CString machineID);
