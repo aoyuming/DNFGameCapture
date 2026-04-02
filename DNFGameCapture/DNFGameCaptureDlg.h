@@ -166,6 +166,12 @@ private:
     std::mutex m_launchMutex;
     DWORD m_lastLaunchOcrTime;
 
+<<<<<<< HEAD
+=======
+    // =======================================================
+    // 【新增】一机一码授权验证系统
+    // =======================================================
+>>>>>>> a464b03d50369f444ba1102679ed49c3bd79cbae
     bool CheckLicense();
     CString GetMachineID();
     CString GenerateKey(CString machineID);
