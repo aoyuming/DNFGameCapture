@@ -115,29 +115,57 @@ CString CDNFGameCaptureDlg::GetMachineID() {
     return hwid;
 }
 
-bool CDNFGameCaptureDlg::VerifyKey(CString inputKey, CString /* 被废弃的本地验证机码 */) {
+bool CDNFGameCaptureDlg::VerifyKey(CString inputKey, CString /*弃用本地码*/) {
+    // 基础检查：必须以 DNF- 开头
     if (inputKey.Left(4) != L"DNF-") return false;
 
-    int firstDash = 3;
+    // 查找横杠的位置
+    int firstDash = 3; // 'DNF-' 后面那个
     int secondDash = inputKey.Find(L'-', firstDash + 1);
-    if (secondDash == -1) return false;
+    int thirdDash = inputKey.Find(L'-', secondDash + 1);
 
-    CString expStr = inputKey.Mid(firstDash + 1, secondDash - firstDash - 1);
-    CString sigStr = inputKey.Mid(secondDash + 1);
+    // 情况 A：新版三段式卡密 (DNF-时间-随机码-签名)
+    if (thirdDash != -1) {
+        CString expStr = inputKey.Mid(firstDash + 1, secondDash - firstDash - 1);
+        CString nonceStr = inputKey.Mid(secondDash + 1, thirdDash - secondDash - 1);
+        CString sigStr = inputKey.Mid(thirdDash + 1);
 
-    long long expTime = wcstoll(expStr, NULL, 16);
-    unsigned int sig = wcstoul(sigStr, NULL, 16);
+        long long expTime = wcstoll(expStr, NULL, 16);
+        unsigned int sig = wcstoul(sigStr, NULL, 16);
 
-    // 验证本地签名，防止用户随意篡改到期时间
-    CString signData;
-    signData.Format(L"%llX-MySuperSecretKey2026", expTime);
-    std::string ansiSignData = CW2A(signData, CP_UTF8);
-    unsigned int expectedSig = CustomSimpleHash(ansiSignData);
+        // 验证签名：盐值必须和算号器里的 "MySuperSecretKey2026" 一模一样
+        CString signData;
+        signData.Format(L"%llX-%s-MySuperSecretKey2026", expTime, (LPCTSTR)nonceStr);
+        std::string ansiSignData = CW2A(signData, CP_UTF8);
+        unsigned int expectedSig = CustomSimpleHash(ansiSignData);
 
-    if (sig != expectedSig) return false;
-    if (expTime == 0xFFFFFFFF) return true;
+        if (sig != expectedSig) return false;
 
-    return (long long)time(nullptr) <= expTime;
+        // 检查是否过期 (永久卡 0xFFFFFFFF 永远通过)
+        if (expTime >= 0xFFFFFFF0) return true;
+        return (long long)time(nullptr) <= expTime;
+    }
+
+    // 情况 B：旧版两段式卡密 (DNF-时间-签名) - 用于兼容你之前发出去的卡
+    if (secondDash != -1 && thirdDash == -1) {
+        CString expStr = inputKey.Mid(firstDash + 1, secondDash - firstDash - 1);
+        CString sigStr = inputKey.Mid(secondDash + 1);
+
+        long long expTime = wcstoll(expStr, NULL, 16);
+        unsigned int sig = wcstoul(sigStr, NULL, 16);
+
+        CString signData;
+        signData.Format(L"%llX-MySuperSecretKey2026", expTime);
+        std::string ansiSignData = CW2A(signData, CP_UTF8);
+        unsigned int expectedSig = CustomSimpleHash(ansiSignData);
+
+        if (sig != expectedSig) return false;
+
+        if (expTime >= 0xFFFFFFF0) return true;
+        return (long long)time(nullptr) <= expTime;
+    }
+
+    return false; // 格式完全不对
 }
 
 // 替换原有的 CheckCloudBinding，改为返回 CString 以携带真实错误信息
