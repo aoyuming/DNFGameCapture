@@ -11,6 +11,13 @@
 #include <winhttp.h>
 #include "NameMatcher.hpp"
 
+#include <urlmon.h>
+#pragma comment(lib, "urlmon.lib")
+
+// 定义你当前软件的版本号，以及你服务器上 update.txt 的网址
+#define CURRENT_VERSION L"1.0.3"
+#define UPDATE_CHECK_URL L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt" // 【！！！请换成你自己的网址！！！】
+
 #define DNF_WINDOW_NAME L"地下城与勇士：创新世纪"
 #define COLOR_BLUE      RGB(0,0,255)
 #define COLOR_RED       RGB(255,0,0)
@@ -162,9 +169,6 @@ private:
     HINTERNET m_hHttpConnect;
     NOTIFYICONDATA m_nid;
 
-    std::mutex m_launchMutex;
-    DWORD m_lastLaunchOcrTime;
-
     // 【新版授权系统】
     void CheckTrialAndLicense();
     bool VerifyKey(CString inputKey, CString machineID);
@@ -172,4 +176,14 @@ private:
 
     // 【新增】：仅在 Debug 模式下编译的调试输出函数
     void OutputDebugAuthInfo();
+
+    // 【新增】远程更新系统
+    void CheckForUpdates(bool bSilent);
+    void DownloadAndApplyUpdate(CString downloadUrl);
+
+    std::mutex m_launchMutex;
+    DWORD m_lastLaunchOcrTime;
+
+    // 【新增】：用于防止多开的互斥体句柄
+    HANDLE m_hSingleInstanceMutex;
 };
