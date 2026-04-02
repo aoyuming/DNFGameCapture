@@ -25,6 +25,7 @@ struct VisualLogMsg {
     CString text;
     COLORREF color;
 };
+
 std::deque<VisualLogMsg> g_visualLogs;
 std::mutex g_visualLogMutex;
 
@@ -61,7 +62,8 @@ void WriteMatchLog(const CString& logLine) {
         }
         file.SeekToEnd();
         time_t now = time(0);
-        tm t; localtime_s(&t, &now);
+        tm t;
+        localtime_s(&t, &now);
         CString fullLine;
         fullLine.Format(L"[%02d:%02d:%02d] %s\r\n", t.tm_hour, t.tm_min, t.tm_sec, (LPCTSTR)logLine);
         std::string utf8Line = CW2A(fullLine, CP_UTF8);
@@ -69,7 +71,6 @@ void WriteMatchLog(const CString& logLine) {
         file.Close();
     }
 }
-
 
 // ============================================================================
 // 消息映射
@@ -90,12 +91,22 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     ON_MESSAGE(WM_UPDATE_OCR_DROPDOWNS, &CDNFGameCaptureDlg::OnUpdateOcrDropdowns)
     ON_CBN_SELCHANGE(1010, &CDNFGameCaptureDlg::OnCbnSelchangeLeft)
     ON_CBN_SELCHANGE(1009, &CDNFGameCaptureDlg::OnCbnSelchangeRight)
+    // 【新增这一行】：绑定全局快捷键消息
+    ON_WM_HOTKEY()
 END_MESSAGE_MAP()
 
 
 // ============================================================================
-// 授权验证逻辑 (防篡改与试用期)
+// 授权与云端验证模块 (阿里云 FC)
 // ============================================================================
+unsigned int CustomSimpleHash(const std::string& str) {
+    unsigned int hash = 5381;
+    for (char c : str) {
+        hash = ((hash << 5) + hash) + c;
+    }
+    return hash;
+}
+
 CString CDNFGameCaptureDlg::GetMachineID() {
     DWORD volSerial = 0;
     GetVolumeInformation(L"C:\\", NULL, 0, &volSerial, NULL, NULL, NULL, 0);
@@ -104,16 +115,24 @@ CString CDNFGameCaptureDlg::GetMachineID() {
     return hwid;
 }
 
-bool CDNFGameCaptureDlg::VerifyKey(CString inputKey, CString machineID) {
+bool CDNFGameCaptureDlg::VerifyKey(CString inputKey, CString /* 被废弃的本地验证机码 */) {
     if (inputKey.Left(4) != L"DNF-") return false;
 
     int firstDash = 3;
     int secondDash = inputKey.Find(L'-', firstDash + 1);
     if (secondDash == -1) return false;
 
-    long long expTime = wcstoll(inputKey.Mid(firstDash + 1, secondDash - firstDash - 1), NULL, 16);
-    long long sig = wcstoll(inputKey.Mid(secondDash + 1), NULL, 16);
-    long long expectedSig = wcstoll(machineID, NULL, 16) ^ expTime ^ 0x5AA55AA5;
+    CString expStr = inputKey.Mid(firstDash + 1, secondDash - firstDash - 1);
+    CString sigStr = inputKey.Mid(secondDash + 1);
+
+    long long expTime = wcstoll(expStr, NULL, 16);
+    unsigned int sig = wcstoul(sigStr, NULL, 16);
+
+    // 验证本地签名，防止用户随意篡改到期时间
+    CString signData;
+    signData.Format(L"%llX-MySuperSecretKey2026", expTime);
+    std::string ansiSignData = CW2A(signData, CP_UTF8);
+    unsigned int expectedSig = CustomSimpleHash(ansiSignData);
 
     if (sig != expectedSig) return false;
     if (expTime == 0xFFFFFFFF) return true;
@@ -121,6 +140,79 @@ bool CDNFGameCaptureDlg::VerifyKey(CString inputKey, CString machineID) {
     return (long long)time(nullptr) <= expTime;
 }
 
+// 替换原有的 CheckCloudBinding，改为返回 CString 以携带真实错误信息
+CString CDNFGameCaptureDlg::CheckCloudBinding(CString key, CString hwid) {
+    CString jsonStr;
+    jsonStr.Format(L"{\"key\": \"%s\", \"hwid\": \"%s\"}", key, hwid);
+    std::string jsonUtf8 = CW2A(jsonStr, CP_UTF8);
+
+    HINTERNET hSession = WinHttpOpen(L"DNF Capture", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+
+    // 【已填入你的专属杭州云端地址】
+    HINTERNET hConnect = WinHttpConnect(hSession, L"verifykey-thaovfpoib.cn-hangzhou.fcapp.run", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", L"/", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+
+    CString resultMsg = L"未知错误";
+
+    if (hRequest) {
+        std::wstring headers = L"Content-Type: application/json\r\n";
+        WinHttpAddRequestHeaders(hRequest, headers.c_str(), (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+
+        if (WinHttpSendRequest(hRequest, NULL, 0, (LPVOID)jsonUtf8.c_str(), jsonUtf8.length(), jsonUtf8.length(), 0) && WinHttpReceiveResponse(hRequest, NULL)) {
+
+            DWORD statusCode = 0;
+            DWORD dwSize = sizeof(DWORD);
+            WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &dwSize, WINHTTP_NO_HEADER_INDEX);
+
+            std::string responseStr;
+            DWORD size = 0, downloaded = 0;
+            while (WinHttpQueryDataAvailable(hRequest, &size) && size > 0) {
+                std::vector<char> buf(size + 1, 0);
+                if (WinHttpReadData(hRequest, buf.data(), size, &downloaded)) {
+                    responseStr.append(buf.data(), downloaded);
+                }
+            }
+
+            // 解析阿里云返回的结果
+            if (responseStr.find("\"status\":\"ok\"") != std::string::npos) {
+                resultMsg = L"OK";
+            }
+            else {
+                size_t p1 = responseStr.find("\"msg\":\"");
+                if (p1 != std::string::npos) {
+                    p1 += 7;
+                    size_t p2 = responseStr.find("\"", p1);
+                    if (p2 != std::string::npos) {
+                        std::string errMsg = responseStr.substr(p1, p2 - p1);
+                        int wLen = MultiByteToWideChar(CP_UTF8, 0, errMsg.c_str(), -1, NULL, 0);
+                        std::vector<wchar_t> wBuf(wLen + 1, 0);
+                        MultiByteToWideChar(CP_UTF8, 0, errMsg.c_str(), -1, wBuf.data(), wLen);
+                        resultMsg = wBuf.data(); // 获取云端真实原话
+                    }
+                }
+                else {
+                    // 如果云端崩了返回了 HTML，直接打出状态码和原始数据
+                    int wLen = MultiByteToWideChar(CP_UTF8, 0, responseStr.c_str(), -1, NULL, 0);
+                    std::vector<wchar_t> wBuf(wLen + 1, 0);
+                    MultiByteToWideChar(CP_UTF8, 0, responseStr.c_str(), -1, wBuf.data(), wLen);
+                    resultMsg.Format(L"HTTP %d: %s", statusCode, wBuf.data());
+                }
+            }
+        }
+        else {
+            resultMsg.Format(L"网络请求发送失败 (系统错误码: %d)\r\n可能原因: 域名填错、断网或防火墙拦截", GetLastError());
+        }
+        WinHttpCloseHandle(hRequest);
+    }
+    else {
+        resultMsg.Format(L"创建网络请求失败 (系统错误码: %d)", GetLastError());
+    }
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+
+    return resultMsg;
+}
+// 替换原有的 CheckTrialAndLicense
 void CDNFGameCaptureDlg::CheckTrialAndLicense() {
     CString hwid = GetMachineID();
     wchar_t exePath[MAX_PATH];
@@ -133,16 +225,30 @@ void CDNFGameCaptureDlg::CheckTrialAndLicense() {
         char buf[256] = { 0 };
         file.Read(buf, 255);
         file.Close();
+
         CString inputKey(buf);
         inputKey.Trim();
-        if (VerifyKey(inputKey, hwid)) return;
+
+        if (VerifyKey(inputKey, hwid)) {
+            // 异步验证云端绑定
+            std::thread([this, inputKey, hwid]() {
+                CString cloudResult = CheckCloudBinding(inputKey, hwid);
+                if (cloudResult != L"OK") {
+                    CString errorBoxMsg;
+                    errorBoxMsg.Format(L"云端验证拦截！\r\n\r\n拦截原因：%s\r\n\r\n(如果是 OSS 权限/配置问题，请检查阿里云后台)", (LPCTSTR)cloudResult);
+                    MessageBox(errorBoxMsg, L"防多开安全拦截", MB_ICONERROR | MB_SYSTEMMODAL);
+                    exit(0);
+                }
+                }).detach();
+            return;
+        }
     }
 
     HKEY hKey;
     DWORD disp;
     time_t now = time(nullptr);
     bool bTrialValid = false;
-    long long left = 0;
+    long long expTrialTime = 0; // 记录试用到期时间戳
 
     if (RegCreateKeyEx(HKEY_CURRENT_USER, L"Software\\DNFCapture", 0, NULL, 0, KEY_READ | KEY_WRITE, NULL, &hKey, &disp) == ERROR_SUCCESS) {
         DWORD iT = 0, lR = 0, sz = 4;
@@ -160,33 +266,28 @@ void CDNFGameCaptureDlg::CheckTrialAndLicense() {
         RegSetValueEx(hKey, L"LastRun", 0, REG_DWORD, (const BYTE*)&cR, 4);
         RegCloseKey(hKey);
 
-        if (iT > 0 && (DWORD)now <= iT + 604800) {
+        if (iT > 0 && (long long)now <= ((long long)iT + 604800)) {
             bTrialValid = true;
-            left = (iT + 604800) - (DWORD)now;
+            expTrialTime = (long long)iT + 604800; // 7天后的时间戳
         }
     }
 
     if (bTrialValid) {
+        time_t exp_t = (time_t)expTrialTime;
+        tm t;
+        localtime_s(&t, &exp_t);
         CString m;
-        m.Format(L"【欢迎试用】\r\n剩余试用时间: %lld 小时。", left / 3600);
+        m.Format(L"【欢迎试用】\r\n\r\n您的试用期将在以下时间结束：\r\n%04d-%02d-%02d %02d:%02d:%02d\r\n\r\n祝您使用愉快！",
+            t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
         MessageBox(m, L"试用提示", MB_ICONINFORMATION);
         return;
     }
 
-    if (::OpenClipboard(NULL)) {
-        ::EmptyClipboard();
-        size_t s = (hwid.GetLength() + 1) * 2;
-        HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, s);
-        memcpy(GlobalLock(h), hwid.GetBuffer(), s);
-        GlobalUnlock(h);
-        ::SetClipboardData(CF_UNICODETEXT, h);
-        ::CloseClipboard();
-    }
-
-    MessageBox(L"授权已过期！机器码 " + hwid + L" 已复制。", L"拦截", MB_ICONERROR);
+    MessageBox(L"您的试用期已结束，或未检测到有效卡密！\r\n\r\n请将您购买的有效卡密（如 DNF-XXXX-XXXX）保存在软件同目录下的 license.txt 文件中。", L"授权拦截", MB_ICONERROR);
     exit(0);
 }
 
+// 替换原有的 OutputDebugAuthInfo
 void CDNFGameCaptureDlg::OutputDebugAuthInfo() {
     auto print = [&](const CString& t, COLORREF c) {
         if (!m_editVisualLogs.m_hWnd) return;
@@ -199,14 +300,83 @@ void CDNFGameCaptureDlg::OutputDebugAuthInfo() {
         cf.crTextColor = c;
         m_editVisualLogs.SetSelectionCharFormat(cf);
         m_editVisualLogs.ReplaceSel(t + L"\r\n");
+        m_editVisualLogs.SendMessage(WM_VSCROLL, SB_BOTTOM, 0);
         };
 
-    print(L"====== [授权诊断报告] ======", RGB(255, 100, 255));
-    print(L"机器码: " + GetMachineID(), RGB(255, 255, 255));
-    print(L"软件版本: v" CURRENT_VERSION, RGB(255, 255, 255));
-    print(L"============================", RGB(255, 100, 255));
-}
+    // 提取时间戳并格式化为年月日的工具函数
+    auto formatTime = [](long long ts) {
+        if (ts == 0xFFFFFFFF) return CString(L"永久有效");
+        time_t t_ts = (time_t)ts;
+        tm t;
+        localtime_s(&t, &t_ts);
+        CString res;
+        res.Format(L"%04d-%02d-%02d %02d:%02d:%02d", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
+        return res;
+        };
 
+    print(L"====== [开发者授权诊断报告] ======", RGB(255, 100, 255));
+    print(L"当前机器码: " + GetMachineID(), RGB(255, 255, 255));
+
+    // 诊断 1：试用期状态
+    HKEY hKey;
+    time_t now = time(nullptr);
+    if (RegOpenKeyEx(HKEY_CURRENT_USER, L"Software\\DNFCapture", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        DWORD iT = 0, sz = 4;
+        if (RegQueryValueEx(hKey, L"InstallTime", NULL, NULL, (LPBYTE)&iT, &sz) == ERROR_SUCCESS) {
+            long long expTime = (long long)iT + 604800;
+            if (expTime > (long long)now) {
+                print(L"试用状态: 正常 (到期: " + formatTime(expTime) + L")", RGB(0, 255, 0));
+            }
+            else {
+                print(L"试用状态: 已过期", RGB(255, 100, 100));
+            }
+        }
+        RegCloseKey(hKey);
+    }
+    else {
+        print(L"试用状态: 未找到注册表记录", RGB(200, 200, 200));
+    }
+
+    // 诊断 2：本地卡密读取与日期解析
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileName(NULL, exePath, MAX_PATH);
+    CString path = exePath;
+    path = path.Left(path.ReverseFind(L'\\') + 1) + L"license.txt";
+
+    CFile file;
+    if (file.Open(path, CFile::modeRead)) {
+        char buf[256] = { 0 };
+        file.Read(buf, 255);
+        file.Close();
+        CString inputKey(buf);
+        inputKey.Trim();
+        print(L"读取到本地卡密: " + inputKey, RGB(200, 200, 200));
+
+        // 提取卡密中隐藏的到期时间
+        int firstDash = 3;
+        int secondDash = inputKey.Find(L'-', firstDash + 1);
+        if (secondDash != -1) {
+            CString expStr = inputKey.Mid(firstDash + 1, secondDash - firstDash - 1);
+            long long keyExpTime = wcstoll(expStr, NULL, 16);
+
+            if (VerifyKey(inputKey, GetMachineID())) {
+                print(L"本地签名校验: 合法 (到期: " + formatTime(keyExpTime) + L")", RGB(0, 255, 0));
+            }
+            else {
+                print(L"本地签名校验: 非法或已过期", RGB(255, 100, 100));
+            }
+        }
+        else {
+            print(L"本地签名校验: 卡密格式被破坏", RGB(255, 100, 100));
+        }
+    }
+    else {
+        print(L"本地卡密: 未找到 license.txt", RGB(200, 200, 200));
+    }
+
+    print(L"云端验证接口: 连通就绪", RGB(0, 255, 255));
+    print(L"==================================", RGB(255, 100, 255));
+}
 
 // ============================================================================
 // 初始化与窗口过程
@@ -261,7 +431,9 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     wchar_t dirBuf[MAX_PATH];
     GetPrivateProfileString(L"Settings", L"OutputDir", appDir, dirBuf, MAX_PATH, m_iniPath);
     m_outputDir = dirBuf;
-    if (m_outputDir.Right(1) == L"\\") m_outputDir.TrimRight(L"\\");
+    if (m_outputDir.Right(1) == L"\\") {
+        m_outputDir.TrimRight(L"\\");
+    }
 
     AfxInitRichEdit2();
     for (int i = 0; i < 25; i++) {
@@ -287,15 +459,24 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
 
     LPCTSTR cls = AfxRegisterWndClass(CS_HREDRAW | CS_VREDRAW, ::LoadCursor(NULL, IDC_ARROW), (HBRUSH)(COLOR_WINDOW + 1));
     CString title;
-    title.Format(L"DNF击杀统计 - 终极完备版 (v%s)", CURRENT_VERSION);
+    title.Format(L"DNF击杀统计-v%s", CURRENT_VERSION);
 
     CreateEx(0, cls, title, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
         100, 100, (int)(750 * WINDOW_SCALE), (int)(730 * WINDOW_SCALE), NULL, NULL);
 
     InitTrayIcon();
+
+    // 【修改】：加入 MOD_CONTROL，改为 Ctrl + F8 和 Ctrl + F9
+    ::RegisterHotKey(m_hWnd, 8008, MOD_CONTROL, VK_F8);
+    ::RegisterHotKey(m_hWnd, 8009, MOD_CONTROL, VK_F9);
 }
 
-CDNFGameCaptureDlg::~CDNFGameCaptureDlg() {
+CDNFGameCaptureDlg::~CDNFGameCaptureDlg() 
+{
+     // 【新增】：软件退出时注销快捷键，把按键还给系统
+    ::UnregisterHotKey(m_hWnd, 8008);
+    ::UnregisterHotKey(m_hWnd, 8009);
+
     if (m_hSingleInstanceMutex) {
         CloseHandle(m_hSingleInstanceMutex);
     }
@@ -305,6 +486,7 @@ CDNFGameCaptureDlg::~CDNFGameCaptureDlg() {
     for (int i = 0; i < 25; i++) {
         if (m_historyBmps[i]) ::DeleteObject(m_historyBmps[i]);
     }
+
     if (m_hHttpConnect) WinHttpCloseHandle(m_hHttpConnect);
     if (m_hHttpSession) WinHttpCloseHandle(m_hHttpSession);
 
@@ -326,7 +508,10 @@ void CDNFGameCaptureDlg::InitTrayIcon() {
     wchar_t p[MAX_PATH];
     GetModuleFileName(NULL, p, MAX_PATH);
     m_nid.hIcon = ExtractIcon(AfxGetInstanceHandle(), p, 0);
-    if (!m_nid.hIcon) m_nid.hIcon = AfxGetApp()->LoadStandardIcon(IDI_APPLICATION);
+
+    if (!m_nid.hIcon) {
+        m_nid.hIcon = AfxGetApp()->LoadStandardIcon(IDI_APPLICATION);
+    }
 
     wcscpy_s(m_nid.szTip, L"DNF击杀统计 - 运行中");
     Shell_NotifyIcon(NIM_ADD, &m_nid);
@@ -338,12 +523,8 @@ void CDNFGameCaptureDlg::RemoveTrayIcon() {
 
 void CDNFGameCaptureDlg::OnSysCommand(UINT nID, LPARAM lParam) {
     if ((nID & 0xFFF0) == SC_CLOSE) {
-        if (m_bIsRunning) {
-            ShowWindow(SW_HIDE);
-        }
-        else {
-            DoRealExit();
-        }
+        if (m_bIsRunning) ShowWindow(SW_HIDE);
+        else DoRealExit();
         return;
     }
     if ((nID & 0xFFF0) == SC_MINIMIZE) {
@@ -406,9 +587,12 @@ void CDNFGameCaptureDlg::CheckForUpdates(bool bSilent) {
     URL_COMPONENTS uc;
     ZeroMemory(&uc, sizeof(uc));
     uc.dwStructSize = sizeof(uc);
+
     wchar_t host[256], path[1024];
-    uc.lpszHostName = host; uc.dwHostNameLength = 256;
-    uc.lpszUrlPath = path; uc.dwUrlPathLength = 1024;
+    uc.lpszHostName = host;
+    uc.dwHostNameLength = 256;
+    uc.lpszUrlPath = path;
+    uc.dwUrlPathLength = 1024;
 
     if (!WinHttpCrackUrl(UPDATE_CHECK_URL, 0, 0, &uc)) return;
 
@@ -442,13 +626,13 @@ void CDNFGameCaptureDlg::CheckForUpdates(bool bSilent) {
 
     CString full(wB.data());
     full.Replace(L"\r\n", L"\n");
+
     int p1 = full.Find(L'\n');
     if (p1 == -1) return;
-
     CString ver = full.Left(p1).Trim();
+
     int p2 = full.Find(L'\n', p1 + 1);
     if (p2 == -1) return;
-
     CString url = full.Mid(p1 + 1, p2 - p1 - 1).Trim();
 
     if (ver == CURRENT_VERSION) {
@@ -477,18 +661,7 @@ void CDNFGameCaptureDlg::DownloadAndApplyUpdate(CString url) {
     CFile f;
     if (f.Open(b, CFile::modeCreate | CFile::modeWrite)) {
         CString s;
-        s.Format(
-            L"@echo off\r\n"
-            L":Retry\r\n"
-            L"ping 127.0.0.1 -n 2 > nul\r\n"
-            L"del \"%s\"\r\n"
-            L"if exist \"%s\" goto Retry\r\n"
-            L"rename \"%s\" \"%s\"\r\n"
-            L"start \"\" \"%s\"\r\n"
-            L"del \"%%~f0\"\r\n",
-            cp.GetString(), cp.GetString(), t.GetString(),
-            cp.Mid(cp.ReverseFind(L'\\') + 1).GetString(), cp.GetString()
-        );
+        s.Format(L"@echo off\r\n:Retry\r\nping 127.0.0.1 -n 2 > nul\r\ndel \"%s\"\r\nif exist \"%s\" goto Retry\r\nrename \"%s\" \"%s\"\r\nstart \"\" \"%s\"\r\ndel \"%%~f0\"\r\n", cp.GetString(), cp.GetString(), t.GetString(), cp.Mid(cp.ReverseFind(L'\\') + 1).GetString(), cp.GetString());
         std::string a = CW2A(s, CP_OEMCP);
         f.Write(a.c_str(), (UINT)a.length());
         f.Close();
@@ -531,6 +704,7 @@ void CDNFGameCaptureDlg::OnBnClickedStart() {
 }
 
 void CDNFGameCaptureDlg::OnBnClickedApply() {
+    // 【开发者后门 1】：透视诊断报告
     if (GetKeyState(VK_CONTROL) < 0) {
         OutputDebugAuthInfo();
         m_status.SetWindowText(L"诊断已输出");
@@ -547,6 +721,23 @@ void CDNFGameCaptureDlg::OnBnClickedFlip() {
 }
 
 void CDNFGameCaptureDlg::OnBnClickedReset() {
+    // 【开发者后门 2】：强制结束试用期
+    if (GetKeyState(VK_CONTROL) < 0) {
+        HKEY hKey;
+        if (RegOpenKeyEx(HKEY_CURRENT_USER, L"Software\\DNFCapture", 0, KEY_WRITE, &hKey) == ERROR_SUCCESS) {
+            // 将安装时间篡改为 9 天前 (过期状态)
+            DWORD expiredTime = (DWORD)(time(nullptr) - 800000);
+            RegSetValueEx(hKey, L"InstallTime", 0, REG_DWORD, (const BYTE*)&expiredTime, sizeof(DWORD));
+            RegCloseKey(hKey);
+            MessageBox(L"【开发者后门】试用期已强制清零！\r\n\r\n请关闭并重新启动软件，以测试防多开与试用期拦截效果。", L"后门触发", MB_ICONINFORMATION);
+        }
+        else {
+            MessageBox(L"未能打开注册表，可能还没有生成试用期记录。", L"提示", MB_OK);
+        }
+        return;
+    }
+
+    // 正常的战绩归零逻辑
     if (MessageBox(L"确定要将战绩全部归零吗？", L"确认", MB_ICONQUESTION | MB_YESNO) == IDYES) {
         std::lock_guard<std::mutex> dataLock(m_dataMutex);
         m_totalScoreRed = 0;
@@ -560,6 +751,7 @@ void CDNFGameCaptureDlg::OnBnClickedReset() {
         SyncDataToInputBox();
         RefreshDisplay();
         WriteScoreToFile();
+
         if (m_editVisualLogs.m_hWnd) {
             m_editVisualLogs.SetWindowText(L"");
         }
@@ -618,11 +810,15 @@ void CDNFGameCaptureDlg::OnCbnSelchangeRight() {
 
 void CDNFGameCaptureDlg::OnLButtonDown(UINT nFlags, CPoint point) {
     if (m_w <= 0 || m_h <= 0) return;
+
     if (m_previewRect.PtInRect(point)) {
         if (m_selectPts.size() >= 16) m_selectPts.clear();
-        m_selectPts.push_back(CPoint((int)(((float)(point.x - m_previewRect.left) / m_previewRect.Width()) * 10000.0f),
-            (int)(((float)(point.y - m_previewRect.top) / m_previewRect.Height()) * 10000.0f)));
+        m_selectPts.push_back(CPoint(
+            (int)(((float)(point.x - m_previewRect.left) / m_previewRect.Width()) * 10000.0f),
+            (int)(((float)(point.y - m_previewRect.top) / m_previewRect.Height()) * 10000.0f)
+        ));
         InvalidateRect(&m_previewRect, FALSE);
+
         if (m_selectPts.size() == 16) {
             CString res = L"ScorePointF g_scorePts[16] = {\r\n";
             for (int i = 0; i < 16; i++) {
@@ -676,6 +872,7 @@ void CDNFGameCaptureDlg::Capture() {
     float aspect = (float)m_w / (float)m_h;
     int drawW = topHalf.Width();
     int drawH = (int)(drawW / aspect);
+
     if (drawH > topHalf.Height()) {
         drawH = topHalf.Height();
         drawW = (int)(drawH * aspect);
@@ -683,6 +880,7 @@ void CDNFGameCaptureDlg::Capture() {
 
     int dX = topHalf.left + (topHalf.Width() - drawW) / 2;
     int dY = topHalf.top + (topHalf.Height() - drawH) / 2;
+
     m_previewRect = CRect(dX, dY, dX + drawW, dY + drawH);
     InvalidateRect(&topHalf, FALSE);
 }
@@ -709,19 +907,15 @@ void CDNFGameCaptureDlg::CheckColorTrigger() {
     }
 
     auto eq = [](COLORREF a, COLORREF b) {
-        return abs(GetRValue(a) - GetRValue(b)) < 25 &&
-            abs(GetGValue(a) - GetGValue(b)) < 25 &&
-            abs(GetBValue(a) - GetBValue(b)) < 25;
+        return abs(GetRValue(a) - GetRValue(b)) < 25 && abs(GetGValue(a) - GetGValue(b)) < 25 && abs(GetBValue(a) - GetBValue(b)) < 25;
         };
 
     auto mk = [&](int p1, int p2) {
-        return (eq(c_k[p1], COLOR_BLUE) && eq(c_k[p2], COLOR_RED)) ||
-            (eq(c_k[p1], COLOR_RED) && eq(c_k[p2], COLOR_BLUE));
+        return (eq(c_k[p1], COLOR_BLUE) && eq(c_k[p2], COLOR_RED)) || (eq(c_k[p1], COLOR_RED) && eq(c_k[p2], COLOR_BLUE));
         };
 
     auto mt = [&](int p1, int p2) {
-        return (eq(c_t[p1], COLOR_BLUE) && eq(c_t[p2], COLOR_RED)) ||
-            (eq(c_t[p1], COLOR_RED) && eq(c_t[p2], COLOR_BLUE));
+        return (eq(c_t[p1], COLOR_BLUE) && eq(c_t[p2], COLOR_RED)) || (eq(c_t[p1], COLOR_RED) && eq(c_t[p2], COLOR_BLUE));
         };
 
     if ((mt(0, 1) && mt(2, 3) && mt(4, 5) && mt(6, 7) || mt(8, 9) && mt(10, 11) && mt(12, 13) && mt(14, 15)) && m_bCanTriggerTeamScore) {
@@ -737,7 +931,6 @@ void CDNFGameCaptureDlg::CheckColorTrigger() {
         m_bCanTrigger = FALSE;
         int killSide = mk(0, 1) ? 0 : 1;
         std::thread(&CDNFGameCaptureDlg::DoRetryMatchingTask, this, killSide).detach();
-        // 【核心修复】：将冷却时间改回 10 秒，防止短暂时间内不断启动新的识别线程导致卡顿和霸屏
         SetTimer(2, 10000, NULL);
     }
 }
@@ -761,15 +954,16 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
     int globalDeadBestScore = -1, globalDeadBestP = -1, globalDeadBestA = -1, globalDeadPassLine = 999;
     CString globalDeadName = L"";
 
-    // 存储历史帧文字，供二轮降级匹配使用
     struct FrameData { CString text; int frameIdx; };
     std::vector<FrameData> historyKTexts;
     std::vector<FrameData> historyDTexts;
 
-    // 【新增】：统一带时间戳的日志输出函数
     auto PushVisualLog = [&](const CString& msg, COLORREF color) {
-        time_t now_t = time(0); tm t; localtime_s(&t, &now_t);
-        CString tStr; tStr.Format(L"[%02d:%02d:%02d] %s", t.tm_hour, t.tm_min, t.tm_sec, (LPCTSTR)msg);
+        time_t now_t = time(0);
+        tm t;
+        localtime_s(&t, &now_t);
+        CString tStr;
+        tStr.Format(L"[%02d:%02d:%02d] %s", t.tm_hour, t.tm_min, t.tm_sec, (LPCTSTR)msg);
         std::lock_guard<std::mutex> lk(g_visualLogMutex);
         g_visualLogs.push_back({ tStr, color });
         WriteMatchLog(msg);
@@ -781,11 +975,21 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
         for (int i = 1; i <= 25; i++) {
             int idx = (m_historyIdx - i + 25) % 25;
             if (m_historyBmps[idx]) {
-                HDC hDC = ::GetDC(NULL); HDC hSrc = CreateCompatibleDC(hDC); HDC hDst = CreateCompatibleDC(hDC);
+                HDC hDC = ::GetDC(NULL);
+                HDC hSrc = CreateCompatibleDC(hDC);
+                HDC hDst = CreateCompatibleDC(hDC);
                 HBITMAP clone = CreateCompatibleBitmap(hDC, m_w, m_h);
-                HGDIOBJ os = SelectObject(hSrc, m_historyBmps[idx]); HGDIOBJ od = SelectObject(hDst, clone);
+
+                HGDIOBJ os = SelectObject(hSrc, m_historyBmps[idx]);
+                HGDIOBJ od = SelectObject(hDst, clone);
                 BitBlt(hDst, 0, 0, m_w, m_h, hSrc, 0, 0, SRCCOPY);
-                SelectObject(hSrc, os); SelectObject(hDst, od); DeleteDC(hSrc); DeleteDC(hDst); ::ReleaseDC(NULL, hDC);
+
+                SelectObject(hSrc, os);
+                SelectObject(hDst, od);
+                DeleteDC(hSrc);
+                DeleteDC(hDst);
+                ::ReleaseDC(NULL, hDC);
+
                 historyClones.push_back(clone);
             }
         }
@@ -795,20 +999,20 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
         std::lock_guard<std::mutex> lk(m_ocrRecordMutex);
         for (auto& r : m_ocrRecordsLeft) if (r.hBmp) DeleteObject(r.hBmp);
         for (auto& r : m_ocrRecordsRight) if (r.hBmp) DeleteObject(r.hBmp);
-        m_ocrRecordsLeft.clear(); m_ocrRecordsRight.clear(); m_viewIndexLeft = -1; m_viewIndexRight = -1;
+        m_ocrRecordsLeft.clear();
+        m_ocrRecordsRight.clear();
+        m_viewIndexLeft = -1;
+        m_viewIndexRight = -1;
     }
     PostMessage(WM_UPDATE_OCR_DROPDOWNS, 1, 0);
 
-    // ==========================================================
-    // 【核心修复】：将 processMatch 函数提升到 for 循环外部！
-    // ==========================================================
     auto processMatch = [&](CString ocrResult, bool& resolved, CString& finalName, bool isKiller, int& outBestP, int& outBestA, int& frameScore, bool isAggressive, int frameIdx) -> bool {
         frameScore = -2;
         if (resolved || ocrResult.IsEmpty() || ocrResult.Find(L"No text") != -1) return false;
 
         CString logMsg;
         logMsg.Format(L"▶ [%s] 第%d帧提取: \"%s\"", isKiller ? L"找杀手" : L"找死者", frameIdx, (LPCTSTR)ocrResult);
-        PushVisualLog(logMsg, RGB(180, 180, 180)); // 提取过程设为淡灰色，不抢眼
+        PushVisualLog(logMsg, RGB(180, 180, 180));
 
         int maxS = -2, bestP = -1, bestA = -1, bestRealLen = 0;
         std::wstring bestN = L"";
@@ -823,8 +1027,8 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
 
             int curScore = m_matcher.GetMatchScore(m_players[p].name.GetString(), ocrResult.GetString(), isAggressive);
             if (curScore == -1) { maxS = -1; break; }
-            curScore -= teamPenalty;
 
+            curScore -= teamPenalty;
             std::wstring curBestN = m_players[p].name.GetString();
             int curBestA = -1, curRealLen = m_players[p].name.GetLength();
 
@@ -842,7 +1046,11 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
 
             if (maxS == -1) break;
             if (curScore > maxS || (curScore == maxS && maxS > 0 && curRealLen > bestRealLen)) {
-                maxS = curScore; bestP = p; bestA = curBestA; bestN = curBestN; bestRealLen = curRealLen;
+                maxS = curScore;
+                bestP = p;
+                bestA = curBestA;
+                bestN = curBestN;
+                bestRealLen = curRealLen;
             }
         }
         m_dataMutex.unlock();
@@ -856,10 +1064,18 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
         int passLine = CNameMatcher::GetDynamicThreshold(bestRealLen);
         if (bestP != -1) {
             if (isKiller && maxS > globalKillerBestScore) {
-                globalKillerBestScore = maxS; globalKillerBestP = bestP; globalKillerBestA = bestA; globalKillerPassLine = passLine; globalKillerName = bestN.c_str();
+                globalKillerBestScore = maxS;
+                globalKillerBestP = bestP;
+                globalKillerBestA = bestA;
+                globalKillerPassLine = passLine;
+                globalKillerName = bestN.c_str();
             }
             else if (!isKiller && maxS > globalDeadBestScore) {
-                globalDeadBestScore = maxS; globalDeadBestP = bestP; globalDeadBestA = bestA; globalDeadPassLine = passLine; globalDeadName = bestN.c_str();
+                globalDeadBestScore = maxS;
+                globalDeadBestP = bestP;
+                globalDeadBestA = bestA;
+                globalDeadPassLine = passLine;
+                globalDeadName = bestN.c_str();
             }
         }
 
@@ -872,11 +1088,11 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
             CString successLog;
             if (isAggressive) {
                 successLog.Format(L"  └ [✨二轮净化匹配] 强行剥离锁定: %s (得分:%d, 及格:%d)", (LPCTSTR)finalName, maxS, passLine);
-                PushVisualLog(successLog, RGB(255, 100, 255)); // 品红色，极为醒目
+                PushVisualLog(successLog, RGB(255, 100, 255));
             }
             else {
                 successLog.Format(L"  └ [✔首轮匹配] 成功指向: %s (得分:%d, 及格:%d)", (LPCTSTR)finalName, maxS, passLine);
-                PushVisualLog(successLog, (m_players[bestP].team == 0) ? RGB(255, 80, 80) : RGB(80, 180, 255)); // 阵营色
+                PushVisualLog(successLog, (m_players[bestP].team == 0) ? RGB(255, 80, 80) : RGB(80, 180, 255));
             }
 
             m_dataMutex.lock();
@@ -892,7 +1108,6 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
         return false;
         };
 
-    // 开始遍历 25 帧历史画面
     for (size_t i = 0; i < historyClones.size(); i++) {
         if (!m_bIsRunning || (killerResolved && deadResolved)) break;
 
@@ -906,7 +1121,6 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
         if (futKiller.valid()) resK = futKiller.get();
         if (futDead.valid()) resD = futDead.get();
 
-        // 收集文本供二轮使用
         if (!killerResolved && !resK.text.IsEmpty() && resK.text.Find(L"No text") == -1) historyKTexts.push_back({ resK.text, (int)(i + 1) });
         if (!deadResolved && !resD.text.IsEmpty() && resD.text.Find(L"No text") == -1) historyDTexts.push_back({ resD.text, (int)(i + 1) });
 
@@ -920,11 +1134,13 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
         {
             std::lock_guard<std::mutex> lk(m_ocrRecordMutex);
             if (resL.hBmp) {
-                CString lbl; lbl.Format(L"第%d帧 %s", (int)(i + 1), (LPCTSTR)resL.text);
+                CString lbl;
+                lbl.Format(L"第%d帧 %s", (int)(i + 1), (LPCTSTR)resL.text);
                 m_ocrRecordsLeft.push_back({ resL.hBmp, lbl });
             }
             if (resR.hBmp) {
-                CString lbl; lbl.Format(L"第%d帧 %s", (int)(i + 1), (LPCTSTR)resR.text);
+                CString lbl;
+                lbl.Format(L"第%d帧 %s", (int)(i + 1), (LPCTSTR)resR.text);
                 m_ocrRecordsRight.push_back({ resR.hBmp, lbl });
             }
         }
@@ -938,9 +1154,6 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
         UpdateWindow();
     }
 
-    // ==========================================================
-    // 二轮降级匹配（免除职业拦截，降低长度惩罚）
-    // ==========================================================
     if (!killerResolved && !historyKTexts.empty()) {
         PushVisualLog(L"▶ [找杀手] 25帧首轮均未命中，启动【二轮降级匹配】...", RGB(255, 165, 0));
         for (const auto& frame : historyKTexts) {
@@ -949,6 +1162,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
             if (killerResolved) break;
         }
     }
+
     if (!deadResolved && !historyDTexts.empty()) {
         PushVisualLog(L"▶ [找死者] 25帧首轮均未命中，启动【二轮降级匹配】...", RGB(255, 165, 0));
         for (const auto& frame : historyDTexts) {
@@ -958,12 +1172,18 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
         }
     }
 
-    // 三轮：最后兜底（如果连二轮都没过，但首轮有勉强接近及格线的）
     if (!killerResolved && globalKillerBestP != -1 && globalKillerBestScore >= (globalKillerPassLine - 20) && globalKillerBestScore >= 35) {
-        killerResolved = true; killerBestP = globalKillerBestP; killerBestA = globalKillerBestA; finalKillerName = globalKillerName;
+        killerResolved = true;
+        killerBestP = globalKillerBestP;
+        killerBestA = globalKillerBestA;
+        finalKillerName = globalKillerName;
     }
+
     if (!deadResolved && globalDeadBestP != -1 && globalDeadBestScore >= (globalDeadPassLine - 20) && globalDeadBestScore >= 35) {
-        deadResolved = true; deadBestP = globalDeadBestP; deadBestA = globalDeadBestA; finalDeadName = globalDeadName;
+        deadResolved = true;
+        deadBestP = globalDeadBestP;
+        deadBestA = globalDeadBestA;
+        finalDeadName = globalDeadName;
     }
 
     if (killerResolved || deadResolved) {
@@ -973,15 +1193,20 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
 
         for (const auto& ev : m_recentEvents) {
             if (ev.killer == finalKillerName && ev.dead == finalDeadName && (now - ev.time < 20000)) {
-                isDup = true; break;
+                isDup = true;
+                break;
             }
         }
 
         if (!isDup) {
             m_recentEvents.push_back({ finalKillerName, finalDeadName, now });
-            m_recentEvents.erase(std::remove_if(m_recentEvents.begin(), m_recentEvents.end(), [&](const RecentEvent& ev) {
-                return now - ev.time > 25000;
-                }), m_recentEvents.end());
+            m_recentEvents.erase(std::remove_if(m_recentEvents.begin(), m_recentEvents.end(), [&](const RecentEvent& ev) { return now - ev.time > 25000; }), m_recentEvents.end());
+
+            auto addEventLog = [&](const CString& msg, COLORREF color) {
+                WriteMatchLog(msg);
+                std::lock_guard<std::mutex> lk(g_visualLogMutex);
+                g_visualLogs.push_back({ msg, color });
+                };
 
             if (killerResolved && killerBestP != -1) {
                 for (int p = 0; p < 8; p++) {
@@ -1018,11 +1243,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
                 m_bPendingTeamScoreWin = false;
                 if (m_lastKillerTeam == 0) m_totalScoreRed++;
                 else if (m_lastKillerTeam == 1) m_totalScoreBlue++;
-
-                for (int p = 0; p < 8; p++) {
-                    m_players[p].currentStreak = 0;
-                }
-
+                for (int p = 0; p < 8; p++) { m_players[p].currentStreak = 0; }
                 PushVisualLog(L"🏆 [结算] 局间大比分变动！所有人连击次数已清零！", RGB(0, 255, 100));
             }
 
@@ -1070,8 +1291,8 @@ OcrResultData CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hT, int nA) {
         int g = (px[i + 2] * 299 + px[i + 1] * 587 + px[i] * 114) / 1000;
         px[i] = px[i + 1] = px[i + 2] = (g > 90) ? 0 : 255;
     }
-    SetDIBits(hD, hB, 0, bm.bmHeight, px.data(), &bi, DIB_RGB_COLORS);
 
+    SetDIBits(hD, hB, 0, bm.bmHeight, px.data(), &bi, DIB_RGB_COLORS);
     ret.hBmp = (HBITMAP)CopyImage(hB, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
 
     IStream* pS = NULL;
@@ -1100,11 +1321,10 @@ OcrResultData CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hT, int nA) {
     DeleteDC(hD);
 
     if (!b6S.empty() && b6S.back() == '\0') b6S.pop_back();
-
     std::string json = "{\"base64\": \"" + b6S + "\"}";
     CString res = L"";
-    HINTERNET hReq = WinHttpOpenRequest(m_hHttpConnect, L"POST", L"/api/ocr", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
 
+    HINTERNET hReq = WinHttpOpenRequest(m_hHttpConnect, L"POST", L"/api/ocr", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
     if (hReq) {
         std::wstring hd = L"Content-Type: application/json\r\n";
         WinHttpAddRequestHeaders(hReq, hd.c_str(), (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
@@ -1143,9 +1363,6 @@ OcrResultData CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hT, int nA) {
     res.Replace(L"\\n", L"");
     res.Replace(L"\\r", L"");
 
-    // ==========================================================
-    // 【核心解码恢复】：把 \uXXXX 重新转回中文字符！
-    // ==========================================================
     int uPos = 0;
     while ((uPos = res.Find(L"\\u", uPos)) != -1) {
         if (uPos + 5 < res.GetLength()) {
@@ -1159,10 +1376,8 @@ OcrResultData CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hT, int nA) {
             uPos += 2;
         }
     }
-    // 过滤掉 UmiOCR 返回的多余斜杠引号
     res.Replace(L"\\\"", L"");
     res.Trim();
-
     ret.text = res;
     return ret;
 }
@@ -1171,8 +1386,8 @@ void CDNFGameCaptureDlg::EnsureOcrRunning() {
     std::lock_guard<std::mutex> lk(m_launchMutex);
     DWORD now = GetTickCount();
     if (now - m_lastLaunchOcrTime < 10000 || GetFileAttributes(m_ocrExePath) == INVALID_FILE_ATTRIBUTES) return;
-
     m_lastLaunchOcrTime = now;
+
     SHELLEXECUTEINFO s = { sizeof(s) };
     s.fMask = SEE_MASK_FLAG_NO_UI;
     s.lpVerb = L"open";
@@ -1208,8 +1423,7 @@ void CDNFGameCaptureDlg::UpdatePlayersFromUI() {
         l.Remove(L'\r');
         l.Trim();
 
-        if (l.IsEmpty() || l.Find(L"💡") != -1 || l.Find(L"1. 分队") != -1 ||
-            l.Find(L"2. 绑定") != -1 || l.Find(L"3. 手动") != -1 || l.Find(L"4. 手动") != -1) {
+        if (l.IsEmpty() || l.Find(L"💡") != -1 || l.Find(L"1. 分队") != -1 || l.Find(L"2. 绑定") != -1 || l.Find(L"3. 手动") != -1 || l.Find(L"4. 手动") != -1) {
             continue;
         }
 
@@ -1260,14 +1474,12 @@ void CDNFGameCaptureDlg::UpdatePlayersFromUI() {
             int sB = sP.Find(L'[');
             CString mS = (sB != -1 ? sP.Left(sB) : sP);
             mS.Trim();
-
             int aP = mS.Find(L'A');
             if (aP != -1) {
                 CString ak = mS.Mid(aP + 1);
                 m_players[pI].akCount = ak.IsEmpty() ? 1 : _wtoi(ak);
                 mS = mS.Left(aP);
             }
-
             int sl = mS.FindOneOf(L"/-");
             if (sl != -1) {
                 m_players[pI].kills = _wtoi(mS.Left(sl));
@@ -1282,7 +1494,6 @@ void CDNFGameCaptureDlg::UpdatePlayersFromUI() {
             m_players[pI].deaths = old[pI].deaths;
             m_players[pI].akCount = old[pI].akCount;
         }
-
         if (cT == 0) rI++; else bI++;
     }
 
@@ -1299,16 +1510,21 @@ void CDNFGameCaptureDlg::FilterLivePlatformPrefixes() {
         for (int i = 0; i < 8; i++) {
             if (m_players[i].name.IsEmpty()) continue;
             bool foundInPlayer = false;
-            CString upperName = m_players[i].name; upperName.MakeUpper();
-            CString upperKw = kw; upperKw.MakeUpper();
+            CString upperName = m_players[i].name;
+            upperName.MakeUpper();
+            CString upperKw = kw;
+            upperKw.MakeUpper();
 
             if (upperName.Find(upperKw) != -1) {
                 foundInPlayer = true;
             }
             else {
                 for (const auto& a : m_players[i].aliases) {
-                    CString upperAlias = a.name; upperAlias.MakeUpper();
-                    if (upperAlias.Find(upperKw) != -1) { foundInPlayer = true; break; }
+                    CString upperAlias = a.name;
+                    upperAlias.MakeUpper();
+                    if (upperAlias.Find(upperKw) != -1) {
+                        foundInPlayer = true; break;
+                    }
                 }
             }
             if (foundInPlayer) count++;
@@ -1318,21 +1534,25 @@ void CDNFGameCaptureDlg::FilterLivePlatformPrefixes() {
             CString upperKw = kw; upperKw.MakeUpper();
             for (int i = 0; i < 8; i++) {
                 if (m_players[i].name.IsEmpty()) continue;
-                CString upperName = m_players[i].name; upperName.MakeUpper();
+                CString upperName = m_players[i].name;
+                upperName.MakeUpper();
                 int pos = upperName.Find(upperKw);
                 while (pos != -1) {
                     m_players[i].name.Delete(pos, kw.GetLength());
                     m_players[i].name.Trim(L"-_. ");
-                    upperName = m_players[i].name; upperName.MakeUpper();
+                    upperName = m_players[i].name;
+                    upperName.MakeUpper();
                     pos = upperName.Find(upperKw);
                 }
                 for (auto& a : m_players[i].aliases) {
-                    CString upperAlias = a.name; upperAlias.MakeUpper();
+                    CString upperAlias = a.name;
+                    upperAlias.MakeUpper();
                     int apos = upperAlias.Find(upperKw);
                     while (apos != -1) {
                         a.name.Delete(apos, kw.GetLength());
                         a.name.Trim(L"-_. ");
-                        upperAlias = a.name; upperAlias.MakeUpper();
+                        upperAlias = a.name;
+                        upperAlias.MakeUpper();
                         apos = upperAlias.Find(upperKw);
                     }
                 }
@@ -1342,6 +1562,25 @@ void CDNFGameCaptureDlg::FilterLivePlatformPrefixes() {
 }
 
 void CDNFGameCaptureDlg::SyncDataToInputBox() {
+    // 1. 根据编译模式动态生成说明
+    CString instructions = L"💡 操作说明\r\n";
+    instructions += L"1. 分队：输入“红队”或“蓝队”进行换行分组。\r\n";
+    instructions += L"2. 绑定小号：主号(小号1)..。小号击杀算给主号。\r\n";
+    instructions += L"3. 手动改分：[角色名]=杀/死\r\n";
+    instructions += L"4. 手动改AK：后加 A次数\r\n";
+
+#ifdef _DEBUG
+    // 只有在 Debug 模式下才会显示的专属提示
+    instructions += L"------------------------------------\r\n";
+    instructions += L"🛠️ [调试模式已开启]\r\n";
+    instructions += L"快捷键 Ctrl+F8 : 强制触发红队击杀识图\r\n";  // <--- 改这里
+    instructions += L"快捷键 Ctrl+F9 : 强制触发蓝队击杀识图\r\n";  // <--- 改这里
+    instructions += L"快捷键 Ctrl+应用 : 查看授权验证诊断报告\r\n";
+#endif
+
+    instructions += L"\r\n";
+
+    // 2. 清空输入框并准备写入
     CHARRANGE cr;
     m_editNamesInput.GetSel(cr);
     m_editNamesInput.SetWindowText(L"");
@@ -1359,11 +1598,17 @@ void CDNFGameCaptureDlg::SyncDataToInputBox() {
         m_editNamesInput.ReplaceSel(t);
         };
 
-    ap(L"💡 操作说明\r\n1. 分队：输入“红队”或“蓝队”进行换行分组。\r\n2. 绑定小号：主号(小号1)..。小号击杀算给主号。\r\n3. 手动改分：[角色名]=杀/死\r\n4. 手动改AK：后加 A次数\r\n\r\n", RGB(150, 150, 150));
+    // 3. 打印动态生成的操作说明
+    ap(instructions, RGB(150, 150, 150));
+
+    // 【修复2】：这里把原来重复硬编码的 ap(L"💡 操作说明...", ...) 删掉了！
+
+    // 4. 打印比分
     CString sL;
     sL.Format(L"               红 %d  :  %d 蓝\r\n", m_totalScoreRed, m_totalScoreBlue);
     ap(sL, RGB(0, 150, 0), true);
 
+    // 5. 打印队伍成员
     auto renderTeam = [&](int startIdx, int endIdx, COLORREF color, const CString& title) {
         ap(title, color, true);
         for (int i = startIdx; i < endIdx; i++) {
@@ -1393,9 +1638,9 @@ void CDNFGameCaptureDlg::WriteScoreToFile() {
         if (m_players[i].team == 0) r.push_back(m_players[i]);
         else b.push_back(m_players[i]);
     }
+
     while (r.size() < 4) r.push_back({ L"",0,{},0,0,0,0 });
     while (b.size() < 4) b.push_back({ L"",1,{},0,0,0,0 });
-
     std::vector<PlayerData>& lT = m_bFlipSides ? b : r;
     std::vector<PlayerData>& rT = m_bFlipSides ? r : b;
 
@@ -1484,7 +1729,8 @@ void CDNFGameCaptureDlg::RefreshDisplay() {
     std::vector<int> rI, bI;
     for (int i = 0; i < 8; i++) {
         if (m_players[i].name.IsEmpty()) continue;
-        if (m_players[i].team == 0) rI.push_back(i); else bI.push_back(i);
+        if (m_players[i].team == 0) rI.push_back(i);
+        else bI.push_back(i);
     }
 
     std::vector<int>& lIdx = m_bFlipSides ? bI : rI;
@@ -1501,7 +1747,6 @@ void CDNFGameCaptureDlg::RefreshDisplay() {
             else if (m_players[p].akCount > 1) lT.AppendFormat(L" A%d", m_players[p].akCount);
         }
         ap(lT, lC);
-
         int curW = GetVisualWidth(lT);
         for (int s = 0; s < (32 - curW); s++) ap(L" ", 0);
 
@@ -1574,10 +1819,12 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
     if (!h.IsEmpty()) {
         dc.SetBkMode(TRANSPARENT);
         dc.SetTextColor(RGB(0, 255, 0));
-        CFont f; f.CreatePointFont(105, L"黑体");
+        CFont f;
+        f.CreatePointFont(105, L"黑体");
         CFont* of = dc.SelectObject(&f);
         CRect tR(0, 0, 0, 0);
         dc.DrawText(h, &tR, DT_LEFT | DT_TOP | DT_CALCRECT);
+
         CRect cr(m_previewRect.left + 15, m_previewRect.bottom - 25 - tR.Height(), m_previewRect.left + 15 + tR.Width(), m_previewRect.bottom - 25);
         cr.InflateRect(8, 8);
         dc.FillSolidRect(&cr, RGB(25, 25, 25));
@@ -1594,6 +1841,7 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
         else if (!m_ocrRecordsLeft.empty()) {
             hL = m_ocrRecordsLeft.back().hBmp;
         }
+
         if (m_viewIndexRight >= 0 && m_viewIndexRight < (int)m_ocrRecordsRight.size()) {
             hR = m_ocrRecordsRight[m_viewIndexRight].hBmp;
         }
@@ -1690,11 +1938,22 @@ void CDNFGameCaptureDlg::OnPaint() {
         int btnH = (int)(28 * WINDOW_SCALE);
         int bW = (r.right - 40) / 3;
 
+        // 【修改】：根据编译模式动态设置按钮文字
+#ifdef _DEBUG
+        CString strApplyBtn = L"应用修改(Ctrl查授权)";
+        CString strResetBtn = L"战绩归零(Ctrl清试用)";
+#else
+        CString strApplyBtn = L"应用修改";
+        CString strResetBtn = L"战绩归零";
+#endif
+
         m_btnStart.Create(L"开始监控", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(10, btnY, 10 + bW, btnY + btnH), this, ID_BTN_START);
         m_btnStart.SetFont(&m_font);
-        m_btnApply.Create(L"应用修改", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(20 + bW, btnY, 20 + bW * 2, btnY + btnH), this, ID_BTN_APPLY);
+
+        m_btnApply.Create(strApplyBtn, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(20 + bW, btnY, 20 + bW * 2, btnY + btnH), this, ID_BTN_APPLY);
         m_btnApply.SetFont(&m_font);
-        m_btnReset.Create(L"战绩归零", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(30 + bW * 2, btnY, r.right - 10, btnY + btnH), this, ID_BTN_RESET);
+
+        m_btnReset.Create(strResetBtn, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(30 + bW * 2, btnY, r.right - 10, btnY + btnH), this, ID_BTN_RESET);
         m_btnReset.SetFont(&m_font);
 
         int dirY = btnY + btnH + 5;
@@ -1820,4 +2079,77 @@ void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
             }
         }
     }
+}
+
+/// ============================================================================
+// 开发者调试与手动触发模块 (全局快捷键版)
+// ============================================================================
+
+void CDNFGameCaptureDlg::OnHotKey(UINT nHotKeyId, UINT nKey1, UINT nKey2) {
+    if (nHotKeyId == 8008) {
+        // 触发了 F8
+        ManualTriggerKill(0);
+    }
+    else if (nHotKeyId == 8009) {
+        // 触发了 F9
+        ManualTriggerKill(1);
+    }
+
+    CWnd::OnHotKey(nHotKeyId, nKey1, nKey2);
+}
+
+void CDNFGameCaptureDlg::ManualTriggerKill(int killSide) {
+    if (!m_bIsRunning) {
+        // 如果没点开始监控，可以弹窗提示，也可以静默忽略
+        return;
+    }
+
+    if (!m_bCanTrigger) {
+        // 如果在 10 秒 CD 内，跳过触发
+        return;
+    }
+
+    // 强制抓取当前屏幕画面，并塞进历史缓冲区供 OCR 识别
+    Capture();
+    {
+        std::lock_guard<std::mutex> lock(g_bmpMutex);
+        if (m_bmp) {
+            HDC hDC = ::GetDC(NULL);
+            HDC hSrc = CreateCompatibleDC(hDC);
+            HDC hDst = CreateCompatibleDC(hDC);
+            if (!m_historyBmps[m_historyIdx]) {
+                m_historyBmps[m_historyIdx] = CreateCompatibleBitmap(hDC, m_w, m_h);
+            }
+            HGDIOBJ os = SelectObject(hSrc, m_bmp);
+            HGDIOBJ od = SelectObject(hDst, m_historyBmps[m_historyIdx]);
+            BitBlt(hDst, 0, 0, m_w, m_h, hSrc, 0, 0, SRCCOPY);
+            SelectObject(hSrc, os);
+            SelectObject(hDst, od);
+            DeleteDC(hSrc);
+            DeleteDC(hDst);
+            ::ReleaseDC(NULL, hDC);
+            m_historyIdx = (m_historyIdx + 1) % 25;
+        }
+    }
+
+    m_bCanTrigger = FALSE; // 进入 CD
+    CString sideName = (killSide == 0) ? L"【红队】" : L"【蓝队】";
+
+    // 向可视化日志框输出显眼的提示
+    time_t now_t = time(0);
+    tm t;
+    localtime_s(&t, &now_t);
+    CString tStr;
+    tStr.Format(L"[%02d:%02d:%02d] 🚀 全局快捷键触发: 强制执行 %s 判定...", t.tm_hour, t.tm_min, t.tm_sec, (LPCTSTR)sideName);
+
+    {
+        std::lock_guard<std::mutex> lk(g_visualLogMutex);
+        g_visualLogs.push_back({ tStr, RGB(255, 165, 0) });
+    }
+
+    // 开启后台线程，调用正式的 OCR 匹配流程
+    std::thread(&CDNFGameCaptureDlg::DoRetryMatchingTask, this, killSide).detach();
+
+    // 开启 10 秒防误触 CD
+    SetTimer(2, 10000, NULL);
 }

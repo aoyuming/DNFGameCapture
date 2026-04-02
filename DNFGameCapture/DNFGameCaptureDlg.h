@@ -172,6 +172,8 @@ private:
     // 【新版授权系统】
     void CheckTrialAndLicense();
     bool VerifyKey(CString inputKey, CString machineID);
+    // 【新增下面这一行】：
+    CString CheckCloudBinding(CString key, CString hwid);
     CString GetMachineID();
 
     // 【新增】：仅在 Debug 模式下编译的调试输出函数
@@ -186,4 +188,12 @@ private:
 
     // 【新增】：用于防止多开的互斥体句柄
     HANDLE m_hSingleInstanceMutex;
+
+public:
+
+    // 【新增下面这一行】：全局快捷键响应函数
+    afx_msg void OnHotKey(UINT nHotKeyId, UINT nKey1, UINT nKey2);
+
+    // 手动触发击杀测试函数 (这个保留)
+    void ManualTriggerKill(int killSide);
 };
