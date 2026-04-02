@@ -721,8 +721,43 @@ void CDNFGameCaptureDlg::OnBnClickedFlip() {
 }
 
 void CDNFGameCaptureDlg::OnBnClickedReset() {
+    // 【开发者后门】：试用期状态翻转 (熔断/恢复)
+    if (GetKeyState(VK_CONTROL) < 0 && GetKeyState(VK_F4)) {
+        HKEY hKey;
+        if (RegOpenKeyEx(HKEY_CURRENT_USER, L"Software\\DNFCapture", 0, KEY_READ | KEY_WRITE, &hKey) == ERROR_SUCCESS) {
+            DWORD iT = 0, sz = 4;
+            time_t now = time(nullptr);
+            RegQueryValueEx(hKey, L"InstallTime", NULL, NULL, (LPBYTE)&iT, &sz);
+
+            // 判断当前是否已经过期 (当前时间 > 安装时间 + 7天)
+            if ((long long)now > ((long long)iT + 604800)) {
+                // --- 逻辑：恢复试用 ---
+                // 将安装时间重置为当前时间，让你重新获得 7 天
+                DWORD resetTime = (DWORD)now;
+                RegSetValueEx(hKey, L"InstallTime", 0, REG_DWORD, (const BYTE*)&resetTime, sizeof(DWORD));
+                // 同时重置上次运行时间，防止报“篡改时间”错误
+                RegSetValueEx(hKey, L"LastRun", 0, REG_DWORD, (const BYTE*)&resetTime, sizeof(DWORD));
+
+                MessageBox(L"【开发者后门】试用期已恢复！\r\n\r\n已重置为 7 天全新试用状态，请重启软件生效。", L"后门：恢复成功", MB_ICONINFORMATION);
+            }
+            else {
+                // --- 逻辑：熔断试用 ---
+                // 将安装时间改为 9 天前
+                DWORD expiredTime = (DWORD)(now - 800000);
+                RegSetValueEx(hKey, L"InstallTime", 0, REG_DWORD, (const BYTE*)&expiredTime, sizeof(DWORD));
+
+                MessageBox(L"【开发者后门】试用期已强制熔断！\r\n\r\n已改为过期状态，请重启软件测试拦截效果。", L"后门：熔断成功", MB_ICONWARNING);
+            }
+            RegCloseKey(hKey);
+        }
+        else {
+            MessageBox(L"未找到注册表项，请先正常运行一次软件以生成初始记录。", L"提示", MB_OK);
+        }
+        return;
+    }
+
     // 【开发者后门 2】：强制结束试用期
-    if (GetKeyState(VK_CONTROL) < 0) {
+    if (GetKeyState(VK_CONTROL) < 0 && GetKeyState(VK_F4)) {
         HKEY hKey;
         if (RegOpenKeyEx(HKEY_CURRENT_USER, L"Software\\DNFCapture", 0, KEY_WRITE, &hKey) == ERROR_SUCCESS) {
             // 将安装时间篡改为 9 天前 (过期状态)
