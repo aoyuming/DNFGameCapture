@@ -165,7 +165,11 @@ private:
     std::mutex m_launchMutex;
     DWORD m_lastLaunchOcrTime;
 
-    bool CheckLicense();
+    // 【新版授权系统】
+    void CheckTrialAndLicense();
+    bool VerifyKey(CString inputKey, CString machineID);
     CString GetMachineID();
-    CString GenerateKey(CString machineID);
+
+    // 【新增】：仅在 Debug 模式下编译的调试输出函数
+    void OutputDebugAuthInfo();
 };

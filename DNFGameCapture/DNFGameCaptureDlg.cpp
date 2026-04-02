@@ -98,7 +98,7 @@ END_MESSAGE_MAP()
 
 
 // ============================================================================
-// 一机一码授权验证系统实现
+// 一机一码授权验证与试用系统
 // ============================================================================
 CString CDNFGameCaptureDlg::GetMachineID() {
     DWORD volSerial = 0;
@@ -108,63 +108,209 @@ CString CDNFGameCaptureDlg::GetMachineID() {
     return hwid;
 }
 
-CString CDNFGameCaptureDlg::GenerateKey(CString machineID) {
-    long long val = wcstoll(machineID, NULL, 16);
-    val ^= 0x5AA55AA5;
-    CString key;
-    key.Format(L"DNF-%08llX-KEY", val);
-    return key;
+bool CDNFGameCaptureDlg::VerifyKey(CString inputKey, CString machineID) {
+    // 预期格式: DNF-过期时间-签名校验
+    if (inputKey.Left(4) != L"DNF-") return false;
+
+    int firstDash = 3;
+    int secondDash = inputKey.Find(L'-', firstDash + 1);
+    if (secondDash == -1) return false;
+
+    CString expStr = inputKey.Mid(firstDash + 1, secondDash - firstDash - 1);
+    CString sigStr = inputKey.Mid(secondDash + 1);
+
+    long long expTime = wcstoll(expStr, NULL, 16);
+    long long sig = wcstoll(sigStr, NULL, 16);
+    long long hwidVal = wcstoll(machineID, NULL, 16);
+
+    // 验证签名是否被篡改
+    long long expectedSig = hwidVal ^ expTime ^ 0x5AA55AA5;
+    if (sig != expectedSig) return false;
+
+    if (expTime == 0xFFFFFFFF) return true; // 永久卡直接放行
+
+    // 验证是否过期
+    time_t now = time(nullptr);
+    if ((long long)now > expTime) {
+        MessageBox(L"您的授权卡密已到期，请重新购买！", L"授权过期", MB_ICONWARNING | MB_OK);
+        return false;
+    }
+
+    return true;
 }
 
-bool CDNFGameCaptureDlg::CheckLicense() {
+void CDNFGameCaptureDlg::CheckTrialAndLicense() {
     CString hwid = GetMachineID();
-    CString expectedKey = GenerateKey(hwid);
 
+    // 1. 优先读取并验证 license.txt
     wchar_t exePath[MAX_PATH];
     GetModuleFileName(NULL, exePath, MAX_PATH);
     CString path = exePath;
     path = path.Left(path.ReverseFind(L'\\') + 1) + L"license.txt";
 
-    bool bAuthorized = false;
+    bool bLicensed = false;
     CFile file;
     if (file.Open(path, CFile::modeRead)) {
         char buf[256] = { 0 };
         file.Read(buf, 255);
         file.Close();
-
         CString inputKey(buf);
         inputKey.Trim();
-        if (inputKey == expectedKey) {
-            bAuthorized = true;
+        bLicensed = VerifyKey(inputKey, hwid);
+    }
+
+    if (bLicensed) return; // 卡密验证成功，直接进入软件
+
+    // 2. 如果没有卡密，进入试用期校验 (利用注册表)
+    HKEY hKey;
+    DWORD disp;
+    time_t now = time(nullptr);
+    bool bTrialValid = false;
+    long long secondsLeft = 0;
+
+    if (RegCreateKeyEx(HKEY_CURRENT_USER, L"Software\\DNFCapture", 0, NULL, 0, KEY_READ | KEY_WRITE, NULL, &hKey, &disp) == ERROR_SUCCESS) {
+        DWORD installTime = 0;
+        DWORD lastRun = 0;
+        DWORD size = sizeof(DWORD);
+
+        // 读取首次打开时间
+        if (RegQueryValueEx(hKey, L"InstallTime", NULL, NULL, (LPBYTE)&installTime, &size) != ERROR_SUCCESS) {
+            installTime = (DWORD)now;
+            RegSetValueEx(hKey, L"InstallTime", 0, REG_DWORD, (const BYTE*)&installTime, sizeof(DWORD));
+        }
+
+        // 防篡改检测：防止用户将电脑时间往前倒退
+        size = sizeof(DWORD);
+        if (RegQueryValueEx(hKey, L"LastRun", NULL, NULL, (LPBYTE)&lastRun, &size) == ERROR_SUCCESS) {
+            if ((DWORD)now < lastRun - 3600) { // 如果当前时间小于上次运行时间(容忍1小时误差)，判定为作弊
+                installTime = 0; // 没收试用资格
+            }
+        }
+
+        // 记录本次运行时间
+        DWORD currentLastRun = (DWORD)now;
+        RegSetValueEx(hKey, L"LastRun", 0, REG_DWORD, (const BYTE*)&currentLastRun, sizeof(DWORD));
+        RegCloseKey(hKey);
+
+        DWORD trialDuration = 2 * 24 * 3600; // 2天的秒数
+        if (installTime > 0 && (DWORD)now >= installTime && (DWORD)now <= installTime + trialDuration) {
+            bTrialValid = true;
+            secondsLeft = (installTime + trialDuration) - (DWORD)now;
         }
     }
 
-    if (!bAuthorized) {
-        if (::OpenClipboard(NULL)) {
-            ::EmptyClipboard();
-            size_t size = (hwid.GetLength() + 1) * sizeof(wchar_t);
-            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, size);
-            memcpy(GlobalLock(hMem), hwid.GetBuffer(), size);
-            GlobalUnlock(hMem);
-            ::SetClipboardData(CF_UNICODETEXT, hMem);
-            ::CloseClipboard();
-        }
+    if (bTrialValid) {
+        int hours = secondsLeft / 3600;
         CString msg;
-        msg.Format(L"软件未授权！\r\n\r\n您的机器码是： %s\r\n\r\n(机器码已自动复制)\r\n请将机器码发给作者，获取 license.txt 并放入软件同目录。", hwid);
-        MessageBox(msg, L"授权拦截", MB_ICONERROR | MB_OK);
+        msg.Format(L"【欢迎试用】\r\n您正在免费试用期内，还剩余 %d 小时。\r\n到期后需购买卡密，点“确定”继续进入软件。", hours);
+        MessageBox(msg, L"试用提示", MB_ICONINFORMATION | MB_OK);
+        return;
     }
-    return bAuthorized;
+
+    // 3. 试用结束且无卡密，彻底拦截
+    if (::OpenClipboard(NULL)) {
+        ::EmptyClipboard();
+        size_t size = (hwid.GetLength() + 1) * sizeof(wchar_t);
+        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, size);
+        memcpy(GlobalLock(hMem), hwid.GetBuffer(), size);
+        GlobalUnlock(hMem);
+        ::SetClipboardData(CF_UNICODETEXT, hMem);
+        ::CloseClipboard();
+    }
+
+    MessageBox(L"您的试用期已结束，或未检测到有效卡密！\r\n\r\n您的机器码是：" + hwid + L"\r\n\r\n(机器码已自动复制)\r\n请联系作者购买卡密（日卡/月卡/季卡/年卡/永久），并放入同目录下 license.txt。", L"授权拦截", MB_ICONERROR | MB_OK);
+    exit(0);
+}
+
+// ============================================================================
+// DEBUG 模式专属：可视化输出授权诊断信息
+// ============================================================================
+void CDNFGameCaptureDlg::OutputDebugAuthInfo() {
+    CString hwid = GetMachineID();
+
+    // 定义一个直接写入日志框的 Lambda 函数（无需等待监控开启）
+    auto printDirect = [&](const CString& text, COLORREF color) {
+        if (!m_editVisualLogs.m_hWnd) return;
+        int len = m_editVisualLogs.GetWindowTextLength();
+        m_editVisualLogs.SetSel(len, len);
+        CHARFORMAT cf;
+        ZeroMemory(&cf, sizeof(cf));
+        cf.cbSize = sizeof(cf);
+        cf.dwMask = CFM_COLOR;
+        cf.crTextColor = color;
+        m_editVisualLogs.SetSelectionCharFormat(cf);
+        m_editVisualLogs.ReplaceSel(text + L"\r\n");
+        };
+
+    printDirect(L"====== [DEBUG 授权与试用系统诊断] ======", RGB(255, 100, 255));
+    printDirect(L"当前机器码 (HWID): " + hwid, RGB(255, 255, 255));
+
+    // 1. 验证卡密
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileName(NULL, exePath, MAX_PATH);
+    CString path = exePath;
+    path = path.Left(path.ReverseFind(L'\\') + 1) + L"license.txt";
+
+    CFile file;
+    if (file.Open(path, CFile::modeRead)) {
+        char buf[256] = { 0 };
+        file.Read(buf, 255);
+        file.Close();
+        CString inputKey(buf);
+        inputKey.Trim();
+        printDirect(L"读取本地卡密: " + inputKey, RGB(200, 200, 200));
+
+        if (VerifyKey(inputKey, hwid)) {
+            printDirect(L"▶ 卡密验证: ✔️ 有效", RGB(0, 255, 0));
+        }
+        else {
+            printDirect(L"▶ 卡密验证: ❌ 无效或已过期", RGB(255, 80, 80));
+        }
+    }
+    else {
+        printDirect(L"▶ 卡密验证: ❌ 未找到 license.txt 文件", RGB(255, 80, 80));
+    }
+
+    // 2. 验证试用期
+    HKEY hKey;
+    time_t now = time(nullptr);
+    if (RegOpenKeyEx(HKEY_CURRENT_USER, L"Software\\DNFCapture", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        DWORD installTime = 0, lastRun = 0;
+        DWORD size = sizeof(DWORD);
+        RegQueryValueEx(hKey, L"InstallTime", NULL, NULL, (LPBYTE)&installTime, &size);
+        size = sizeof(DWORD);
+        RegQueryValueEx(hKey, L"LastRun", NULL, NULL, (LPBYTE)&lastRun, &size);
+        RegCloseKey(hKey);
+
+        CString trialLog;
+        trialLog.Format(L"注册表记录 -> 首运: %u, 上次: %u, 当前: %u", installTime, lastRun, (DWORD)now);
+        printDirect(trialLog, RGB(150, 150, 150));
+
+        DWORD trialDuration = 2 * 24 * 3600;
+        if (installTime > 0 && (DWORD)now >= installTime && (DWORD)now <= installTime + trialDuration) {
+            int hoursLeft = ((installTime + trialDuration) - (DWORD)now) / 3600;
+            trialLog.Format(L"▶ 试用期验证: ✔️ 有效 (剩余 %d 小时)", hoursLeft);
+            printDirect(trialLog, RGB(0, 255, 0));
+        }
+        else if ((DWORD)now < lastRun - 3600) {
+            printDirect(L"▶ 试用期验证: ❌ 系统时间被倒退篡改，试用资格作废", RGB(255, 80, 80));
+        }
+        else {
+            printDirect(L"▶ 试用期验证: ❌ 试用已结束", RGB(255, 80, 80));
+        }
+    }
+    else {
+        printDirect(L"▶ 试用期验证: ❓ 尚无记录 (从未在 Release 模式下启动过)", RGB(255, 165, 0));
+    }
+    printDirect(L"========================================", RGB(255, 100, 255));
 }
 
 // ============================================================================
 // 初始化与窗口过程
 // ============================================================================
 CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
-#ifndef _DEBUG
-    if (!CheckLicense()) {
-        exit(0);
-    }
-#endif
+    // 发行版强制验证试用与机器码
+    CheckTrialAndLicense();
 
     m_bmp = NULL;
     m_w = 0;
@@ -529,6 +675,12 @@ void CDNFGameCaptureDlg::OnBnClickedStart() {
 }
 
 void CDNFGameCaptureDlg::OnBnClickedApply() {
+    // 【新增】作者专属隐藏后门：按住 Ctrl 键的同时点击“应用修改”
+    if (GetKeyState(VK_CONTROL) < 0 && GetKeyState(VK_F4)) {
+        OutputDebugAuthInfo();
+        m_status.SetWindowText(L"诊断信息已输出！");
+        return; // 直接返回，不执行原本的应用修改逻辑
+    }
     UpdatePlayersFromUI();
     m_status.SetWindowText(L"修改已生效！");
 }
@@ -1783,6 +1935,17 @@ void CDNFGameCaptureDlg::OnPaint() {
     Draw(memDC);
     dc.BitBlt(0, 0, topHalf.Width(), topHalf.Height(), &memDC, 0, 0, SRCCOPY);
     memDC.SelectObject(pOldBmp);
+
+    // 删掉这三行！
+#ifdef _DEBUG
+    static int once = 0;
+    if (!once)
+    {
+        once = true;
+        OutputDebugAuthInfo();
+    }
+
+#endif
 }
 
 void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
