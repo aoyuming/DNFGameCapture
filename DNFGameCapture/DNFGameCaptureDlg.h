@@ -15,7 +15,7 @@
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址
-#define CURRENT_VERSION L"1.1.0"
+#define CURRENT_VERSION L"1.2.1"
 #define UPDATE_CHECK_URL L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt" // 【！！！请换成你自己的网址！！！】
 
 #define DNF_WINDOW_NAME L"地下城与勇士：创新世纪"
@@ -168,6 +168,13 @@ private:
     HINTERNET m_hHttpSession;
     HINTERNET m_hHttpConnect;
     NOTIFYICONDATA m_nid;
+
+    bool m_bIsAuthValid;            // 记录当前授权是否有效
+    CButton m_btnInputKey;          // 新增的“输入授权码”按钮
+    afx_msg void OnBnClickedInputKey(); // 按钮的点击事件
+
+    bool m_bIsTrial;        // 记录当前是否处于“试用”模式
+    long long m_trialEnd;   // 记录试用结束的时间戳
 
     // 【新版授权系统】
     void CheckTrialAndLicense();
