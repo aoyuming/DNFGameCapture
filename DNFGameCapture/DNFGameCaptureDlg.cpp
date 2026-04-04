@@ -131,6 +131,9 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     // 找到 BEGIN_MESSAGE_MAP 区域，添加下面这一行
     ON_NOTIFY(NM_CUSTOMDRAW, 1023, &CDNFGameCaptureDlg::OnCustomDrawTree)
     ON_WM_CTLCOLOR() // 添加这一行，拦截所有的颜色请求
+    ON_MESSAGE(WM_UPDATE_OCR_DROPDOWNS, &CDNFGameCaptureDlg::OnUpdateOcrDropdowns)
+    ON_MESSAGE(WM_UPDATE_ALL_UI, &CDNFGameCaptureDlg::OnUpdateAllUI)// 【新增】：绑定自定义 UI 刷新消息
+    ON_CBN_SELCHANGE(1010, &CDNFGameCaptureDlg::OnCbnSelchangeLeft)
 
 END_MESSAGE_MAP()
 
@@ -958,7 +961,8 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
         }
         PostMessage(WM_UPDATE_OCR_DROPDOWNS, 0, 0);
         { std::lock_guard<std::mutex> lk(m_debugMutex); m_debugOcrResult.Format(L"时光倒流 %d/%d | 杀:%s 亡:%s", (int)(i + 1), MAX_HISTORY_FRAMES, killerResolved ? finalKillerName : L"未定", deadResolved ? finalDeadName : L"未定"); }
-        InvalidateRect(&m_previewRect, FALSE); UpdateWindow();
+        // 去掉 UpdateWindow，子线程强行要求同步重绘极易引发死锁闪退
+        ::InvalidateRect(m_hWnd, &m_previewRect, FALSE);
     }
 
     if (!killerResolved && !historyKTexts.empty()) {
@@ -1015,7 +1019,8 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
                 for (int p = 0; p < 8; p++) m_players[p].currentStreak = 0;
                 PushVisualLog(L"🏆 [结算] 局间大比分变动！所有人连击清零！", RGB(0, 255, 100));
             }
-            SyncDataToTree();SaveConfigToFile();; RefreshDisplay(); WriteScoreToFile();
+            // 【核心修复】：绝对不能在子线程调 SyncDataToTree！发消息让主线程去干！
+            PostMessage(WM_UPDATE_ALL_UI, 0, 0);
         }
     }
     for (HBITMAP hb : historyClones) DeleteObject(hb);
@@ -2742,4 +2747,11 @@ HBRUSH CDNFGameCaptureDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor) {
     }
 
     return hbr;
+}
+
+// 【核心修复】：专门接收子线程消息，在安全的主线程中刷新树状图和看板
+LRESULT CDNFGameCaptureDlg::OnUpdateAllUI(WPARAM wParam, LPARAM lParam) {
+    SyncDataToTree();
+    RefreshDisplay();
+    return 0;
 }

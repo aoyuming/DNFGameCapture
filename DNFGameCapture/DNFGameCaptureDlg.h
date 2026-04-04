@@ -31,6 +31,7 @@
 
 #define WM_UPDATE_OCR_DROPDOWNS (WM_USER + 100)
 #define WM_TRAY_MESSAGE         (WM_USER + 101) // 托盘图标消息
+#define WM_UPDATE_ALL_UI        (WM_USER + 105)// 【新增】：跨线程刷新 UI 专属消息
 
 struct AliasData {
     CString name;
@@ -66,6 +67,35 @@ struct OcrRecord {
     CString displayText;
 };
 
+// ==========================================
+// 【新增】：自定义编辑框类，底层暴力拦截按键
+// ==========================================
+class CQuickAddEdit : public CEdit {
+protected:
+    virtual LRESULT WindowProc(UINT message, WPARAM wParam, LPARAM lParam) override {
+        // 1. 拦截键盘按下
+        if (message == WM_KEYDOWN && wParam == VK_RETURN) {
+            if (GetKeyState(VK_CONTROL) < 0) {
+                // 【Ctrl + 回车】：纯换行
+                ReplaceSel(L"\r\n", TRUE);
+                return 0; // 吞掉消息
+            }
+            else {
+                // 【纯回车】：给父窗口（主界面）发送“点击了添加按钮 (ID: 1022)”的模拟指令
+                GetParent()->SendMessage(WM_COMMAND, MAKEWPARAM(1022, BN_CLICKED), 0);
+                return 0; // 吞掉消息，坚决不换行
+            }
+        }
+        // 2. 拦截字符输入残影
+        if (message == WM_CHAR && wParam == VK_RETURN) {
+            return 0; // 吞掉多余的换行符
+        }
+
+        // 其他按键正常放行
+        return CEdit::WindowProc(message, wParam, lParam);
+    }
+};
+
 class CDNFGameCaptureDlg : public CWnd
 {
 public:
@@ -97,6 +127,9 @@ protected:
     CButton m_chkFlip;
     CButton m_btnHelp;  // 【新增】：帮助按钮
     afx_msg void OnBnClickedHelp(); // 【新增】：点击说明事件
+
+    // 【新增】：跨线程刷新 UI 响应函数
+    afx_msg LRESULT OnUpdateAllUI(WPARAM wParam, LPARAM lParam);
 
 private:
     void Capture();
@@ -153,7 +186,7 @@ private:
 
     // --- 新增以下控件：---
     CComboBox m_cmbTeamSelect; // 选择红蓝队
-    CEdit     m_editQuickAdd;  // 顶部单行快速输入框
+    CQuickAddEdit     m_editQuickAdd;  // 顶部单行快速输入框
     CButton   m_btnQuickAdd;   // 添加按钮
     CTreeCtrl m_treePlayers;   // 树状展示列表
 
