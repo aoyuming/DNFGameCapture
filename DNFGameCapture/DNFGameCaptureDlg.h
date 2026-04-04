@@ -10,6 +10,7 @@
 #include <future>
 #include <winhttp.h>
 #include "NameMatcher.hpp"
+#include <map>
 
 #include <urlmon.h>
 #pragma comment(lib, "urlmon.lib")
@@ -87,6 +88,10 @@ protected:
 
     DECLARE_MESSAGE_MAP()
 
+    CButton m_chkFlip;
+    CButton m_btnHelp;  // 【新增】：帮助按钮
+    afx_msg void OnBnClickedHelp(); // 【新增】：点击说明事件
+
 private:
     void Capture();
     void CheckColorTrigger();
@@ -94,9 +99,7 @@ private:
     OcrResultData RunOCR_Internal(HBITMAP hTargetBmp, int nAreaIndex);
 
     void DoRetryMatchingTask(int triggerSide);
-    void UpdatePlayersFromUI();
     void FilterLivePlatformPrefixes();
-    void SyncDataToInputBox();
     void WriteScoreToFile();
     void AppendResultText(const CString& t, COLORREF c);
     void RefreshDisplay();
@@ -108,7 +111,25 @@ private:
     void RemoveTrayIcon();
     void DoRealExit();
 
+    // --- 新增响应函数：---
+    afx_msg void OnBnClickedQuickAdd();
+    afx_msg void OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult);
+    void SyncDataToTree();
+    void LoadConfigFromFile(); // 新版读取配置
+
+    afx_msg void OnEditSetFocus();
+    afx_msg void OnEditKillFocus();
+    // 找个 afx_msg 区域放下
+    afx_msg void OnEndLabelEdit(NMHDR* pNMHDR, LRESULT* pResult);
+    afx_msg void OnCustomDrawTree(NMHDR* pNMHDR, LRESULT* pResult);
+    // DNFGameCaptureDlg.h
+// 处理控件颜色的消息函数
+    afx_msg HBRUSH OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor);
+
 private:
+    std::map<CString, CString> m_aliasDB;        // 本地小号数据库
+    void LoadAliasDB();                          // 加载数据库
+    void SaveAliasDB();                          // 保存数据库
     HBITMAP m_bmp;
     int m_w, m_h;
     BOOL m_bIsRunning;
@@ -124,15 +145,19 @@ private:
     CRect m_previewRect;
     std::vector<CPoint> m_selectPts;
 
+    // --- 新增以下控件：---
+    CComboBox m_cmbTeamSelect; // 选择红蓝队
+    CEdit     m_editQuickAdd;  // 顶部单行快速输入框
+    CButton   m_btnQuickAdd;   // 添加按钮
+    CTreeCtrl m_treePlayers;   // 树状展示列表
+
     CStatic         m_status;
-    CRichEditCtrl   m_editNamesInput;
     CRichEditCtrl   m_editOcrResult;
     CRichEditCtrl   m_editVisualLogs;
 
     CButton         m_btnStart;
     CButton         m_btnApply;
     CButton         m_btnReset;
-    CButton         m_chkFlip;
     CButton         m_btnBrowseDir;
     CEdit           m_editOutDir;
     CFont           m_font;
@@ -203,4 +228,6 @@ public:
 
     // 手动触发击杀测试函数 (这个保留)
     void ManualTriggerKill(int killSide);
+
+    afx_msg void OnChangeEditNamesInput();
 };

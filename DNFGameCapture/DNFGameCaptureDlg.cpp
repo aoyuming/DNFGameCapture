@@ -29,7 +29,7 @@ struct VisualLogMsg {
 std::deque<VisualLogMsg> g_visualLogs;
 std::mutex g_visualLogMutex;
 
-const float WINDOW_SCALE = 1.6f;
+float WINDOW_SCALE = 1.0f;
 const int ID_BTN_START = 1005;
 const int ID_BTN_APPLY = 1006;
 const int ID_CHK_FLIP = 1007;
@@ -37,6 +37,7 @@ const int ID_BTN_RESET = 1008;
 const int ID_BTN_BROWSE = 1013;
 const int ID_EDIT_DIR = 1014;
 const int ID_BTN_INPUT_KEY = 1020; // 输入授权码按钮ID
+const CString PLACEHOLDER_TEXT = L"输入：主号(小号1)(小号2)...";
 
 struct ScorePointF { float x; float y; };
 ScorePointF g_scorePts[16] = {
@@ -65,6 +66,15 @@ CString FormatTimeStamp(long long ts) {
     res.Format(L"%04d-%02d-%02d %02d:%02d:%02d",
         t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
     return res;
+}
+
+
+// 【新增】：全局通用的 UI 日志输出助手，随处可用
+void AppLog(const CString& msg, COLORREF color) {
+    time_t now_t = time(0); tm t; localtime_s(&t, &now_t);
+    CString tStr; tStr.Format(L"[%02d:%02d:%02d] %s", t.tm_hour, t.tm_min, t.tm_sec, (LPCTSTR)msg);
+    std::lock_guard<std::mutex> lk(g_visualLogMutex);
+    g_visualLogs.push_back({ tStr, color });
 }
 
 // 写入本地匹配日志
@@ -104,11 +114,26 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     ON_BN_CLICKED(ID_BTN_INPUT_KEY, OnBnClickedInputKey)
     ON_WM_SYSCOMMAND()
     ON_WM_HOTKEY()
+    ON_EN_CHANGE(1025, &CDNFGameCaptureDlg::OnChangeEditNamesInput) // 1001是你输入框的ID
     ON_MESSAGE(WM_TRAY_MESSAGE, &CDNFGameCaptureDlg::OnTrayMessage)
     ON_MESSAGE(WM_UPDATE_OCR_DROPDOWNS, &CDNFGameCaptureDlg::OnUpdateOcrDropdowns)
     ON_CBN_SELCHANGE(1010, &CDNFGameCaptureDlg::OnCbnSelchangeLeft)
     ON_CBN_SELCHANGE(1009, &CDNFGameCaptureDlg::OnCbnSelchangeRight)
+    ON_BN_CLICKED(ID_CHK_FLIP, OnBnClickedFlip)
+    ON_BN_CLICKED(1021, &CDNFGameCaptureDlg::OnBnClickedHelp) // 【新增】：绑定说明按钮
+    ON_EN_SETFOCUS(1025, &CDNFGameCaptureDlg::OnEditSetFocus)   // 得到焦点
+    ON_EN_KILLFOCUS(1025, &CDNFGameCaptureDlg::OnEditKillFocus) // 失去焦点
+    // 绑定添加按钮和树控件的右键菜单
+    ON_BN_CLICKED(1022, &CDNFGameCaptureDlg::OnBnClickedQuickAdd)
+    ON_NOTIFY(NM_RCLICK, 1023, &CDNFGameCaptureDlg::OnRClickTree)
+    // 1023 是树控件的 ID
+    ON_NOTIFY(TVN_ENDLABELEDIT, 1023, &CDNFGameCaptureDlg::OnEndLabelEdit)
+    // 找到 BEGIN_MESSAGE_MAP 区域，添加下面这一行
+    ON_NOTIFY(NM_CUSTOMDRAW, 1023, &CDNFGameCaptureDlg::OnCustomDrawTree)
+    ON_WM_CTLCOLOR() // 添加这一行，拦截所有的颜色请求
+
 END_MESSAGE_MAP()
+
 
 void CDNFGameCaptureDlg::OnHotKey(UINT nHotKeyId, UINT nKey1, UINT nKey2) {
     if (nHotKeyId == 8008) {
@@ -424,8 +449,18 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     CString title;
     title.Format(L"DNF击杀统计 - 终极云端版 (v%s)", CURRENT_VERSION);
 
+    // 【新增】：分辨率自适应
+    int screenY = GetSystemMetrics(SM_CYSCREEN);
+    if (screenY <= 1080) {
+        WINDOW_SCALE = 1.2f; // 1080P或更低，缩小界面
+    }
+    else {
+        WINDOW_SCALE = 1.6f; // 2K/4K屏幕，放大界面
+    }
+
+    // 然后再执行 CreateEx ...
     CreateEx(0, cls, title, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
-        100, 100, (int)(750 * WINDOW_SCALE), (int)(730 * WINDOW_SCALE), NULL, NULL);
+        100, 100, (int)(750 * WINDOW_SCALE), (int)(760 * WINDOW_SCALE), NULL, NULL);
 
     InitTrayIcon();
 
@@ -547,7 +582,6 @@ void CDNFGameCaptureDlg::OnBnClickedStart() {
    
     // 3. 执行正常的监控逻辑
     if (!m_bIsRunning) {
-        UpdatePlayersFromUI();
         m_bIsRunning = TRUE;
         m_btnStart.SetWindowText(L"停止监控");
         SetTimer(1, 50, NULL);
@@ -583,16 +617,11 @@ void CDNFGameCaptureDlg::OnBnClickedInputKey() {
 }
 
 void CDNFGameCaptureDlg::OnBnClickedApply() {
-    UpdatePlayersFromUI();
-    m_editVisualLogs.SetWindowText(L"");
-
-    // 重新执行静默检查
+    SaveConfigToFile();
+    SyncDataToTree();
+    // 重新执行静默检查，但不输出长串授权信息
     CheckTrialAndLicense();
-
-    // 更新日志区的授权状态文字
-    OutputDebugAuthInfo();
-
-    m_status.SetWindowText(L"修改与授权状态已更新");
+    m_status.SetWindowText(L"应用修改成功");
 }
 
 void CDNFGameCaptureDlg::OnBnClickedFlip() { m_bFlipSides = (m_chkFlip.GetCheck() == BST_CHECKED); WriteScoreToFile(); RefreshDisplay(); }
@@ -630,7 +659,8 @@ void CDNFGameCaptureDlg::OnBnClickedReset() {
             m_players[i].kills = 0; m_players[i].deaths = 0;
             m_players[i].currentStreak = 0; m_players[i].akCount = 0;
         }
-        SyncDataToInputBox();
+        SyncDataToTree();
+        SaveConfigToFile();
         RefreshDisplay();
         WriteScoreToFile();
         if (m_editVisualLogs.m_hWnd) m_editVisualLogs.SetWindowText(L"");
@@ -732,19 +762,40 @@ void CDNFGameCaptureDlg::Capture() {
 
     {
         std::lock_guard<std::mutex> lock(g_bmpMutex);
-        RECT rc; ::GetClientRect(hGame, &rc); m_w = rc.right - rc.left; m_h = rc.bottom - rc.top;
+        RECT rc;
+        ::GetClientRect(hGame, &rc);
+        m_w = rc.right - rc.left;
+        m_h = rc.bottom - rc.top;
         if (m_w <= 0 || m_h <= 0) return;
-        if (!m_bmp) { HDC hdc = ::GetDC(hGame); m_bmp = ::CreateCompatibleBitmap(hdc, m_w, m_h); ::ReleaseDC(hGame, hdc); }
-        HDC hGameDC = ::GetDC(hGame); HDC hMem = ::CreateCompatibleDC(hGameDC);
+
+        if (!m_bmp) {
+            HDC hdc = ::GetDC(hGame);
+            m_bmp = ::CreateCompatibleBitmap(hdc, m_w, m_h);
+            ::ReleaseDC(hGame, hdc);
+        }
+
+        HDC hGameDC = ::GetDC(hGame);
+        HDC hMem = ::CreateCompatibleDC(hGameDC);
         HGDIOBJ old = ::SelectObject(hMem, m_bmp);
+
+        // 恢复使用 PrintWindow，捕获专属窗口（支持遮挡和压在后台）
         ::PrintWindow(hGame, hMem, 2);
-        ::SelectObject(hMem, old); ::DeleteDC(hMem); ::ReleaseDC(hGame, hGameDC);
+
+        ::SelectObject(hMem, old);
+        ::DeleteDC(hMem);
+        ::ReleaseDC(hGame, hGameDC);
     }
+
+    // 渲染预览图逻辑
     CRect client; GetClientRect(&client);
-    int splitY = max(100, client.bottom - (int)(420 * WINDOW_SCALE)); CRect topHalf(0, 0, client.right, splitY);
-    float aspect = (float)m_w / (float)m_h; int drawW = topHalf.Width(); int drawH = (int)(drawW / aspect);
+    int splitY = max(100, client.bottom - (int)(420 * WINDOW_SCALE));
+    CRect topHalf(0, 0, client.right, splitY);
+    float aspect = (float)m_w / (float)m_h;
+    int drawW = topHalf.Width();
+    int drawH = (int)(drawW / aspect);
     if (drawH > topHalf.Height()) { drawH = topHalf.Height(); drawW = (int)(drawH * aspect); }
-    int dX = topHalf.left + (topHalf.Width() - drawW) / 2; int dY = topHalf.top + (topHalf.Height() - drawH) / 2;
+    int dX = topHalf.left + (topHalf.Width() - drawW) / 2;
+    int dY = topHalf.top + (topHalf.Height() - drawH) / 2;
     m_previewRect = CRect(dX, dY, dX + drawW, dY + drawH);
     InvalidateRect(&topHalf, FALSE);
 }
@@ -926,10 +977,10 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
         }
     }
 
-    if (!killerResolved && globalKillerBestP != -1 && globalKillerBestScore >= (globalKillerPassLine - 20) && globalKillerBestScore >= 35) {
+    if (!killerResolved && globalKillerBestP != -1 && globalKillerBestScore >= (globalKillerPassLine - 20) && globalKillerBestScore >= 40) {
         killerResolved = true; killerBestP = globalKillerBestP; killerBestA = globalKillerBestA; finalKillerName = globalKillerName;
     }
-    if (!deadResolved && globalDeadBestP != -1 && globalDeadBestScore >= (globalDeadPassLine - 20) && globalDeadBestScore >= 35) {
+    if (!deadResolved && globalDeadBestP != -1 && globalDeadBestScore >= (globalDeadPassLine - 20) && globalDeadBestScore >= 40) {
         deadResolved = true; deadBestP = globalDeadBestP; deadBestA = globalDeadBestA; finalDeadName = globalDeadName;
     }
 
@@ -964,7 +1015,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
                 for (int p = 0; p < 8; p++) m_players[p].currentStreak = 0;
                 PushVisualLog(L"🏆 [结算] 局间大比分变动！所有人连击清零！", RGB(0, 255, 100));
             }
-            SyncDataToInputBox(); RefreshDisplay(); WriteScoreToFile();
+            SyncDataToTree();SaveConfigToFile();; RefreshDisplay(); WriteScoreToFile();
         }
     }
     for (HBITMAP hb : historyClones) DeleteObject(hb);
@@ -1028,45 +1079,6 @@ void CDNFGameCaptureDlg::EnsureOcrRunning() {
     SHELLEXECUTEINFO s = { sizeof(s) }; s.fMask = SEE_MASK_FLAG_NO_UI; s.lpVerb = L"open"; s.lpFile = m_ocrExePath; s.nShow = SW_SHOWMINNOACTIVE; ShellExecuteEx(&s);
 }
 
-// ============================================================================
-// 数据解析与保存
-// ============================================================================
-void CDNFGameCaptureDlg::UpdatePlayersFromUI() {
-    std::lock_guard<std::mutex> lk(m_dataMutex); CString txt; m_editNamesInput.GetWindowText(txt);
-    int st = 0, cT = -1, rI = 0, bI = 4; PlayerData old[8];
-    for (int i = 0; i < 8; i++) { old[i] = m_players[i]; m_players[i].name = L""; m_players[i].aliases.clear(); m_players[i].kills = 0; m_players[i].deaths = 0; m_players[i].akCount = 0; m_players[i].team = (i < 4 ? 0 : 1); }
-    while (st < txt.GetLength()) {
-        int nl = txt.Find(L'\n', st); CString l = (nl != -1) ? txt.Mid(st, nl - st) : txt.Mid(st);
-        st = (nl != -1) ? nl + 1 : (int)txt.GetLength(); l.Remove(L'\r'); l.Trim();
-        if (l.IsEmpty() || l.Find(L"💡") != -1 || l.Find(L"1. 分队") != -1 || l.Find(L"2. 绑定") != -1 || l.Find(L"3. 手动") != -1 || l.Find(L"4. 手动") != -1) continue;
-        if (l.Find(L"红") != -1 && l.Find(L"蓝") != -1 && l.Find(L":") != -1 && l.Find(L"【") == -1) {
-            CString m = l.Mid(l.Find(L"红") + 1, l.Find(L"蓝") - l.Find(L"红") - 1); int c = m.Find(L":");
-            if (c != -1) { m_totalScoreRed = _wtoi(m.Left(c)); m_totalScoreBlue = _wtoi(m.Mid(c + 1)); } continue;
-        }
-        if (l.Find(L"【红队】") != -1 || l == L"红队") { cT = 0; continue; }
-        if (l.Find(L"【蓝队】") != -1 || l == L"蓝队") { cT = 1; continue; }
-        if (cT == -1) continue;
-        int pI = (cT == 0 ? rI : bI); if ((cT == 0 && rI >= 4) || (cT == 1 && bI >= 8)) continue;
-        int eP = l.FindOneOf(L"=＝"); CString nP = (eP != -1 ? l.Left(eP) : l); nP.Trim(); int fP = nP.FindOneOf(L"(（");
-        if (fP != -1) {
-            m_players[pI].name = nP.Left(fP); m_players[pI].name.Trim(); CString aR = nP.Mid(fP); int c = 0;
-            while (true) {
-                CString tS = aR.Mid(c); int Lr = tS.FindOneOf(L"(（"), Rr = tS.FindOneOf(L")）"); if (Lr == -1 || Rr == -1) break;
-                CString aN = aR.Mid(c + Lr + 1, c + Rr - (c + Lr) - 1); aN.Trim(); if (!aN.IsEmpty()) m_players[pI].aliases.push_back({ aN }); c += Rr + 1;
-            }
-        }
-        else { m_players[pI].name = nP; }
-        if (eP != -1) {
-            CString sP = l.Mid(eP + 1); sP.Trim(); int sB = sP.Find(L'['); CString mS = (sB != -1 ? sP.Left(sB) : sP); mS.Trim();
-            int aP = mS.Find(L'A'); if (aP != -1) { CString ak = mS.Mid(aP + 1); m_players[pI].akCount = ak.IsEmpty() ? 1 : _wtoi(ak); mS = mS.Left(aP); }
-            int sl = mS.FindOneOf(L"/-"); if (sl != -1) { m_players[pI].kills = _wtoi(mS.Left(sl)); m_players[pI].deaths = _wtoi(mS.Mid(sl + 1)); }
-            else { m_players[pI].kills = _wtoi(mS); }
-        }
-        else { m_players[pI].kills = old[pI].kills; m_players[pI].deaths = old[pI].deaths; m_players[pI].akCount = old[pI].akCount; }
-        if (cT == 0) rI++; else bI++;
-    }
-    FilterLivePlatformPrefixes(); SyncDataToInputBox(); WriteScoreToFile(); RefreshDisplay();
-}
 
 void CDNFGameCaptureDlg::FilterLivePlatformPrefixes() {
     std::vector<CString> keywords = { L"FSN", L"TV", L"直播", L"抖音", L"快手", L"斗鱼", L"虎牙", L"B站", L"BILIBILI", L"企冲", L"熊猫", L"战旗" };
@@ -1163,103 +1175,171 @@ void CDNFGameCaptureDlg::RefreshDisplay() {
     }
 }
 
-void CDNFGameCaptureDlg::SaveConfigToFile() {
-    if (!m_editNamesInput.m_hWnd) return; CString text; m_editNamesInput.GetWindowText(text); if (text.IsEmpty()) return;
-    CFile file;
-    if (file.Open(m_configPath, CFile::modeCreate | CFile::modeWrite)) {
-        unsigned char bom[] = { 0xEF, 0xBB, 0xBF }; file.Write(bom, 3);
-        std::string utf8 = CW2A(text, CP_UTF8); file.Write(utf8.c_str(), (UINT)utf8.length()); file.Close();
-    }
-}
-
 // ============================================================================
 // 绘制模块与 UI 排版
 // ============================================================================
 void CDNFGameCaptureDlg::OnPaint() {
-    CPaintDC dc(this); CRect r; GetClientRect(&r);
-    int splitY = max(100, r.bottom - (int)(420 * WINDOW_SCALE));
-    CRect topHalf(0, 0, r.right, splitY); CRect uiRect(0, splitY, r.right, r.bottom);
+    CPaintDC dc(this);
+    CRect r;
+    GetClientRect(&r);
+
+    int splitY = max(100, r.bottom - (int)(440 * WINDOW_SCALE));
+    CRect topHalf(0, 0, r.right, splitY);
+    CRect uiRect(0, splitY, r.right, r.bottom);
 
     if (!m_status.m_hWnd) {
-        m_font.CreatePointFont(95, L"微软雅黑"); int row1_Y = splitY + 5;
-        m_chkFlip.Create(L"翻转红蓝(蓝左红右)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, CRect(10, row1_Y, 200, row1_Y + 25), this, ID_CHK_FLIP); m_chkFlip.SetFont(&m_font);
-        m_status.Create(L"就绪", WS_CHILD | WS_VISIBLE | SS_CENTER, CRect(210, row1_Y + 4, 380, row1_Y + 25), this, 1003); m_status.SetFont(&m_font);
+        m_font.CreatePointFont(95, L"微软雅黑");
+        int row1_Y = splitY + 5;
+
+        m_chkFlip.Create(L"翻转红蓝(蓝左红右)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            CRect(10, row1_Y, 185, row1_Y + 25), this, ID_CHK_FLIP);
+        m_chkFlip.SetFont(&m_font);
+
+        m_btnHelp.Create(L"❓说明", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            CRect(190, row1_Y, 270, row1_Y + 25), this, 1021);
+        m_btnHelp.SetFont(&m_font);
+
+        m_status.Create(L"就绪", WS_CHILD | WS_VISIBLE | SS_CENTER,
+            CRect(280, row1_Y + 4, 420, row1_Y + 25), this, 1003);
+        m_status.SetFont(&m_font);
 
         int cmbW = 150;
-        m_cmbRight.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, CRect(r.right - 10 - cmbW, row1_Y, r.right - 10, row1_Y + 300), this, 1009);
-        m_cmbRight.SetFont(&m_font); m_cmbRight.AddString(L"[蓝]自动"); m_cmbRight.SetCurSel(0);
-        m_cmbLeft.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, CRect(r.right - 10 - cmbW * 2 - 10, row1_Y, r.right - 10 - cmbW - 10, row1_Y + 300), this, 1010);
-        m_cmbLeft.SetFont(&m_font); m_cmbLeft.AddString(L"[红]自动"); m_cmbLeft.SetCurSel(0);
+        m_cmbRight.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+            CRect(r.right - 10 - cmbW, row1_Y, r.right - 10, row1_Y + 300), this, 1009);
+        m_cmbRight.SetFont(&m_font);
+        m_cmbRight.AddString(L"[蓝]自动");
+        m_cmbRight.SetCurSel(0);
 
-        int halfW = (r.right - 30) / 2; int row2_Y = row1_Y + 30; int row2_Bottom = r.bottom - (int)(75 * WINDOW_SCALE);
-        m_editNamesInput.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_WANTRETURN | WS_VSCROLL | ES_NOHIDESEL, CRect(10, row2_Y, 10 + halfW, row2_Bottom), this, 1001); m_editNamesInput.SetFont(&m_font);
+        m_cmbLeft.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+            CRect(r.right - 10 - cmbW * 2 - 10, row1_Y, r.right - 10 - cmbW - 10, row1_Y + 300), this, 1010);
+        m_cmbLeft.SetFont(&m_font);
+        m_cmbLeft.AddString(L"[红]自动");
+        m_cmbLeft.SetCurSel(0);
 
+        int halfW = (r.right - 30) / 2;
+        int row2_Y = row1_Y + 30;
+        int row2_Bottom = r.bottom - (int)(75 * WINDOW_SCALE);
         int scoreH = (int)(150 * WINDOW_SCALE);
-        m_editOcrResult.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY | WS_VSCROLL, CRect(20 + halfW, row2_Y, r.right - 10, row2_Y + scoreH), this, 1002); m_editOcrResult.SetFont(&m_font);
-        m_editVisualLogs.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY | WS_VSCROLL, CRect(20 + halfW, row2_Y + scoreH + 5, r.right - 10, row2_Bottom), this, 1011); m_editVisualLogs.SetFont(&m_font); m_editVisualLogs.SetBackgroundColor(FALSE, RGB(30, 30, 30));
 
-        int btnY = row2_Bottom + 8; int btnH = (int)(28 * WINDOW_SCALE); int bW = (r.right - 40) / 3;
-        m_btnStart.Create(L"开始监控", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(10, btnY, 10 + bW, btnY + btnH), this, ID_BTN_START); m_btnStart.SetFont(&m_font);
-
-#ifdef _DEBUG
-        CString strApplyBtn = L"应用修改"; CString strResetBtn = L"战绩归零(Ctrl断试用)";
-#else
-        CString strApplyBtn = L"应用修改"; CString strResetBtn = L"战绩归零";
-#endif
-        m_btnApply.Create(strApplyBtn, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(20 + bW, btnY, 20 + bW * 2, btnY + btnH), this, ID_BTN_APPLY); m_btnApply.SetFont(&m_font);
-        m_btnReset.Create(strResetBtn, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(30 + bW * 2, btnY, r.right - 10, btnY + btnH), this, ID_BTN_RESET); m_btnReset.SetFont(&m_font);
-
-        // 【按钮排版】：在最底下一排加上“输入授权码”按钮
-        int dirY = btnY + btnH + 5;
-        int rightBtnW = 110;
-        m_editOutDir.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_READONLY | ES_AUTOHSCROLL, CRect(10, dirY, r.right - (rightBtnW * 2) - 30, dirY + btnH), this, ID_EDIT_DIR);
-        m_editOutDir.SetFont(&m_font); m_editOutDir.SetWindowText(m_outputDir);
-
-        m_btnBrowseDir.Create(L"更改目录", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(r.right - (rightBtnW * 2) - 20, dirY, r.right - rightBtnW - 20, dirY + btnH), this, ID_BTN_BROWSE);
-        m_btnBrowseDir.SetFont(&m_font);
-
-        // 新建输入授权码按钮
-        m_btnInputKey.Create(L"输入授权码", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(r.right - rightBtnW - 10, dirY, r.right - 10, dirY + btnH), this, ID_BTN_INPUT_KEY);
-        m_btnInputKey.SetFont(&m_font);
-
-        // 读取 config.txt 
-        bool configLoaded = false; CFile file;
-        if (file.Open(m_configPath, CFile::modeRead)) {
-            int len = (int)file.GetLength();
-            if (len > 0) {
-                char* buf = new char[len + 1]; file.Read(buf, len); buf[len] = 0;
-                char* start = buf; if (len >= 3 && (unsigned char)buf[0] == 0xEF && (unsigned char)buf[1] == 0xBB && (unsigned char)buf[2] == 0xBF) start += 3;
-                int wLen = MultiByteToWideChar(CP_UTF8, 0, start, -1, NULL, 0);
-                if (wLen > 0) { wchar_t* wBuf = new wchar_t[wLen + 1]; MultiByteToWideChar(CP_UTF8, 0, start, -1, wBuf, wLen); wBuf[wLen] = 0; m_editNamesInput.SetWindowText(wBuf); configLoaded = true; delete[] wBuf; }
-                delete[] buf;
-            } file.Close();
+        m_cmbTeamSelect.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+            CRect(10, row2_Y + 10, 80, row2_Y + 150), this, 1024);
+        m_cmbTeamSelect.SetFont(&m_font);
+        if (m_cmbTeamSelect.GetCount() == 0) {
+            m_cmbTeamSelect.AddString(L"[红队]");
+            m_cmbTeamSelect.AddString(L"[蓝队]");
+            m_cmbTeamSelect.SetCurSel(0);
         }
 
-        if (configLoaded) UpdatePlayersFromUI();
-        else { SyncDataToInputBox(); RefreshDisplay(); WriteScoreToFile(); }
+        m_editQuickAdd.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_MULTILINE | ES_WANTRETURN | WS_VSCROLL,
+            CRect(90, row2_Y, halfW - 60, row2_Y + 45), this, 1025);
+        m_editQuickAdd.SetFont(&m_font);
+        m_editQuickAdd.SetWindowText(PLACEHOLDER_TEXT);
 
-        // 软件第一次启动完毕后，在界面上输出一次授权信息
+        m_btnQuickAdd.Create(L"添加", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            CRect(halfW - 55, row2_Y, 10 + halfW, row2_Y + 45), this, 1022);
+        m_btnQuickAdd.SetFont(&m_font);
+
+        m_treePlayers.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | TVS_HASLINES | TVS_LINESATROOT |
+            TVS_HASBUTTONS | TVS_SHOWSELALWAYS | TVS_EDITLABELS,
+            CRect(10, row2_Y + 55, 10 + halfW, row2_Bottom), this, 1023);
+        m_treePlayers.SetFont(&m_font);
+
+        m_editOcrResult.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
+            CRect(20 + halfW, row2_Y, r.right - 10, row2_Y + scoreH), this, 1002);
+        m_editOcrResult.SetFont(&m_font);
+
+        m_editVisualLogs.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
+            CRect(20 + halfW, row2_Y + scoreH + 5, r.right - 10, row2_Bottom), this, 1011);
+        m_editVisualLogs.SetFont(&m_font);
+        m_editVisualLogs.SetBackgroundColor(FALSE, RGB(30, 30, 30));
+
+        int btnY = row2_Bottom + 8;
+        int btnH = (int)(28 * WINDOW_SCALE);
+        int bW = (r.right - 40) / 3;
+
+        m_btnStart.Create(L"开始监控", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            CRect(10, btnY, 10 + bW, btnY + btnH), this, ID_BTN_START);
+        m_btnStart.SetFont(&m_font);
+
+#ifdef _DEBUG
+        CString strApplyBtn = L"应用修改";
+        CString strResetBtn = L"战绩归零(Ctrl断试用)";
+#else
+        CString strApplyBtn = L"应用修改";
+        CString strResetBtn = L"战绩归零";
+#endif
+        m_btnApply.Create(strApplyBtn, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            CRect(20 + bW, btnY, 20 + bW * 2, btnY + btnH), this, ID_BTN_APPLY);
+        m_btnApply.SetFont(&m_font);
+
+        m_btnReset.Create(strResetBtn, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            CRect(30 + bW * 2, btnY, r.right - 10, btnY + btnH), this, ID_BTN_RESET);
+        m_btnReset.SetFont(&m_font);
+
+        int dirY = btnY + btnH + 5;
+        int rightBtnW = 110;
+
+        m_editOutDir.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_READONLY | ES_AUTOHSCROLL,
+            CRect(10, dirY, r.right - (rightBtnW * 2) - 30, dirY + btnH), this, ID_EDIT_DIR);
+        m_editOutDir.SetFont(&m_font);
+        m_editOutDir.SetWindowText(m_outputDir);
+
+        m_btnBrowseDir.Create(L"更改目录", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            CRect(r.right - (rightBtnW * 2) - 20, dirY, r.right - rightBtnW - 20, dirY + btnH), this, ID_BTN_BROWSE);
+        m_btnBrowseDir.SetFont(&m_font);
+
+        m_btnInputKey.Create(L"输入授权码", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            CRect(r.right - rightBtnW - 10, dirY, r.right - 10, dirY + btnH), this, ID_BTN_INPUT_KEY);
+        m_btnInputKey.SetFont(&m_font);
+
+        static bool configLoadedonce = false;
+        if (!configLoadedonce) {
+            LoadConfigFromFile();
+            LoadAliasDB();
+            configLoadedonce = true;
+        }
+
+        SyncDataToTree();
+        RefreshDisplay();
+        WriteScoreToFile();
         OutputDebugAuthInfo();
 
-        // 【新增】：开启后台线程，静默检测更新，防止网络请求卡死主界面
         std::thread([this]() {
-            CheckForUpdates(true); // true 代表静默检测，只有发现新版本才会弹窗
+            CheckForUpdates(true);
             }).detach();
 
+        // 【新增】：开启全局日志刷新定时器（每 100 毫秒刷新一次日志面板）
+        SetTimer(5, 100, NULL);
     }
 
     dc.FillSolidRect(&uiRect, GetSysColor(COLOR_BTNFACE));
-    CDC memDC; memDC.CreateCompatibleDC(&dc); CBitmap memBmp; memBmp.CreateCompatibleBitmap(&dc, topHalf.Width(), topHalf.Height());
-    CBitmap* pOldBmp = memDC.SelectObject(&memBmp); memDC.FillSolidRect(0, 0, topHalf.Width(), topHalf.Height(), RGB(15, 15, 15));
+    CDC memDC;
+    memDC.CreateCompatibleDC(&dc);
+    CBitmap memBmp;
+    memBmp.CreateCompatibleBitmap(&dc, topHalf.Width(), topHalf.Height());
+    CBitmap* pOldBmp = memDC.SelectObject(&memBmp);
+
+    memDC.FillSolidRect(0, 0, topHalf.Width(), topHalf.Height(), RGB(15, 15, 15));
+
     if (m_w > 0 && m_h > 0) {
         std::lock_guard<std::mutex> lock(g_bmpMutex);
         if (m_bmp) {
-            HDC hBmpDC = ::CreateCompatibleDC(dc.GetSafeHdc()); HGDIOBJ oldBmp = ::SelectObject(hBmpDC, m_bmp);
-            memDC.SetStretchBltMode(HALFTONE); memDC.StretchBlt(m_previewRect.left, m_previewRect.top, m_previewRect.Width(), m_previewRect.Height(), CDC::FromHandle(hBmpDC), 0, 0, m_w, m_h, SRCCOPY);
-            ::SelectObject(hBmpDC, oldBmp); ::DeleteDC(hBmpDC);
+            HDC hBmpDC = ::CreateCompatibleDC(dc.GetSafeHdc());
+            HGDIOBJ oldBmp = ::SelectObject(hBmpDC, m_bmp);
+
+            memDC.SetStretchBltMode(HALFTONE);
+            memDC.StretchBlt(m_previewRect.left, m_previewRect.top,
+                m_previewRect.Width(), m_previewRect.Height(),
+                CDC::FromHandle(hBmpDC), 0, 0, m_w, m_h, SRCCOPY);
+
+            ::SelectObject(hBmpDC, oldBmp);
+            ::DeleteDC(hBmpDC);
         }
     }
-    Draw(memDC); dc.BitBlt(0, 0, topHalf.Width(), topHalf.Height(), &memDC, 0, 0, SRCCOPY); memDC.SelectObject(pOldBmp);
+
+    Draw(memDC);
+    dc.BitBlt(0, 0, topHalf.Width(), topHalf.Height(), &memDC, 0, 0, SRCCOPY);
+    memDC.SelectObject(pOldBmp);
 }
 
 void CDNFGameCaptureDlg::Draw(CDC& dc) {
@@ -1295,76 +1375,86 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
     }
 }
 
-void CDNFGameCaptureDlg::SyncDataToInputBox() {
-    CString instructions = L"💡 操作说明\r\n";
-    instructions += L"1. 分队：输入“红队”或“蓝队”进行换行分组。\r\n";
-    instructions += L"2. 绑定小号：主号(小号1)..。小号击杀算给主号。\r\n";
-    instructions += L"3. 手动改分：[角色名]=杀/死\r\n";
-    instructions += L"4. 手动改AK：后加 A次数\r\n";
+// 【修改】：点击说明按钮弹出的消息框，详细更新功能手册
+void CDNFGameCaptureDlg::OnBnClickedHelp() {
+    CString msg = L"💡 树状战绩管理核心操作说明\r\n\r\n"
+        L"【一、 录入与补全】\r\n"
+        L"1. 批量添加：输入框支持“主号(小号1)(小号2)”格式，按回车或点击[添加]解析入库。\r\n"
+        L"2. 智能补全：输入主号后打出左括号“(”，系统会自动去“数据库”里检索并补齐小号。\r\n\r\n"
+        L"【二、 右键菜单功能 (极其强大)】\r\n"
+        L"1. 队伍操作：在【红/蓝队】根节点右键，可修改队伍大比分，或一键清空该队全员。\r\n"
+        L"2. 主号操作：在[主号]节点右键，可加减战绩，或将玩家连带小号【一键移动】到对面阵营（如果对面满员，会自动弹出替换互换菜单）。\r\n"
+        L"3. 小号操作：在[小号]节点右键，可以仅从本局移除，或者选择【彻底删除】（连同自动补全数据库里的记忆一并抹除）。\r\n\r\n"
+        L"【三、 快捷修改与交互】\r\n"
+        L"1. 直接改名：左键单击选中某个主号或小号，再点一下名字，即可像重命名文件一样修改名字或战绩数值。\r\n"
+        L"2. 展开折叠：节点前有 [+] / [-] 可以自由隐藏或显示小号，让界面更清爽。\r\n"
+        L"------------------------------------\r\n"
+        L"🛠️ 调试模式快捷键：\r\n"
+        L"Ctrl+F8 : 强制触发【红队】击杀识图\r\n"
+        L"Ctrl+F9 : 强制触发【蓝队】击杀识图";
 
-#ifdef _DEBUG
-    instructions += L"------------------------------------\r\n";
-    instructions += L"🛠️ [调试模式已开启]\r\n";
-    instructions += L"快捷键 Ctrl+F8 : 强制触发红队击杀识图\r\n";
-    instructions += L"快捷键 Ctrl+F9 : 强制触发蓝队击杀识图\r\n";
-#endif
-
-    instructions += L"\r\n";
-
-    CHARRANGE cr; m_editNamesInput.GetSel(cr); m_editNamesInput.SetWindowText(L"");
-    auto ap = [&](const CString& t, COLORREF c, bool b = false) {
-        int l = m_editNamesInput.GetWindowTextLength(); m_editNamesInput.SetSel(l, l);
-        CHARFORMAT cf; ZeroMemory(&cf, sizeof(cf)); cf.cbSize = sizeof(cf);
-        cf.dwMask = CFM_COLOR | CFM_BOLD; cf.crTextColor = c; cf.dwEffects = b ? CFE_BOLD : 0;
-        m_editNamesInput.SetSelectionCharFormat(cf); m_editNamesInput.ReplaceSel(t);
-        };
-
-    ap(instructions, RGB(150, 150, 150));
-    CString sL; sL.Format(L"               红 %d  :  %d 蓝\r\n", m_totalScoreRed, m_totalScoreBlue);
-    ap(sL, RGB(0, 150, 0), true);
-
-    auto renderTeam = [&](int startIdx, int endIdx, COLORREF color, const CString& title) {
-        ap(title, color, true);
-        for (int i = startIdx; i < endIdx; i++) {
-            if (m_players[i].name.IsEmpty()) continue;
-            CString l = L"  " + m_players[i].name;
-            for (auto& a : m_players[i].aliases) l += L"(" + a.name + L")";
-            l.AppendFormat(L" = %d/%d", m_players[i].kills, m_players[i].deaths);
-            if (m_players[i].akCount == 1) l += L" A";
-            else if (m_players[i].akCount > 1) l.AppendFormat(L" A%d", m_players[i].akCount);
-            ap(l + L"\r\n", color);
-        }
-        };
-
-    renderTeam(0, 4, RGB(220, 0, 0), L"【红队】\r\n"); renderTeam(4, 8, RGB(0, 0, 220), L"【蓝队】\r\n");
-    m_editNamesInput.SetSel(cr); SaveConfigToFile();
+    MessageBox(msg, L"最新操作逻辑与指南", MB_ICONINFORMATION);
 }
 
 void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
-    if (nID == 1 && m_bIsRunning) { Capture(); CheckColorTrigger(); }
-    else if (nID == 2) { m_bCanTrigger = TRUE; KillTimer(2); }
-    else if (nID == 4) { m_bCanTriggerTeamScore = TRUE; KillTimer(4); }
+    if (nID == 1 && m_bIsRunning) {
+        Capture();
+        CheckColorTrigger();
+    }
+    else if (nID == 2) {
+        m_bCanTrigger = TRUE;
+        KillTimer(2);
+    }
+    else if (nID == 4) {
+        m_bCanTriggerTeamScore = TRUE;
+        KillTimer(4);
+    }
     else if (nID == 3 && m_bIsRunning) {
-        {
-            std::lock_guard<std::mutex> lock(g_bmpMutex);
-            if (m_bmp) {
-                HDC hDC = ::GetDC(NULL); HDC hSrc = CreateCompatibleDC(hDC); HDC hDst = CreateCompatibleDC(hDC);
-                if (!m_historyBmps[m_historyIdx]) m_historyBmps[m_historyIdx] = CreateCompatibleBitmap(hDC, m_w, m_h);
-                HGDIOBJ os = SelectObject(hSrc, m_bmp); HGDIOBJ od = SelectObject(hDst, m_historyBmps[m_historyIdx]);
-                BitBlt(hDst, 0, 0, m_w, m_h, hSrc, 0, 0, SRCCOPY); SelectObject(hSrc, os); SelectObject(hDst, od);
-                DeleteDC(hSrc); DeleteDC(hDst); ::ReleaseDC(NULL, hDC); m_historyIdx = (m_historyIdx + 1) % 25;
+        // 这是原有的历史截图缓存逻辑
+        std::lock_guard<std::mutex> lock(g_bmpMutex);
+        if (m_bmp) {
+            HDC hDC = ::GetDC(NULL);
+            HDC hSrc = CreateCompatibleDC(hDC);
+            HDC hDst = CreateCompatibleDC(hDC);
+
+            if (!m_historyBmps[m_historyIdx]) {
+                m_historyBmps[m_historyIdx] = CreateCompatibleBitmap(hDC, m_w, m_h);
             }
+
+            HGDIOBJ os = SelectObject(hSrc, m_bmp);
+            HGDIOBJ od = SelectObject(hDst, m_historyBmps[m_historyIdx]);
+
+            BitBlt(hDst, 0, 0, m_w, m_h, hSrc, 0, 0, SRCCOPY);
+
+            SelectObject(hSrc, os);
+            SelectObject(hDst, od);
+            DeleteDC(hSrc);
+            DeleteDC(hDst);
+            ::ReleaseDC(NULL, hDC);
+
+            m_historyIdx = (m_historyIdx + 1) % 25;
         }
-        {
-            std::lock_guard<std::mutex> lkLog(g_visualLogMutex);
-            if (!g_visualLogs.empty() && m_editVisualLogs.m_hWnd) {
-                for (const auto& log : g_visualLogs) {
-                    int len = m_editVisualLogs.GetWindowTextLength(); m_editVisualLogs.SetSel(len, len);
-                    CHARFORMAT cf; ZeroMemory(&cf, sizeof(cf)); cf.cbSize = sizeof(cf); cf.dwMask = CFM_COLOR; cf.crTextColor = log.color;
-                    m_editVisualLogs.SetSelectionCharFormat(cf); m_editVisualLogs.ReplaceSel(log.text + L"\r\n");
-                }
-                m_editVisualLogs.SendMessage(WM_VSCROLL, SB_BOTTOM, 0); g_visualLogs.clear();
+    }
+    else if (nID == 5) {
+        // 【新增】：独立于监控状态的全局日志刷新定时器
+        std::lock_guard<std::mutex> lkLog(g_visualLogMutex);
+        if (!g_visualLogs.empty() && m_editVisualLogs.m_hWnd) {
+            for (const auto& log : g_visualLogs) {
+                int len = m_editVisualLogs.GetWindowTextLength();
+                m_editVisualLogs.SetSel(len, len);
+
+                CHARFORMAT cf;
+                ZeroMemory(&cf, sizeof(cf));
+                cf.cbSize = sizeof(cf);
+                cf.dwMask = CFM_COLOR;
+                cf.crTextColor = log.color;
+
+                m_editVisualLogs.SetSelectionCharFormat(cf);
+                m_editVisualLogs.ReplaceSel(log.text + L"\r\n");
             }
+            // 自动滚动到最底部
+            m_editVisualLogs.SendMessage(WM_VSCROLL, SB_BOTTOM, 0);
+            g_visualLogs.clear();
         }
     }
 }
@@ -1528,4 +1618,850 @@ void CDNFGameCaptureDlg::DownloadAndApplyUpdate(CString url) {
         MessageBox(L"更新脚本执行失败，请尝试以管理员身份运行软件。", L"错误", MB_ICONERROR);
         if (m_status.m_hWnd) m_status.SetWindowText(L"就绪");
     }
+}
+
+void CDNFGameCaptureDlg::LoadAliasDB() {
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileName(NULL, exePath, MAX_PATH);
+    CString path = exePath;
+    path = path.Left(path.ReverseFind(L'\\') + 1) + L"alias_db.ini";
+
+    CFile file;
+    if (file.Open(path, CFile::modeRead)) {
+        int len = (int)file.GetLength();
+        if (len > 0) {
+            char* buf = new char[len + 1];
+            file.Read(buf, len); buf[len] = 0;
+            CString content = CA2W(buf, CP_UTF8);
+            delete[] buf;
+
+            m_aliasDB.clear(); // 【关键】：先清空内存，防止重复加载
+
+            int pos = 0;
+            while (pos < content.GetLength()) {
+                int nl = content.Find(L'\n', pos);
+                CString line = (nl != -1) ? content.Mid(pos, nl - pos) : content.Mid(pos);
+                pos = (nl != -1) ? nl + 1 : content.GetLength();
+                line.Remove(L'\r'); line.Trim();
+
+                int eq = line.Find(L'=');
+                if (eq != -1) {
+                    CString mainName = line.Left(eq);
+                    CString aliases = line.Mid(eq + 1);
+
+                    mainName.Trim(); // 【关键清洗】：洗掉隐形空格！
+                    aliases.Trim();
+
+                    if (!mainName.IsEmpty()) {
+                        // std::map 自带去重属性，同名会自动覆盖，留下最新的
+                        m_aliasDB[mainName] = aliases;
+                    }
+                }
+            }
+        }
+        file.Close();
+    }
+}
+
+void CDNFGameCaptureDlg::SaveAliasDB() {
+    for (int i = 0; i < 8; i++) {
+        CString mName = m_players[i].name;
+        mName.Trim();
+
+        if (!mName.IsEmpty() && !m_players[i].aliases.empty()) {
+            // 获取数据库中已有的该主号的小号字符串（如果没有则为空）
+            CString existingAliases = m_aliasDB[mName];
+
+            for (const auto& a : m_players[i].aliases) {
+                CString aName = a.name;
+                aName.Trim();
+                CString target1 = L"(" + aName + L")";
+                CString target2 = L"（" + aName + L"）"; // 兼容中文括号
+
+                // 【核心：增量合并过滤】如果数据库里没有这个小号，才追加进去
+                if (existingAliases.Find(target1) == -1 && existingAliases.Find(target2) == -1) {
+                    existingAliases += target1;
+                }
+            }
+            // 更新内存中的数据库
+            m_aliasDB[mName] = existingAliases;
+        }
+    }
+
+    // 写入 ini 文件
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileName(NULL, exePath, MAX_PATH);
+    CString path = exePath;
+    path = path.Left(path.ReverseFind(L'\\') + 1) + L"alias_db.ini";
+
+    CString content;
+    for (const auto& pair : m_aliasDB) {
+        if (!pair.second.IsEmpty()) { // 防止写入空主号
+            content += pair.first + L"=" + pair.second + L"\r\n";
+        }
+    }
+
+    CFile file;
+    if (file.Open(path, CFile::modeCreate | CFile::modeWrite)) {
+        std::string utf8 = CW2A(content, CP_UTF8);
+        file.Write(utf8.c_str(), (UINT)utf8.length());
+        file.Close();
+    }
+}
+
+void CDNFGameCaptureDlg::OnChangeEditNamesInput() {
+    // 记录上一次文本的长度，防止按退格键时无限触发
+    static int s_prevLen = 0;
+    int curLen = m_editQuickAdd.GetWindowTextLength();
+    bool isBackspace = (curLen < s_prevLen);
+    s_prevLen = curLen;
+
+    if (isBackspace) return;
+
+    int nStart, nEnd;
+    m_editQuickAdd.GetSel(nStart, nEnd);
+
+    if (nStart == nEnd && nStart > 0) {
+        CString fullText;
+        m_editQuickAdd.GetWindowText(fullText);
+        fullText.Replace(L"\r\n", L"\n");
+
+        if (nStart <= fullText.GetLength()) {
+            wchar_t lastChar = fullText.GetAt(nStart - 1);
+
+            // 当用户敲下左括号时触发补全
+            if (lastChar == L'(' || lastChar == L'（') {
+                CString textBeforeCursor = fullText.Left(nStart - 1);
+                int lastSpace = textBeforeCursor.ReverseFind(L' ');
+                int lastNewline = textBeforeCursor.ReverseFind(L'\n');
+                int splitPos = max(lastSpace, lastNewline);
+
+                CString typedName = textBeforeCursor.Mid(splitPos + 1);
+                typedName.Trim();
+
+                if (!typedName.IsEmpty() && m_aliasDB.find(typedName) != m_aliasDB.end()) {
+                    CString dbAliases = m_aliasDB[typedName]; // 获取数据库里的所有小号
+
+                    // 1. 获取该主号当前已经在树状图里存在的小号
+                    std::vector<CString> existAliases;
+                    m_dataMutex.lock();
+                    for (int i = 0; i < 8; i++) {
+                        if (m_players[i].name == typedName) {
+                            for (const auto& a : m_players[i].aliases) {
+                                existAliases.push_back(a.name);
+                            }
+                            break;
+                        }
+                    }
+                    m_dataMutex.unlock();
+
+                    // 2. 遍历数据库的小号，过滤掉已经存在的小号
+                    CString aliasesToInsert = L"";
+                    int c = 0;
+                    while (true) {
+                        CString tS = dbAliases.Mid(c);
+                        int Lr = tS.Find(L'('); if (Lr == -1) Lr = tS.Find(L'（');
+                        int Rr = tS.Find(L')'); if (Rr == -1) Rr = tS.Find(L'）');
+                        if (Lr == -1 || Rr == -1 || Rr <= Lr) break;
+
+                        CString aN = tS.Mid(Lr + 1, Rr - Lr - 1); aN.Trim();
+
+                        // 查重对比
+                        bool exists = false;
+                        for (const auto& ea : existAliases) {
+                            if (ea == aN) { exists = true; break; }
+                        }
+
+                        // 如果树状图里没有这个小号，才加入待补全列表
+                        if (!exists && !aN.IsEmpty()) {
+                            aliasesToInsert += L"(" + aN + L")";
+                        }
+                        c += Rr + 1;
+                    }
+
+                    // 3. 如果有确实缺失的小号，才进行插入补全
+                    if (!aliasesToInsert.IsEmpty()) {
+                        m_editQuickAdd.SetSel(nStart - 1, nStart);
+                        m_editQuickAdd.ReplaceSel(aliasesToInsert);
+                        s_prevLen = m_editQuickAdd.GetWindowTextLength();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 新版 GUI 核心逻辑：添加、树状渲染、右键菜单、存取配置
+// ============================================================================
+void CDNFGameCaptureDlg::OnBnClickedQuickAdd() {
+    CString input;
+    m_editQuickAdd.GetWindowText(input);
+    input.Trim();
+    if (input.IsEmpty() || input == PLACEHOLDER_TEXT) return;
+
+    input.Replace(L"\r\n", L"\n");
+    int start = 0;
+    int currentTeam = m_cmbTeamSelect.GetCurSel();
+    int lastIdx = -1;
+
+    // 统计变量，用于最终汇总输出
+    int addMainCount = 0;
+    int addAliasCount = 0;
+    int dupFilteredCount = 0;
+
+    std::lock_guard<std::mutex> lk(m_dataMutex);
+    AppLog(L"================================", RGB(150, 150, 150));
+    AppLog(L"📥 [系统] 开始解析导入名单数据...", RGB(255, 215, 0));
+
+    while (start < input.GetLength()) {
+        int nl = input.Find(L'\n', start);
+        CString line = (nl != -1) ? input.Mid(start, nl - start) : input.Mid(start);
+        start = (nl != -1) ? nl + 1 : input.GetLength();
+        line.Trim(); if (line.IsEmpty()) continue;
+
+        // 1. 解析比分行
+        if (line.Find(L"红") != -1 && line.Find(L"蓝") != -1 && (line.Find(L":") != -1 || line.Find(L"：") != -1)) {
+            int rPos = line.Find(L"红"), bPos = line.Find(L"蓝"), cPos = line.Find(L":");
+            if (cPos == -1) cPos = line.Find(L"：");
+            if (cPos != -1 && rPos < cPos && cPos < bPos) {
+                m_totalScoreRed = _wtoi(line.Mid(rPos + 1, cPos - rPos - 1));
+                m_totalScoreBlue = _wtoi(line.Mid(cPos + 1, bPos - cPos - 1));
+                AppLog(L"📌 [比分修改] 识别并修改全局比分", RGB(200, 200, 200));
+            }
+            continue;
+        }
+
+        // 2. 识别队伍切换
+        if (line.Find(L"【红队】") != -1) { currentTeam = 0; continue; }
+        if (line.Find(L"【蓝队】") != -1) { currentTeam = 1; continue; }
+
+        // 3. 识别独立的小号行
+        if (line.Left(1) == L"└" || line.Left(1) == L"├" || line.Left(1) == L"+") {
+            if (lastIdx != -1) {
+                CString aN = line.Mid(1); aN.Trim();
+                bool isDup = false;
+                for (int i = 0; i < 8 && !isDup; i++) {
+                    if (m_players[i].name == aN) { isDup = true; break; }
+                    for (const auto& ea : m_players[i].aliases) { if (ea.name == aN) { isDup = true; break; } }
+                }
+                if (!isDup && !aN.IsEmpty()) {
+                    m_players[lastIdx].aliases.push_back({ aN });
+                    addAliasCount++;
+                    AppLog(L" ├ ➕追加小号: [" + aN + L"]", RGB(100, 255, 100));
+                }
+                else if (isDup) {
+                    dupFilteredCount++;
+                    AppLog(L" ├ ⚠️拦截重复: 小号 [" + aN + L"] 已存在，自动去重！", RGB(255, 165, 0));
+                }
+            }
+            continue;
+        }
+
+        // 4. 解析主号及战绩
+        int eP = line.Find(L'='); if (eP == -1) eP = line.Find(L'＝');
+        CString namePart = (eP != -1) ? line.Left(eP) : line; namePart.Trim();
+
+        int fP = namePart.Find(L'('); if (fP == -1) fP = namePart.Find(L'（');
+        CString mainName = (fP != -1) ? namePart.Left(fP) : namePart; mainName.Trim();
+
+        int targetIdx = -1;
+
+        // 【核心查重A】：先全局找找这个主号是不是已经在库里了（无视队伍）
+        for (int i = 0; i < 8; i++) {
+            if (m_players[i].name == mainName) {
+                targetIdx = i;
+                m_players[i].team = currentTeam; // 顺带更新到最新的队伍
+                break;
+            }
+        }
+
+        // 如果主号不存在，检查这个名字是不是被别人当成小号了
+        if (targetIdx == -1) {
+            bool isAliasElsewhere = false;
+            for (int i = 0; i < 8 && !isAliasElsewhere; i++) {
+                for (const auto& a : m_players[i].aliases) {
+                    if (a.name == mainName) { isAliasElsewhere = true; break; }
+                }
+            }
+            if (isAliasElsewhere) {
+                AppLog(L"🚫 [冲突拦截] 名字 [" + mainName + L"] 已被他人的小号占用，跳过创建主号！", RGB(255, 80, 80));
+                continue;
+            }
+
+            // 安全，在当前队伍找个空位
+            int sI = (currentTeam == 0) ? 0 : 4, eI = (currentTeam == 0) ? 4 : 8;
+            for (int i = sI; i < eI; i++) {
+                if (m_players[i].name.IsEmpty()) {
+                    targetIdx = i; m_players[i].name = mainName; m_players[i].team = currentTeam;
+                    addMainCount++;
+                    AppLog(L"👤 [新增主号] [" + mainName + L"]", RGB(80, 180, 255));
+                    break;
+                }
+            }
+        }
+
+        if (targetIdx != -1) {
+            lastIdx = targetIdx;
+            // 提取行内的一连串小号
+            if (fP != -1) {
+                CString aR = namePart.Mid(fP); int c = 0;
+                while (true) {
+                    CString tS = aR.Mid(c);
+                    int Lr = tS.Find(L'('); if (Lr == -1) Lr = tS.Find(L'（');
+                    int Rr = tS.Find(L')'); if (Rr == -1) Rr = tS.Find(L'）');
+                    if (Lr == -1 || Rr == -1 || Rr <= Lr) break;
+                    CString aN = tS.Mid(Lr + 1, Rr - Lr - 1); aN.Trim();
+
+                    // 【核心查重B】：提取的小号也不能和库里的任何名字重复
+                    bool isDup = false;
+                    for (int i = 0; i < 8 && !isDup; i++) {
+                        if (m_players[i].name == aN) { isDup = true; break; }
+                        for (const auto& ea : m_players[i].aliases) { if (ea.name == aN) { isDup = true; break; } }
+                    }
+                    if (!isDup && !aN.IsEmpty()) {
+                        m_players[targetIdx].aliases.push_back({ aN });
+                        addAliasCount++;
+                        AppLog(L" ├ ➕追加小号: [" + aN + L"]", RGB(100, 255, 100));
+                    }
+                    else if (isDup) {
+                        dupFilteredCount++;
+                        AppLog(L" ├ ⚠️拦截重复: 小号 [" + aN + L"] 已存在，自动去重！", RGB(255, 165, 0));
+                    }
+                    c += Rr + 1;
+                }
+            }
+            // 提取战绩 (K/D A)
+            if (eP != -1) {
+                CString scorePart = line.Mid(eP + 1); scorePart.Trim();
+                int aP = scorePart.Find(L'A');
+                if (aP != -1) {
+                    m_players[targetIdx].akCount = _wtoi(scorePart.Mid(aP + 1));
+                    if (m_players[targetIdx].akCount == 0) m_players[targetIdx].akCount = 1;
+                    scorePart = scorePart.Left(aP);
+                }
+                int sl = scorePart.Find(L'/'); if (sl == -1) sl = scorePart.Find(L'-');
+                if (sl != -1) {
+                    m_players[targetIdx].kills = _wtoi(scorePart.Left(sl));
+                    m_players[targetIdx].deaths = _wtoi(scorePart.Mid(sl + 1));
+                }
+            }
+        }
+    }
+
+    CString summaryLog;
+    summaryLog.Format(L"✅ [解析完毕] 新增主号:%d | 追加小号:%d | 过滤重复:%d", addMainCount, addAliasCount, dupFilteredCount);
+    AppLog(summaryLog, RGB(0, 255, 255));
+    AppLog(L"================================", RGB(150, 150, 150));
+
+    m_editQuickAdd.SetWindowText(PLACEHOLDER_TEXT);
+    SaveAliasDB();
+    SaveConfigToFile();
+    WriteScoreToFile();
+    SyncDataToTree();
+    RefreshDisplay();
+}
+
+void CDNFGameCaptureDlg::SyncDataToTree() {
+    m_treePlayers.DeleteAllItems();
+
+    // 【新增】：在根节点直接显示当前队伍总比分
+    CString redTitle; redTitle.Format(L"【红队】  -  %d 分", m_totalScoreRed);
+    CString blueTitle; blueTitle.Format(L"【蓝队】  -  %d 分", m_totalScoreBlue);
+
+    HTREEITEM hRed = m_treePlayers.InsertItem(redTitle);
+    HTREEITEM hBlue = m_treePlayers.InsertItem(blueTitle);
+
+    for (int i = 0; i < 8; i++) {
+        if (m_players[i].name.IsEmpty()) continue;
+        HTREEITEM hTeam = (m_players[i].team == 0) ? hRed : hBlue;
+
+        CString mainText;
+        mainText.Format(L"%s = %d/%d", m_players[i].name, m_players[i].kills, m_players[i].deaths);
+        if (m_players[i].akCount > 0) mainText.AppendFormat(L" A%d", m_players[i].akCount);
+
+        HTREEITEM hMain = m_treePlayers.InsertItem(mainText, hTeam);
+        m_treePlayers.SetItemData(hMain, i);
+
+        for (size_t j = 0; j < m_players[i].aliases.size(); j++) {
+            HTREEITEM hAlias = m_treePlayers.InsertItem(m_players[i].aliases[j].name, hMain);
+            m_treePlayers.SetItemData(hAlias, (i << 16) | j | 0x80000000);
+        }
+        // 【关键】：注释掉主号展开代码，让小号默认全部折叠收缩起来
+        // m_treePlayers.Expand(hMain, TVE_EXPAND); 
+    }
+    // 仅展开队伍根节点
+    m_treePlayers.Expand(hRed, TVE_EXPAND);
+    m_treePlayers.Expand(hBlue, TVE_EXPAND);
+}
+
+void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
+    CPoint pt;
+    GetCursorPos(&pt);
+    CPoint ptTree = pt;
+    m_treePlayers.ScreenToClient(&ptTree);
+    UINT uFlags;
+    HTREEITEM hItem = m_treePlayers.HitTest(ptTree, &uFlags);
+
+    if (hItem && (uFlags & TVHT_ONITEM)) {
+        m_treePlayers.SelectItem(hItem);
+        DWORD_PTR data = m_treePlayers.GetItemData(hItem);
+        HTREEITEM hParent = m_treePlayers.GetParentItem(hItem);
+
+        CMenu menu;
+        menu.CreatePopupMenu();
+        CMenu subMenu;
+
+        if (hParent == NULL) {
+            menu.AppendMenu(MF_STRING, 7, L"🏆 该队大比分 +1");
+            menu.AppendMenu(MF_STRING, 9, L"🔽 该队大比分 -1");
+            menu.AppendMenu(MF_STRING, 8, L"❌ 该队大比分归零");
+            menu.AppendMenu(MF_SEPARATOR);
+            menu.AppendMenu(MF_STRING, 10, L"✏️ 自定义比分 (在上方输入框修改)");
+            menu.AppendMenu(MF_SEPARATOR);
+            menu.AppendMenu(MF_STRING, 11, L"🗑️ 一键清空该队所有成员");
+        }
+        else if (data & 0x80000000) {
+            menu.AppendMenu(MF_STRING, 1, L"🗑️ 从当前战局列表中移除");
+            menu.AppendMenu(MF_STRING, 14, L"💥 删除（同时从自动补齐库中彻底删除）");
+        }
+        else if (data >= 0 && data < 8) {
+            // 【新增】：为主号添加小号快捷选项
+            menu.AppendMenu(MF_STRING, 15, L"➕ 为该主号添加小号...");
+            menu.AppendMenu(MF_STRING, 2, L"🗑️ 删除该主号 (及所有小号)");
+            menu.AppendMenu(MF_SEPARATOR);
+            menu.AppendMenu(MF_STRING, 3, L"➕ 战绩：击杀 +1");
+            menu.AppendMenu(MF_STRING, 4, L"➖ 战绩：死亡 +1");
+            menu.AppendMenu(MF_STRING, 5, L"🌟 战绩：AK +1");
+            menu.AppendMenu(MF_STRING, 6, L"🔄 该主号战绩清零");
+            menu.AppendMenu(MF_SEPARATOR);
+
+            int curTeam = m_players[data].team;
+            int targetTeam = (curTeam == 0) ? 1 : 0;
+            int sI = (targetTeam == 0) ? 0 : 4, eI = (targetTeam == 0) ? 4 : 8;
+
+            std::vector<int> targetOccupied;
+            for (int i = sI; i < eI; i++) {
+                CString checkName = m_players[i].name;
+                checkName.Trim();
+                if (!checkName.IsEmpty()) {
+                    targetOccupied.push_back(i);
+                }
+            }
+
+            if (targetOccupied.size() < 4) {
+                if (curTeam == 0) menu.AppendMenu(MF_STRING, 12, L"➡️ 一键移动到【蓝队】");
+                else menu.AppendMenu(MF_STRING, 13, L"⬅️ 一键移动到【红队】");
+            }
+            else {
+                subMenu.CreatePopupMenu();
+                for (size_t i = 0; i < targetOccupied.size(); i++) {
+                    int tIdx = targetOccupied[i];
+                    CString swapTxt;
+                    swapTxt.Format(L"🔄 与 [%s] 互换位置", m_players[tIdx].name);
+                    subMenu.AppendMenu(MF_STRING, 20 + tIdx, swapTxt);
+                }
+                if (curTeam == 0) menu.AppendMenu(MF_POPUP, (UINT_PTR)subMenu.GetSafeHmenu(), L"➡️ 【蓝队】已满，请选择互换目标...");
+                else menu.AppendMenu(MF_POPUP, (UINT_PTR)subMenu.GetSafeHmenu(), L"⬅️ 【红队】已满，请选择互换目标...");
+            }
+        }
+
+        if (menu.GetMenuItemCount() > 0) {
+            int cmd = menu.TrackPopupMenu(TPM_RETURNCMD, pt.x, pt.y, this);
+            if (cmd <= 0) {
+                *pResult = 0;
+                return;
+            }
+
+            if (cmd == 7) {
+                if (m_treePlayers.GetItemText(hItem).Find(L"红队") != -1) m_totalScoreRed++;
+                else m_totalScoreBlue++;
+            }
+            else if (cmd == 9) {
+                if (m_treePlayers.GetItemText(hItem).Find(L"红队") != -1) m_totalScoreRed--;
+                else m_totalScoreBlue--;
+            }
+            else if (cmd == 8) {
+                if (m_treePlayers.GetItemText(hItem).Find(L"红队") != -1) m_totalScoreRed = 0;
+                else m_totalScoreBlue = 0;
+            }
+            else if (cmd == 10) {
+                CString scoreStr;
+                scoreStr.Format(L"红 %d : %d 蓝", m_totalScoreRed, m_totalScoreBlue);
+                m_editQuickAdd.SetWindowText(scoreStr);
+                m_editQuickAdd.SetFocus();
+                m_editQuickAdd.SetSel(0, -1);
+            }
+            else if (cmd == 11) {
+                int teamToClear = (m_treePlayers.GetItemText(hItem).Find(L"红队") != -1) ? 0 : 1;
+                CString teamName = (teamToClear == 0) ? L"红队" : L"蓝队";
+                int sI = (teamToClear == 0) ? 0 : 4;
+                int eI = (teamToClear == 0) ? 4 : 8;
+                for (int i = sI; i < eI; i++) {
+                    m_players[i].name = L"";
+                    m_players[i].aliases.clear();
+                    m_players[i].kills = 0;
+                    m_players[i].deaths = 0;
+                    m_players[i].akCount = 0;
+                }
+                AppLog(L"🗑️ [清空队伍] 一键清空了【" + teamName + L"】的所有成员！", RGB(255, 80, 80));
+            }
+            // 【新增：添加小号交互逻辑】
+            else if (cmd == 15) {
+                int pIdx = (int)data;
+                CString mainName = m_players[pIdx].name;
+                CString templateText;
+
+                // 帮你把输入框填充好模板： 主号()
+                templateText.Format(L"%s()", mainName.GetString());
+                m_editQuickAdd.SetWindowText(templateText);
+                m_editQuickAdd.SetFocus();
+
+                // 精准将光标移动到左右括号的中间，直接打字即可
+                int pos = templateText.GetLength() - 1;
+                m_editQuickAdd.SetSel(pos, pos);
+
+                AppLog(L"💡 [操作提示] 请在上方输入框的括号内填入小号名称，按回车即可添加！", RGB(0, 255, 255));
+            }
+            else if (cmd == 12 || cmd == 13) {
+                int pIdx = (int)data;
+                int targetTeam = (cmd == 12) ? 1 : 0;
+                int targetIdx = -1;
+                int sI = (targetTeam == 0) ? 0 : 4;
+                int eI = (targetTeam == 0) ? 4 : 8;
+
+                for (int i = sI; i < eI; i++) {
+                    CString checkName = m_players[i].name;
+                    checkName.Trim();
+                    if (checkName.IsEmpty()) {
+                        targetIdx = i;
+                        break;
+                    }
+                }
+                if (targetIdx != -1) {
+                    CString moveName = m_players[pIdx].name;
+                    m_players[targetIdx] = m_players[pIdx];
+                    m_players[targetIdx].team = targetTeam;
+                    m_players[pIdx].name = L"";
+                    m_players[pIdx].aliases.clear();
+                    m_players[pIdx].kills = 0;
+                    m_players[pIdx].deaths = 0;
+                    m_players[pIdx].akCount = 0;
+                    AppLog(L"➡️ [移动换边] 玩家 [" + moveName + L"] 已移动至对面阵营", RGB(80, 180, 255));
+                }
+            }
+            else if (cmd >= 20 && cmd <= 27) {
+                int pIdx = (int)data;
+                int targetIdx = cmd - 20;
+
+                int curTeam = m_players[pIdx].team;
+                int targetTeam = m_players[targetIdx].team;
+                CString myName = m_players[pIdx].name;
+                CString targetName = m_players[targetIdx].name;
+
+                PlayerData temp = m_players[targetIdx];
+                m_players[targetIdx] = m_players[pIdx];
+                m_players[targetIdx].team = targetTeam;
+
+                m_players[pIdx] = temp;
+                m_players[pIdx].team = curTeam;
+
+                AppLog(L"🔄 [位置互换] [" + myName + L"] 与 [" + targetName + L"] 互换了位置", RGB(255, 215, 0));
+            }
+            else if (cmd == 1) {
+                int pIdx = (data & 0x7FFFFFFF) >> 16;
+                int aIdx = (data & 0xFFFF);
+                CString subName = m_players[pIdx].aliases[aIdx].name;
+                m_players[pIdx].aliases.erase(m_players[pIdx].aliases.begin() + aIdx);
+                AppLog(L"✂️ [战局移除] 小号 [" + subName + L"] 已从当前战局剥离（保留在库中）", RGB(200, 200, 200));
+            }
+            else if (cmd == 14) {
+                int pIdx = (data & 0x7FFFFFFF) >> 16;
+                int aIdx = (data & 0xFFFF);
+                CString mainName = m_players[pIdx].name;
+                CString subName = m_players[pIdx].aliases[aIdx].name;
+
+                if (m_aliasDB.find(mainName) != m_aliasDB.end()) {
+                    CString& dbAliases = m_aliasDB[mainName];
+                    dbAliases.Replace(L"(" + subName + L")", L"");
+                    dbAliases.Replace(L"（" + subName + L"）", L"");
+                    if (dbAliases.IsEmpty()) {
+                        m_aliasDB.erase(mainName);
+                    }
+                }
+
+                m_players[pIdx].aliases.erase(m_players[pIdx].aliases.begin() + aIdx);
+                AppLog(L"💥 [双重抹除] 小号 [" + subName + L"] 已从战局及自动补齐数据库中彻底删除！", RGB(255, 80, 80));
+            }
+            else if (cmd == 2) {
+                int pIdx = (int)data;
+                CString mainName = m_players[pIdx].name;
+                m_players[pIdx].name = L"";
+                m_players[pIdx].aliases.clear();
+                m_players[pIdx].kills = 0;
+                m_players[pIdx].deaths = 0;
+                m_players[pIdx].akCount = 0;
+                AppLog(L"🗑️ [删除主号] 玩家 [" + mainName + L"] 及其旗下小号已被全盘清空", RGB(255, 80, 80));
+            }
+            else if (cmd == 3) { m_players[data].kills++; }
+            else if (cmd == 4) { m_players[data].deaths++; }
+            else if (cmd == 5) { m_players[data].akCount++; }
+            else if (cmd == 6) {
+                m_players[data].kills = 0;
+                m_players[data].deaths = 0;
+                m_players[data].akCount = 0;
+            }
+
+            SaveAliasDB();
+            SyncDataToTree();
+            WriteScoreToFile();
+            RefreshDisplay();
+            SaveConfigToFile();
+        }
+    }
+    *pResult = 0;
+}
+
+// 序列化保存新版配置文件
+void CDNFGameCaptureDlg::SaveConfigToFile() {
+    CFile file;
+    if (file.Open(m_configPath, CFile::modeCreate | CFile::modeWrite)) {
+        unsigned char bom[] = { 0xEF, 0xBB, 0xBF }; file.Write(bom, 3);
+        CString text;
+        for (int i = 0; i < 8; i++) {
+            if (m_players[i].name.IsEmpty()) continue;
+            text.AppendFormat(L"%d|%s|%d|%d|%d", m_players[i].team, m_players[i].name, m_players[i].kills, m_players[i].deaths, m_players[i].akCount);
+            for (auto& a : m_players[i].aliases) text.AppendFormat(L"|%s", a.name);
+            text += L"\r\n";
+        }
+        std::string utf8 = CW2A(text, CP_UTF8); file.Write(utf8.c_str(), (UINT)utf8.length()); file.Close();
+    }
+}
+
+// 反序列化读取新版配置文件（自带开机洗脏数据功能）
+void CDNFGameCaptureDlg::LoadConfigFromFile() {
+    CFile file;
+    if (file.Open(m_configPath, CFile::modeRead)) {
+        int len = (int)file.GetLength();
+        if (len > 0) {
+            char* buf = new char[len + 1]; file.Read(buf, len); buf[len] = 0;
+            char* start = buf; if (len >= 3 && (unsigned char)buf[0] == 0xEF && (unsigned char)buf[1] == 0xBB && (unsigned char)buf[2] == 0xBF) start += 3;
+            CString content = CA2W(start, CP_UTF8); delete[] buf;
+
+            int pos = 0;
+            while (pos < content.GetLength()) {
+                int nl = content.Find(L'\n', pos);
+                CString line = (nl != -1) ? content.Mid(pos, nl - pos) : content.Mid(pos);
+                pos = (nl != -1) ? nl + 1 : content.GetLength();
+                line.Remove(L'\r'); line.Trim();
+                if (line.IsEmpty() || line.Find(L"|") == -1) continue;
+
+                int p1 = line.Find(L'|'); int team = _wtoi(line.Left(p1)); line = line.Mid(p1 + 1);
+
+                int p2 = line.Find(L'|');
+                CString mainName = (p2 != -1) ? line.Left(p2) : line;
+                mainName.Trim();
+
+                // 【自动清洗脏数据】：如果这个名字在库里已经有了，说明是旧版遗留的重复脏数据，直接丢弃！
+                bool isDup = false;
+                for (int i = 0; i < 8; i++) { if (m_players[i].name == mainName) { isDup = true; break; } }
+                if (isDup) continue;
+
+                int targetIdx = -1; int sIdx = (team == 0) ? 0 : 4; int eIdx = (team == 0) ? 4 : 8;
+                for (int i = sIdx; i < eIdx; i++) { if (m_players[i].name.IsEmpty()) { targetIdx = i; break; } }
+                if (targetIdx == -1) continue;
+
+                m_players[targetIdx].team = team;
+                m_players[targetIdx].name = mainName;
+
+                if (p2 != -1) {
+                    line = line.Mid(p2 + 1);
+                    int p3 = line.Find(L'|'); if (p3 != -1) { m_players[targetIdx].kills = _wtoi(line.Left(p3)); line = line.Mid(p3 + 1); }
+                    else { m_players[targetIdx].kills = _wtoi(line); continue; }
+                    int p4 = line.Find(L'|'); if (p4 != -1) { m_players[targetIdx].deaths = _wtoi(line.Left(p4)); line = line.Mid(p4 + 1); }
+                    else { m_players[targetIdx].deaths = _wtoi(line); continue; }
+                    int p5 = line.Find(L'|'); if (p5 != -1) { m_players[targetIdx].akCount = _wtoi(line.Left(p5)); line = line.Mid(p5 + 1); }
+                    else { m_players[targetIdx].akCount = _wtoi(line); continue; }
+
+                    while (!line.IsEmpty()) {
+                        int px = line.Find(L'|');
+                        CString aName = (px != -1) ? line.Left(px) : line;
+                        aName.Trim();
+
+                        // 【小号查重】：丢弃旧文件里的重复小号
+                        bool aDup = false;
+                        for (int k = 0; k < 8; k++) {
+                            if (m_players[k].name == aName) { aDup = true; break; }
+                            for (auto& ea : m_players[k].aliases) { if (ea.name == aName) { aDup = true; break; } }
+                        }
+                        if (!aDup && !aName.IsEmpty()) m_players[targetIdx].aliases.push_back({ aName });
+
+                        if (px != -1) line = line.Mid(px + 1);
+                        else break;
+                    }
+                }
+            }
+        } file.Close();
+    }
+}
+
+// 当鼠标点进输入框
+void CDNFGameCaptureDlg::OnEditSetFocus() {
+    CString content;
+    m_editQuickAdd.GetWindowText(content);
+    // 如果当前内容是水印提示，则清空并改变颜色
+    if (content == PLACEHOLDER_TEXT) {
+        m_editQuickAdd.SetWindowText(L"");
+        // 这里可以根据需要微调文字颜色，CEdit默认是黑色
+    }
+}
+
+// 当鼠标切出输入框
+void CDNFGameCaptureDlg::OnEditKillFocus() {
+    CString content;
+    m_editQuickAdd.GetWindowText(content);
+    content.Trim(); // 【关键】：去除空格
+
+    // 如果内容为空或用户只打了空格，恢复水印提示
+    if (content.IsEmpty()) {
+        m_editQuickAdd.SetWindowText(PLACEHOLDER_TEXT);
+    }
+}
+
+void CDNFGameCaptureDlg::OnEndLabelEdit(NMHDR* pNMHDR, LRESULT* pResult) {
+    LPNMTVDISPINFO pTVDispInfo = (LPNMTVDISPINFO)pNMHDR;
+    *pResult = FALSE;
+
+    if (pTVDispInfo->item.pszText != NULL) {
+        CString line = pTVDispInfo->item.pszText; line.Trim();
+        if (line.IsEmpty()) return;
+
+        DWORD_PTR data = m_treePlayers.GetItemData(pTVDispInfo->item.hItem);
+        std::lock_guard<std::mutex> lk(m_dataMutex);
+
+        CString newNameOnly = line;
+        if (!(data & 0x80000000)) {
+            int eP = line.Find(L'='); if (eP == -1) eP = line.Find(L'＝');
+            if (eP != -1) { newNameOnly = line.Left(eP); newNameOnly.Trim(); }
+        }
+
+        int curPIdx = (data & 0x80000000) ? ((data & 0x7FFFFFFF) >> 16) : (int)data;
+        int curAIdx = (data & 0x80000000) ? (data & 0xFFFF) : -1;
+
+        // 查重拦截逻辑
+        bool isDup = false;
+        for (int i = 0; i < 8 && !isDup; i++) {
+            if (m_players[i].name.IsEmpty()) continue;
+
+            if (m_players[i].name == newNameOnly && !(i == curPIdx && curAIdx == -1)) {
+                isDup = true; break;
+            }
+            for (int j = 0; j < (int)m_players[i].aliases.size(); j++) {
+                if (m_players[i].aliases[j].name == newNameOnly && !(i == curPIdx && j == curAIdx)) {
+                    isDup = true; break;
+                }
+            }
+        }
+
+        if (isDup) {
+            AppLog(L"❌ [重命名失败] 名称 [" + newNameOnly + L"] 已经被其他玩家占用，修改被拦截！", RGB(255, 100, 100));
+            MessageBox(L"修改失败！该名称已经被其他主号或小号占用，请使用唯一名称。", L"命名冲突", MB_ICONWARNING);
+            return;
+        }
+
+        // 修改保存逻辑
+        if (data & 0x80000000) {
+            m_players[curPIdx].aliases[curAIdx].name = line;
+        }
+        else {
+            int eP = line.Find(L'='); if (eP == -1) eP = line.Find(L'＝');
+            if (eP != -1) {
+                m_players[data].name = line.Left(eP); m_players[data].name.Trim();
+                CString score = line.Mid(eP + 1); score.Trim();
+                int aP = score.Find(L'A');
+                if (aP != -1) { m_players[data].akCount = _wtoi(score.Mid(aP + 1)); score = score.Left(aP); }
+                int sl = score.Find(L'/'); if (sl == -1) sl = score.Find(L'-');
+                if (sl != -1) { m_players[data].kills = _wtoi(score.Left(sl)); m_players[data].deaths = _wtoi(score.Mid(sl + 1)); }
+            }
+            else {
+                m_players[data].name = line;
+            }
+        }
+
+        AppLog(L"✏️ [信息修改] 成功保存更新: " + line, RGB(0, 255, 100));
+
+        SaveAliasDB();
+        SaveConfigToFile();
+        WriteScoreToFile();
+        SyncDataToTree();
+        RefreshDisplay();
+    }
+}
+
+void CDNFGameCaptureDlg::OnCustomDrawTree(NMHDR* pNMHDR, LRESULT* pResult) {
+    LPNMTVCUSTOMDRAW pCustomDraw = (LPNMTVCUSTOMDRAW)pNMHDR;
+    *pResult = CDRF_DODEFAULT;
+
+    if (pCustomDraw->nmcd.dwDrawStage == CDDS_PREPAINT) {
+        *pResult = CDRF_NOTIFYITEMDRAW;
+        return;
+    }
+
+    if (pCustomDraw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+        HTREEITEM hItem = (HTREEITEM)pCustomDraw->nmcd.dwItemSpec;
+        CString text = m_treePlayers.GetItemText(hItem);
+        DWORD_PTR data = m_treePlayers.GetItemData(hItem);
+
+        if (text.Find(L"【红队】") != -1) {
+            pCustomDraw->clrText = RGB(220, 20, 60);
+            *pResult = CDRF_NEWFONT;
+            return;
+        }
+        if (text.Find(L"【蓝队】") != -1) {
+            pCustomDraw->clrText = RGB(30, 144, 255);
+            *pResult = CDRF_NEWFONT;
+            return;
+        }
+
+        // --- 【新增】：判断是小号，直接变灰 ---
+        if (data & 0x80000000) {
+            pCustomDraw->clrText = RGB(150, 150, 150); // 灰色
+            *pResult = CDRF_NEWFONT;
+            return;
+        }
+
+        // --- 下面是主号的颜色 ---
+        int playerIdx = (int)data;
+        if (playerIdx >= 0 && playerIdx < 4) {
+            pCustomDraw->clrText = RGB(255, 80, 80); // 红队主号
+        }
+        else if (playerIdx >= 4 && playerIdx < 8) {
+            pCustomDraw->clrText = RGB(80, 120, 255); // 蓝队主号
+        }
+        *pResult = CDRF_NEWFONT;
+    }
+}
+
+// DNFGameCaptureDlg.cpp
+HBRUSH CDNFGameCaptureDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor) {
+    // 先调用父类的默认处理，拿到默认的画刷
+    HBRUSH hbr = CWnd::OnCtlColor(pDC, pWnd, nCtlColor);
+
+    // 1. 判断当前发消息的控件是不是我们的“快速添加框”（ID为1025）
+    if (pWnd->GetDlgCtrlID() == 1025) {
+        CString txt;
+        pWnd->GetWindowText(txt);
+
+        // 2. 判断内容是否为提示水印
+        if (txt == PLACEHOLDER_TEXT) {
+            // 如果是水印，把画笔颜色设为灰色
+            pDC->SetTextColor(RGB(160, 160, 160));
+        }
+        else {
+            // 如果用户开始打字了，恢复成正常的黑色
+            pDC->SetTextColor(RGB(0, 0, 0));
+        }
+    }
+
+    return hbr;
 }
