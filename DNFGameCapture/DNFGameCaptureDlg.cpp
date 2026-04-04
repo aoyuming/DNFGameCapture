@@ -206,6 +206,7 @@ CString CDNFGameCaptureDlg::CheckCloudBinding(CString key, CString hwid) {
                 std::vector<char> buf(sz + 1, 0);
                 if (WinHttpReadData(hRequest, buf.data(), sz, &dl)) resp.append(buf.data(), dl);
             }
+
             if (resp.find("\"status\":\"ok\"") != std::string::npos) {
                 resultMsg = L"OK";
             }
@@ -214,7 +215,15 @@ CString CDNFGameCaptureDlg::CheckCloudBinding(CString key, CString hwid) {
                 if (p1 != std::string::npos) {
                     p1 += 7;
                     size_t p2 = resp.find("\"", p1);
-                    resultMsg = (p2 != std::string::npos) ? CString(resp.substr(p1, p2 - p1).c_str()) : L"解析异常失败";
+                    if (p2 != std::string::npos) {
+                        // 【修复核心】：提取 UTF-8 字符串
+                        std::string utf8Msg = resp.substr(p1, p2 - p1);
+                        // 使用 CA2W 并指定 CP_UTF8，将其完美转换为 CString
+                        resultMsg = CA2W(utf8Msg.c_str(), CP_UTF8);
+                    }
+                    else {
+                        resultMsg = L"解析异常失败";
+                    }
                 }
             }
         }
@@ -1101,22 +1110,22 @@ void CDNFGameCaptureDlg::WriteScoreToFile() {
 
     auto gs_full = [](PlayerData& p) {
         if (p.name.IsEmpty()) return CString(L""); CString s; s.Format(L"%s%02d/%02d", p.name.GetString(), p.kills, p.deaths);
-        if (p.akCount == 1) s += L" A"; else if (p.akCount > 1) s.AppendFormat(L" A%d", p.akCount); return s;
+        if (p.akCount == 1) s += L" A"; else if (p.akCount > 1) s.AppendFormat(L" A%d", p.akCount);else  s += L" -"; return s;
         };
 
     FILE* fKL = NULL; if (_wfopen_s(&fKL, pathLeft, L"wt, ccs=UTF-8") == 0 && fKL) { for (int i = 0; i < 4; i++) { CString ls = gs_full(lT[i]); if (!ls.IsEmpty()) fwprintf(fKL, L"%s\n", ls.GetString()); } fclose(fKL); }
     FILE* fKR = NULL; if (_wfopen_s(&fKR, pathRight, L"wt, ccs=UTF-8") == 0 && fKR) { for (int i = 0; i < 4; i++) { CString rs = gs_full(rT[i]); if (!rs.IsEmpty()) fwprintf(fKR, L"%s\n", rs.GetString()); } fclose(fKR); }
 
     auto gs_kill_only = [](PlayerData& p) {
-        if (p.name.IsEmpty()) return CString(L""); CString s; s.Format(L"%s%02d", p.name.GetString(), p.kills);
-        if (p.akCount == 1) s += L" A"; else if (p.akCount > 1) s.AppendFormat(L"A%d", p.akCount); return s;
+        if (p.name.IsEmpty()) return CString(L""); CString s; s.Format(L"%s %02d", p.name.GetString(), p.kills);
+        if (p.akCount == 1) s += L" A"; else if (p.akCount > 1) s.AppendFormat(L"A%d", p.akCount);else  s += L" -"; return s;
         };
     FILE* fKill = NULL;
     if (_wfopen_s(&fKill, pathKill, L"wt, ccs=UTF-8") == 0 && fKill) {
         for (int i = 0; i < 4; i++) {
             CString ls = gs_kill_only(lT[i]); CString rs = gs_kill_only(rT[i]);
             if (ls.IsEmpty() && rs.IsEmpty()) continue;
-            int pad = max(1, 9 - GetVisualWidth(ls)); CString spaces(L' ', pad); fwprintf(fKill, L"%s%s%s\n", ls.GetString(), spaces.GetString(), rs.GetString());
+            int pad = max(1, 11 - GetVisualWidth(ls)); CString spaces(L' ', pad); fwprintf(fKill, L"%s%s%s\n", ls.GetString(), spaces.GetString(), rs.GetString());
         }
         fclose(fKill);
     }
