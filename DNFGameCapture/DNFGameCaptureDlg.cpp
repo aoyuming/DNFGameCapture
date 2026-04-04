@@ -438,7 +438,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     }
 
     AfxInitRichEdit2();
-    for (int i = 0; i < 25; i++) { m_historyBmps[i] = NULL; }
+    for (int i = 0; i < MAX_HISTORY_FRAMES; i++) { m_historyBmps[i] = NULL; }
     for (int i = 0; i < 8; i++) {
         m_players[i].kills = 0; m_players[i].deaths = 0;
         m_players[i].currentStreak = 0; m_players[i].akCount = 0;
@@ -447,7 +447,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
 
     LPCTSTR cls = AfxRegisterWndClass(CS_HREDRAW | CS_VREDRAW, ::LoadCursor(NULL, IDC_ARROW), (HBRUSH)(COLOR_WINDOW + 1));
     CString title;
-    title.Format(L"DNF击杀统计 - 终极云端版 (v%s)", CURRENT_VERSION);
+    title.Format(L"DNF击杀统计(v%s)", CURRENT_VERSION);
 
     // 【新增】：分辨率自适应
     int screenY = GetSystemMetrics(SM_CYSCREEN);
@@ -477,7 +477,7 @@ CDNFGameCaptureDlg::~CDNFGameCaptureDlg() {
     RemoveTrayIcon();
 
     if (m_bmp) ::DeleteObject(m_bmp);
-    for (int i = 0; i < 25; i++) { if (m_historyBmps[i]) ::DeleteObject(m_historyBmps[i]); }
+    for (int i = 0; i < MAX_HISTORY_FRAMES; i++) { if (m_historyBmps[i]) ::DeleteObject(m_historyBmps[i]); }
     if (m_hHttpConnect) WinHttpCloseHandle(m_hHttpConnect);
     if (m_hHttpSession) WinHttpCloseHandle(m_hHttpSession);
 
@@ -585,7 +585,7 @@ void CDNFGameCaptureDlg::OnBnClickedStart() {
         m_bIsRunning = TRUE;
         m_btnStart.SetWindowText(L"停止监控");
         SetTimer(1, 50, NULL);
-        SetTimer(3, 300, NULL);
+        SetTimer(3, HISTORY_INTERVAL_MS, NULL);
         m_status.SetWindowText(L"监控中...");
     }
     else {
@@ -739,7 +739,7 @@ void CDNFGameCaptureDlg::ManualTriggerKill(int killSide) {
             HGDIOBJ os = SelectObject(hSrc, m_bmp); HGDIOBJ od = SelectObject(hDst, m_historyBmps[m_historyIdx]);
             BitBlt(hDst, 0, 0, m_w, m_h, hSrc, 0, 0, SRCCOPY);
             SelectObject(hSrc, os); SelectObject(hDst, od); DeleteDC(hSrc); DeleteDC(hDst); ::ReleaseDC(NULL, hDC);
-            m_historyIdx = (m_historyIdx + 1) % 25;
+            m_historyIdx = (m_historyIdx + 1) % MAX_HISTORY_FRAMES;
         }
     }
 
@@ -855,8 +855,8 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
     std::vector<HBITMAP> historyClones;
     {
         std::lock_guard<std::mutex> lock(g_bmpMutex);
-        for (int i = 1; i <= 25; i++) {
-            int idx = (m_historyIdx - i + 25) % 25;
+        for (int i = 1; i <= MAX_HISTORY_FRAMES; i++) {
+            int idx = (m_historyIdx - i + MAX_HISTORY_FRAMES) % MAX_HISTORY_FRAMES;
             if (m_historyBmps[idx]) {
                 HDC hDC = ::GetDC(NULL); HDC hSrc = CreateCompatibleDC(hDC); HDC hDst = CreateCompatibleDC(hDC);
                 HBITMAP clone = CreateCompatibleBitmap(hDC, m_w, m_h);
@@ -957,7 +957,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide) {
             if (resR.hBmp) { CString lbl; lbl.Format(L"第%d帧 %s", (int)(i + 1), (LPCTSTR)resR.text); m_ocrRecordsRight.push_back({ resR.hBmp, lbl }); }
         }
         PostMessage(WM_UPDATE_OCR_DROPDOWNS, 0, 0);
-        { std::lock_guard<std::mutex> lk(m_debugMutex); m_debugOcrResult.Format(L"时光倒流 %d/25 | 杀:%s 亡:%s", (int)(i + 1), killerResolved ? finalKillerName : L"未定", deadResolved ? finalDeadName : L"未定"); }
+        { std::lock_guard<std::mutex> lk(m_debugMutex); m_debugOcrResult.Format(L"时光倒流 %d/%d | 杀:%s 亡:%s", (int)(i + 1), MAX_HISTORY_FRAMES, killerResolved ? finalKillerName : L"未定", deadResolved ? finalDeadName : L"未定"); }
         InvalidateRect(&m_previewRect, FALSE); UpdateWindow();
     }
 
@@ -1432,7 +1432,7 @@ void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
             DeleteDC(hDst);
             ::ReleaseDC(NULL, hDC);
 
-            m_historyIdx = (m_historyIdx + 1) % 25;
+            m_historyIdx = (m_historyIdx + 1) % MAX_HISTORY_FRAMES;
         }
     }
     else if (nID == 5) {
@@ -1810,6 +1810,10 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd() {
     int addAliasCount = 0;
     int dupFilteredCount = 0;
 
+    // 用于收集错误信息，以便最后集中弹窗提示
+    CString strTeamFullAlert = L"";
+    CString strDupAliasAlert = L"";
+
     std::lock_guard<std::mutex> lk(m_dataMutex);
     AppLog(L"================================", RGB(150, 150, 150));
     AppLog(L"📥 [系统] 开始解析导入名单数据...", RGB(255, 215, 0));
@@ -1819,6 +1823,18 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd() {
         CString line = (nl != -1) ? input.Mid(start, nl - start) : input.Mid(start);
         start = (nl != -1) ? nl + 1 : input.GetLength();
         line.Trim(); if (line.IsEmpty()) continue;
+
+        // ==========================================
+        // 【新增】：垃圾文案过滤器，拦截说明文本
+        // ==========================================
+        if (line.Find(L"操作说明") != -1 ||
+            line.Find(L"分队：") != -1 ||
+            line.Find(L"绑定小号：") != -1 ||
+            line.Find(L"手动改分") != -1 ||
+            line.Find(L"手动改AK") != -1 ||
+            line.Find(L"💡") != -1) {
+            continue; // 遇到说明书文本直接跳过，不当成玩家解析
+        }
 
         // 1. 解析比分行
         if (line.Find(L"红") != -1 && line.Find(L"蓝") != -1 && (line.Find(L":") != -1 || line.Find(L"：") != -1)) {
@@ -1853,6 +1869,7 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd() {
                 else if (isDup) {
                     dupFilteredCount++;
                     AppLog(L" ├ ⚠️拦截重复: 小号 [" + aN + L"] 已存在，自动去重！", RGB(255, 165, 0));
+                    strDupAliasAlert += L"[" + aN + L"] ";
                 }
             }
             continue;
@@ -1867,17 +1884,55 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd() {
 
         int targetIdx = -1;
 
-        // 【核心查重A】：先全局找找这个主号是不是已经在库里了（无视队伍）
+        // 先全局找找这个主号是不是已经在库里了
         for (int i = 0; i < 8; i++) {
             if (m_players[i].name == mainName) {
                 targetIdx = i;
-                m_players[i].team = currentTeam; // 顺带更新到最新的队伍
-                break;
+                break; // 找到了先不急着改队伍，只记下位置
+            }
+        }
+
+        // =========================================================
+        // 【核心修复】：如果发现他跨队了，执行“物理搬家”，防止占坑导致队伍假满
+        // =========================================================
+        if (targetIdx != -1 && m_players[targetIdx].team != currentTeam) {
+            int newSlot = -1;
+            int sI = (currentTeam == 0) ? 0 : 4;
+            int eI = (currentTeam == 0) ? 4 : 8;
+            for (int k = sI; k < eI; k++) {
+                if (m_players[k].name.IsEmpty()) {
+                    newSlot = k;
+                    break;
+                }
+            }
+            if (newSlot != -1) {
+                // 目标队伍有空位，进行搬家
+                m_players[newSlot] = m_players[targetIdx];
+                m_players[newSlot].team = currentTeam; // 换上新队伍的衣服
+
+                // 【关键】清空老位置，把坑位还给原来的队伍
+                m_players[targetIdx].name = L"";
+                m_players[targetIdx].aliases.clear();
+                m_players[targetIdx].kills = 0;
+                m_players[targetIdx].deaths = 0;
+                m_players[targetIdx].akCount = 0;
+
+                targetIdx = newSlot; // 目标锁定为新位置
+                AppLog(L"🔄 [队伍更替] 主号 [" + mainName + L"] 已自动迁移至新队伍", RGB(255, 215, 0));
+            }
+            else {
+                // 目标队伍已经满了，拦截跨队行为
+                CString teamNameStr = (currentTeam == 0) ? L"红队" : L"蓝队";
+                AppLog(L"🚫 [迁移失败] " + teamNameStr + L" 已满(最多4人)，无法将 [" + mainName + L"] 移入", RGB(255, 80, 80));
+                strTeamFullAlert += L"[" + mainName + L"](无法移入" + teamNameStr + L") ";
+                continue; // 终止对该人的处理，直接跳到下一行
             }
         }
 
         // 如果主号不存在，检查这个名字是不是被别人当成小号了
-        if (targetIdx == -1) {
+        if (targetIdx == -1) 
+        {
+            // ... (这下面保留你原来的逻辑不动)
             bool isAliasElsewhere = false;
             for (int i = 0; i < 8 && !isAliasElsewhere; i++) {
                 for (const auto& a : m_players[i].aliases) {
@@ -1886,6 +1941,7 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd() {
             }
             if (isAliasElsewhere) {
                 AppLog(L"🚫 [冲突拦截] 名字 [" + mainName + L"] 已被他人的小号占用，跳过创建主号！", RGB(255, 80, 80));
+                strDupAliasAlert += L"[" + mainName + L"](被占用) ";
                 continue;
             }
 
@@ -1899,11 +1955,18 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd() {
                     break;
                 }
             }
+
+            // 如果在自己的队伍里找不到空位，说明满了
+            if (targetIdx == -1) {
+                CString teamNameStr = (currentTeam == 0) ? L"红队" : L"蓝队";
+                AppLog(L"🚫 [新增失败] " + teamNameStr + L" 已满(最多4人)，无法添加 [" + mainName + L"]", RGB(255, 80, 80));
+                strTeamFullAlert += L"[" + mainName + L"](" + teamNameStr + L") ";
+            }
         }
 
+        // 如果主号成功定位/创建，继续处理它后边带着的小号
         if (targetIdx != -1) {
             lastIdx = targetIdx;
-            // 提取行内的一连串小号
             if (fP != -1) {
                 CString aR = namePart.Mid(fP); int c = 0;
                 while (true) {
@@ -1913,7 +1976,6 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd() {
                     if (Lr == -1 || Rr == -1 || Rr <= Lr) break;
                     CString aN = tS.Mid(Lr + 1, Rr - Lr - 1); aN.Trim();
 
-                    // 【核心查重B】：提取的小号也不能和库里的任何名字重复
                     bool isDup = false;
                     for (int i = 0; i < 8 && !isDup; i++) {
                         if (m_players[i].name == aN) { isDup = true; break; }
@@ -1927,6 +1989,7 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd() {
                     else if (isDup) {
                         dupFilteredCount++;
                         AppLog(L" ├ ⚠️拦截重复: 小号 [" + aN + L"] 已存在，自动去重！", RGB(255, 165, 0));
+                        strDupAliasAlert += L"[" + aN + L"] ";
                     }
                     c += Rr + 1;
                 }
@@ -1954,7 +2017,25 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd() {
     AppLog(summaryLog, RGB(0, 255, 255));
     AppLog(L"================================", RGB(150, 150, 150));
 
-    m_editQuickAdd.SetWindowText(PLACEHOLDER_TEXT);
+    // 根据收集到的错误信息，执行弹窗提示
+    if (!strTeamFullAlert.IsEmpty() || !strDupAliasAlert.IsEmpty()) {
+        CString alertMsg = L"添加过程中遇到以下拦截：\n\n";
+
+        if (!strTeamFullAlert.IsEmpty()) {
+            alertMsg += L"🛑 队伍已满（每队上限4人），以下主号未能添加：\n   " + strTeamFullAlert + L"\n\n";
+        }
+        if (!strDupAliasAlert.IsEmpty()) {
+            alertMsg += L"⚠️ 名字冲突，以下小号(或主号)已被占用而自动忽略：\n   " + strDupAliasAlert + L"\n";
+        }
+
+        MessageBox(alertMsg, L"添加结果提示", MB_ICONWARNING | MB_OK);
+        // 发生错误时不清除文本，让内容保留在输入框中
+    }
+    else {
+        // 只有完全成功，没有任何拦截时，才清空输入框恢复默认水印
+        m_editQuickAdd.SetWindowText(PLACEHOLDER_TEXT);
+    }
+
     SaveAliasDB();
     SaveConfigToFile();
     WriteScoreToFile();
@@ -2013,6 +2094,12 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
         CMenu subMenu;
 
         if (hParent == NULL) {
+            // ==========================================
+            // 【新增】：根节点添加“添加主号”选项
+            // ==========================================
+            menu.AppendMenu(MF_STRING, 16, L"➕ 添加主号 (自动切换队伍)");
+            menu.AppendMenu(MF_SEPARATOR);
+
             menu.AppendMenu(MF_STRING, 7, L"🏆 该队大比分 +1");
             menu.AppendMenu(MF_STRING, 9, L"🔽 该队大比分 -1");
             menu.AppendMenu(MF_STRING, 8, L"❌ 该队大比分归零");
@@ -2026,7 +2113,7 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
             menu.AppendMenu(MF_STRING, 14, L"💥 删除（同时从自动补齐库中彻底删除）");
         }
         else if (data >= 0 && data < 8) {
-            // 【新增】：为主号添加小号快捷选项
+            // 为主号添加小号快捷选项
             menu.AppendMenu(MF_STRING, 15, L"➕ 为该主号添加小号...");
             menu.AppendMenu(MF_STRING, 2, L"🗑️ 删除该主号 (及所有小号)");
             menu.AppendMenu(MF_SEPARATOR);
@@ -2073,6 +2160,28 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
                 return;
             }
 
+            // ==========================================
+            // 【新增】：处理根节点点击“添加主号”的联动逻辑
+            // ==========================================
+            if (cmd == 16) {
+                // 1. 判断点的是红队还是蓝队，自动切换下拉框
+                if (m_treePlayers.GetItemText(hItem).Find(L"红队") != -1) {
+                    m_cmbTeamSelect.SetCurSel(0); // 设置为红队
+                }
+                else {
+                    m_cmbTeamSelect.SetCurSel(1); // 设置为蓝队
+                }
+
+                // 2. 将光标焦点移至录入输入框，方便直接打字
+                m_editQuickAdd.SetFocus();
+
+                // 3. (可选) 全选当前输入框的内容，这样用户一打字就会覆盖掉旧内容或提示词
+                m_editQuickAdd.SetSel(0, -1);
+
+                AppLog(L"💡 [操作提示] 已自动切换队伍，请在输入框录入新主号！", RGB(0, 255, 255));
+                return; // 直接返回，不用走后面的保存刷新逻辑
+            }
+
             if (cmd == 7) {
                 if (m_treePlayers.GetItemText(hItem).Find(L"红队") != -1) m_totalScoreRed++;
                 else m_totalScoreBlue++;
@@ -2106,9 +2215,15 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
                 }
                 AppLog(L"🗑️ [清空队伍] 一键清空了【" + teamName + L"】的所有成员！", RGB(255, 80, 80));
             }
-            // 【新增：添加小号交互逻辑】
             else if (cmd == 15) {
                 int pIdx = (int)data;
+
+                // ==========================================
+                // 【新增】：获取该主号所在的队伍，并自动切换下拉框
+                // ==========================================
+                int curTeam = m_players[pIdx].team;
+                m_cmbTeamSelect.SetCurSel(curTeam);
+
                 CString mainName = m_players[pIdx].name;
                 CString templateText;
 
@@ -2121,7 +2236,8 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
                 int pos = templateText.GetLength() - 1;
                 m_editQuickAdd.SetSel(pos, pos);
 
-                AppLog(L"💡 [操作提示] 请在上方输入框的括号内填入小号名称，按回车即可添加！", RGB(0, 255, 255));
+                CString teamNameStr = (curTeam == 0) ? L"红队" : L"蓝队";
+                AppLog(L"💡 [操作提示] 已自动切换至【" + teamNameStr + L"】，请在括号内填入小号名称！", RGB(0, 255, 255));
             }
             else if (cmd == 12 || cmd == 13) {
                 int pIdx = (int)data;
@@ -2238,71 +2354,206 @@ void CDNFGameCaptureDlg::SaveConfigToFile() {
     }
 }
 
-// 反序列化读取新版配置文件（自带开机洗脏数据功能）
+// 反序列化读取配置文件（支持三种历史格式，自带脏数据清洗，附带说明文案过滤）
 void CDNFGameCaptureDlg::LoadConfigFromFile() {
     CFile file;
-    if (file.Open(m_configPath, CFile::modeRead)) {
-        int len = (int)file.GetLength();
-        if (len > 0) {
-            char* buf = new char[len + 1]; file.Read(buf, len); buf[len] = 0;
-            char* start = buf; if (len >= 3 && (unsigned char)buf[0] == 0xEF && (unsigned char)buf[1] == 0xBB && (unsigned char)buf[2] == 0xBF) start += 3;
-            CString content = CA2W(start, CP_UTF8); delete[] buf;
+    if (!file.Open(m_configPath, CFile::modeRead)) return;
 
-            int pos = 0;
-            while (pos < content.GetLength()) {
-                int nl = content.Find(L'\n', pos);
-                CString line = (nl != -1) ? content.Mid(pos, nl - pos) : content.Mid(pos);
-                pos = (nl != -1) ? nl + 1 : content.GetLength();
-                line.Remove(L'\r'); line.Trim();
-                if (line.IsEmpty() || line.Find(L"|") == -1) continue;
+    int len = (int)file.GetLength();
+    if (len <= 0) {
+        file.Close();
+        return;
+    }
 
-                int p1 = line.Find(L'|'); int team = _wtoi(line.Left(p1)); line = line.Mid(p1 + 1);
+    char* buf = new char[len + 1];
+    file.Read(buf, len);
+    buf[len] = 0;
 
-                int p2 = line.Find(L'|');
-                CString mainName = (p2 != -1) ? line.Left(p2) : line;
-                mainName.Trim();
+    // 处理 UTF-8 BOM 头
+    char* start = buf;
+    if (len >= 3 && (unsigned char)buf[0] == 0xEF && (unsigned char)buf[1] == 0xBB && (unsigned char)buf[2] == 0xBF) {
+        start += 3;
+    }
 
-                // 【自动清洗脏数据】：如果这个名字在库里已经有了，说明是旧版遗留的重复脏数据，直接丢弃！
-                bool isDup = false;
-                for (int i = 0; i < 8; i++) { if (m_players[i].name == mainName) { isDup = true; break; } }
-                if (isDup) continue;
+    CString content = CA2W(start, CP_UTF8);
+    delete[] buf;
 
-                int targetIdx = -1; int sIdx = (team == 0) ? 0 : 4; int eIdx = (team == 0) ? 4 : 8;
-                for (int i = sIdx; i < eIdx; i++) { if (m_players[i].name.IsEmpty()) { targetIdx = i; break; } }
-                if (targetIdx == -1) continue;
+    int pos = 0;
+    int currentTeamContext = 0; // 记忆纯文本格式下的当前队伍，默认红队(0)
 
-                m_players[targetIdx].team = team;
-                m_players[targetIdx].name = mainName;
+    while (pos < content.GetLength()) {
+        int nl = content.Find(L'\n', pos);
+        CString line = (nl != -1) ? content.Mid(pos, nl - pos) : content.Mid(pos);
+        pos = (nl != -1) ? nl + 1 : content.GetLength();
 
-                if (p2 != -1) {
-                    line = line.Mid(p2 + 1);
-                    int p3 = line.Find(L'|'); if (p3 != -1) { m_players[targetIdx].kills = _wtoi(line.Left(p3)); line = line.Mid(p3 + 1); }
-                    else { m_players[targetIdx].kills = _wtoi(line); continue; }
-                    int p4 = line.Find(L'|'); if (p4 != -1) { m_players[targetIdx].deaths = _wtoi(line.Left(p4)); line = line.Mid(p4 + 1); }
-                    else { m_players[targetIdx].deaths = _wtoi(line); continue; }
-                    int p5 = line.Find(L'|'); if (p5 != -1) { m_players[targetIdx].akCount = _wtoi(line.Left(p5)); line = line.Mid(p5 + 1); }
-                    else { m_players[targetIdx].akCount = _wtoi(line); continue; }
+        line.Remove(L'\r');
+        line.Trim();
 
-                    while (!line.IsEmpty()) {
-                        int px = line.Find(L'|');
-                        CString aName = (px != -1) ? line.Left(px) : line;
-                        aName.Trim();
+        if (line.IsEmpty()) continue;
 
-                        // 【小号查重】：丢弃旧文件里的重复小号
-                        bool aDup = false;
-                        for (int k = 0; k < 8; k++) {
-                            if (m_players[k].name == aName) { aDup = true; break; }
-                            for (auto& ea : m_players[k].aliases) { if (ea.name == aName) { aDup = true; break; } }
-                        }
-                        if (!aDup && !aName.IsEmpty()) m_players[targetIdx].aliases.push_back({ aName });
+        // ==========================================
+        // 【新增】：垃圾文案过滤器，拦截说明文本
+        // ==========================================
+        if (line.Find(L"操作说明") != -1 ||
+            line.Find(L"分队：") != -1 ||
+            line.Find(L"绑定小号：") != -1 ||
+            line.Find(L"手动改分") != -1 ||
+            line.Find(L"手动改AK") != -1 ||
+            line.Find(L"💡") != -1) {
+            continue; // 遇到说明书文本直接跳过
+        }
 
-                        if (px != -1) line = line.Mid(px + 1);
-                        else break;
-                    }
+        // ==========================================
+        // 兼容层 1：识别纯文本格式的队伍 Header 标签
+        // ==========================================
+        if (line.Find(L"【红队】") != -1) {
+            currentTeamContext = 0;
+            continue;
+        }
+        if (line.Find(L"【蓝队】") != -1) {
+            currentTeamContext = 1;
+            continue;
+        }
+
+        // ==========================================
+        // 兼容层 2：处理结构化 `|` 分隔格式（含新老两版）
+        // ==========================================
+        if (line.Find(L"|") != -1) {
+            std::vector<CString> tokens;
+            int splitPos = 0; CString token;
+            while (AfxExtractSubString(token, line, splitPos, L'|')) {
+                tokens.push_back(token); splitPos++;
+            }
+            if (tokens.size() < 4) continue;
+
+            int team = _wtoi(tokens[0]);
+            CString mainName = tokens[1]; mainName.Trim();
+
+            // 查重与空位寻找
+            bool isDup = false;
+            for (int i = 0; i < 8; i++) { if (m_players[i].name == mainName) { isDup = true; break; } }
+            if (isDup) continue;
+
+            int targetIdx = -1; int sIdx = (team == 0) ? 0 : 4; int eIdx = (team == 0) ? 4 : 8;
+            for (int i = sIdx; i < eIdx; i++) { if (m_players[i].name.IsEmpty()) { targetIdx = i; break; } }
+            if (targetIdx == -1) continue;
+
+            m_players[targetIdx].team = team;
+            m_players[targetIdx].name = mainName;
+            m_players[targetIdx].kills = _wtoi(tokens[2]);
+            m_players[targetIdx].deaths = _wtoi(tokens[3]);
+            m_players[targetIdx].akCount = 0;
+            int aliasStartIndex = 4;
+
+            // 探测是否包含 AK 次数
+            if (tokens.size() >= 5) {
+                CString t4 = tokens[4]; t4.Trim();
+                bool isNumeric = !t4.IsEmpty();
+                for (int i = 0; i < t4.GetLength(); i++) { if (t4[i] < L'0' || t4[i] > L'9') { isNumeric = false; break; } }
+                if (isNumeric && t4.GetLength() <= 3) {
+                    m_players[targetIdx].akCount = _wtoi(t4);
+                    aliasStartIndex = 5;
                 }
             }
-        } file.Close();
+
+            // 载入小号
+            for (size_t i = aliasStartIndex; i < tokens.size(); i++) {
+                CString aName = tokens[i]; aName.Trim();
+                bool aDup = false;
+                for (int k = 0; k < 8; k++) {
+                    if (m_players[k].name == aName) { aDup = true; break; }
+                    for (auto& ea : m_players[k].aliases) { if (ea.name == aName) { aDup = true; break; } }
+                }
+                if (!aDup && !aName.IsEmpty()) m_players[targetIdx].aliases.push_back({ aName });
+            }
+        }
+        // ==========================================
+        // 兼容层 3：处理纯文本 `=` 格式（如：五九(...) = 15/6 A2）
+        // ==========================================
+        else if (line.Find(L"=") != -1 || line.Find(L"＝") != -1) {
+            int eqPos = line.Find(L'=');
+            if (eqPos == -1) eqPos = line.Find(L'＝');
+
+            CString leftPart = line.Left(eqPos);
+            CString rightPart = line.Mid(eqPos + 1);
+            leftPart.Trim(); rightPart.Trim();
+
+            // 解析主号名
+            int firstParen = leftPart.Find(L'(');
+            if (firstParen == -1) firstParen = leftPart.Find(L'（');
+
+            CString mainName = (firstParen != -1) ? leftPart.Left(firstParen) : leftPart;
+            mainName.Trim();
+            if (mainName.IsEmpty()) continue;
+
+            // 查重拦截
+            bool isDup = false;
+            for (int i = 0; i < 8; i++) { if (m_players[i].name == mainName) { isDup = true; break; } }
+            if (isDup) continue;
+
+            // 在当前队伍找空位（依赖前面的【红队】/【蓝队】标签设定的 currentTeamContext）
+            int targetIdx = -1;
+            int sIdx = (currentTeamContext == 0) ? 0 : 4;
+            int eIdx = (currentTeamContext == 0) ? 4 : 8;
+            for (int i = sIdx; i < eIdx; i++) {
+                if (m_players[i].name.IsEmpty()) { targetIdx = i; break; }
+            }
+            if (targetIdx == -1) continue; // 队伍满了就跳过
+
+            m_players[targetIdx].name = mainName;
+            m_players[targetIdx].team = currentTeamContext;
+
+            // 解析右侧战绩：支持 "15/6 A2", "15/6", "15-6"
+            int aP = rightPart.Find(L'A');
+            if (aP != -1) {
+                m_players[targetIdx].akCount = _wtoi(rightPart.Mid(aP + 1));
+                if (m_players[targetIdx].akCount == 0) m_players[targetIdx].akCount = 1; // 如果写了A但没数字，保底算1次
+                rightPart = rightPart.Left(aP); // 剥离出K/D部分
+            }
+            else {
+                m_players[targetIdx].akCount = 0;
+            }
+
+            int slash = rightPart.Find(L'/');
+            if (slash == -1) slash = rightPart.Find(L'-'); // 兼容使用减号的情况
+
+            if (slash != -1) {
+                m_players[targetIdx].kills = _wtoi(rightPart.Left(slash));
+                m_players[targetIdx].deaths = _wtoi(rightPart.Mid(slash + 1));
+            }
+            else {
+                m_players[targetIdx].kills = 0; m_players[targetIdx].deaths = 0;
+            }
+
+            // 解析左侧的小号群： (小号1)(小号2)
+            if (firstParen != -1) {
+                CString aliasesPart = leftPart.Mid(firstParen);
+                int c = 0;
+                while (true) {
+                    CString tS = aliasesPart.Mid(c);
+                    int Lr = tS.Find(L'('); if (Lr == -1) Lr = tS.Find(L'（');
+                    int Rr = tS.Find(L')'); if (Rr == -1) Rr = tS.Find(L'）');
+                    if (Lr == -1 || Rr == -1 || Rr <= Lr) break;
+
+                    CString aN = tS.Mid(Lr + 1, Rr - Lr - 1);
+                    aN.Trim();
+
+                    // 小号查重
+                    bool aDup = false;
+                    for (int k = 0; k < 8; k++) {
+                        if (m_players[k].name == aN) { aDup = true; break; }
+                        for (auto& ea : m_players[k].aliases) {
+                            if (ea.name == aN) { aDup = true; break; }
+                        }
+                    }
+                    if (!aDup && !aN.IsEmpty()) m_players[targetIdx].aliases.push_back({ aN });
+
+                    c += Rr + 1; // 游标移到下一个括号后
+                }
+            }
+        }
     }
+    file.Close();
 }
 
 // 当鼠标点进输入框
@@ -2371,30 +2622,56 @@ void CDNFGameCaptureDlg::OnEndLabelEdit(NMHDR* pNMHDR, LRESULT* pResult) {
 
         // 修改保存逻辑
         if (data & 0x80000000) {
+            // =========================================================
+            // 【新增】：小号更名，精准同步替换数据库里的旧名字
+            // =========================================================
+            CString oldAliasName = m_players[curPIdx].aliases[curAIdx].name;
+            CString mainName = m_players[curPIdx].name;
+
+            if (m_aliasDB.find(mainName) != m_aliasDB.end()) {
+                CString& dbAliases = m_aliasDB[mainName];
+                // 兼容中英文括号替换，避免旧名字变幽灵数据
+                dbAliases.Replace(L"(" + oldAliasName + L")", L"(" + line + L")");
+                dbAliases.Replace(L"（" + oldAliasName + L"）", L"（" + line + L"）");
+            }
+
             m_players[curPIdx].aliases[curAIdx].name = line;
         }
         else {
             int eP = line.Find(L'='); if (eP == -1) eP = line.Find(L'＝');
+            CString oldMainName = m_players[data].name;
+            CString newMainName = line;
+
             if (eP != -1) {
-                m_players[data].name = line.Left(eP); m_players[data].name.Trim();
+                newMainName = line.Left(eP); newMainName.Trim();
+                // 战绩解析
                 CString score = line.Mid(eP + 1); score.Trim();
                 int aP = score.Find(L'A');
                 if (aP != -1) { m_players[data].akCount = _wtoi(score.Mid(aP + 1)); score = score.Left(aP); }
                 int sl = score.Find(L'/'); if (sl == -1) sl = score.Find(L'-');
                 if (sl != -1) { m_players[data].kills = _wtoi(score.Left(sl)); m_players[data].deaths = _wtoi(score.Mid(sl + 1)); }
             }
-            else {
-                m_players[data].name = line;
+
+            // =========================================================
+            // 【新增】：主号更名，同步转移数据库的 Key，防止小号库丢失
+            // =========================================================
+            if (oldMainName != newMainName && !oldMainName.IsEmpty()) {
+                if (m_aliasDB.find(oldMainName) != m_aliasDB.end()) {
+                    m_aliasDB[newMainName] = m_aliasDB[oldMainName]; // 继承该主号下的所有小号数据
+                    m_aliasDB.erase(oldMainName); // 删除旧的主号 Key
+                }
             }
+
+            m_players[data].name = newMainName;
         }
 
         AppLog(L"✏️ [信息修改] 成功保存更新: " + line, RGB(0, 255, 100));
 
-        SaveAliasDB();
-        SaveConfigToFile();
-        WriteScoreToFile();
-        SyncDataToTree();
-        RefreshDisplay();
+        SaveAliasDB();      // 先把内存里的字典写入文件
+        SaveConfigToFile(); // 再保存对局文件
+        WriteScoreToFile(); // 刷新输出的TXT
+        SyncDataToTree();   // 重绘树状图
+        RefreshDisplay();   // 刷新右侧看板
     }
 }
 
@@ -2451,6 +2728,7 @@ HBRUSH CDNFGameCaptureDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor) {
     if (pWnd->GetDlgCtrlID() == 1025) {
         CString txt;
         pWnd->GetWindowText(txt);
+
 
         // 2. 判断内容是否为提示水印
         if (txt == PLACEHOLDER_TEXT) {

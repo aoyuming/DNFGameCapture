@@ -16,12 +16,18 @@
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址
-#define CURRENT_VERSION L"1.2.3"
+#define CURRENT_VERSION L"1.3.2"
 #define UPDATE_CHECK_URL L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt" // 【！！！请换成你自己的网址！！！】
 
 #define DNF_WINDOW_NAME L"地下城与勇士：创新世纪"
 #define COLOR_BLUE      RGB(0,0,255)
 #define COLOR_RED       RGB(255,0,0)
+
+// ==========================================
+// 【新增】：历史回溯截图的宏定义
+// ==========================================
+#define MAX_HISTORY_FRAMES 20      // 历史缓存的总帧数（决定了最多能回溯多少张图）
+#define HISTORY_INTERVAL_MS 1000   // 截图的时间间隔(毫秒)，1000代表每秒1张
 
 #define WM_UPDATE_OCR_DROPDOWNS (WM_USER + 100)
 #define WM_TRAY_MESSAGE         (WM_USER + 101) // 托盘图标消息
@@ -174,7 +180,7 @@ private:
     CNameMatcher m_matcher;
     std::vector<RecentEvent> m_recentEvents;
 
-    HBITMAP m_historyBmps[25];
+    HBITMAP m_historyBmps[MAX_HISTORY_FRAMES];
     int m_historyIdx;
 
     std::mutex m_dataMutex;
