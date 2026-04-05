@@ -11,6 +11,7 @@
 #include <winhttp.h>
 #include "NameMatcher.hpp"
 #include <map>
+#include "WGCCapture.h"
 
 #include <urlmon.h>
 #pragma comment(lib, "urlmon.lib")
@@ -130,6 +131,7 @@ protected:
 
     // 【新增】：跨线程刷新 UI 响应函数
     afx_msg LRESULT OnUpdateAllUI(WPARAM wParam, LPARAM lParam);
+    std::vector<CString> m_autoExpandedNodes; // 【新增】：记忆刚才修改过，需要临时展开3秒的主号
 
 private:
     void Capture();
@@ -165,7 +167,24 @@ private:
 // 处理控件颜色的消息函数
     afx_msg HBRUSH OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor);
 
+    // 【新增】:系统版本与权限检测
+    bool IsWindows10OrGreater();
+    bool IsRunningAsAdmin();
+    bool RelaunchAsAdmin(); // 权限检测与自动提权
+    bool IsBitmapBlank(HBITMAP hBmp, int w, int h);
+
+    int m_nBlankFrameCount = 0;
+    bool m_bAlreadyPrompted = false;
+
+    const int ID_CMB_CAPTURE_ENGINE = 1030; // 捕获引擎选择下拉框 ID
+    CComboBox m_cmbCaptureEngine;           // 捕获引擎选择下拉框
+    int m_nCaptureEngineChoice = 0;         // 0=自动, 1=WGC, 2=PrintWindow
+
 private:
+
+    WGCCapture* m_pWGC = nullptr;
+    bool m_bUseWGC = false;   // 是否使用 WGC 模式
+
     std::map<CString, CString> m_aliasDB;        // 本地小号数据库
     void LoadAliasDB();                          // 加载数据库
     void SaveAliasDB();                          // 保存数据库
@@ -254,11 +273,14 @@ private:
     void CheckForUpdates(bool bSilent);
     void DownloadAndApplyUpdate(CString downloadUrl);
 
+
     std::mutex m_launchMutex;
     DWORD m_lastLaunchOcrTime;
 
     // 【新增】：用于防止多开的互斥体句柄
     HANDLE m_hSingleInstanceMutex;
+
+    void ClearPreview(); // 清空预览画面
 
 public:
 
@@ -269,4 +291,5 @@ public:
     void ManualTriggerKill(int killSide);
 
     afx_msg void OnChangeEditNamesInput();
+    afx_msg void OnCbnSelchangeCaptureEngine();
 };
