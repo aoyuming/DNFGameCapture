@@ -17,7 +17,7 @@
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址
-#define CURRENT_VERSION L"1.3.2"
+#define CURRENT_VERSION L"2.3.0"
 #define UPDATE_CHECK_URL L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt" // 【！！！请换成你自己的网址！！！】
 
 #define DNF_WINDOW_NAME L"地下城与勇士：创新世纪"

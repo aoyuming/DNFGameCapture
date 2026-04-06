@@ -9,7 +9,9 @@
 #include <future>
 #include <winhttp.h>
 #include <wincrypt.h>
+#include <wininet.h>
 
+#pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "Crypt32.lib")
 #pragma comment(lib, "Gdiplus.lib")
@@ -1388,13 +1390,18 @@ void CDNFGameCaptureDlg::RefreshDisplay() {
 // 绘制模块与 UI 排版
 // ============================================================================
 void CDNFGameCaptureDlg::OnPaint() {
-    // ==========================================
     // 【新增】：确保 Timer 7 绝对能启动
-    // ==========================================
     static bool s_bTimer7Started = false;
     if (!s_bTimer7Started) {
         SetTimer(7, 1000, NULL); // 启动 1 秒钟的心跳
         s_bTimer7Started = true;
+    }
+
+    // 【新增】：界面渲染后，延迟 2 秒偷偷检测是否有终极 ZIP 包
+    static bool s_bUpdateTimerStarted = false;
+    if (!s_bUpdateTimerStarted) {
+        SetTimer(8, 2000, NULL);
+        s_bUpdateTimerStarted = true;
     }
 
     CPaintDC dc(this);
@@ -1695,23 +1702,24 @@ void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
         }
     }
     // ==========================================
-      // 【Timer 7】: 终极系统级轮询 (无视任何消息屏蔽)
-      // ==========================================
+        // 【Timer 7】: 终极系统级轮询 (无视任何消息屏蔽)
+        // ==========================================
     else if (nID == 7) {
         static int s_idleSeconds = 0;          // 闲置秒数
-        static POINT s_lastMousePt = { 0, 0 }; // 记录上一秒鼠标的位置
         static bool s_hasFolded = true;        // 默认 true，防止刚开软件还没动就乱折叠
 
         // 1. 问系统：现在屏幕最前面的是不是咱们的软件？
         HWND hForeground = ::GetForegroundWindow();
         bool bIsOurAppFocused = (hForeground == m_hWnd || ::IsChild(m_hWnd, hForeground));
 
-        // 2. 问系统：当前鼠标在屏幕的绝对坐标是多少？
-        POINT currentMousePt;
-        ::GetCursorPos(&currentMousePt);
+        // 2. 问系统：用户最近一次摸鼠标或【敲键盘】距离现在多少毫秒？
+        LASTINPUTINFO lii;
+        lii.cbSize = sizeof(LASTINPUTINFO);
+        ::GetLastInputInfo(&lii);
+        DWORD idleMs = ::GetTickCount() - lii.dwTime;
 
-        // 3. 判断是否“正在操作”
-        if (bIsOurAppFocused && (currentMousePt.x != s_lastMousePt.x || currentMousePt.y != s_lastMousePt.y)) {
+        // 3. 判断是否“正在操作”：焦点在咱们软件上，且最近 1.5 秒内敲过键盘或动过鼠标
+        if (bIsOurAppFocused && idleMs < 1500) {
             s_idleSeconds = 0;
             s_hasFolded = false;
         }
@@ -1719,30 +1727,26 @@ void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
             s_idleSeconds++;
         }
 
-        s_lastMousePt = currentMousePt;
-
-        // 4. 满 10 秒执行动作
+        // 4. 满 10 秒闲置或失去焦点执行动作
         if (s_idleSeconds >= 10) {
             if (!s_hasFolded && m_treePlayers.m_hWnd) {
-                bool actuallyFoldedSomething = false; // 【新增】：记录是否真的折叠了东西
+                bool actuallyFoldedSomething = false;
 
                 HTREEITEM hRoot = m_treePlayers.GetRootItem();
                 while (hRoot) {
                     HTREEITEM hChild = m_treePlayers.GetChildItem(hRoot);
                     while (hChild) {
-                        // 【核心判断】：先检查它现在是不是展开的，如果是，才去折叠它
                         if (m_treePlayers.GetItemState(hChild, TVIS_EXPANDED) & TVIS_EXPANDED) {
                             m_treePlayers.Expand(hChild, TVE_COLLAPSE);
-                            actuallyFoldedSomething = true; // 确实干活了！
+                            actuallyFoldedSomething = true;
                         }
                         hChild = m_treePlayers.GetNextSiblingItem(hChild);
                     }
                     hRoot = m_treePlayers.GetNextSiblingItem(hRoot);
                 }
 
-                s_hasFolded = true; // 标记流程已走完
+                s_hasFolded = true;
 
-                // 【精细化反馈】：只有刚才真的把展开的东西收起来了，才输出提示日志！
                 if (actuallyFoldedSomething) {
                     AppLog(L"💤 [界面收起] 失去焦点或闲置10秒，已自动折叠", RGB(150, 150, 150));
                 }
@@ -1758,101 +1762,92 @@ void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
 // 自动更新系统 (适配按行读取格式)
 // ============================================================================
 void CDNFGameCaptureDlg::CheckForUpdates(bool bSilent) {
+    CString strCheckUrlV2 = L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt";
+    CString currentVersion = CURRENT_VERSION;
+
     wchar_t tempPath[MAX_PATH];
     GetTempPath(MAX_PATH, tempPath);
     CString tempFile;
     tempFile.Format(L"%supdate_check.txt", tempPath);
 
-    HRESULT hr = URLDownloadToFile(NULL, UPDATE_CHECK_URL, tempFile, 0, NULL);
-    if (hr == S_OK) {
-        CFile file;
-        if (file.Open(tempFile, CFile::modeRead)) {
-            // 扩大缓冲区到 4096，防止更新日志太长被截断
-            int len = (int)file.GetLength();
-            if (len > 0 && len < 4096) {
-                char* buf = new char[len + 1];
-                file.Read(buf, len);
-                buf[len] = 0;
-                file.Close();
-                ::DeleteFile(tempFile);
+    ::DeleteUrlCacheEntry(strCheckUrlV2);
 
-                // 智能跳过 UTF-8 的 BOM 头
-                char* start = buf;
-                if (len >= 3 && (unsigned char)buf[0] == 0xEF && (unsigned char)buf[1] == 0xBB && (unsigned char)buf[2] == 0xBF) {
-                    start += 3;
-                }
-
-                // 强制按 UTF-8 编码将字节流转为宽字符
-                CString response = CA2W(start, CP_UTF8);
-                response.Trim();
-                delete[] buf;
-
-                // ==========================================
-                // 【修改点】：按行解析格式
-                // 第1行: 版本号
-                // 第2行: 下载直链
-                // 第3行及以后: 更新内容
-                // ==========================================
-                // 统一把 \r\n 替换成 \n，方便解析
-                response.Replace(L"\r\n", L"\n");
-
-                CString newVersion = response;
-                CString downloadUrl = L"";
-                CString updateLog = L"";
-
-                int firstNewline = response.Find(L'\n');
-                if (firstNewline != -1) {
-                    newVersion = response.Left(firstNewline);
-                    int secondNewline = response.Find(L'\n', firstNewline + 1);
-
-                    if (secondNewline != -1) {
-                        downloadUrl = response.Mid(firstNewline + 1, secondNewline - firstNewline - 1);
-                        updateLog = response.Mid(secondNewline + 1);
-                    }
-                    else {
-                        downloadUrl = response.Mid(firstNewline + 1);
-                    }
-                }
-
-                newVersion.Trim();
-                downloadUrl.Trim();
-                updateLog.Trim();
-
-                // 把日志里的 \n 恢复成 Windows 换行符 \r\n 确保弹窗显示正常
-                updateLog.Replace(L"\n", L"\r\n");
-
-                // ==========================================
-
-                // 触发更新弹窗
-                if (!newVersion.IsEmpty() && newVersion != CURRENT_VERSION) {
-                    CString msg;
-                    msg.Format(L"发现新版本 v%s！\r\n当前版本是 v%s。\r\n\r\n【更新内容】\r\n%s\r\n\r\n请选择更新方式：\r\n[是] - 立即在后台静默下载并自动替换\r\n[否] - 打开浏览器，我去网页手动下载\r\n[取消] - 暂不更新",
-                        newVersion, CURRENT_VERSION, updateLog.IsEmpty() ? L"优化并修复已知问题。" : updateLog);
-
-                    int btnRet = MessageBox(msg, L"发现新版本", MB_ICONQUESTION | MB_YESNOCANCEL | MB_SYSTEMMODAL);
-
-                    if (btnRet == IDYES) {
-                        if (!downloadUrl.IsEmpty()) {
-                            DownloadAndApplyUpdate(downloadUrl);
-                        }
-                    }
-                    else if (btnRet == IDNO) {
-                        // 手动更新：填入你的 OSS 根目录或下载页
-                        ShellExecute(NULL, L"open", L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com", NULL, NULL, SW_SHOWNORMAL);
-                    }
-                }
-                else if (!bSilent) {
-                    MessageBox(L"当前已是最新版本！", L"检查更新", MB_ICONINFORMATION | MB_SYSTEMMODAL);
-                }
-            }
-            else {
-                file.Close();
-                ::DeleteFile(tempFile);
-            }
-        }
+    // ==========================================
+    // 拦截 1：下载失败，提前返回
+    // ==========================================
+    if (URLDownloadToFile(NULL, strCheckUrlV2, tempFile, 0, NULL) != S_OK) {
+        if (!bSilent) MessageBox(L"连接更新服务器失败！", L"错误", MB_ICONERROR);
+        return;
     }
-    else if (!bSilent) {
-        MessageBox(L"检查更新失败，请检查网络连接或防火墙设置。", L"检查更新", MB_ICONERROR | MB_SYSTEMMODAL);
+
+    // ==========================================
+    // 拦截 2：文件打开失败，提前返回
+    // ==========================================
+    CFile file;
+    if (!file.Open(tempFile, CFile::modeRead)) {
+        if (!bSilent) MessageBox(L"无法读取更新配置文件！", L"错误", MB_ICONERROR);
+        return;
+    }
+
+    // --- 读取并转换 UTF-8 内容 ---
+    ULONGLONG dwLength = file.GetLength();
+    char* pBuf = new char[(size_t)dwLength + 1];  // 加上 (size_t) 消除警告
+    memset(pBuf, 0, (size_t)dwLength + 1);        // 加上 (size_t) 消除警告
+    file.Read(pBuf, (UINT)dwLength);
+    file.Close();
+    ::DeleteFile(tempFile);
+
+    int nLen = MultiByteToWideChar(CP_UTF8, 0, pBuf, -1, NULL, 0);
+    wchar_t* pWBuf = new wchar_t[nLen + 1];
+    memset(pWBuf, 0, (nLen + 1) * sizeof(wchar_t));
+    MultiByteToWideChar(CP_UTF8, 0, pBuf, -1, pWBuf, nLen);
+
+    CString content(pWBuf);
+    delete[] pBuf;
+    delete[] pWBuf;
+
+    // ==========================================
+    // 拦截 3：格式解析失败，提前返回
+    // ==========================================
+    content.Replace(L"\r\n", L"\n");
+    int pos1 = content.Find(L'\n');
+    int pos2 = content.Find(L'\n', pos1 + 1);
+
+    if (pos1 == -1 || pos2 == -1) {
+        if (!bSilent) MessageBox(L"更新文件格式解析失败！", L"错误", MB_ICONERROR);
+        return;
+    }
+
+    CString serverVersion = content.Left(pos1);
+    CString downloadUrl = content.Mid(pos1 + 1, pos2 - pos1 - 1);
+    CString updateLog = content.Mid(pos2 + 1);
+
+    serverVersion.Trim();
+    downloadUrl.Trim();
+    updateLog.Trim();
+
+    // ==========================================
+    // 拦截 4：没有新版本，提前返回
+    // ==========================================
+    bool bHasUpdate = (serverVersion != currentVersion && !serverVersion.IsEmpty());
+    if (!bHasUpdate) {
+        if (!bSilent) MessageBox(L"当前已是最新版本！", L"检查更新", MB_OK);
+        return;
+    }
+
+    // ==========================================
+    // 终点：真正的更新处理逻辑 (没有任何多余嵌套)
+    // ==========================================
+    if (bSilent) {
+        AppLog(L"🔄 [系统升级] 正在后台拉取全新资源包，请稍候...", RGB(255, 165, 0));
+        DownloadAndApplyUpdate(downloadUrl);
+    }
+    else {
+        CString msg;
+        msg.Format(L"发现新版本：%s\n\n更新内容：\n%s\n\n是否立即更新？", serverVersion, updateLog);
+        if (MessageBox(msg, L"发现新版本", MB_YESNO | MB_ICONINFORMATION) == IDYES) {
+            DownloadAndApplyUpdate(downloadUrl);
+        }
     }
 }
 
@@ -1863,36 +1858,50 @@ void CDNFGameCaptureDlg::DownloadAndApplyUpdate(CString url) {
     GetModuleFileName(NULL, p, MAX_PATH);
     CString cp(p);
     CString d = cp.Left(cp.ReverseFind(L'\\') + 1);
-    CString t = d + L"update_temp.exe"; // 下载到同目录的临时文件
-    CString b = d + L"update.bat";      // 同目录的更新脚本
 
-    // 1. 下载文件
+    CString t = d + L"update_temp.zip";
+    CString b = d + L"update.bat";
+    CString engine = d + L"7za.exe";
+
+    // 1. 强制清理引擎和更新包的本地缓存
+    CString engineUrl = L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/7z/7za.exe"; // 【请修改这里】
+    ::DeleteUrlCacheEntry(engineUrl);
+    ::DeleteUrlCacheEntry(url);
+
+    // 2. 先下解压引擎，再下真实的 ZIP 压缩包
+    URLDownloadToFile(NULL, engineUrl, engine, 0, NULL);
     if (URLDownloadToFile(NULL, url, t, 0, NULL) != S_OK) {
-        MessageBox(L"下载更新文件失败，请检查网络！", L"更新失败", MB_ICONERROR);
+        MessageBox(L"下载更新包失败，请检查网络！", L"更新失败", MB_ICONERROR);
         if (m_status.m_hWnd) m_status.SetWindowText(L"就绪");
         return;
     }
 
-    // 2. 写入极其稳妥的自动重试批处理脚本
+    // 3. 生成强力解压替换脚本 (兼容 Win7~Win11)
     CFile f;
     if (f.Open(b, CFile::modeCreate | CFile::modeWrite)) {
         CString s;
-        // 核心逻辑：循环检查原文件是否被占用，直到成功删除后再重命名并启动
-        s.Format(L"@echo off\r\n:Retry\r\nping 127.0.0.1 -n 2 > nul\r\ndel \"%s\"\r\nif exist \"%s\" goto Retry\r\nrename \"%s\" \"%s\"\r\nstart \"\" \"%s\"\r\ndel \"%%~f0\"\r\n",
-            cp.GetString(), cp.GetString(), t.GetString(), cp.Mid(cp.ReverseFind(L'\\') + 1).GetString(), cp.GetString());
+        s.Format(L"@echo off\r\n"
+            L":Retry\r\n"
+            L"ping 127.0.0.1 -n 2 > nul\r\n"
+            L"del \"%s\" 2>nul\r\n"
+            L"if exist \"%s\" goto Retry\r\n"
+            L"\"%s\" x \"update_temp.zip\" -y > nul\r\n"
+            L"del \"update_temp.zip\"\r\n"
+            L"start \"\" \"%s\"\r\n"
+            L"del \"%%~f0\"\r\n",
+            cp.GetString(), cp.GetString(), engine.GetString(), cp.GetString());
 
         std::string a = CW2A(s, CP_OEMCP);
         f.Write(a.c_str(), (UINT)a.length());
         f.Close();
     }
 
-    // 3. 【双重保险】提前释放防多开锁，确保新程序启动不被拦截
+    // 4. 释放多开锁并执行换包脚本
     if (m_hSingleInstanceMutex) {
         CloseHandle(m_hSingleInstanceMutex);
         m_hSingleInstanceMutex = NULL;
     }
 
-    // 4. 静默执行脚本
     SHELLEXECUTEINFO sei = { sizeof(sei) };
     sei.fMask = SEE_MASK_FLAG_NO_UI;
     sei.lpVerb = L"open";
@@ -1900,12 +1909,8 @@ void CDNFGameCaptureDlg::DownloadAndApplyUpdate(CString url) {
     sei.nShow = SW_HIDE;
 
     if (ShellExecuteEx(&sei)) {
-        ShowWindow(SW_HIDE); // 瞬间隐藏当前界面
-        exit(0);             // 退出进程，释放文件锁，让 bat 脚本接管
-    }
-    else {
-        MessageBox(L"更新脚本执行失败，请尝试以管理员身份运行软件。", L"错误", MB_ICONERROR);
-        if (m_status.m_hWnd) m_status.SetWindowText(L"就绪");
+        ShowWindow(SW_HIDE);
+        exit(0);
     }
 }
 
@@ -1999,84 +2004,159 @@ void CDNFGameCaptureDlg::SaveAliasDB() {
 }
 
 void CDNFGameCaptureDlg::OnChangeEditNamesInput() {
-    // 记录上一次文本的长度，防止按退格键时无限触发
     static int s_prevLen = 0;
+    static CString s_lastAutoExpandedName = L""; // 记忆：上次因为打字而自动展开的主号名
+
     int curLen = m_editQuickAdd.GetWindowTextLength();
     bool isBackspace = (curLen < s_prevLen);
     s_prevLen = curLen;
 
-    if (isBackspace) return;
-
     int nStart, nEnd;
     m_editQuickAdd.GetSel(nStart, nEnd);
 
-    if (nStart == nEnd && nStart > 0) {
-        CString fullText;
-        m_editQuickAdd.GetWindowText(fullText);
-        fullText.Replace(L"\r\n", L"\n");
+    CString fullText;
+    m_editQuickAdd.GetWindowText(fullText);
 
-        if (nStart <= fullText.GetLength()) {
-            wchar_t lastChar = fullText.GetAt(nStart - 1);
+    // ==========================================
+    // 1. 安全提取：当前光标所在行的文本 (修复了旧版换行符引发的错位BUG)
+    // ==========================================
+    int lineStart = 0;
+    for (int i = nStart - 1; i >= 0; i--) {
+        if (fullText[i] == L'\n') { lineStart = i + 1; break; }
+    }
+    int lineEnd = fullText.GetLength();
+    for (int i = nStart; i < fullText.GetLength(); i++) {
+        if (fullText[i] == L'\r' || fullText[i] == L'\n') { lineEnd = i; break; }
+    }
+    CString currentLine = fullText.Mid(lineStart, lineEnd - lineStart);
 
-            // 当用户敲下左括号时触发补全
-            if (lastChar == L'(' || lastChar == L'（') {
-                CString textBeforeCursor = fullText.Left(nStart - 1);
-                int lastSpace = textBeforeCursor.ReverseFind(L' ');
-                int lastNewline = textBeforeCursor.ReverseFind(L'\n');
-                int splitPos = max(lastSpace, lastNewline);
+    // 解析出正在输入的主名 (去掉括号和后面的内容)
+    int fP = currentLine.Find(L'(');
+    if (fP == -1) fP = currentLine.Find(L'（');
+    CString typingMainName = (fP != -1) ? currentLine.Left(fP) : currentLine;
+    typingMainName.Trim();
 
-                CString typedName = textBeforeCursor.Mid(splitPos + 1);
-                typedName.Trim();
+    // ==========================================
+    // 2. 满员智能跳转：自动将下拉框切到未满员的队伍
+    // ==========================================
+    int redCount = 0, blueCount = 0;
+    m_dataMutex.lock();
+    for (int i = 0; i < 4; i++) if (!m_players[i].name.IsEmpty()) redCount++;
+    for (int i = 4; i < 8; i++) if (!m_players[i].name.IsEmpty()) blueCount++;
+    m_dataMutex.unlock();
 
-                if (!typedName.IsEmpty() && m_aliasDB.find(typedName) != m_aliasDB.end()) {
-                    CString dbAliases = m_aliasDB[typedName]; // 获取数据库里的所有小号
+    if (redCount >= 4 && blueCount < 4) {
+        m_cmbTeamSelect.SetCurSel(1); // 红队满，切蓝队
+    }
+    else if (blueCount >= 4 && redCount < 4) {
+        m_cmbTeamSelect.SetCurSel(0); // 蓝队满，切红队
+    }
 
-                    // 1. 获取该主号当前已经在树状图里存在的小号
-                    std::vector<CString> existAliases;
-                    m_dataMutex.lock();
-                    for (int i = 0; i < 8; i++) {
-                        if (m_players[i].name == typedName) {
-                            for (const auto& a : m_players[i].aliases) {
-                                existAliases.push_back(a.name);
-                            }
-                            break;
-                        }
-                    }
-                    m_dataMutex.unlock();
+    // ==========================================
+    // 3. 树状图状态跟踪与下拉框强覆盖 (核心视觉反馈)
+    // ==========================================
+    // 定义一个极简的辅助函数：专门用来展开或收缩指定的节点
+    auto ToggleTreeNode = [&](CString targetName, UINT action) {
+        if (!m_treePlayers.m_hWnd || targetName.IsEmpty()) return;
+        HTREEITEM hRoot = m_treePlayers.GetRootItem();
+        while (hRoot) {
+            HTREEITEM hChild = m_treePlayers.GetChildItem(hRoot);
+            while (hChild) {
+                CString text = m_treePlayers.GetItemText(hChild);
+                int eqPos = text.Find(L'='); if (eqPos == -1) eqPos = text.Find(L'＝');
+                CString nodeName = (eqPos != -1) ? text.Left(eqPos) : text;
+                nodeName.Trim();
 
-                    // 2. 遍历数据库的小号，过滤掉已经存在的小号
-                    CString aliasesToInsert = L"";
-                    int c = 0;
-                    while (true) {
-                        CString tS = dbAliases.Mid(c);
-                        int Lr = tS.Find(L'('); if (Lr == -1) Lr = tS.Find(L'（');
-                        int Rr = tS.Find(L')'); if (Rr == -1) Rr = tS.Find(L'）');
-                        if (Lr == -1 || Rr == -1 || Rr <= Lr) break;
-
-                        CString aN = tS.Mid(Lr + 1, Rr - Lr - 1); aN.Trim();
-
-                        // 查重对比
-                        bool exists = false;
-                        for (const auto& ea : existAliases) {
-                            if (ea == aN) { exists = true; break; }
-                        }
-
-                        // 如果树状图里没有这个小号，才加入待补全列表
-                        if (!exists && !aN.IsEmpty()) {
-                            aliasesToInsert += L"(" + aN + L")";
-                        }
-                        c += Rr + 1;
-                    }
-
-                    // 3. 如果有确实缺失的小号，才进行插入补全
-                    if (!aliasesToInsert.IsEmpty()) {
-                        m_editQuickAdd.SetSel(nStart - 1, nStart);
-                        m_editQuickAdd.ReplaceSel(aliasesToInsert);
-                        s_prevLen = m_editQuickAdd.GetWindowTextLength();
-                    }
+                if (nodeName == targetName) {
+                    m_treePlayers.Expand(hChild, action);
+                    return;
                 }
+                hChild = m_treePlayers.GetNextSiblingItem(hChild);
             }
+            hRoot = m_treePlayers.GetNextSiblingItem(hRoot);
         }
+        };
+
+    // 去战局里找找，当前打字的名字是不是已经在场上了
+    int foundTeam = -1;
+    m_dataMutex.lock();
+    for (int i = 0; i < 8; i++) {
+        if (!m_players[i].name.IsEmpty() && m_players[i].name == typingMainName) {
+            foundTeam = m_players[i].team;
+            break;
+        }
+    }
+    m_dataMutex.unlock();
+
+    // 状态分发
+    if (foundTeam != -1) {
+        // 【命中老玩家】：无视队伍满不满，强行把下拉框切到他所在的队
+        m_cmbTeamSelect.SetCurSel(foundTeam);
+
+        // 发现新目标：展开节点，并记在脑子里
+        if (s_lastAutoExpandedName != typingMainName) {
+            ToggleTreeNode(typingMainName, TVE_EXPAND);
+            s_lastAutoExpandedName = typingMainName;
+        }
+    }
+    else {
+        // 【未命中或被删除了】：把刚才自动展开的节点收起来
+        if (!s_lastAutoExpandedName.IsEmpty() && s_lastAutoExpandedName != typingMainName) {
+            ToggleTreeNode(s_lastAutoExpandedName, TVE_COLLAPSE);
+            s_lastAutoExpandedName = L""; // 清除记忆
+        }
+    }
+
+    // ==========================================
+    // 4. 括号探测：小号智能补全拦截区
+    // ==========================================
+    // 如果是按退格键、或者光标异常，立即拦截，不再执行补全
+    if (isBackspace || nStart == 0 || nStart > fullText.GetLength()) return;
+
+    // 没打括号，立即拦截
+    wchar_t lastChar = fullText.GetAt(nStart - 1);
+    if (lastChar != L'(' && lastChar != L'（') return;
+
+    // 名字为空或数据库里没有记录，立即拦截
+    if (typingMainName.IsEmpty() || m_aliasDB.find(typingMainName) == m_aliasDB.end()) return;
+
+    CString dbAliases = m_aliasDB[typingMainName];
+    std::vector<CString> existAliases;
+
+    // 查一下树状图里已经有这个人的哪些小号了
+    m_dataMutex.lock();
+    for (int i = 0; i < 8; i++) {
+        if (m_players[i].name == typingMainName) {
+            for (const auto& a : m_players[i].aliases) existAliases.push_back(a.name);
+            break;
+        }
+    }
+    m_dataMutex.unlock();
+
+    CString aliasesToInsert = L"";
+    int c = 0;
+    while (true) {
+        CString tS = dbAliases.Mid(c);
+        int Lr = tS.Find(L'('); if (Lr == -1) Lr = tS.Find(L'（');
+        int Rr = tS.Find(L')'); if (Rr == -1) Rr = tS.Find(L'）');
+        if (Lr == -1 || Rr == -1 || Rr <= Lr) break;
+
+        CString aN = tS.Mid(Lr + 1, Rr - Lr - 1); aN.Trim();
+
+        bool exists = false;
+        for (const auto& ea : existAliases) {
+            if (ea == aN) { exists = true; break; }
+        }
+
+        if (!exists && !aN.IsEmpty()) aliasesToInsert += L"(" + aN + L")";
+        c += Rr + 1;
+    }
+
+    // 补齐小号并移动光标
+    if (!aliasesToInsert.IsEmpty()) {
+        m_editQuickAdd.SetSel(nStart - 1, nStart);
+        m_editQuickAdd.ReplaceSel(aliasesToInsert);
+        s_prevLen = m_editQuickAdd.GetWindowTextLength();
     }
 }
 
