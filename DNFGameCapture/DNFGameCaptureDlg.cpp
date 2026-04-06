@@ -1778,21 +1778,26 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
 
 // 【修改】：点击说明按钮弹出的消息框，详细更新功能手册
 void CDNFGameCaptureDlg::OnBnClickedHelp() {
-    CString msg = L"💡 树状战绩管理核心操作说明\r\n\r\n"
-        L"【一、 录入与补全】\r\n"
-        L"1. 批量添加：输入框支持“主号(小号1)(小号2)”格式，按回车或点击[添加]解析入库。\r\n"
-        L"2. 智能补全：输入主号后打出左括号“(”，系统会自动去“数据库”里检索并补齐小号。\r\n\r\n"
-        L"【二、 右键菜单功能 (极其强大)】\r\n"
-        L"1. 队伍操作：在【红/蓝队】根节点右键，可修改队伍大比分，或一键清空该队全员。\r\n"
-        L"2. 主号操作：在[主号]节点右键，可加减战绩，或将玩家连带小号【一键移动】到对面阵营（如果对面满员，会自动弹出替换互换菜单）。\r\n"
-        L"3. 小号操作：在[小号]节点右键，可以仅从本局移除，或者选择【彻底删除】（连同自动补全数据库里的记忆一并抹除）。\r\n\r\n"
-        L"【三、 快捷修改与交互】\r\n"
-        L"1. 直接改名：左键单击选中某个主号或小号，再点一下名字，即可像重命名文件一样修改名字或战绩数值。\r\n"
-        L"2. 展开折叠：节点前有 [+] / [-] 可以自由隐藏或显示小号，让界面更清爽。\r\n"
+    CString msg = L"💡 DNF击杀统计 - 终极使用说明书\r\n\r\n"
+        L"【一、 智能录入 (顶部输入框)】\r\n"
+        L"1. 批量添加：支持“主号(小号1)(小号2)”格式，按回车或点击[添加]解析入库。\r\n"
+        L"2. 智能补全：输入主号后打出左括号“(”，系统会自动去“历史数据库”里检索并秒补齐小号。\r\n"
+        L"3. 队伍防呆：如果一侧队伍满员，打字时会自动将人员分配到对面未满队伍。\r\n\r\n"
+        L"【二、 树状图左键操作 (双击直接修改)】\r\n"
+        L"1. 改比分：左键慢速双击【红队/蓝队】根节点，直接输入数字即可修改大比分。\r\n"
+        L"2. 改人名/战绩：左键慢速双击任意【主号/小号】，像重命名文件一样修改名字或“击杀/死亡/AK”数值。系统防重名，且会自动绑定数据库。\r\n"
+        L"3. 展开折叠：点击 [+] / [-] 可以自由隐藏或显示小号，让界面更清爽。\r\n\r\n"
+        L"【三、 树状图右键菜单 (全能管理)】\r\n"
+        L"1. 队伍管理：在【红队/蓝队】右键，可 +1/-1/归零大比分，或一键清空该队。\r\n"
+        L"2. 战绩容错：在【主号】右键，可手动对“击杀、死亡、AK”进行加减(+1/-1)操作。\r\n"
+        L"3. 一键换边：在【主号】右键，可将该玩家及旗下所有小号【移动】到对面阵营（如果对面满员，自动触发位置互换）。\r\n"
+        L"4. 智能删除：在【小号】右键，可以选择仅从本局移除，或者【彻底删除】（连同自动补全记忆一并抹除）。\r\n\r\n"
+        L"【四、 OBS 与直播防卡死同步】\r\n"
+        L"无论你是添加小号、还是修改了人头、或是系统自动识图抓取了击杀，软件都会【在毫秒内】自动更新输出目录下的 TXT 文件！OBS 即可实现零延迟自动跳分！\r\n\r\n"
         L"------------------------------------\r\n"
-        L"🛠️ 调试模式快捷键：\r\n"
-        L"Ctrl+F8 : 强制触发【红队】击杀识图\r\n"
-        L"Ctrl+F9 : 强制触发【蓝队】击杀识图";
+        L"🛠️ 调试快捷键：(用于无比赛时测试画图)\r\n"
+        L"Ctrl+F8 : 强制触发【红队】击杀一次\r\n"
+        L"Ctrl+F9 : 强制触发【蓝队】击杀一次";
 
     MessageBox(msg, L"最新操作逻辑与指南", MB_ICONINFORMATION);
 }
@@ -2662,9 +2667,16 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
             menu.AppendMenu(MF_STRING, 15, L"➕ 为该主号添加小号...");
             menu.AppendMenu(MF_STRING, 2, L"🗑️ 删除该主号 (及所有小号)");
             menu.AppendMenu(MF_SEPARATOR);
-            menu.AppendMenu(MF_STRING, 3, L"➕ 战绩：击杀 +1");
-            menu.AppendMenu(MF_STRING, 4, L"➖ 战绩：死亡 +1");
+
+            // ==========================================
+            // 【关键视觉优化】：使用高辨识度专属图标，彻底告别点错
+            // ==========================================
+            menu.AppendMenu(MF_STRING, 3, L"⚔️ 战绩：击杀 +1");
+            menu.AppendMenu(MF_STRING, 31, L"⚔️ 战绩：击杀 -1  (撤销)");
+            menu.AppendMenu(MF_STRING, 4, L"💀 战绩：死亡 +1");
+            menu.AppendMenu(MF_STRING, 32, L"💀 战绩：死亡 -1  (撤销)");
             menu.AppendMenu(MF_STRING, 5, L"🌟 战绩：AK +1");
+            menu.AppendMenu(MF_STRING, 33, L"🌟 战绩：AK -1  (撤销)");
             menu.AppendMenu(MF_STRING, 6, L"🔄 该主号战绩清零");
             menu.AppendMenu(MF_SEPARATOR);
 
@@ -2865,8 +2877,11 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
                 AppLog(L"🗑️ [删除主号] 玩家 [" + mainName + L"] 及其旗下小号已被全盘清空", RGB(255, 80, 80));
             }
             else if (cmd == 3) { m_players[data].kills++; }
+            else if (cmd == 31) { if (m_players[data].kills > 0) m_players[data].kills--; }
             else if (cmd == 4) { m_players[data].deaths++; }
+            else if (cmd == 32) { if (m_players[data].deaths > 0) m_players[data].deaths--; }
             else if (cmd == 5) { m_players[data].akCount++; }
+            else if (cmd == 33) { if (m_players[data].akCount > 0) m_players[data].akCount--; }
             else if (cmd == 6) {
                 m_players[data].kills = 0;
                 m_players[data].deaths = 0;
@@ -3126,98 +3141,161 @@ void CDNFGameCaptureDlg::OnEditKillFocus() {
 
 void CDNFGameCaptureDlg::OnEndLabelEdit(NMHDR* pNMHDR, LRESULT* pResult) {
     LPNMTVDISPINFO pTVDispInfo = (LPNMTVDISPINFO)pNMHDR;
+    // 默认返回 FALSE，表示禁止控件自动修改文本（由我们手动刷新树状图来更新显示）
     *pResult = FALSE;
 
-    if (pTVDispInfo->item.pszText != NULL) {
-        CString line = pTVDispInfo->item.pszText; line.Trim();
-        if (line.IsEmpty()) return;
+    // 如果用户取消编辑或未输入内容，直接返回
+    if (pTVDispInfo->item.pszText == NULL) return;
 
-        DWORD_PTR data = m_treePlayers.GetItemData(pTVDispInfo->item.hItem);
-        std::lock_guard<std::mutex> lk(m_dataMutex);
+    CString line = pTVDispInfo->item.pszText;
+    line.Trim();
+    if (line.IsEmpty()) return;
 
-        CString newNameOnly = line;
-        if (!(data & 0x80000000)) {
-            int eP = line.Find(L'='); if (eP == -1) eP = line.Find(L'＝');
-            if (eP != -1) { newNameOnly = line.Left(eP); newNameOnly.Trim(); }
+    HTREEITEM hItem = pTVDispInfo->item.hItem;
+    HTREEITEM hParent = m_treePlayers.GetParentItem(hItem);
+
+    // =========================================================
+    // 1. 根节点处理：直接修改【红队 / 蓝队】大比分
+    // 逻辑：只要输入里包含数字，就提取出来作为新的大比分
+    // =========================================================
+    if (hParent == NULL) {
+        CString oldText = m_treePlayers.GetItemText(hItem);
+        int newScore = 0;
+        CString numStr = L"";
+
+        // 提取字符串中的所有数字
+        for (int i = 0; i < line.GetLength(); i++) {
+            if (line[i] >= L'0' && line[i] <= L'9') numStr += line[i];
         }
 
-        int curPIdx = (data & 0x80000000) ? ((data & 0x7FFFFFFF) >> 16) : (int)data;
-        int curAIdx = (data & 0x80000000) ? (data & 0xFFFF) : -1;
+        if (!numStr.IsEmpty()) {
+            newScore = _wtoi(numStr);
+            if (oldText.Find(L"红队") != -1) {
+                m_totalScoreRed = newScore;
+            }
+            else {
+                m_totalScoreBlue = newScore;
+            }
+            AppLog(L"✏️ [大比分修改] 队伍比分已更新为：" + numStr, RGB(0, 255, 100));
+        }
 
-        // 查重拦截逻辑
-        bool isDup = false;
-        for (int i = 0; i < 8 && !isDup; i++) {
-            if (m_players[i].name.IsEmpty()) continue;
+        // 修改完大比分后，强制执行全套刷新逻辑并退出
+        SaveConfigToFile();
+        WriteScoreToFile();
+        SyncDataToTree();
+        RefreshDisplay();
+        return;
+    }
 
-            if (m_players[i].name == newNameOnly && !(i == curPIdx && curAIdx == -1)) {
+    // =========================================================
+    // 2. 子节点处理：修改【主号】或【小号】
+    // =========================================================
+    DWORD_PTR data = m_treePlayers.GetItemData(hItem);
+    std::lock_guard<std::mutex> lk(m_dataMutex);
+
+    // 预判：如果是主号编辑，先剥离出名字部分用于查重
+    CString newNameOnly = line;
+    if (!(data & 0x80000000)) { // 如果是主号
+        int eP = line.Find(L'=');
+        if (eP == -1) eP = line.Find(L'＝');
+        if (eP != -1) {
+            newNameOnly = line.Left(eP);
+            newNameOnly.Trim();
+        }
+    }
+
+    // 索引定位
+    int curPIdx = (data & 0x80000000) ? ((data & 0x7FFFFFFF) >> 16) : (int)data;
+    int curAIdx = (data & 0x80000000) ? (data & 0xFFFF) : -1;
+
+    // --- 查重拦截逻辑 ---
+    bool isDup = false;
+    for (int i = 0; i < 8 && !isDup; i++) {
+        if (m_players[i].name.IsEmpty()) continue;
+
+        // 检查是否与现有主号重名（排除掉正在编辑的自己）
+        if (m_players[i].name == newNameOnly && !(i == curPIdx && curAIdx == -1)) {
+            isDup = true; break;
+        }
+        // 检查是否与现有小号重名
+        for (int j = 0; j < (int)m_players[i].aliases.size(); j++) {
+            if (m_players[i].aliases[j].name == newNameOnly && !(i == curPIdx && j == curAIdx)) {
                 isDup = true; break;
             }
-            for (int j = 0; j < (int)m_players[i].aliases.size(); j++) {
-                if (m_players[i].aliases[j].name == newNameOnly && !(i == curPIdx && j == curAIdx)) {
-                    isDup = true; break;
-                }
-            }
         }
-
-        if (isDup) {
-            AppLog(L"❌ [重命名失败] 名称 [" + newNameOnly + L"] 已经被其他玩家占用，修改被拦截！", RGB(255, 100, 100));
-            MessageBox(L"修改失败！该名称已经被其他主号或小号占用，请使用唯一名称。", L"命名冲突", MB_ICONWARNING);
-            return;
-        }
-
-        // 修改保存逻辑
-        if (data & 0x80000000) {
-            // =========================================================
-            // 【新增】：小号更名，精准同步替换数据库里的旧名字
-            // =========================================================
-            CString oldAliasName = m_players[curPIdx].aliases[curAIdx].name;
-            CString mainName = m_players[curPIdx].name;
-
-            if (m_aliasDB.find(mainName) != m_aliasDB.end()) {
-                CString& dbAliases = m_aliasDB[mainName];
-                // 兼容中英文括号替换，避免旧名字变幽灵数据
-                dbAliases.Replace(L"(" + oldAliasName + L")", L"(" + line + L")");
-                dbAliases.Replace(L"（" + oldAliasName + L"）", L"（" + line + L"）");
-            }
-
-            m_players[curPIdx].aliases[curAIdx].name = line;
-        }
-        else {
-            int eP = line.Find(L'='); if (eP == -1) eP = line.Find(L'＝');
-            CString oldMainName = m_players[data].name;
-            CString newMainName = line;
-
-            if (eP != -1) {
-                newMainName = line.Left(eP); newMainName.Trim();
-                // 战绩解析
-                CString score = line.Mid(eP + 1); score.Trim();
-                int aP = score.Find(L'A');
-                if (aP != -1) { m_players[data].akCount = _wtoi(score.Mid(aP + 1)); score = score.Left(aP); }
-                int sl = score.Find(L'/'); if (sl == -1) sl = score.Find(L'-');
-                if (sl != -1) { m_players[data].kills = _wtoi(score.Left(sl)); m_players[data].deaths = _wtoi(score.Mid(sl + 1)); }
-            }
-
-            // =========================================================
-            // 【新增】：主号更名，同步转移数据库的 Key，防止小号库丢失
-            // =========================================================
-            if (oldMainName != newMainName && !oldMainName.IsEmpty()) {
-                if (m_aliasDB.find(oldMainName) != m_aliasDB.end()) {
-                    m_aliasDB[newMainName] = m_aliasDB[oldMainName]; // 继承该主号下的所有小号数据
-                    m_aliasDB.erase(oldMainName); // 删除旧的主号 Key
-                }
-            }
-
-            m_players[data].name = newMainName;
-        }
-
-        AppLog(L"✏️ [信息修改] 成功保存更新: " + line, RGB(0, 255, 100));
-
-        SaveAliasDB();      // 先把内存里的字典写入文件
-        SaveConfigToFile(); // 再保存对局文件
-        WriteScoreToFile(); // 刷新输出的TXT
-        SyncDataToTree();   // 重绘树状图
-        RefreshDisplay();   // 刷新右侧看板
     }
+
+    if (isDup) {
+        AppLog(L"❌ [重命名失败] 名称 [" + newNameOnly + L"] 已被占用！", RGB(255, 100, 100));
+        MessageBox(L"修改失败！该名称已经被其他主号或小号占用，请使用唯一名称。", L"命名冲突", MB_ICONWARNING);
+        return;
+    }
+
+    // --- 正式执行数据更新 ---
+    if (data & 0x80000000) {
+        // A. 编辑的是小号
+        CString oldAliasName = m_players[curPIdx].aliases[curAIdx].name;
+        CString mainName = m_players[curPIdx].name;
+
+        // 同步修改自动补全数据库（防止旧名字残留在库里）
+        if (m_aliasDB.find(mainName) != m_aliasDB.end()) {
+            CString& dbAliases = m_aliasDB[mainName];
+            dbAliases.Replace(L"(" + oldAliasName + L")", L"(" + line + L")");
+            dbAliases.Replace(L"（" + oldAliasName + L"）", L"（" + line + L"）");
+        }
+        m_players[curPIdx].aliases[curAIdx].name = line;
+    }
+    else {
+        // B. 编辑的是主号 (支持 Name = 10/5 A2 格式解析)
+        CString oldMainName = m_players[data].name;
+        CString newMainName = line;
+
+        int eP = line.Find(L'=');
+        if (eP == -1) eP = line.Find(L'＝');
+
+        if (eP != -1) {
+            newMainName = line.Left(eP);
+            newMainName.Trim();
+
+            // 尝试解析战绩部分
+            CString scorePart = line.Mid(eP + 1);
+            scorePart.Trim();
+
+            // 解析 AK 次数
+            int aPos = scorePart.Find(L'A');
+            if (aPos != -1) {
+                m_players[data].akCount = _wtoi(scorePart.Mid(aPos + 1));
+                if (m_players[data].akCount == 0 && scorePart.Mid(aPos + 1) != L"0") m_players[data].akCount = 1;
+                scorePart = scorePart.Left(aPos);
+            }
+
+            // 解析 K/D
+            int slash = scorePart.Find(L'/');
+            if (slash == -1) slash = scorePart.Find(L'-');
+            if (slash != -1) {
+                m_players[data].kills = _wtoi(scorePart.Left(slash));
+                m_players[data].deaths = _wtoi(scorePart.Mid(slash + 1));
+            }
+        }
+
+        // 如果主号改名了，同步转移数据库中的小号关联数据
+        if (oldMainName != newMainName && !oldMainName.IsEmpty()) {
+            if (m_aliasDB.find(oldMainName) != m_aliasDB.end()) {
+                m_aliasDB[newMainName] = m_aliasDB[oldMainName];
+                m_aliasDB.erase(oldMainName);
+            }
+        }
+        m_players[data].name = newMainName;
+    }
+
+    AppLog(L"✏️ [信息修改] 成功保存更新: " + line, RGB(0, 255, 100));
+
+    // --- 全局同步落地 ---
+    SaveAliasDB();
+    SaveConfigToFile();
+    WriteScoreToFile();
+    SyncDataToTree();
+    RefreshDisplay();
 }
 
 void CDNFGameCaptureDlg::OnCustomDrawTree(NMHDR* pNMHDR, LRESULT* pResult) {
@@ -3291,8 +3369,17 @@ HBRUSH CDNFGameCaptureDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor) {
 
 // 【核心修复】：专门接收子线程消息，在安全的主线程中刷新树状图和看板
 LRESULT CDNFGameCaptureDlg::OnUpdateAllUI(WPARAM wParam, LPARAM lParam) {
+    // 1. 刷新软件界面的视觉显示
     SyncDataToTree();
     RefreshDisplay();
+
+    // ==========================================
+    // 【关键修复】：自动识图拿到人头后，必须立刻将数据写入本地 TXT 文件！
+    // 这样 OBS 才能瞬间读取到最新比分，实现真正的零延迟自动跟进！
+    // ==========================================
+    WriteScoreToFile(); // 实时更新发给 OBS 用的 TXT 文件
+    SaveConfigToFile(); // 实时保存对局进度，防止崩溃丢失战绩
+
     return 0;
 }
 
