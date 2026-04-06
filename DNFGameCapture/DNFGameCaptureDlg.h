@@ -16,9 +16,10 @@
 #include <urlmon.h>
 #pragma comment(lib, "urlmon.lib")
 
-// 定义你当前软件的版本号，以及你服务器上 update.txt 的网址
-#define CURRENT_VERSION L"2.3.0"
-#define UPDATE_CHECK_URL L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt" // 【！！！请换成你自己的网址！！！】
+// 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
+#define CURRENT_VERSION L"2.3.3"
+#define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
+#define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
 
 #define DNF_WINDOW_NAME L"地下城与勇士：创新世纪"
 #define COLOR_BLUE      RGB(0,0,255)
@@ -33,6 +34,14 @@
 #define WM_UPDATE_OCR_DROPDOWNS (WM_USER + 100)
 #define WM_TRAY_MESSAGE         (WM_USER + 101) // 托盘图标消息
 #define WM_UPDATE_ALL_UI        (WM_USER + 105)// 【新增】：跨线程刷新 UI 专属消息
+#define WM_CLOUD_AUTH_FAIL      (WM_USER + 106) // 【新增】：云端授权失败专属消息
+
+// =========================================================
+// 【编译环境切换开关】
+// 设为 1：开启云端测试模式（捕获全屏幕桌面，用于云端播放录像测试）
+// 设为 0：正式发布模式（精准捕获 DNF 窗口，用于发给用户的正式版）
+// =========================================================
+#define ENABLE_CLOUD_TEST_MODE 0
 
 struct AliasData {
     CString name;
@@ -131,6 +140,8 @@ protected:
 
     // 【新增】：跨线程刷新 UI 响应函数
     afx_msg LRESULT OnUpdateAllUI(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnCloudAuthFail(WPARAM wParam, LPARAM lParam); // 【新增】
+
     std::vector<CString> m_autoExpandedNodes; // 【新增】：记忆刚才修改过，需要临时展开3秒的主号
 
 private:

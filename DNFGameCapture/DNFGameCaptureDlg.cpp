@@ -58,6 +58,29 @@ int GetVisualWidth(const CString& s) {
     return w;
 }
 
+// 按语义版本号比较：返回 1 表示 a > b，-1 表示 a < b，0 表示相等
+static int CompareVersion(const CString& a, const CString& b) {
+    int ia = 0, ib = 0;
+    int la = a.GetLength(), lb = b.GetLength();
+    while (ia < la || ib < lb) {
+        int numA = 0, numB = 0;
+        while (ia < la && a[ia] != L'.') {
+            if (a[ia] >= L'0' && a[ia] <= L'9')
+                numA = numA * 10 + (a[ia] - L'0');
+            ia++;
+        }
+        while (ib < lb && b[ib] != L'.') {
+            if (b[ib] >= L'0' && b[ib] <= L'9')
+                numB = numB * 10 + (b[ib] - L'0');
+            ib++;
+        }
+        if (numA > numB) return 1;
+        if (numA < numB) return -1;
+        ia++; ib++; // 跳过 '.'
+    }
+    return 0;
+}
+
 // 时间戳转字符串
 CString FormatTimeStamp(long long ts) {
     if (ts >= 0xFFFFFFF0) return L"永久有效";
@@ -135,8 +158,10 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     ON_WM_CTLCOLOR() // 添加这一行，拦截所有的颜色请求
     ON_MESSAGE(WM_UPDATE_OCR_DROPDOWNS, &CDNFGameCaptureDlg::OnUpdateOcrDropdowns)
     ON_MESSAGE(WM_UPDATE_ALL_UI, &CDNFGameCaptureDlg::OnUpdateAllUI)// 【新增】：绑定自定义 UI 刷新消息
+    ON_MESSAGE(WM_CLOUD_AUTH_FAIL, &CDNFGameCaptureDlg::OnCloudAuthFail) // 【新增】
     ON_CBN_SELCHANGE(1010, &CDNFGameCaptureDlg::OnCbnSelchangeLeft)
     ON_CBN_SELCHANGE(1030, &CDNFGameCaptureDlg::OnCbnSelchangeCaptureEngine)
+
 
 END_MESSAGE_MAP()
 
@@ -230,7 +255,7 @@ CString CDNFGameCaptureDlg::CheckCloudBinding(CString key, CString hwid) {
         std::wstring headers = L"Content-Type: application/json\r\n";
         WinHttpAddRequestHeaders(hRequest, headers.c_str(), (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
 
-        if (WinHttpSendRequest(hRequest, NULL, 0, (LPVOID)jsonUtf8.c_str(), jsonUtf8.length(), jsonUtf8.length(), 0) && WinHttpReceiveResponse(hRequest, NULL)) {
+        if (WinHttpSendRequest(hRequest, NULL, 0, (LPVOID)jsonUtf8.c_str(), (DWORD)jsonUtf8.length(), (DWORD)jsonUtf8.length(), 0) && WinHttpReceiveResponse(hRequest, NULL)) {
             std::string resp;
             DWORD sz = 0, dl = 0;
             while (WinHttpQueryDataAvailable(hRequest, &sz) && sz > 0) {
@@ -265,66 +290,87 @@ CString CDNFGameCaptureDlg::CheckCloudBinding(CString key, CString hwid) {
     return resultMsg;
 }
 
-// 授权检查函数：现在是静默的，不弹窗
+// 授权检查函数：支持云端异步校验与环境隔离
 void CDNFGameCaptureDlg::CheckTrialAndLicense() {
+    // =========================================================
+    // 【模式切换】：如果是云端测试模式，直接赋予上帝权限，跳过所有校验
+    // =========================================================
+#if ENABLE_CLOUD_TEST_MODE
+    m_bIsAuthValid = true;   // 授权有效
+    m_bIsTrial = false;      // 非试用（正式模式）
+    m_trialEnd = 0;
+    return;
+#endif
+
+    // 默认初始化状态：未授权
     m_bIsAuthValid = false;
     m_bIsTrial = false;
     m_trialEnd = 0;
 
+    // 获取机器码
     CString hwid = GetMachineID();
+
+    // 定位本地 license.txt 路径
     wchar_t exePath[MAX_PATH];
     GetModuleFileName(NULL, exePath, MAX_PATH);
     CString path = exePath;
     path = path.Left(path.ReverseFind(L'\\') + 1) + L"license.txt";
 
+    // --- 第一阶段：尝试读取本地卡密 ---
     CFile file;
     if (file.Open(path, CFile::modeRead)) {
         char buf[256] = { 0 };
-        file.Read(buf, 255);
+        UINT nRead = file.Read(buf, 255);
         file.Close();
+
         CString inputKey(buf);
         inputKey.Trim();
 
-        // 如果卡密校验通过
-        if (VerifyKey(inputKey, hwid)) {
+        // 基础算法校验（离线验证）
+        if (!inputKey.IsEmpty() && VerifyKey(inputKey, hwid)) {
+            // 离线校验通过，先允许进入软件
             m_bIsAuthValid = true;
-            m_bIsTrial = false; // 正式卡用户
+            m_bIsTrial = false;
 
-            // 异步云端校验防多开
-            std::thread([this, inputKey, hwid]() {
+            // --- 第二阶段：异步云端二次校验（防多开、防封卡） ---
+            // 核心：捕获当前窗口句柄，用于跨线程安全通信
+            HWND hWnd = GetSafeHwnd();
+
+            std::thread([this, hWnd, inputKey, hwid]() {
+                // 在后台线程请求云端 API
                 CString cloudResult = CheckCloudBinding(inputKey, hwid);
-                if (cloudResult != L"OK") {
-                    m_bIsAuthValid = false;
-                    if (m_bIsRunning) {
-                        m_bIsRunning = FALSE;
-                        KillTimer(1);
-                        m_btnStart.SetWindowText(L"开始监控");
+
+                // 如果云端返回不是 "OK"，说明卡密已被封或机器码不匹配
+                if (cloudResult != L"OK" && ::IsWindow(hWnd)) {
+                    // 【关键】：绝不在子线程弹窗！
+                    // 创建一个堆内存字符串，把错误信息“邮寄”给主线程
+                    CString* pResult = new CString(cloudResult);
+                    if (!::PostMessage(hWnd, WM_CLOUD_AUTH_FAIL, 0, (LPARAM)pResult)) {
+                        delete pResult; // 如果发送失败（窗口已关闭），手动回收内存
                     }
-                    CString errMsg;
-                    errMsg.Format(L"云端安全拦截：%s\r\n\r\n授权已失效！", (LPCTSTR)cloudResult);
-                    MessageBox(errMsg, L"授权异常", MB_ICONERROR | MB_SYSTEMMODAL);
                 }
                 }).detach();
-            return;
+
+            return; // 离线校验成功，直接返回
         }
     }
 
-    // 检查注册表试用期
+    // --- 第三阶段：如果没有卡密，检查注册表试用期 ---
     HKEY hKey;
     time_t now = time(nullptr);
+    // 打开注册表项：HKEY_CURRENT_USER\Software\DNFCapture
     if (RegOpenKeyEx(HKEY_CURRENT_USER, L"Software\\DNFCapture", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        DWORD iT = 0, sz = 4;
-        RegQueryValueEx(hKey, L"InstallTime", NULL, NULL, (LPBYTE)&iT, &sz);
-        if (iT > 0 && (long long)now <= ((long long)iT + 604800)) {
-            m_bIsAuthValid = true;
-            m_bIsTrial = true; // 标记为试用用户
-            m_trialEnd = (long long)iT + 604800;
+        DWORD iT = 0, sz = sizeof(DWORD);
+        if (RegQueryValueEx(hKey, L"InstallTime", NULL, NULL, (LPBYTE)&iT, &sz) == ERROR_SUCCESS) {
+            // 试用期设定为 7 天 (604800 秒)
+            long long expireTime = (long long)iT + 604800;
+            if (iT > 0 && (long long)now <= expireTime) {
+                m_bIsAuthValid = true;
+                m_bIsTrial = true;
+                m_trialEnd = expireTime;
+            }
         }
         RegCloseKey(hKey);
-    }
-    else {
-        // 如果是纯新用户，且没有注册表项，可以这里帮他初始化一个试用期
-        // 或者等他第一次点击【开始监控】时再初始化
     }
 }
 
@@ -821,9 +867,14 @@ void CDNFGameCaptureDlg::ManualTriggerKill(int killSide) {
 }
 
 void CDNFGameCaptureDlg::Capture() {
+    // 1. 智能判定目标句柄：测试环境拿全屏，正式环境找游戏
+#if ENABLE_CLOUD_TEST_MODE
+    HWND hGame = ::GetDesktopWindow();
+#else
     HWND hGame = ::FindWindow(NULL, DNF_WINDOW_NAME);
+#endif
+
     if (!hGame) {
-        // 游戏未开启时，自动释放引擎节省资源
         if (m_pWGC && !m_bIsRunning) {
             m_pWGC->StopCapture();
             delete m_pWGC;
@@ -833,22 +884,18 @@ void CDNFGameCaptureDlg::Capture() {
         return;
     }
 
-    // ===== 【核心修复】：按需自动激活捕获引擎（支持开启即预览） =====
+    // 2. 智能激活引擎：测试环境跳过WGC(无显卡必败)，正式环境按需激活
+#if !ENABLE_CLOUD_TEST_MODE
     if (!m_bUseWGC && (m_nCaptureEngineChoice == 0 || m_nCaptureEngineChoice == 1)) {
         static DWORD lastTryTime = 0;
         DWORD now = GetTickCount();
-        // 限制重试频率，每 2 秒最多尝试一次，防止在不支持的系统上狂刷 CPU
         if (now - lastTryTime > 2000) {
             lastTryTime = now;
             try {
                 if (WGCCapture::IsSupported()) {
                     if (!m_pWGC) m_pWGC = new WGCCapture();
-                    if (m_pWGC->Initialize(hGame) && m_pWGC->StartCapture()) {
-                        m_bUseWGC = true;
-                    }
-                    else {
-                        delete m_pWGC; m_pWGC = nullptr;
-                    }
+                    if (m_pWGC->Initialize(hGame) && m_pWGC->StartCapture()) m_bUseWGC = true;
+                    else { delete m_pWGC; m_pWGC = nullptr; }
                 }
             }
             catch (...) {
@@ -856,27 +903,21 @@ void CDNFGameCaptureDlg::Capture() {
             }
         }
     }
-    // ===============================================================
+#endif
 
-    // 用于锁外判断的局部变量
     bool bNeedBlankCheck = false;
     int  capturedW = 0, capturedH = 0;
     HBITMAP hCapturedBmp = nullptr;
 
-    // ==========================================
-    // WGC 捕获
-    // ==========================================
+    // 3. WGC 捕获 (正式版专用)
     if (m_bUseWGC && m_pWGC) {
         int w = 0, h = 0;
         HBITMAP hFrame = m_pWGC->GetLatestFrame(w, h);
         if (hFrame && w > 0 && h > 0) {
-            if (!m_bAlreadyPrompted && m_nCaptureEngineChoice == 0
-                && IsBitmapBlank(hFrame, w, h))
-            {
+            if (!m_bAlreadyPrompted && m_nCaptureEngineChoice == 0 && IsBitmapBlank(hFrame, w, h)) {
                 m_nBlankFrameCount++;
                 if (m_nBlankFrameCount >= 5) {
-                    AppLog(L"⚠️ [捕获引擎] WGC 持续黑屏,自动降级为 PrintWindow",
-                        RGB(255, 165, 0));
+                    AppLog(L"⚠️ [捕获引擎] WGC 持续黑屏,自动降级为 PrintWindow", RGB(255, 165, 0));
                     m_bUseWGC = false;
                     m_pWGC->StopCapture();
                     m_nBlankFrameCount = 0;
@@ -895,104 +936,80 @@ void CDNFGameCaptureDlg::Capture() {
             m_h = h;
         }
     }
-    // ==========================================
-    // PrintWindow 降级方案
-    // ==========================================
+    // 4. 备用捕获引擎
     else {
     fallback_printwindow:
-
-        // ====== 锁内：只做截图，不做任何弹窗 ======
         {
             std::lock_guard<std::mutex> lock(g_bmpMutex);
+
+#if ENABLE_CLOUD_TEST_MODE
+            // 【云端测试环境】：强行 BitBlt 截取全屏桌面，无视播放器黑屏
+            m_w = GetSystemMetrics(SM_CXSCREEN);
+            m_h = GetSystemMetrics(SM_CYSCREEN);
+            if (m_w > 0 && m_h > 0) {
+                HDC hdcScreen = ::GetDC(NULL);
+                if (!m_bmp) m_bmp = ::CreateCompatibleBitmap(hdcScreen, m_w, m_h);
+                HDC hMem = ::CreateCompatibleDC(hdcScreen);
+                HGDIOBJ old = ::SelectObject(hMem, m_bmp);
+                ::BitBlt(hMem, 0, 0, m_w, m_h, hdcScreen, 0, 0, SRCCOPY);
+                ::SelectObject(hMem, old);
+                ::DeleteDC(hMem);
+                ::ReleaseDC(NULL, hdcScreen);
+
+                capturedW = m_w; capturedH = m_h; hCapturedBmp = m_bmp;
+                bNeedBlankCheck = false; // 测试模式永不报黑屏
+            }
+#else
+            // 【正式环境】：正常 PrintWindow 捕获游戏窗口
             RECT rc;
             ::GetClientRect(hGame, &rc);
             m_w = rc.right - rc.left;
             m_h = rc.bottom - rc.top;
-            if (m_w <= 0 || m_h <= 0) return;
+            if (m_w > 0 && m_h > 0) {
+                if (!m_bmp) {
+                    HDC hdc = ::GetDC(hGame);
+                    m_bmp = ::CreateCompatibleBitmap(hdc, m_w, m_h);
+                    ::ReleaseDC(hGame, hdc);
+                }
+                HDC hGameDC = ::GetDC(hGame);
+                HDC hMem = ::CreateCompatibleDC(hGameDC);
+                HGDIOBJ old = ::SelectObject(hMem, m_bmp);
+                ::PrintWindow(hGame, hMem, 2);
+                ::SelectObject(hMem, old);
+                ::DeleteDC(hMem);
+                ::ReleaseDC(hGame, hGameDC);
 
-            if (!m_bmp) {
-                HDC hdc = ::GetDC(hGame);
-                m_bmp = ::CreateCompatibleBitmap(hdc, m_w, m_h);
-                ::ReleaseDC(hGame, hdc);
+                capturedW = m_w; capturedH = m_h; hCapturedBmp = m_bmp;
+                bNeedBlankCheck = !m_bAlreadyPrompted;
             }
-
-            HDC hGameDC = ::GetDC(hGame);
-            HDC hMem = ::CreateCompatibleDC(hGameDC);
-            HGDIOBJ old = ::SelectObject(hMem, m_bmp);
-            ::PrintWindow(hGame, hMem, 2);
-            ::SelectObject(hMem, old);
-            ::DeleteDC(hMem);
-            ::ReleaseDC(hGame, hGameDC);
-
-            // 记录下来，锁外再检测
-            capturedW = m_w;
-            capturedH = m_h;
-            hCapturedBmp = m_bmp;
-            bNeedBlankCheck = !m_bAlreadyPrompted;
+#endif
         }
-        // ====== 锁已释放，安全做黑屏检测和弹窗 ======
 
+        // 黑屏检测与权限弹窗 (仅正式环境生效)
         if (m_bIsRunning && bNeedBlankCheck && IsBitmapBlank(hCapturedBmp, capturedW, capturedH)) {
             m_nBlankFrameCount++;
-
             if (m_nBlankFrameCount >= 5) {
                 m_bAlreadyPrompted = true;
-
-                // 【关键】弹窗前先停掉定时器，防止重入
                 KillTimer(1);
-
                 if (!IsRunningAsAdmin()) {
                     int ret = MessageBox(
-                        L"⚠️ 检测到画面捕获失败（连续黑屏）\r\n\r\n"
-                        L"WGC 捕获引擎已尝试并失败，PrintWindow 也无法获取画面。\r\n"
-                        L"这通常是因为游戏以管理员权限运行，而本软件权限不足。\r\n\r\n"
-                        L"点击 [是] → 自动以管理员身份重启软件\r\n"
-                        L"点击 [否] → 忽略并继续",
-                        L"权限不足 - 需要管理员权限",
-                        MB_ICONWARNING | MB_YESNO | MB_SYSTEMMODAL);
-
+                        L"⚠️ 检测到画面连续黑屏\r\n请尝试以管理员身份运行软件。",
+                        L"权限不足", MB_ICONWARNING | MB_YESNO | MB_SYSTEMMODAL);
                     if (ret == IDYES) {
-                        m_bIsRunning = FALSE;
-                        KillTimer(3);
-                        if (!RelaunchAsAdmin()) {
-                            MessageBox(
-                                L"自动提权失败！\r\n\r\n"
-                                L"请手动操作：右键软件图标 → 以管理员身份运行",
-                                L"错误", MB_ICONERROR);
-                        }
+                        m_bIsRunning = FALSE; KillTimer(3);
+                        if (!RelaunchAsAdmin()) MessageBox(L"自动提权失败，请手动管理员运行", L"错误", MB_ICONERROR);
                         return;
                     }
-                    else {
-                        AppLog(L"⚠️ [权限] 用户选择忽略黑屏警告，继续运行",
-                            RGB(255, 165, 0));
-                    }
                 }
-                else {
-                    AppLog(L"⚠️ [捕获异常] 已是管理员权限，WGC 和 PrintWindow 均失败",
-                        RGB(255, 80, 80));
-                    AppLog(L"   可能原因：① 游戏处于独占全屏模式 ② 反作弊系统拦截",
-                        RGB(255, 80, 80));
-                    AppLog(L"   建议：将游戏切换为【窗口化】或【无边框全屏】模式",
-                        RGB(255, 215, 0));
-                }
-
-                // 【关键】弹窗结束后恢复定时器
-                if (m_bIsRunning) {
-                    SetTimer(1, 50, NULL);
-                }
+                if (m_bIsRunning) SetTimer(1, 50, NULL);
             }
         }
-        else if (!m_bIsRunning) {
-            // 预览模式：不计黑屏，直接清零计数
-            m_nBlankFrameCount = 0;
-        }
-        else if (bNeedBlankCheck) {
-            // 监控状态下画面正常：清零计数
+        else if (!m_bIsRunning || bNeedBlankCheck) {
             m_nBlankFrameCount = 0;
         }
     }
 
-    // 渲染预览图逻辑（保持不变）
+    // 5. 渲染预览图逻辑
     CRect client; GetClientRect(&client);
     int splitY = max(100, client.bottom - (int)(390 * WINDOW_SCALE));
     CRect topHalf(0, 0, client.right, splitY);
@@ -1404,6 +1421,27 @@ void CDNFGameCaptureDlg::OnPaint() {
         s_bUpdateTimerStarted = true;
     }
 
+    // 启动后强制把自己拉到前台（解决更新后窗口不弹出的问题）
+    static bool s_bBringToFrontOnce = false;
+    if (!s_bBringToFrontOnce) {
+        s_bBringToFrontOnce = true;
+
+        // 绕过 Windows 前台锁：先 attach 到前台线程，再 SetForegroundWindow
+        HWND hFore = ::GetForegroundWindow();
+        DWORD dwFore = ::GetWindowThreadProcessId(hFore, NULL);
+        DWORD dwSelf = ::GetCurrentThreadId();
+
+        ::AttachThreadInput(dwSelf, dwFore, TRUE);
+        ::ShowWindow(m_hWnd, SW_SHOW);
+        ::ShowWindow(m_hWnd, SW_RESTORE);       // 如果被最小化
+        ::SetWindowPos(m_hWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+        ::SetWindowPos(m_hWnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+        ::SetForegroundWindow(m_hWnd);
+        ::SetActiveWindow(m_hWnd);
+        ::SetFocus(m_hWnd);
+        ::AttachThreadInput(dwSelf, dwFore, FALSE);
+    }
+
     CPaintDC dc(this);
     CRect r;
     GetClientRect(&r);
@@ -1762,7 +1800,7 @@ void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
 // 自动更新系统 (适配按行读取格式)
 // ============================================================================
 void CDNFGameCaptureDlg::CheckForUpdates(bool bSilent) {
-    CString strCheckUrlV2 = L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt";
+    CString strCheckUrlV2 = UPDATE_CHECK_URL_V2;
     CString currentVersion = CURRENT_VERSION;
 
     wchar_t tempPath[MAX_PATH];
@@ -1829,22 +1867,47 @@ void CDNFGameCaptureDlg::CheckForUpdates(bool bSilent) {
     // ==========================================
     // 拦截 4：没有新版本，提前返回
     // ==========================================
-    bool bHasUpdate = (serverVersion != currentVersion && !serverVersion.IsEmpty());
+    // 原来的：
+    // bool bHasUpdate = (serverVersion != currentVersion && !serverVersion.IsEmpty());
+
+    int cmp = CompareVersion(serverVersion, currentVersion);
+    bool bHasUpdate = (!serverVersion.IsEmpty() && cmp > 0);
+
     if (!bHasUpdate) {
-        if (!bSilent) MessageBox(L"当前已是最新版本！", L"检查更新", MB_OK);
+        if (!bSilent) {
+            if (cmp < 0)
+                MessageBox(L"当前为测试版本，已高于线上正式版。", L"检查更新", MB_OK);
+            else
+                MessageBox(L"当前已是最新版本！", L"检查更新", MB_OK);
+        }
         return;
     }
 
     // ==========================================
-    // 终点：真正的更新处理逻辑 (没有任何多余嵌套)
+    // 终点：真正的更新处理逻辑
     // ==========================================
-    if (bSilent) {
-        AppLog(L"🔄 [系统升级] 正在后台拉取全新资源包，请稍候...", RGB(255, 165, 0));
+    const CString BRIDGE_VERSION = L"2.2.0";  // 桥接版本号
+
+    if (currentVersion == BRIDGE_VERSION) {
+        AppLog(L"═══════════════════════════════════", RGB(255, 215, 0));
+        AppLog(L"🔄 [桥接升级] 检测到这是过渡版本", RGB(255, 215, 0));
+        AppLog(L"   正在自动升级到最新正式版,请稍候...", RGB(255, 215, 0));
+        AppLog(L"   升级完成后软件会自动重启", RGB(255, 215, 0));
+        AppLog(L"═══════════════════════════════════", RGB(255, 215, 0));
+        Sleep(800);  // 让用户有时间看到提示
         DownloadAndApplyUpdate(downloadUrl);
     }
+    else if (bSilent) {
+        // 【普通版 - 后台静默检测】：不打扰用户,只在日志里提示有新版本
+        CString logMsg;
+        logMsg.Format(L"💡 [发现新版本] 服务器版本 %s,点击菜单可手动更新", serverVersion.GetString());
+        AppLog(logMsg, RGB(100, 200, 255));
+        // 注意:这里不调用 DownloadAndApplyUpdate,等用户主动点"检查更新"
+    }
     else {
+        // 【普通版 - 用户手动点"检查更新"】：弹窗让用户自己选
         CString msg;
-        msg.Format(L"发现新版本：%s\n\n更新内容：\n%s\n\n是否立即更新？", serverVersion, updateLog);
+        msg.Format(L"发现新版本:%s\n\n更新内容:\n%s\n\n是否立即更新?", serverVersion, updateLog);
         if (MessageBox(msg, L"发现新版本", MB_YESNO | MB_ICONINFORMATION) == IDYES) {
             DownloadAndApplyUpdate(downloadUrl);
         }
@@ -1852,7 +1915,8 @@ void CDNFGameCaptureDlg::CheckForUpdates(bool bSilent) {
 }
 
 void CDNFGameCaptureDlg::DownloadAndApplyUpdate(CString url) {
-    if (m_status.m_hWnd) m_status.SetWindowText(L"正在下载更新包...");
+    if (m_status.m_hWnd) 
+        ::SetWindowText(m_status.GetSafeHwnd(), L"正在下载更新包...");// 加上全局作用域和安全的句柄
 
     wchar_t p[MAX_PATH];
     GetModuleFileName(NULL, p, MAX_PATH);
@@ -1887,7 +1951,16 @@ void CDNFGameCaptureDlg::DownloadAndApplyUpdate(CString url) {
             L"if exist \"%s\" goto Retry\r\n"
             L"\"%s\" x \"update_temp.zip\" -y > nul\r\n"
             L"del \"update_temp.zip\"\r\n"
+            L"ping 127.0.0.1 -n 2 > nul\r\n"                       // 等 1 秒让文件系统稳定
             L"start \"\" \"%s\"\r\n"
+            L"ping 127.0.0.1 -n 3 > nul\r\n"                       // 等新程序启动窗口
+            L"powershell -NoProfile -Command \""
+            L"$w=(Get-Process -Name 'DNFGameCapture' -ErrorAction SilentlyContinue | "
+            L"Where-Object {$_.MainWindowHandle -ne 0} | Select-Object -First 1).MainWindowHandle; "
+            L"if($w){ "
+            L"Add-Type '[DllImport(\\\"user32.dll\\\")]public static extern bool SetForegroundWindow(IntPtr h);' "
+            L"-Name W -Namespace N; "
+            L"[N.W]::SetForegroundWindow($w) }\"\r\n"
             L"del \"%%~f0\"\r\n",
             cp.GetString(), cp.GetString(), engine.GetString(), cp.GetString());
 
@@ -3059,6 +3132,29 @@ HBRUSH CDNFGameCaptureDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor) {
 LRESULT CDNFGameCaptureDlg::OnUpdateAllUI(WPARAM wParam, LPARAM lParam) {
     SyncDataToTree();
     RefreshDisplay();
+    return 0;
+}
+
+// 接收来自后台线程的“坏消息”，由主线程安全弹窗
+LRESULT CDNFGameCaptureDlg::OnCloudAuthFail(WPARAM wParam, LPARAM lParam) {
+    CString* pCloudResult = (CString*)lParam;
+    if (pCloudResult) {
+        // 1. 立即标记授权失效，停止所有监控任务
+        m_bIsAuthValid = false;
+        if (m_bIsRunning) {
+            OnBnClickedStart(); // 模拟点击停止按钮，清理定时器和引擎
+        }
+
+        // 2. 格式化错误提示
+        CString errMsg;
+        errMsg.Format(L"授权校验失败：\r\n%s\r\n\r\n软件将限制使用部分功能。", (LPCTSTR)*pCloudResult);
+
+        // 3. 安全弹窗（主线程弹窗绝对不会闪退）
+        MessageBox(errMsg, L"安全拦截", MB_ICONERROR | MB_SYSTEMMODAL);
+
+        // 4. 释放子线程 new 出来的内存，防止内存泄漏
+        delete pCloudResult;
+    }
     return 0;
 }
 
