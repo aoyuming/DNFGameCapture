@@ -224,6 +224,10 @@ bool CDNFGameCaptureDlg::VerifyKey(CString inputKey, CString machineID) {
 
             m_keyDuration = duration;
             m_cloudExpireTime = -1;    // 设置为正在请求云端的状态
+
+            // 【关键修改】：本地格式过关不代表授权有效！
+            // 必须设为 false，等待子线程拿到云端的“OK”后再反转。
+            m_bIsAuthValid = false;
             return true;
         }
     }
@@ -618,6 +622,19 @@ void CDNFGameCaptureDlg::OnClose() { ShowWindow(SW_HIDE); }
 // UI 事件响应与授权软拦截
 // ============================================================================
 void CDNFGameCaptureDlg::OnBnClickedStart() {
+    // 【关键修复】：如果正在同步云端信息（-1），禁止开启监控
+    if (m_cloudExpireTime == -1) {
+        MessageBox(L"正在与云端同步授权信息，请稍后...", L"安全校验", MB_ICONINFORMATION);
+        return;
+    }
+
+    // 原有的授权校验拦截
+    if (!m_bIsAuthValid) {
+        CString msg = L"❌ 您的授权无效或已过期，请检查卡密记录！";
+        MessageBox(msg, L"需要授权", MB_ICONWARNING);
+        return;
+    }
+
     static bool once;
     if (!once) {
         if (!m_bIsAuthValid) {
