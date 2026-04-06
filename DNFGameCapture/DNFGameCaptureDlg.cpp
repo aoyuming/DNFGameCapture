@@ -196,12 +196,57 @@ CString CDNFGameCaptureDlg::GetMachineID() {
     return hwid;
 }
 
+// 云端返回成功时触发：
 LRESULT CDNFGameCaptureDlg::OnUpdateAuthTime(WPARAM wParam, LPARAM lParam) {
-    m_cloudExpireTime = (long long)lParam;
-    OutputDebugAuthInfo(); // 收到云端时间后，刷新面板
+    long long cloudTime = (long long)lParam;
+    m_cloudExpireTime = cloudTime;
+
+    // 1. 严格纠正授权状态
+    if (cloudTime > 1 || cloudTime == 0xFFFFFFFF) {
+        m_bIsAuthValid = true;
+    }
+    else {
+        m_bIsAuthValid = false;
+    }
+
+    // 2. 【关键修复 3】：清空面板上的“正在同步...”，重新打印终极状态！
+    if (m_editVisualLogs.m_hWnd) m_editVisualLogs.SetWindowText(L"");
+    OutputDebugAuthInfo();
+
+    // 3. 追加高亮提示
+    if (m_bIsAuthValid) {
+        AppLog(L"✅ [云端验证] 授权已激活，欢迎使用！", RGB(0, 255, 100));
+    }
+    else {
+        AppLog(L"❌ [云端验证] 该卡密已被封停或无效！", RGB(255, 80, 80));
+    }
+
     return 0;
 }
 
+// 云端返回失败（或网络超时）时触发：
+LRESULT CDNFGameCaptureDlg::OnCloudAuthFail(WPARAM wParam, LPARAM lParam) {
+    CString* pCloudResult = (CString*)lParam;
+    if (pCloudResult) {
+        m_bIsAuthValid = false;
+
+        // 【关键修复 4】：必须解除 -1 状态，否则用户永远点不了开始监控！
+        m_cloudExpireTime = 0;
+
+        // 强行清空面板并刷新状态
+        if (m_editVisualLogs.m_hWnd) m_editVisualLogs.SetWindowText(L"");
+        OutputDebugAuthInfo();
+
+        if (m_bIsRunning) OnBnClickedStart();
+
+        CString errMsg;
+        errMsg.Format(L"授权校验失败：\r\n%s\r\n\r\n请检查网络或卡密状态！", (LPCTSTR)*pCloudResult);
+        MessageBox(errMsg, L"安全拦截", MB_ICONERROR | MB_SYSTEMMODAL);
+
+        delete pCloudResult;
+    }
+    return 0;
+}
 bool CDNFGameCaptureDlg::VerifyKey(CString inputKey, CString machineID) {
     // ===================================
     // 纯血新版：只允许动态时长激活码 (CDK-开头)
@@ -243,6 +288,12 @@ CString CDNFGameCaptureDlg::CheckCloudBinding(CString key, CString hwid, long lo
     std::string jsonUtf8 = CW2A(jsonStr, CP_UTF8);
 
     HINTERNET hSession = WinHttpOpen(L"DNF Capture", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    // ==========================================
+    // 【关键修复 1】：设置 3 秒超时！绝不允许后台线程无限卡死！
+    // ==========================================
+    if (hSession) {
+        WinHttpSetTimeouts(hSession, 3000, 3000, 3000, 3000);
+    }
     HINTERNET hConnect = WinHttpConnect(hSession, L"verifykey-thaovfpoib.cn-hangzhou.fcapp.run", INTERNET_DEFAULT_HTTPS_PORT, 0);
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", L"/", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
 
@@ -319,11 +370,9 @@ void CDNFGameCaptureDlg::CheckTrialAndLicense() {
 
         // 基础算法校验（这里现在只有 CDK 能通过了）
         if (!inputKey.IsEmpty() && VerifyKey(inputKey, hwid)) {
-            // 离线校验通过，先允许进入软件
-            m_bIsAuthValid = true;
+            // 【关键修复 2】：删掉 m_bIsAuthValid = true; 
+            // 离线格式对了也没用，必须设为 false，等待云端判决！
             m_bIsTrial = false;
-
-            // 没有任何后门，所有通过离线校验的 CDK 必须过云端机器码这一关！
             long long duration = m_keyDuration;
             HWND hWnd = GetSafeHwnd();
 
@@ -832,11 +881,15 @@ void CDNFGameCaptureDlg::OnBnClickedReset() {
 }
 
 void CDNFGameCaptureDlg::OnBnClickedBrowseDir() {
-    // Win7 不支持 CFolderPickerDialog，用传统的 SHBrowseForFolder
+    bool wasRunning = m_bIsRunning;
+    KillTimer(1);
+    KillTimer(6);
+
     BROWSEINFO bi = { 0 };
     bi.hwndOwner = m_hWnd;
-    bi.lpszTitle = L"选择输出目录";
-    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    bi.lpszTitle = L"请选择输出目录：";
+    // 【终极绝杀】：只保留基础属性，绝对不能加 BIF_NEWDIALOGSTYLE！
+    bi.ulFlags = BIF_RETURNONLYFSDIRS;
 
     LPITEMIDLIST pidl = SHBrowseForFolder(&bi);
     if (pidl) {
@@ -844,6 +897,7 @@ void CDNFGameCaptureDlg::OnBnClickedBrowseDir() {
         if (SHGetPathFromIDList(pidl, path)) {
             m_outputDir = path;
             if (m_outputDir.Right(1) == L"\\") m_outputDir.TrimRight(L"\\");
+
             m_editOutDir.SetWindowText(m_outputDir);
             WritePrivateProfileString(L"Settings", L"OutputDir", m_outputDir, m_iniPath);
             WriteScoreToFile();
@@ -851,6 +905,9 @@ void CDNFGameCaptureDlg::OnBnClickedBrowseDir() {
         }
         CoTaskMemFree(pidl);
     }
+
+    if (wasRunning) SetTimer(1, 50, NULL);
+    SetTimer(6, 50, NULL);
 }
 
 BOOL CDNFGameCaptureDlg::OnEraseBkgnd(CDC* pDC) { return TRUE; }
@@ -3236,29 +3293,6 @@ HBRUSH CDNFGameCaptureDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor) {
 LRESULT CDNFGameCaptureDlg::OnUpdateAllUI(WPARAM wParam, LPARAM lParam) {
     SyncDataToTree();
     RefreshDisplay();
-    return 0;
-}
-
-// 接收来自后台线程的“坏消息”，由主线程安全弹窗
-LRESULT CDNFGameCaptureDlg::OnCloudAuthFail(WPARAM wParam, LPARAM lParam) {
-    CString* pCloudResult = (CString*)lParam;
-    if (pCloudResult) {
-        // 1. 立即标记授权失效，停止所有监控任务
-        m_bIsAuthValid = false;
-        if (m_bIsRunning) {
-            OnBnClickedStart(); // 模拟点击停止按钮，清理定时器和引擎
-        }
-
-        // 2. 格式化错误提示
-        CString errMsg;
-        errMsg.Format(L"授权校验失败：\r\n%s\r\n\r\n软件将限制使用部分功能。", (LPCTSTR)*pCloudResult);
-
-        // 3. 安全弹窗（主线程弹窗绝对不会闪退）
-        MessageBox(errMsg, L"安全拦截", MB_ICONERROR | MB_SYSTEMMODAL);
-
-        // 4. 释放子线程 new 出来的内存，防止内存泄漏
-        delete pCloudResult;
-    }
     return 0;
 }
 
