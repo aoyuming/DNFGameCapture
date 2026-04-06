@@ -2407,7 +2407,15 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd() {
         if (!strDupAliasAlert.IsEmpty()) alertMsg += L"⚠️ 名字冲突：" + strDupAliasAlert + L"\n";
         MessageBox(alertMsg, L"添加结果提示", MB_ICONWARNING | MB_OK);
     }
-    else { m_editQuickAdd.SetWindowText(PLACEHOLDER_TEXT); }
+    // ==========================================
+    // 【关键修复】：智能清空输入框
+    // 1. 只要主号/小号成功加进去了 (currentAdded > 0)，就强制清空！哪怕弹了警告也不留残影。
+    // 2. 如果全程没有任何报错 (比如改大比分)，也正常清空。
+    // 3. 只有当“主号没加进去且队伍满了”这种完全失败的情况，才保留文字让用户修改。
+        // ==========================================
+    if (currentAdded.size() > 0 || (strTeamFullAlert.IsEmpty() && strDupAliasAlert.IsEmpty())) {
+        m_editQuickAdd.SetWindowText(L"");
+    }
 
     SaveAliasDB();
     SaveConfigToFile();
@@ -2435,6 +2443,42 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd() {
                         break;
                     }
                 }
+                hChild = m_treePlayers.GetNextSiblingItem(hChild);
+            }
+            hRoot = m_treePlayers.GetNextSiblingItem(hRoot);
+        }
+    }
+
+    // ==========================================
+    // 【新增核心】：遍历树状图，只展开刚刚修改过的主号，并收起其他人
+    // ==========================================
+    if (currentAdded.size() > 0) {
+        HTREEITEM hRoot = m_treePlayers.GetRootItem();
+        while (hRoot) {
+            HTREEITEM hChild = m_treePlayers.GetChildItem(hRoot);
+            while (hChild) {
+                CString text = m_treePlayers.GetItemText(hChild);
+                int eqPos = text.Find(L'='); if (eqPos == -1) eqPos = text.Find(L'＝');
+                CString name = (eqPos != -1) ? text.Left(eqPos) : text;
+                name.Trim();
+
+                bool isModified = false;
+                for (const auto& addedName : currentAdded) {
+                    if (name == addedName) {
+                        isModified = true;
+                        break;
+                    }
+                }
+
+                if (isModified) {
+                    // 是刚操作过的玩家，展开它
+                    m_treePlayers.Expand(hChild, TVE_EXPAND);
+                }
+                else {
+                    // 【关键修复 2】：其他玩家无情收缩，保持界面清爽！
+                    m_treePlayers.Expand(hChild, TVE_COLLAPSE);
+                }
+
                 hChild = m_treePlayers.GetNextSiblingItem(hChild);
             }
             hRoot = m_treePlayers.GetNextSiblingItem(hRoot);
