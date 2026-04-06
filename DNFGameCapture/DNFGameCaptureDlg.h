@@ -17,7 +17,8 @@
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"2.3.3"
+#define CURRENT_VERSION L"2.3.4"    //当前版本号
+#define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
 
@@ -35,6 +36,7 @@
 #define WM_TRAY_MESSAGE         (WM_USER + 101) // 托盘图标消息
 #define WM_UPDATE_ALL_UI        (WM_USER + 105)// 【新增】：跨线程刷新 UI 专属消息
 #define WM_CLOUD_AUTH_FAIL      (WM_USER + 106) // 【新增】：云端授权失败专属消息
+#define WM_UPDATE_AUTH_TIME     (WM_USER + 107) // 【新增】：同步云端到期时间
 
 // =========================================================
 // 【编译环境切换开关】
@@ -272,9 +274,16 @@ private:
 
     // 【新版授权系统】
     void CheckTrialAndLicense();
+
+    // 【新增】：云端授权回调变量与消息
+    long long m_keyDuration = 0;     // 存放解析出的时长
+    long long m_cloudExpireTime = 0; // 存放云端返回的绝对到期时间
+
+    // 把下面这两行覆盖原来的声明
     bool VerifyKey(CString inputKey, CString machineID);
-    // 【新增下面这一行】：
-    CString CheckCloudBinding(CString key, CString hwid);
+    CString CheckCloudBinding(CString key, CString hwid, long long duration, long long& outExpTime);
+    afx_msg LRESULT OnUpdateAuthTime(WPARAM wParam, LPARAM lParam); // 【新增消息】
+
     CString GetMachineID();
 
     // 【新增】：仅在 Debug 模式下编译的调试输出函数

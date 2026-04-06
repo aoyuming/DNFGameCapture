@@ -161,6 +161,7 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     ON_MESSAGE(WM_CLOUD_AUTH_FAIL, &CDNFGameCaptureDlg::OnCloudAuthFail) // 【新增】
     ON_CBN_SELCHANGE(1010, &CDNFGameCaptureDlg::OnCbnSelchangeLeft)
     ON_CBN_SELCHANGE(1030, &CDNFGameCaptureDlg::OnCbnSelchangeCaptureEngine)
+    ON_MESSAGE(WM_UPDATE_AUTH_TIME, &CDNFGameCaptureDlg::OnUpdateAuthTime)
 
 
 END_MESSAGE_MAP()
@@ -195,55 +196,46 @@ CString CDNFGameCaptureDlg::GetMachineID() {
     return hwid;
 }
 
+LRESULT CDNFGameCaptureDlg::OnUpdateAuthTime(WPARAM wParam, LPARAM lParam) {
+    m_cloudExpireTime = (long long)lParam;
+    OutputDebugAuthInfo(); // 收到云端时间后，刷新面板
+    return 0;
+}
 
-// 本地卡密格式校验
-bool CDNFGameCaptureDlg::VerifyKey(CString inputKey, CString) {
-    if (inputKey.Left(4) != L"DNF-") return false;
+bool CDNFGameCaptureDlg::VerifyKey(CString inputKey, CString machineID) {
+    // ===================================
+    // 纯血新版：只允许动态时长激活码 (CDK-开头)
+    // ===================================
+    if (inputKey.Left(4) == L"CDK-") {
+        int firstDash = 3;
+        int secondDash = inputKey.Find(L'-', firstDash + 1);
+        int thirdDash = inputKey.Find(L'-', secondDash + 1);
 
-    int firstDash = 3;
-    int secondDash = inputKey.Find(L'-', firstDash + 1);
-    int thirdDash = inputKey.Find(L'-', secondDash + 1);
+        if (thirdDash != -1) {
+            CString durStr = inputKey.Mid(firstDash + 1, secondDash - firstDash - 1);
+            CString nonceStr = inputKey.Mid(secondDash + 1, thirdDash - secondDash - 1);
+            CString sigStr = inputKey.Mid(thirdDash + 1);
 
-    // 情况 A：新版三段式卡密
-    if (thirdDash != -1) {
-        CString expStr = inputKey.Mid(firstDash + 1, secondDash - firstDash - 1);
-        CString nonceStr = inputKey.Mid(secondDash + 1, thirdDash - secondDash - 1);
-        CString sigStr = inputKey.Mid(thirdDash + 1);
+            long long duration = wcstoll(durStr, NULL, 16);
+            unsigned int sig = wcstoul(sigStr, NULL, 16);
 
-        long long expTime = wcstoll(expStr, NULL, 16);
-        unsigned int sig = wcstoul(sigStr, NULL, 16);
+            CString signData; signData.Format(L"%llX-%s-MySuperSecretKey2026", duration, (LPCTSTR)nonceStr);
+            if (sig != CustomSimpleHash(std::string(CW2A(signData, CP_UTF8)))) return false;
 
-        CString signData;
-        signData.Format(L"%llX-%s-MySuperSecretKey2026", expTime, (LPCTSTR)nonceStr);
-
-        std::string ansiSignData = CW2A(signData, CP_UTF8);
-        if (sig != CustomSimpleHash(ansiSignData)) return false;
-
-        return (expTime >= 0xFFFFFFF0) || ((long long)time(nullptr) <= expTime);
+            m_keyDuration = duration;
+            m_cloudExpireTime = -1;    // 设置为正在请求云端的状态
+            return true;
+        }
     }
 
-    // 情况 B：旧版两段式卡密
-    if (secondDash != -1 && thirdDash == -1) {
-        CString expStr = inputKey.Mid(firstDash + 1, secondDash - firstDash - 1);
-        CString sigStr = inputKey.Mid(secondDash + 1);
-
-        long long expTime = wcstoll(expStr, NULL, 16);
-        unsigned int sig = wcstoul(sigStr, NULL, 16);
-
-        CString signData;
-        signData.Format(L"%llX-MySuperSecretKey2026", expTime);
-
-        std::string ansiSignData = CW2A(signData, CP_UTF8);
-        if (sig != CustomSimpleHash(ansiSignData)) return false;
-
-        return (expTime >= 0xFFFFFFF0) || ((long long)time(nullptr) <= expTime);
-    }
+    // 如果是 DNF- 开头的老卡，或者乱输的字符，统统在这里直接拦截！
     return false;
 }
 
-CString CDNFGameCaptureDlg::CheckCloudBinding(CString key, CString hwid) {
+CString CDNFGameCaptureDlg::CheckCloudBinding(CString key, CString hwid, long long duration, long long& outExpTime) {
     CString jsonStr;
-    jsonStr.Format(L"{\"key\": \"%s\", \"hwid\": \"%s\"}", key, hwid);
+    // 把 duration 一并传给 Node.js
+    jsonStr.Format(L"{\"key\": \"%s\", \"hwid\": \"%s\", \"duration\": %lld}", key, hwid, duration);
     std::string jsonUtf8 = CW2A(jsonStr, CP_UTF8);
 
     HINTERNET hSession = WinHttpOpen(L"DNF Capture", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
@@ -256,8 +248,7 @@ CString CDNFGameCaptureDlg::CheckCloudBinding(CString key, CString hwid) {
         WinHttpAddRequestHeaders(hRequest, headers.c_str(), (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
 
         if (WinHttpSendRequest(hRequest, NULL, 0, (LPVOID)jsonUtf8.c_str(), (DWORD)jsonUtf8.length(), (DWORD)jsonUtf8.length(), 0) && WinHttpReceiveResponse(hRequest, NULL)) {
-            std::string resp;
-            DWORD sz = 0, dl = 0;
+            std::string resp; DWORD sz = 0, dl = 0;
             while (WinHttpQueryDataAvailable(hRequest, &sz) && sz > 0) {
                 std::vector<char> buf(sz + 1, 0);
                 if (WinHttpReadData(hRequest, buf.data(), sz, &dl)) resp.append(buf.data(), dl);
@@ -265,21 +256,17 @@ CString CDNFGameCaptureDlg::CheckCloudBinding(CString key, CString hwid) {
 
             if (resp.find("\"status\":\"ok\"") != std::string::npos) {
                 resultMsg = L"OK";
+                // 【提取云端返回的 expireTime】
+                size_t pExp = resp.find("\"expireTime\":");
+                if (pExp != std::string::npos) {
+                    outExpTime = atoll(resp.c_str() + pExp + 13);
+                }
             }
             else {
                 size_t p1 = resp.find("\"msg\":\"");
                 if (p1 != std::string::npos) {
-                    p1 += 7;
-                    size_t p2 = resp.find("\"", p1);
-                    if (p2 != std::string::npos) {
-                        // 【修复核心】：提取 UTF-8 字符串
-                        std::string utf8Msg = resp.substr(p1, p2 - p1);
-                        // 使用 CA2W 并指定 CP_UTF8，将其完美转换为 CString
-                        resultMsg = CA2W(utf8Msg.c_str(), CP_UTF8);
-                    }
-                    else {
-                        resultMsg = L"解析异常失败";
-                    }
+                    size_t p2 = resp.find("\"", p1 + 7);
+                    if (p2 != std::string::npos) resultMsg = CA2W(resp.substr(p1 + 7, p2 - p1 - 7).c_str(), CP_UTF8);
                 }
             }
         }
@@ -326,32 +313,30 @@ void CDNFGameCaptureDlg::CheckTrialAndLicense() {
         CString inputKey(buf);
         inputKey.Trim();
 
-        // 基础算法校验（离线验证）
+        // 基础算法校验（这里现在只有 CDK 能通过了）
         if (!inputKey.IsEmpty() && VerifyKey(inputKey, hwid)) {
             // 离线校验通过，先允许进入软件
             m_bIsAuthValid = true;
             m_bIsTrial = false;
 
-            // --- 第二阶段：异步云端二次校验（防多开、防封卡） ---
-            // 核心：捕获当前窗口句柄，用于跨线程安全通信
+            // 没有任何后门，所有通过离线校验的 CDK 必须过云端机器码这一关！
+            long long duration = m_keyDuration;
             HWND hWnd = GetSafeHwnd();
 
-            std::thread([this, hWnd, inputKey, hwid]() {
-                // 在后台线程请求云端 API
-                CString cloudResult = CheckCloudBinding(inputKey, hwid);
+            std::thread([this, hWnd, inputKey, hwid, duration]() {
+                long long cloudExpTime = 0;
+                CString cloudResult = CheckCloudBinding(inputKey, hwid, duration, cloudExpTime);
 
-                // 如果云端返回不是 "OK"，说明卡密已被封或机器码不匹配
                 if (cloudResult != L"OK" && ::IsWindow(hWnd)) {
-                    // 【关键】：绝不在子线程弹窗！
-                    // 创建一个堆内存字符串，把错误信息“邮寄”给主线程
                     CString* pResult = new CString(cloudResult);
-                    if (!::PostMessage(hWnd, WM_CLOUD_AUTH_FAIL, 0, (LPARAM)pResult)) {
-                        delete pResult; // 如果发送失败（窗口已关闭），手动回收内存
-                    }
+                    ::PostMessage(hWnd, WM_CLOUD_AUTH_FAIL, 0, (LPARAM)pResult);
+                }
+                else if (cloudResult == L"OK" && ::IsWindow(hWnd)) {
+                    ::PostMessage(hWnd, WM_UPDATE_AUTH_TIME, 0, (LPARAM)cloudExpTime);
                 }
                 }).detach();
 
-            return; // 离线校验成功，直接返回
+            return;
         }
     }
 
@@ -427,18 +412,38 @@ void CDNFGameCaptureDlg::OutputDebugAuthInfo() {
         file.Close();
         CString inputKey(buf);
         inputKey.Trim();
-        print(L"本地卡密记录: " + inputKey, RGB(180, 180, 180));
 
-        int firstDash = 3;
-        int secondDash = inputKey.Find(L'-', firstDash + 1);
-        if (secondDash != -1) {
-            CString expStr = inputKey.Mid(firstDash + 1, secondDash - firstDash - 1);
-            long long keyExpTime = wcstoll(expStr, NULL, 16);
-            print(L"该卡密到期时间: " + FormatTimeStamp(keyExpTime), RGB(200, 200, 200));
+        // ==========================================
+        // 【新增】：卡密脱敏处理 (数据打码)
+        // ==========================================
+        CString displayKey = inputKey;
+        if (displayKey.GetLength() > 12) {
+            // 保留前 8 个字符 (例如 CDK-278D 或 DNF-69F6)
+            // 保留后 4 个字符 (例如 9A91)，中间全部用 **** 替换
+            displayKey = displayKey.Left(8) + L"****-****-" + displayKey.Right(4);
         }
-    }
-    else {
-        print(L"本地卡密记录: 未找到 (请点击下方[输入授权码]绑定)", RGB(150, 150, 150));
+
+        print(L"本地卡密记录: " + displayKey, RGB(180, 180, 180));
+
+        if (inputKey.Left(4) == L"CDK-") {
+            // ... 下面保持不变
+            if (!m_bIsAuthValid && m_cloudExpireTime == 0) {
+                print(L"该卡密状态: ❌ 无效卡密 (格式错误或被篡改)", RGB(255, 80, 80));
+            }
+            else if (m_cloudExpireTime > 0) {
+                print(L"该卡密到期时间: " + FormatTimeStamp(m_cloudExpireTime), RGB(200, 200, 200));
+            }
+            else if (m_cloudExpireTime == -1) {
+                print(L"该卡密到期时间: 正在向云端同步激活信息...", RGB(255, 165, 0));
+            }
+            else {
+                print(L"该卡密到期时间: 验证通过 (以云端记录为准)", RGB(0, 255, 100));
+            }
+        }
+        else {
+            // 【新增】：旧版卡密无情拒绝提示
+            print(L"该卡密状态: ❌ 已淘汰的旧版卡密，请联系管理员更换新版 CDK！", RGB(255, 80, 80));
+        }
     }
     print(L"==================================", RGB(255, 215, 0));
 }
@@ -448,7 +453,7 @@ void CDNFGameCaptureDlg::OutputDebugAuthInfo() {
 // ============================================================================
 CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_bIsAuthValid = false;
-    CheckTrialAndLicense();
+    
 
     m_hSingleInstanceMutex = CreateMutex(NULL, TRUE, L"Global\\DNFGameCapture_SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -513,7 +518,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     // 然后再执行 CreateEx ...
     CreateEx(0, cls, title, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
         100, 100, (int)(750 * WINDOW_SCALE), (int)(760 * WINDOW_SCALE), NULL, NULL);
-
+    CheckTrialAndLicense();
     InitTrayIcon();
 
     // 注册全局测试快捷键
@@ -698,30 +703,70 @@ void CDNFGameCaptureDlg::OnBnClickedStart() {
 }
 
 void CDNFGameCaptureDlg::OnBnClickedInputKey() {
-    wchar_t exePath[MAX_PATH];
-    GetModuleFileName(NULL, exePath, MAX_PATH);
-    CString path = exePath;
-    path = path.Left(path.ReverseFind(L'\\') + 1) + L"license.txt";
+    CString currentText;
+    m_btnInputKey.GetWindowText(currentText);
 
-    // 【完美修复】：静默处理文件丢失的情况
-    // 如果文件被删除，这里会自动创建一个空的 txt 文件，如果还在就不做任何破坏
-    CFile file;
-    if (file.Open(path, CFile::modeCreate | CFile::modeNoTruncate | CFile::modeWrite)) {
-        file.Close();
+    // ==========================================
+    // 阶段一：点击“输入授权码”，打开记事本，并将按钮变身
+    // ==========================================
+    if (currentText == L"输入授权码") {
+        wchar_t exePath[MAX_PATH];
+        GetModuleFileName(NULL, exePath, MAX_PATH);
+        CString path = exePath;
+        path = path.Left(path.ReverseFind(L'\\') + 1) + L"license.txt";
+
+        CFile file;
+        if (file.Open(path, CFile::modeCreate | CFile::modeNoTruncate | CFile::modeWrite)) {
+            file.Close();
+        }
+
+        ShellExecute(NULL, L"open", L"notepad.exe", path, NULL, SW_SHOWNORMAL);
+
+        // 【关键】：改变按钮文字
+        m_btnInputKey.SetWindowText(L"应用授权码");
+
+        // 更新弹窗提示语
+        MessageBox(L"请在打开的 license.txt 中粘贴新卡密并保存。\r\n\r\n保存完成后，请点击软件上的【应用授权码】即可生效！", L"第一步：输入授权码", MB_ICONINFORMATION);
     }
+    // ==========================================
+    // 阶段二：点击“应用授权码”，校验卡密，并将按钮还原
+    // ==========================================
+    else {
+        // 1. 重新读取卡密并执行静默检查
+        CheckTrialAndLicense();
 
-    // 调起记事本，此时无论如何文件都是存在的，直接打开
-    ShellExecute(NULL, L"open", L"notepad.exe", path, NULL, SW_SHOWNORMAL);
+        // 2. 清空旧面板，强制打印最新的状态
+        if (m_editVisualLogs.m_hWnd) {
+            m_editVisualLogs.SetWindowText(L"");
+        }
+        OutputDebugAuthInfo();
 
-    MessageBox(L"请在打开的 license.txt 中粘贴新卡密并保存。\r\n\r\n保存后关闭记事本，点击软件上的【应用修改】即可重新验证授权状态。", L"输入授权码", MB_ICONINFORMATION);
+        m_status.SetWindowText(L"授权码校验已触发");
+
+        // 3. 【关键】：将按钮文字还原，完成闭环
+        m_btnInputKey.SetWindowText(L"输入授权码");
+    }
 }
 
 void CDNFGameCaptureDlg::OnBnClickedApply() {
-    SaveConfigToFile();
-    SyncDataToTree();
-    // 重新执行静默检查，但不输出长串授权信息
-    CheckTrialAndLicense();
+    // ==========================================
+    // 1. 纯粹的数据落地：保存所有战绩和配置
+    // ==========================================
+    SaveAliasDB();      // 保存小号自动补全库
+    SaveConfigToFile(); // 保存战局人员信息
+    WriteScoreToFile(); // 刷新输出给 OBS 用的直播 TXT 文本
+
+    // ==========================================
+    // 2. 纯粹的视觉刷新：同步左右界面的显示
+    // ==========================================
+    SyncDataToTree();   // 刷新左侧树状图
+    RefreshDisplay();   // 刷新右侧红蓝阵营对比图
+
+    // ==========================================
+    // 3. 状态反馈
+    // ==========================================
     m_status.SetWindowText(L"应用修改成功");
+    AppLog(L"💾 [系统] 对局信息与战绩已手动保存", RGB(0, 255, 100));
 }
 
 void CDNFGameCaptureDlg::OnBnClickedFlip() { m_bFlipSides = (m_chkFlip.GetCheck() == BST_CHECKED); WriteScoreToFile(); RefreshDisplay(); }
@@ -1886,8 +1931,6 @@ void CDNFGameCaptureDlg::CheckForUpdates(bool bSilent) {
     // ==========================================
     // 终点：真正的更新处理逻辑
     // ==========================================
-    const CString BRIDGE_VERSION = L"2.2.0";  // 桥接版本号
-
     if (currentVersion == BRIDGE_VERSION) {
         AppLog(L"═══════════════════════════════════", RGB(255, 215, 0));
         AppLog(L"🔄 [桥接升级] 检测到这是过渡版本", RGB(255, 215, 0));
