@@ -128,6 +128,8 @@ bool WGCCapture::StartCapture() {
 
     try {
         auto size = m_captureItem.Size();
+        m_captureWidth = size.Width;
+        m_captureHeight = size.Height;
 
         m_framePool = Direct3D11CaptureFramePool::CreateFreeThreaded(
             m_winrtDevice,
@@ -149,7 +151,7 @@ bool WGCCapture::StartCapture() {
         return true;
     }
     catch (...) {
-        if (m_session) { m_session.Close(); m_session = nullptr; }
+        if (m_session) { m_session.Close();   m_session = nullptr; }
         if (m_framePool) { m_framePool.Close(); m_framePool = nullptr; }
         return false;
     }
@@ -173,14 +175,28 @@ void WGCCapture::OnFrameArrived(
     Direct3D11CaptureFramePool const& sender,
     winrt::Windows::Foundation::IInspectable const&)
 {
-    // ★★★ 核心修复：空指针保护 ★★★
     if (!m_isCapturing || !m_d3dDevice || !m_d3dContext) return;
 
     auto frame = sender.TryGetNextFrame();
     if (!frame) return;
 
     try {
+        // ★ 检测窗口尺寸是否变化，若变化则重建帧池
+        auto newSize = frame.ContentSize();
+        if (newSize.Width != m_captureWidth || newSize.Height != m_captureHeight) {
+            m_captureWidth = newSize.Width;
+            m_captureHeight = newSize.Height;
+            m_framePool.Recreate(
+                m_winrtDevice,
+                DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                2,
+                { m_captureWidth, m_captureHeight });
+            frame.Close();
+            return; // 本帧丢弃，下一帧就是新尺寸了
+        }
+
         auto surface = frame.Surface();
+        // ... 后面的纹理拷贝逻辑不变 ...
 
         auto access = surface.as<
             ::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();

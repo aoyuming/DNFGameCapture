@@ -65,6 +65,10 @@ private:
     GraphicsCaptureSession m_session{ nullptr };
     IDirect3DDevice m_winrtDevice{ nullptr };
 
+    winrt::event_token m_closedToken;
+    int m_captureWidth = 0;
+    int m_captureHeight = 0;
+
     // 帧到达事件令牌
     winrt::event_token m_frameArrivedToken;
 
