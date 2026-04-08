@@ -18,7 +18,7 @@
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"2.4.0"    //当前版本号
+#define CURRENT_VERSION L"2.5.0"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -197,10 +197,17 @@ private:
     const int ID_CMB_TARGET_WINDOW = 1031; // 【新增】：目标选择下拉框
     CComboBox m_cmbTargetWindow;
     afx_msg void OnCbnDropdownTargetWindow(); // 下拉展开时刷新列表
-    afx_msg void OnCbnSelchangeTargetWindow();
+    afx_msg void OnCbnCloseupTargetWindow();
+    // 【新增】：去标题栏复选框
+    CButton m_chkCropTitle;
+
     void RefreshTargetList(); // 刷新目标列表的方法
     static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam); // 遍历窗口的回调函数
     CameraCapture* m_pCamera = nullptr; // 摄像头引擎实例
+    std::atomic<bool> m_bWGCInitPending{ false };  // WGC 正在后台初始化中
+    HWND m_hWGCInitTarget = NULL;                  // 正在初始化的目标窗口
+    afx_msg LRESULT OnWGCInitDone(WPARAM wParam, LPARAM lParam);
+    std::atomic<int> m_nWGCInitGeneration{ 0 };  // WGC 初始化代际计数
 
 private:
 

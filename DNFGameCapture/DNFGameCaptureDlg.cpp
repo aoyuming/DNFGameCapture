@@ -160,7 +160,8 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     ON_CBN_SELCHANGE(1030, &CDNFGameCaptureDlg::OnCbnSelchangeCaptureEngine)
     ON_MESSAGE(WM_UPDATE_AUTH_TIME, &CDNFGameCaptureDlg::OnUpdateAuthTime)
     ON_CBN_DROPDOWN(1031, &CDNFGameCaptureDlg::OnCbnDropdownTargetWindow)
-    ON_CBN_SELCHANGE(1031, &CDNFGameCaptureDlg::OnCbnSelchangeTargetWindow)
+    ON_CBN_CLOSEUP(1031, &CDNFGameCaptureDlg::OnCbnCloseupTargetWindow)
+    ON_MESSAGE(WM_USER + 200, &CDNFGameCaptureDlg::OnWGCInitDone)
 
 
 END_MESSAGE_MAP()
@@ -1672,10 +1673,17 @@ void CDNFGameCaptureDlg::ManualTriggerKill(int killSide) {
 }
 
 
+LRESULT CDNFGameCaptureDlg::OnWGCInitDone(WPARAM wParam, LPARAM lParam) {
+    // 【已被废弃的异步回调，内容留空】
+    return 0;
+}
+
 void CDNFGameCaptureDlg::Capture() {
-    // ==========================================
-    // 路由分发器：根据用户下拉框选择决定数据源
-    // ==========================================
+    // ★★★ 下拉框打开期间，完全跳过捕获，防止滚动时反复初始化引擎 ★★★
+    if (m_cmbTargetWindow.m_hWnd && m_cmbTargetWindow.GetDroppedState()) {
+        return;
+    }
+
     DWORD_PTR targetData = 0;
     if (m_cmbTargetWindow.m_hWnd && m_cmbTargetWindow.GetCurSel() != -1) {
         targetData = m_cmbTargetWindow.GetItemData(m_cmbTargetWindow.GetCurSel());
@@ -1686,26 +1694,23 @@ void CDNFGameCaptureDlg::Capture() {
     // ==========================================
     if (targetData & 0x80000000) {
         int camIndex = targetData & 0x7FFFFFFF;
-        
-        // 懒加载启动摄像头
         if (!m_pCamera) {
             m_pCamera = new CameraCapture();
             if (m_pCamera->Initialize(camIndex)) {
                 m_pCamera->StartCapture();
                 AppLog(L"📹 [摄像头] 已成功连接，正在出流", RGB(0, 255, 100));
-            } else {
+            }
+            else {
                 delete m_pCamera; m_pCamera = nullptr;
                 AppLog(L"❌ [摄像头] 无法连接或被占用", RGB(255, 80, 80));
                 return;
             }
         }
 
-        // 直接从摄像头引擎提取画面给 m_bmp
         int camW = 0, camH = 0;
         HBITMAP hCamFrame = m_pCamera->GetLatestFrame(camW, camH);
         if (hCamFrame && camW > 0 && camH > 0) {
             std::lock_guard<std::mutex> lock(g_bmpMutex);
-            // 分辨率变化时清理历史缓存
             if (camW != m_w || camH != m_h) {
                 for (int i = 0; i < MAX_HISTORY_FRAMES; i++) {
                     if (m_historyBmps[i]) { ::DeleteObject(m_historyBmps[i]); m_historyBmps[i] = nullptr; }
@@ -1718,28 +1723,25 @@ void CDNFGameCaptureDlg::Capture() {
             m_h = camH;
         }
         else if (hCamFrame) {
-            ::DeleteObject(hCamFrame); // 防孤儿句柄泄漏兜底
+            ::DeleteObject(hCamFrame);
         }
-        
-        // 摄像头模式下直接进入底部的“渲染预览图逻辑”，完全跳过下方的窗口寻找和截图逻辑
     }
     // ==========================================
-    // 路线 B：【窗口模式】(系统默认游戏 or 用户指定进程)
+    // 路线 B：【窗口模式】
     // ==========================================
     else {
         HWND hGame = NULL;
-        
         if (targetData == 0) {
-            // 完美保留了你的云端测试宏判断！
 #if ENABLE_CLOUD_TEST_MODE
             hGame = ::GetDesktopWindow();
 #else
             hGame = ::FindWindow(NULL, DNF_WINDOW_NAME);
 #endif
-        } else {
-            hGame = (HWND)targetData; // 用户指定的特定进程句柄
+        }
+        else {
+            hGame = (HWND)targetData;
             if (!::IsWindow(hGame)) {
-                m_cmbTargetWindow.SetCurSel(0); // 窗口关了自动切回默认
+                m_cmbTargetWindow.SetCurSel(0);
                 return;
             }
         }
@@ -1754,27 +1756,35 @@ void CDNFGameCaptureDlg::Capture() {
             return;
         }
 
-        // 2. 尝试激活 WGC 引擎
+        // ==========================================
+        // 2. 同步安全 WGC 初始化 (防假死装甲护体)
+        // ==========================================
 #if !ENABLE_CLOUD_TEST_MODE
         if (!m_bUseWGC && (m_nCaptureEngineChoice == 0 || m_nCaptureEngineChoice == 1)) {
             static HWND s_lastTryHwnd = NULL;
             static DWORD s_lastTryTime = 0;
             DWORD now = GetTickCount();
 
-            // 【关键修复 1】：如果用户切换了目标窗口，立即重试 WGC，跳过 2 秒冷却！
-            // 防止在冷却期内被迫使用 PrintWindow 导致卡死
             if (hGame != s_lastTryHwnd || now - s_lastTryTime > 2000) {
                 s_lastTryTime = now;
                 s_lastTryHwnd = hGame;
-                try {
-                    if (WGCCapture::IsSupported()) {
-                        if (!m_pWGC) m_pWGC = new WGCCapture();
-                        if (m_pWGC->Initialize(hGame) && m_pWGC->StartCapture()) m_bUseWGC = true;
-                        else { delete m_pWGC; m_pWGC = nullptr; }
+
+                DWORD_PTR dwResult = 0;
+                if (::SendMessageTimeout(hGame, WM_NULL, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 50, &dwResult) != 0) {
+                    try {
+                        if (WGCCapture::IsSupported()) {
+                            if (!m_pWGC) m_pWGC = new WGCCapture();
+                            if (m_pWGC->Initialize(hGame) && m_pWGC->StartCapture()) {
+                                m_bUseWGC = true;
+                            }
+                            else {
+                                delete m_pWGC; m_pWGC = nullptr;
+                            }
+                        }
                     }
-                }
-                catch (...) {
-                    if (m_pWGC) { delete m_pWGC; m_pWGC = nullptr; }
+                    catch (...) {
+                        if (m_pWGC) { delete m_pWGC; m_pWGC = nullptr; }
+                    }
                 }
             }
         }
@@ -1784,17 +1794,55 @@ void CDNFGameCaptureDlg::Capture() {
         int  capturedW = 0, capturedH = 0;
         HBITMAP hCapturedBmp = nullptr;
 
-        // 3. WGC 捕获逻辑
+        // 3. WGC 捕获
         if (m_bUseWGC && m_pWGC) {
             int w = 0, h = 0;
             HBITMAP hFrame = m_pWGC->GetLatestFrame(w, h);
             if (hFrame && w > 0 && h > 0) {
+
+                // 【绝杀】：WGC 暴力切除标题栏与边框手术 (避开Win11幽灵阴影)
+                // ==========================================
+                if (m_chkCropTitle.m_hWnd && m_chkCropTitle.GetCheck() == BST_CHECKED && hGame) {
+                    RECT cRect; ::GetClientRect(hGame, &cRect);
+                    int cW = cRect.right - cRect.left;
+                    int cH = cRect.bottom - cRect.top;
+
+                    // 计算物理边框：(WGC截图宽度 - 实际客户区宽度) / 2 = 单侧边框厚度
+                    int borderX = max(0, (w - cW) / 2);
+                    // 标题栏高度：(WGC截图高度 - 实际客户区高度) - 底部边框
+                    int borderY = max(0, h - cH - borderX);
+
+                    // 只有当高度差确实存在（有标题栏），且尺寸合法时，才执行手术
+                    if (borderY > 0 && cW > 0 && cH > 0 && (borderX + cW) <= w && (borderY + cH) <= h) {
+                        HDC hdcScreen = ::GetDC(NULL);
+                        HBITMAP hCropped = ::CreateCompatibleBitmap(hdcScreen, cW, cH);
+                        HDC hMemDst = ::CreateCompatibleDC(hdcScreen);
+                        HDC hMemSrc = ::CreateCompatibleDC(hdcScreen);
+                        HGDIOBJ oldDst = ::SelectObject(hMemDst, hCropped);
+                        HGDIOBJ oldSrc = ::SelectObject(hMemSrc, hFrame);
+
+                        // 精准从 WGC 原图的 (borderX, borderY) 开始抠出纯净画面
+                        ::BitBlt(hMemDst, 0, 0, cW, cH, hMemSrc, borderX, borderY, SRCCOPY);
+
+                        ::SelectObject(hMemDst, oldDst); ::SelectObject(hMemSrc, oldSrc);
+                        ::DeleteDC(hMemDst); ::DeleteDC(hMemSrc); ::ReleaseDC(NULL, hdcScreen);
+
+                        ::DeleteObject(hFrame); // 销毁带标题栏的原图
+                        hFrame = hCropped;      // 替换为纯净的图！
+                        w = cW; h = cH;         // 更新全局分辨率
+                    }
+                }
+
                 if (!m_bAlreadyPrompted && m_nCaptureEngineChoice == 0 && IsBitmapBlank(hFrame, w, h)) {
                     m_nBlankFrameCount++;
                     if (m_nBlankFrameCount >= 5) {
                         AppLog(L"⚠️ [捕获引擎] WGC 持续黑屏,自动降级为 PrintWindow", RGB(255, 165, 0));
                         m_bUseWGC = false;
+
                         m_pWGC->StopCapture();
+                        delete m_pWGC;
+                        m_pWGC = nullptr;
+
                         m_nBlankFrameCount = 0;
                         DeleteObject(hFrame);
                         goto fallback_printwindow;
@@ -1805,13 +1853,9 @@ void CDNFGameCaptureDlg::Capture() {
                 }
 
                 std::lock_guard<std::mutex> lock(g_bmpMutex);
-
                 if (w != m_w || h != m_h) {
                     for (int i = 0; i < MAX_HISTORY_FRAMES; i++) {
-                        if (m_historyBmps[i]) {
-                            ::DeleteObject(m_historyBmps[i]);
-                            m_historyBmps[i] = nullptr;
-                        }
+                        if (m_historyBmps[i]) { ::DeleteObject(m_historyBmps[i]); m_historyBmps[i] = nullptr; }
                     }
                     m_historyIdx = 0;
                 }
@@ -1822,110 +1866,94 @@ void CDNFGameCaptureDlg::Capture() {
                 m_h = h;
             }
             else if (hFrame) {
-                ::DeleteObject(hFrame); // 【关键修复】：WGC 孤儿句柄防泄漏兜底！
+                ::DeleteObject(hFrame);
             }
         }
-        // 4. PrintWindow 兼容模式逻辑
+        // 4. PrintWindow / BitBlt 兼容模式
         else {
         fallback_printwindow:
-            
-            // ==========================================
-            // 【终极物理断流阀门】：绝对不可能被跳过！
-            // ==========================================
             static DWORD s_lastPwTime = 0;
             DWORD now = GetTickCount();
-            if (now - s_lastPwTime < 333) {
-                return; // 连大括号都不进，直接掐断整个 Capture 函数的执行！
-            }
+            if (now - s_lastPwTime < 333) return;
             s_lastPwTime = now;
 
             {
                 std::lock_guard<std::mutex> lock(g_bmpMutex);
 #if ENABLE_CLOUD_TEST_MODE
-                m_w = GetSystemMetrics(SM_CXSCREEN);
-                m_h = GetSystemMetrics(SM_CYSCREEN);
+                m_w = GetSystemMetrics(SM_CXSCREEN); m_h = GetSystemMetrics(SM_CYSCREEN);
                 if (m_w > 0 && m_h > 0) {
                     HDC hdcScreen = ::GetDC(NULL);
                     if (!m_bmp) m_bmp = ::CreateCompatibleBitmap(hdcScreen, m_w, m_h);
                     HDC hMem = ::CreateCompatibleDC(hdcScreen);
                     HGDIOBJ old = ::SelectObject(hMem, m_bmp);
                     ::BitBlt(hMem, 0, 0, m_w, m_h, hdcScreen, 0, 0, SRCCOPY);
-                    ::SelectObject(hMem, old);
-                    ::DeleteDC(hMem);
-                    ::ReleaseDC(NULL, hdcScreen);
-
-                    capturedW = m_w; capturedH = m_h; hCapturedBmp = m_bmp;
-                    bNeedBlankCheck = false;
+                    ::SelectObject(hMem, old); ::DeleteDC(hMem); ::ReleaseDC(NULL, hdcScreen);
+                    capturedW = m_w; capturedH = m_h; hCapturedBmp = m_bmp; bNeedBlankCheck = false;
                 }
 #else
-                RECT rc;
-                ::GetClientRect(hGame, &rc);
-                int newW = rc.right - rc.left;
-                int newH = rc.bottom - rc.top;
+                // ==========================================
+                // 【绝杀修复】：完美适配去标题栏，不留黑边！
+                // ==========================================
+                bool isCrop = (m_chkCropTitle.m_hWnd && m_chkCropTitle.GetCheck() == BST_CHECKED);
+                int newW = 0, newH = 0;
 
-                if (newW > 0 && newH > 0) 
-                {
-                    // 完美保留了你的 PrintWindow 分辨率变化防崩溃修复！
+                // 核心：是否截取整个窗口(包含外部边框和标题栏)
+                if (!isCrop) {
+                    RECT wRect; ::GetWindowRect(hGame, &wRect);
+                    newW = wRect.right - wRect.left;
+                    newH = wRect.bottom - wRect.top;
+                }
+                else {
+                    RECT cRect; ::GetClientRect(hGame, &cRect);
+                    newW = cRect.right - cRect.left;
+                    newH = cRect.bottom - cRect.top;
+                }
+
+                if (newW > 0 && newH > 0) {
                     if (!m_bmp || newW != m_w || newH != m_h) {
-                        if (m_bmp) {
-                            ::DeleteObject(m_bmp);
-                            m_bmp = nullptr;
-                        }
-                        HDC hdc = ::GetDC(hGame);
-                        m_bmp = ::CreateCompatibleBitmap(hdc, newW, newH);
-                        ::ReleaseDC(hGame, hdc);
+                        if (m_bmp) { ::DeleteObject(m_bmp); m_bmp = nullptr; }
+                        HDC hdc = ::GetDC(hGame); m_bmp = ::CreateCompatibleBitmap(hdc, newW, newH); ::ReleaseDC(hGame, hdc);
                     }
-                    m_w = newW;
-                    m_h = newH;
+                    m_w = newW; m_h = newH;
 
                     HDC hGameDC = ::GetDC(hGame);
                     HDC hMemDC = ::CreateCompatibleDC(hGameDC);
                     HGDIOBJ oldBmp = ::SelectObject(hMemDC, m_bmp);
 
-                    // 【关键修复 2】：绝对防卡死装甲 2.0 (分流渲染)
-                    if (targetData == 0) {
-                        // A. 默认目标 (DNF游戏)：
-                        // DNF 引擎特殊，必须用 PrintWindow。加上 50ms 心跳探测防假死。
-                        DWORD_PTR dwResult = 0;
-                        if (::SendMessageTimeout(hGame, WM_NULL, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 50, &dwResult) != 0) {
-                            ::PrintWindow(hGame, hMemDC, 2);
-                        }
-                    }
-                    else {
-                        // B. 指定目标 (QQ、加速器、OBS 等现代软件)：
-                        // 绝对不能用 PrintWindow 惊醒它们的休眠线程，否则 100% 连坐死锁！
-                        // 直接使用 Windows 底层的 DWM 显存映射拷贝，0延迟，绝对不卡！
-                        ::BitBlt(hMemDC, 0, 0, newW, newH, hGameDC, 0, 0, SRCCOPY);
-                    }
-                    ::SelectObject(hMemDC, oldBmp);
-                    ::DeleteDC(hMemDC);
-                    ::ReleaseDC(hGame, hGameDC);
+                    // ==========================================
+                    // 【极度关键】：刷入纯黑底漆！
+                    // ==========================================
+                    RECT fillRect = { 0, 0, newW, newH };
+                    ::FillRect(hMemDC, &fillRect, (HBRUSH)GetStockObject(BLACK_BRUSH));
 
-                    capturedW = m_w;
-                    capturedH = m_h;
-                    hCapturedBmp = m_bmp;
-                    bNeedBlankCheck = !m_bAlreadyPrompted;
+                    // ==========================================
+                    // 【终极合并】：废弃 BitBlt，全系启用 DWM 穿透捕获！
+                    // 无论是 DNF 还是 OBS，只要没假死，统统能抓到最新的硬件加速实时画面！
+                    // ==========================================
+                    DWORD_PTR dwResult = 0;
+                    if (::SendMessageTimeout(hGame, WM_NULL, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 50, &dwResult) != 0) {
+                        // 参数 2: PW_RENDERFULLCONTENT (捕获带边框的硬件加速窗口)
+                        // 参数 3: PW_CLIENTONLY | PW_RENDERFULLCONTENT (精准剔除标题栏)
+                        ::PrintWindow(hGame, hMemDC, isCrop ? 3 : 2);
+                    }
+
+                    ::SelectObject(hMemDC, oldBmp); ::DeleteDC(hMemDC); ::ReleaseDC(hGame, hGameDC);
+                    capturedW = m_w; capturedH = m_h; hCapturedBmp = m_bmp; bNeedBlankCheck = !m_bAlreadyPrompted;
                 }
 #endif
             }
-
             if (bNeedBlankCheck && IsBitmapBlank(hCapturedBmp, capturedW, capturedH)) {
                 m_nBlankFrameCount++;
                 if (m_nBlankFrameCount >= 5) {
                     m_bAlreadyPrompted = true;
                     if (!IsRunningAsAdmin()) {
                         KillTimer(m_bIsRunning ? 1 : 6);
-
-                        int ret = MessageBox(
-                            L"⚠️ 检测到画面连续黑屏\r\n请尝试以管理员身份运行软件。",
-                            L"权限不足", MB_ICONWARNING | MB_YESNO | MB_SYSTEMMODAL);
+                        int ret = MessageBox(L"⚠️ 检测到画面连续黑屏\r\n请尝试以管理员身份运行软件。", L"权限不足", MB_ICONWARNING | MB_YESNO | MB_SYSTEMMODAL);
                         if (ret == IDYES) {
                             if (m_bIsRunning) { m_bIsRunning = FALSE; KillTimer(3); }
-                            if (!RelaunchAsAdmin())
-                                MessageBox(L"自动提权失败，请手动管理员运行", L"错误", MB_ICONERROR);
+                            if (!RelaunchAsAdmin()) MessageBox(L"自动提权失败，请手动管理员运行", L"错误", MB_ICONERROR);
                             return;
                         }
-
                         if (m_bIsRunning) SetTimer(1, 50, NULL);
                         else              SetTimer(6, 200, NULL);
                     }
@@ -1937,21 +1965,15 @@ void CDNFGameCaptureDlg::Capture() {
         }
     }
 
-    // ==========================================
-    // 5. 渲染预览图逻辑 (不论是相机还是窗口，最终都汇聚于此)
-    // ==========================================
+    // 5. 渲染预览图
+    if (m_w <= 0 || m_h <= 0) return;
     CRect client; GetClientRect(&client);
     int splitY = max(100, client.bottom - (int)(390 * WINDOW_SCALE));
     CRect topHalf(0, 0, client.right, splitY);
     float aspect = (float)m_w / (float)m_h;
-    int drawW = topHalf.Width();
-    int drawH = (int)(drawW / aspect);
-    if (drawH > topHalf.Height()) {
-        drawH = topHalf.Height();
-        drawW = (int)(drawH * aspect);
-    }
-    int dX = topHalf.left + (topHalf.Width() - drawW) / 2;
-    int dY = topHalf.top + (topHalf.Height() - drawH) / 2;
+    int drawW = topHalf.Width(); int drawH = (int)(drawW / aspect);
+    if (drawH > topHalf.Height()) { drawH = topHalf.Height(); drawW = (int)(drawH * aspect); }
+    int dX = topHalf.left + (topHalf.Width() - drawW) / 2; int dY = topHalf.top + (topHalf.Height() - drawH) / 2;
     m_previewRect = CRect(dX, dY, dX + drawW, dY + drawH);
     InvalidateRect(&topHalf, FALSE);
 }
@@ -2110,26 +2132,27 @@ void CDNFGameCaptureDlg::OnPaint() {
 
     if (!m_status.m_hWnd) {
         m_font.CreatePointFont(95, L"微软雅黑");
+
+        // ==========================================
+        // 【第一排】：系统控制栏 (主打宽敞，显示全称)
+        // ==========================================
         int row1_Y = splitY + 5;
 
-        // 1. 翻转按钮
         m_chkFlip.Create(L"翻转红蓝", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            CRect(10, row1_Y, 100, row1_Y + 25), this, ID_CHK_FLIP);
+            CRect(10, row1_Y, 95, row1_Y + 25), this, ID_CHK_FLIP);
         m_chkFlip.SetFont(&m_font);
 
-        // 2. 说明按钮
         m_btnHelp.Create(L"说明", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            CRect(110, row1_Y, 170, row1_Y + 25), this, 1021);
+            CRect(100, row1_Y, 150, row1_Y + 25), this, 1021);
         m_btnHelp.SetFont(&m_font);
 
-        // 3. 状态文本
         m_status.Create(L"就绪", WS_CHILD | WS_VISIBLE | SS_CENTER,
-            CRect(180, row1_Y + 4, 260, row1_Y + 25), this, 1003);
+            CRect(155, row1_Y + 4, 215, row1_Y + 25), this, 1003);
         m_status.SetFont(&m_font);
 
-        // 4. 【恢复显示】捕获引擎选择 (WGC / PrintWindow)
+        // 引擎选择拉宽
         m_cmbCaptureEngine.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-            CRect(270, row1_Y, 410, row1_Y + 200), this, 1030);
+            CRect(220, row1_Y, 380, row1_Y + 200), this, 1030);
         m_cmbCaptureEngine.SetFont(&m_font);
         if (m_cmbCaptureEngine.GetCount() == 0) {
             m_cmbCaptureEngine.AddString(L"🔄 自动选择引擎");
@@ -2140,40 +2163,27 @@ void CDNFGameCaptureDlg::OnPaint() {
             m_cmbCaptureEngine.SetCurSel(m_nCaptureEngineChoice);
         }
 
-        // 5. 【新增】目标窗口/摄像头选择
+        // 目标窗口占据大部分空间，保证长名字能看全
         m_cmbTargetWindow.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-            CRect(420, row1_Y, 650, row1_Y + 400), this, 1031);
+            CRect(385, row1_Y, r.right - 100, row1_Y + 400), this, 1031);
         m_cmbTargetWindow.SetFont(&m_font);
-        RefreshTargetList(); // 初始化列表
+        RefreshTargetList();
 
-        // 从配置文件读取上次的选择
-        m_nCaptureEngineChoice = GetPrivateProfileInt(
-            L"Settings", L"CaptureEngine", 0, m_iniPath);
-        if (m_nCaptureEngineChoice < 0 || m_nCaptureEngineChoice > 2)
-            m_nCaptureEngineChoice = 0;
-        m_cmbCaptureEngine.SetCurSel(m_nCaptureEngineChoice);
+        // 去标题栏贴紧右边缘，并且限制长度防闪烁
+        m_chkCropTitle.Create(L"去标题栏", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            CRect(r.right - 95, row1_Y, r.right - 10, row1_Y + 25), this, 1032);
+        m_chkCropTitle.SetFont(&m_font);
+        m_chkCropTitle.SetCheck(BST_CHECKED);
 
-
-        int cmbW = 150;
-        m_cmbRight.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-            CRect(r.right - 10 - cmbW, row1_Y, r.right - 10, row1_Y + 300), this, 1009);
-        m_cmbRight.SetFont(&m_font);
-        m_cmbRight.AddString(L"[蓝]自动");
-        m_cmbRight.SetCurSel(0);
-
-        m_cmbLeft.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-            CRect(r.right - 10 - cmbW * 2 - 10, row1_Y, r.right - 10 - cmbW - 10, row1_Y + 300), this, 1010);
-        m_cmbLeft.SetFont(&m_font);
-        m_cmbLeft.AddString(L"[红]自动");
-        m_cmbLeft.SetCurSel(0);
-
+        // ==========================================
+        // 【第二排】：数据输入与追踪配置栏 (左右完美对称)
+        // ==========================================
+        int row2_Y = row1_Y + 35; // 垂直下移
         int halfW = (r.right - 30) / 2;
-        int row2_Y = row1_Y + 30;
-        int row2_Bottom = r.bottom - (int)(75 * WINDOW_SCALE);
-        int scoreH = (int)(150 * WINDOW_SCALE);
 
+        // --- 左半边：人员录入 ---
         m_cmbTeamSelect.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-            CRect(10, row2_Y + 10, 80, row2_Y + 150), this, 1024);
+            CRect(10, row2_Y, 80, row2_Y + 200), this, 1024);
         m_cmbTeamSelect.SetFont(&m_font);
         if (m_cmbTeamSelect.GetCount() == 0) {
             m_cmbTeamSelect.AddString(L"[红队]");
@@ -2182,31 +2192,61 @@ void CDNFGameCaptureDlg::OnPaint() {
         }
 
         m_editQuickAdd.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_MULTILINE | ES_WANTRETURN | WS_VSCROLL,
-            CRect(90, row2_Y, halfW - 60, row2_Y + 45), this, 1025);
+            CRect(85, row2_Y, halfW - 55, row2_Y + 30), this, 1025);
         m_editQuickAdd.SetFont(&m_font);
         m_editQuickAdd.SetWindowText(PLACEHOLDER_TEXT);
 
         m_btnQuickAdd.Create(L"添加", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            CRect(halfW - 55, row2_Y, 10 + halfW, row2_Y + 45), this, 1022);
+            CRect(halfW - 50, row2_Y, 10 + halfW, row2_Y + 28), this, 1022);
         m_btnQuickAdd.SetFont(&m_font);
+
+        // --- 右半边：红蓝追踪下拉框 (移到这里极其合理) ---
+        int rightAreaW = (r.right - 10) - (20 + halfW);
+        int trackerW = (rightAreaW - 10) / 2;
+
+        m_cmbLeft.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+            CRect(20 + halfW, row2_Y, 20 + halfW + trackerW, row2_Y + 300), this, 1010);
+        m_cmbLeft.SetFont(&m_font);
+        m_cmbLeft.AddString(L"[红] 左侧自动追踪");
+        m_cmbLeft.SetCurSel(0);
+
+        m_cmbRight.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+            CRect(20 + halfW + trackerW + 10, row2_Y, r.right - 10, row2_Y + 300), this, 1009);
+        m_cmbRight.SetFont(&m_font);
+        m_cmbRight.AddString(L"[蓝] 右侧自动追踪");
+        m_cmbRight.SetCurSel(0);
+
+        // ==========================================
+        // 【第三排】：大面板展示区 (树状图 & 日志)
+        // ==========================================
+        int row3_Y = row2_Y + 35; // 再次垂直下移
+        int row2_Bottom = r.bottom - (int)(75 * WINDOW_SCALE);
+
+        // ==========================================
+        // 【绝杀优化】：精准压缩比分板高度！
+        // 原本是 150，现在改为 115。这个高度刚好能塞下表头 + 4名选手，
+        // 挤出来的所有空间，都会自动补偿给下方的黑色日志台！
+        // ==========================================
+        int scoreH = (int)(122 * WINDOW_SCALE);
 
         m_treePlayers.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | TVS_HASLINES | TVS_LINESATROOT |
             TVS_HASBUTTONS | TVS_SHOWSELALWAYS | TVS_EDITLABELS,
-            CRect(10, row2_Y + 55, 10 + halfW, row2_Bottom), this, 1023);
+            CRect(10, row3_Y, 10 + halfW, row2_Bottom), this, 1023);
         m_treePlayers.SetFont(&m_font);
 
         m_editOcrResult.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
-            CRect(20 + halfW, row2_Y, r.right - 10, row2_Y + scoreH), this, 1002);
+            CRect(20 + halfW, row3_Y, r.right - 10, row3_Y + scoreH), this, 1002);
         m_editOcrResult.SetFont(&m_font);
 
         m_editVisualLogs.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
-            CRect(20 + halfW, row2_Y + scoreH + 5, r.right - 10, row2_Bottom), this, 1011);
+            CRect(20 + halfW, row3_Y + scoreH + 5, r.right - 10, row2_Bottom), this, 1011);
         m_editVisualLogs.SetFont(&m_font);
         m_editVisualLogs.SetBackgroundColor(FALSE, RGB(30, 30, 30));
-
-        // ★ 加这一行：解除文本长度限制
         m_editVisualLogs.LimitText(0);
 
+        // ==========================================
+        // 【第四排与第五排】：底部按钮保持原样，无需大改
+        // ==========================================
         int btnY = row2_Bottom + 8;
         int btnH = (int)(28 * WINDOW_SCALE);
         int bW = (r.right - 40) / 3;
@@ -2245,6 +2285,7 @@ void CDNFGameCaptureDlg::OnPaint() {
         m_btnInputKey.Create(L"输入授权码", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             CRect(r.right - rightBtnW - 10, dirY, r.right - 10, dirY + btnH), this, ID_BTN_INPUT_KEY);
         m_btnInputKey.SetFont(&m_font);
+
 
         static bool configLoadedonce = false;
         if (!configLoadedonce) {
@@ -4013,10 +4054,12 @@ bool CDNFGameCaptureDlg::IsBitmapBlank(HBITMAP hBmp, int w, int h) {
     return (blackCount >= 8);
 }
 
+// =====================================================================
+// 【函数 2】OnCbnSelchangeCaptureEngine —— 替换原函数（同样的问题）
+// =====================================================================
 void CDNFGameCaptureDlg::OnCbnSelchangeCaptureEngine() {
     m_nCaptureEngineChoice = m_cmbCaptureEngine.GetCurSel();
 
-    // 保存到配置文件
     CString val;
     val.Format(L"%d", m_nCaptureEngineChoice);
     WritePrivateProfileString(L"Settings", L"CaptureEngine", val, m_iniPath);
@@ -4026,20 +4069,17 @@ void CDNFGameCaptureDlg::OnCbnSelchangeCaptureEngine() {
 
     ClearPreview();
 
-    // ==========================================
-    // 【核心优化】：无论是否在监控，直接干掉旧引擎
-    // 接下来的 50 毫秒内，Timer 1 或 Timer 6 会调用 Capture() 自动重建新引擎！
-    // ==========================================
+    // 同步安全销毁
     if (m_pWGC) {
         m_pWGC->StopCapture();
         delete m_pWGC;
         m_pWGC = nullptr;
     }
+
     m_bUseWGC = false;
     m_nBlankFrameCount = 0;
     m_bAlreadyPrompted = false;
 }
-
 void CDNFGameCaptureDlg::ClearPreview() 
 {
     // 清空位图数据
@@ -4120,10 +4160,24 @@ void CDNFGameCaptureDlg::OnCbnDropdownTargetWindow() {
     RefreshTargetList(); // 每次点开下拉框，实时刷新最新的窗口列表
 }
 
-void CDNFGameCaptureDlg::OnCbnSelchangeTargetWindow() {
+// 只在用户"确认选择并关闭下拉框"时触发，滚动期间不触发
+// =============================================================
+void CDNFGameCaptureDlg::OnCbnCloseupTargetWindow() {
     ClearPreview();
-    // 切换目标时，停掉当前的引擎，让 Timer 重新激活
-    if (m_pWGC) { m_pWGC->StopCapture(); delete m_pWGC; m_pWGC = nullptr; m_bUseWGC = false; }
-    if (m_pCamera) { m_pCamera->StopCapture(); delete m_pCamera; m_pCamera = nullptr; }
+
+    // 回归简单直接的主线程安全销毁
+    if (m_pWGC) {
+        m_pWGC->StopCapture();
+        delete m_pWGC;
+        m_pWGC = nullptr;
+        m_bUseWGC = false;
+    }
+
+    if (m_pCamera) {
+        m_pCamera->StopCapture();
+        delete m_pCamera;
+        m_pCamera = nullptr;
+    }
+
     AppLog(L"🎯 [设置] 已切换捕获目标", RGB(0, 255, 255));
 }

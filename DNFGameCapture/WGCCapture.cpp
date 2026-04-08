@@ -13,6 +13,9 @@ WGCCapture::~WGCCapture() {
     if (m_d3dDevice) { m_d3dDevice->Release(); m_d3dDevice = nullptr; }
 }
 
+// =============================================================
+// 【函数 1】WGCCapture::IsSupported()  —— 替换 WGCCapture.cpp 中的同名函数
+// =============================================================
 bool WGCCapture::IsSupported() {
     // 第一关：系统版本检测
     typedef LONG(WINAPI* RtlGetVersionFunc)(OSVERSIONINFOEXW*);
@@ -30,8 +33,9 @@ bool WGCCapture::IsSupported() {
         return false;
     }
 
-    // 第二关：初始化 WinRT
-    static bool s_initialized = false;
+    // ★★★ 核心修复：static 改为 thread_local ★★★
+    // COM apartment 是 per-thread 的，每个线程必须独立初始化
+    static thread_local bool s_initialized = false;
     if (!s_initialized) {
         try {
             winrt::init_apartment(winrt::apartment_type::multi_threaded);
@@ -48,6 +52,7 @@ bool WGCCapture::IsSupported() {
         return false;
     }
 }
+
 
 bool WGCCapture::CreateD3DDevice() {
     UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
