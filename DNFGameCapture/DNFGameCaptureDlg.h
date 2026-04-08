@@ -12,6 +12,7 @@
 #include "NameMatcher.hpp"
 #include <map>
 #include "WGCCapture.h"
+#include "CameraCapture.h" // 【新增】
 
 #include <urlmon.h>
 #pragma comment(lib, "urlmon.lib")
@@ -192,6 +193,14 @@ private:
     const int ID_CMB_CAPTURE_ENGINE = 1030; // 捕获引擎选择下拉框 ID
     CComboBox m_cmbCaptureEngine;           // 捕获引擎选择下拉框
     int m_nCaptureEngineChoice = 0;         // 0=自动, 1=WGC, 2=PrintWindow
+
+    const int ID_CMB_TARGET_WINDOW = 1031; // 【新增】：目标选择下拉框
+    CComboBox m_cmbTargetWindow;
+    afx_msg void OnCbnDropdownTargetWindow(); // 下拉展开时刷新列表
+    afx_msg void OnCbnSelchangeTargetWindow();
+    void RefreshTargetList(); // 刷新目标列表的方法
+    static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam); // 遍历窗口的回调函数
+    CameraCapture* m_pCamera = nullptr; // 摄像头引擎实例
 
 private:
 

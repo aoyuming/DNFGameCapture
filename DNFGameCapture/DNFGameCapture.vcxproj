@@ -204,6 +204,7 @@
     </ResourceCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="CameraCapture.h" />
     <ClInclude Include="DNFGameCapture.h" />
     <ClInclude Include="DNFGameCaptureDlg.h" />
     <ClInclude Include="framework.h" />
@@ -214,6 +215,7 @@
     <ClInclude Include="WGCCapture.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="CameraCapture.cpp" />
     <ClCompile Include="DNFGameCapture.cpp" />
     <ClCompile Include="DNFGameCaptureDlg.cpp" />
     <ClCompile Include="pch.cpp">

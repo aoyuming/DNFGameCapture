@@ -39,6 +39,9 @@
     <ClInclude Include="WGCCapture.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="CameraCapture.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="DNFGameCapture.cpp">
@@ -51,6 +54,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="WGCCapture.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="CameraCapture.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
