@@ -18,7 +18,7 @@
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"2.5.0"    //当前版本号
+#define CURRENT_VERSION L"2.5.1"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -209,6 +209,18 @@ private:
     afx_msg LRESULT OnWGCInitDone(WPARAM wParam, LPARAM lParam);
     std::atomic<int> m_nWGCInitGeneration{ 0 };  // WGC 初始化代际计数
 
+    afx_msg void OnMouseMove(UINT nFlags, CPoint point);
+    afx_msg void OnRButtonDown(UINT nFlags, CPoint point);
+
+    // 【新增】：强制居中的自定义 MessageBox
+    int ShowCenteredMsgBox(LPCTSTR lpszText, LPCTSTR lpszCaption = NULL, UINT nType = MB_OK);
+
+
+    void ClearPreview(); // 清空预览画面
+
+    // 【新增】：根据进程名杀后台的黑科技函数
+    void KillProcessByName(const CString& processName);
+
 private:
 
     WGCCapture* m_pWGC = nullptr;
@@ -315,9 +327,6 @@ private:
 
     // 【新增】：用于防止多开的互斥体句柄
     HANDLE m_hSingleInstanceMutex;
-
-    void ClearPreview(); // 清空预览画面
-
 public:
 
     // 【新增下面这一行】：全局快捷键响应函数

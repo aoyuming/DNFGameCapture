@@ -10,6 +10,7 @@
 #include <winhttp.h>
 #include <wincrypt.h>
 #include <wininet.h>
+#include <tlhelp32.h> // 【新增】：用于遍历和杀掉后台残留进程
 
 #pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "winhttp.lib")
@@ -42,12 +43,91 @@ const int ID_BTN_INPUT_KEY = 1020; // 输入授权码按钮ID
 const CString PLACEHOLDER_TEXT = L"输入：主号(小号1)(小号2)...";
 
 struct ScorePointF { float x; float y; };
-ScorePointF g_scorePts[16] = {
-    { 0.1594f, 0.0348f }, { 0.1922f, 0.0377f }, { 0.1761f, 0.1116f }, { 0.1957f, 0.1138f },
-    { 0.2738f, 0.1127f }, { 0.2925f, 0.1127f }, { 0.3714f, 0.1104f }, { 0.3902f, 0.1138f },
-    { 0.8105f, 0.0338f }, { 0.8457f, 0.0372f }, { 0.6085f, 0.1104f }, { 0.6281f, 0.1116f },
-    { 0.7050f, 0.1127f }, { 0.7242f, 0.1127f }, { 0.8019f, 0.1127f }, { 0.8214f, 0.1116f },
+ScorePointF g_deathPts[40] = {
+    { 0.8274f, 0.0366f },
+    { 0.8419f, 0.0110f },
+    { 0.8388f, 0.0532f },
+    { 0.8181f, 0.0532f },
+    { 0.8130f, 0.0128f },
+    { 0.8192f, 0.1247f },
+    { 0.8047f, 0.1009f },
+    { 0.8109f, 0.1119f },
+    { 0.8181f, 0.1009f },
+    { 0.8047f, 0.1247f },
+    { 0.7231f, 0.1266f },
+    { 0.7086f, 0.1229f },
+    { 0.7086f, 0.1027f },
+    { 0.7221f, 0.1009f },
+    { 0.7148f, 0.1119f },
+    { 0.6260f, 0.1247f },
+    { 0.6115f, 0.1247f },
+    { 0.6115f, 0.1009f },
+    { 0.6260f, 0.1009f },
+    { 0.6188f, 0.1119f },
+    { 0.1756f, 0.0366f },
+    { 0.1900f, 0.0110f },
+    { 0.1900f, 0.0568f },
+    { 0.1632f, 0.0605f },
+    { 0.1611f, 0.0128f },
+    { 0.1869f, 0.1119f },
+    { 0.1931f, 0.1009f },
+    { 0.1931f, 0.1247f },
+    { 0.1797f, 0.1247f },
+    { 0.1797f, 0.1027f },
+    { 0.2840f, 0.1119f },
+    { 0.2902f, 0.1027f },
+    { 0.2913f, 0.1247f },
+    { 0.2778f, 0.1229f },
+    { 0.2778f, 0.1027f },
+    { 0.3811f, 0.1119f },
+    { 0.3884f, 0.1009f },
+    { 0.3894f, 0.1266f },
+    { 0.3750f, 0.1229f },
+    { 0.3750f, 0.1027f },
 };
+
+// ========================================================
+// 【新增】：完美的 MessageBox 强行居中钩子引擎
+// ========================================================
+HHOOK g_hMsgBoxHook = NULL;
+HWND  g_hMsgBoxParent = NULL;
+std::mutex g_msgBoxMutex;
+
+LRESULT CALLBACK MsgBoxCBTProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    // 拦截窗口即将激活的瞬间
+    if (nCode == HCBT_ACTIVATE) {
+        HWND hMsgBox = (HWND)wParam;
+        if (g_hMsgBoxParent && ::IsWindow(g_hMsgBoxParent)) {
+            RECT pr, mr;
+            ::GetWindowRect(g_hMsgBoxParent, &pr); // 获取软件主窗口坐标
+            ::GetWindowRect(hMsgBox, &mr);         // 获取弹窗的坐标
+
+            // 像素级计算正中心坐标
+            int x = pr.left + (pr.right - pr.left) / 2 - (mr.right - mr.left) / 2;
+            int y = pr.top + (pr.bottom - pr.top) / 2 - (mr.bottom - mr.top) / 2;
+
+            // 强行挪过去
+            ::SetWindowPos(hMsgBox, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+        }
+        // 挪完就过河拆桥，卸载钩子，防止卡顿
+        ::UnhookWindowsHookEx(g_hMsgBoxHook);
+        g_hMsgBoxHook = NULL;
+    }
+    return CallNextHookEx(g_hMsgBoxHook, nCode, wParam, lParam);
+}
+
+int CDNFGameCaptureDlg::ShowCenteredMsgBox(LPCTSTR lpszText, LPCTSTR lpszCaption, UINT nType) {
+    // 加锁防止多线程同时弹窗导致钩子冲突
+    std::lock_guard<std::mutex> lock(g_msgBoxMutex);
+
+    g_hMsgBoxParent = this->GetSafeHwnd();
+    // 挂上只针对当前线程的拦截钩子
+    g_hMsgBoxHook = SetWindowsHookEx(WH_CBT, MsgBoxCBTProc, NULL, GetCurrentThreadId());
+
+    // 呼出系统的 MessageBox，它刚探出头就会被钩子按在正中间！
+    return ::MessageBox(g_hMsgBoxParent, lpszText, lpszCaption, nType);
+}
+
 
 // 获取中英文混合字符串的视觉宽度
 int GetVisualWidth(const CString& s) {
@@ -162,10 +242,54 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     ON_CBN_DROPDOWN(1031, &CDNFGameCaptureDlg::OnCbnDropdownTargetWindow)
     ON_CBN_CLOSEUP(1031, &CDNFGameCaptureDlg::OnCbnCloseupTargetWindow)
     ON_MESSAGE(WM_USER + 200, &CDNFGameCaptureDlg::OnWGCInitDone)
+    ON_WM_MOUSEMOVE()
+    ON_WM_RBUTTONDOWN()
 
 
 END_MESSAGE_MAP()
 
+
+void CDNFGameCaptureDlg::OnMouseMove(UINT nFlags, CPoint point) {
+    // 鼠标在预览区移动时，高频重绘触发显微镜画面
+    if (m_w > 0 && m_previewRect.PtInRect(point)) {
+        InvalidateRect(&m_previewRect, FALSE);
+    }
+    CWnd::OnMouseMove(nFlags, point);
+}
+
+void CDNFGameCaptureDlg::OnRButtonDown(UINT nFlags, CPoint point) {
+    // 【右键撤销功能】：点错了直接右键，删掉上一个点
+    if (m_w > 0 && m_previewRect.PtInRect(point)) {
+        if (!m_selectPts.empty()) {
+            m_selectPts.pop_back();
+            InvalidateRect(&m_previewRect, FALSE);
+        }
+    }
+    CWnd::OnRButtonDown(nFlags, point);
+}
+
+void CDNFGameCaptureDlg::OnLButtonDown(UINT nFlags, CPoint point) {
+    if (m_w <= 0 || m_h <= 0) return;
+    if (m_previewRect.PtInRect(point)) {
+        if (m_selectPts.size() >= 40) m_selectPts.clear(); // 改为 40 个点
+        m_selectPts.push_back(CPoint(
+            (int)(((float)(point.x - m_previewRect.left) / m_previewRect.Width()) * 10000.0f),
+            (int)(((float)(point.y - m_previewRect.top) / m_previewRect.Height()) * 10000.0f)
+        ));
+        InvalidateRect(&m_previewRect, FALSE);
+
+        // 凑齐 40 个点后，直接生成全新的数组代码
+        if (m_selectPts.size() == 40) {
+            CString res = L"ScorePointF g_deathPts[40] = {\r\n";
+            for (int i = 0; i < 40; i++) {
+                CString t; t.Format(L"    { %.4ff, %.4ff },\r\n", m_selectPts[i].x / 10000.0f, m_selectPts[i].y / 10000.0f); res += t;
+            }
+            m_editOcrResult.SetWindowText(res + L"};\r\n");
+            MessageBox(L"🎉 40个大X坐标已采集完毕！\r\n请去右侧日志框复制代码。");
+        }
+    }
+    CWnd::OnLButtonDown(nFlags, point);
+}
 
 void CDNFGameCaptureDlg::OnHotKey(UINT nHotKeyId, UINT nKey1, UINT nKey2) {
     if (nHotKeyId == 8008) {
@@ -194,6 +318,31 @@ CString CDNFGameCaptureDlg::GetMachineID() {
     CString hwid;
     hwid.Format(L"%08X", volSerial);
     return hwid;
+}
+
+// ==========================================
+// 【新增】：精准击杀指定名称的后台进程
+// ==========================================
+void CDNFGameCaptureDlg::KillProcessByName(const CString& processName) {
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap == INVALID_HANDLE_VALUE) return;
+
+    PROCESSENTRY32 pe;
+    pe.dwSize = sizeof(PROCESSENTRY32);
+
+    if (Process32First(hSnap, &pe)) {
+        do {
+            CString currentName(pe.szExeFile);
+            if (currentName.CompareNoCase(processName) == 0) {
+                HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
+                if (hProcess) {
+                    TerminateProcess(hProcess, 0);
+                    CloseHandle(hProcess);
+                }
+            }
+        } while (Process32Next(hSnap, &pe));
+    }
+    CloseHandle(hSnap);
 }
 
 // 云端返回成功时触发：
@@ -1237,69 +1386,90 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
     if (!m_bmp || !m_bIsRunning)
         return;
 
-    COLORREF colorKill[4];
-    COLORREF colorTeam[16];
-
-    // ---- 一次性读取所有检测点的像素值 ----
+    // 1. 获取这 40 个点的实时像素
+    COLORREF colorDeath[40];
     {
         std::lock_guard<std::mutex> lock(g_bmpMutex);
-
         HDC hMemDC = ::CreateCompatibleDC(NULL);
         HGDIOBJ oldBmp = ::SelectObject(hMemDC, m_bmp);
-
-        // 击杀检测点 (4个)
-        colorKill[0] = ::GetPixel(hMemDC, (int)(m_w * 0.187f), (int)(m_h * 0.036f));
-        colorKill[1] = ::GetPixel(hMemDC, (int)(m_w * 0.157f), (int)(m_h * 0.034f));
-        colorKill[2] = ::GetPixel(hMemDC, (int)(m_w * 0.840f), (int)(m_h * 0.039f));
-        colorKill[3] = ::GetPixel(hMemDC, (int)(m_w * 0.810f), (int)(m_h * 0.039f));
-
-        // 比分检测点 (16个)
-        for (int i = 0; i < 16; i++) {
-            colorTeam[i] = ::GetPixel(hMemDC,
-                (int)(m_w * g_scorePts[i].x),
-                (int)(m_h * g_scorePts[i].y));
+        for (int i = 0; i < 40; i++) {
+            colorDeath[i] = ::GetPixel(hMemDC, (int)(m_w * g_deathPts[i].x), (int)(m_h * g_deathPts[i].y));
         }
-
         ::SelectObject(hMemDC, oldBmp);
         ::DeleteDC(hMemDC);
     }
 
-    // ---- 颜色比较辅助函数 ----
-    auto colorClose = [](COLORREF a, COLORREF b) -> bool {
-        return abs(GetRValue(a) - GetRValue(b)) < 25
-            && abs(GetGValue(a) - GetGValue(b)) < 25
-            && abs(GetBValue(a) - GetBValue(b)) < 25;
+    // 2. 高级色彩滤镜：判断该像素是否是大X的“死亡橙红色”
+    auto isXColor = [](COLORREF c) -> bool {
+        int r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
+        // 大 X 的特征：红色值极高(>160)，且明显高于绿色和蓝色
+        return (r > 160 && r > g + 40 && r > b + 80);
         };
 
-    auto matchKill = [&](int p1, int p2) -> bool {
-        return (colorClose(colorKill[p1], COLOR_BLUE) && colorClose(colorKill[p2], COLOR_RED))
-            || (colorClose(colorKill[p1], COLOR_RED) && colorClose(colorKill[p2], COLOR_BLUE));
+    // 3. 容错判定器：传入起始下标，检查连续的 5 个点，有 3 个符合即认为该位置的人已死
+    auto checkDead = [&](int startIdx) -> bool {
+        int matchCount = 0;
+        for (int i = 0; i < 5; i++) {
+            if (isXColor(colorDeath[startIdx + i])) matchCount++;
+        }
+        return matchCount >= 3;
         };
 
-    auto matchTeam = [&](int p1, int p2) -> bool {
-        return (colorClose(colorTeam[p1], COLOR_BLUE) && colorClose(colorTeam[p2], COLOR_RED))
-            || (colorClose(colorTeam[p1], COLOR_RED) && colorClose(colorTeam[p2], COLOR_BLUE));
-        };
+    // ========================================================
+    // 4. 按照你的专属下标逻辑，提取各位置的生死状态
+    // ========================================================
+    // 右边 (0-19)
+    bool rightActiveDead = checkDead(0);  // 右边正在打的选手 (0-4)
+    bool rightTeamDead = rightActiveDead && checkDead(5) && checkDead(10) && checkDead(15); // 右边替补全部满足 (5-19)
 
-    // ---- 比分检测 ----
-    bool leftTeamMatch = matchTeam(0, 1) && matchTeam(2, 3) && matchTeam(4, 5) && matchTeam(6, 7);
-    bool rightTeamMatch = matchTeam(8, 9) && matchTeam(10, 11) && matchTeam(12, 13) && matchTeam(14, 15);
+    // 左边 (20-39)
+    bool leftActiveDead = checkDead(20); // 左边正在打的选手 (20-24)
+    bool leftTeamDead = leftActiveDead && checkDead(25) && checkDead(30) && checkDead(35); // 左边替补全部满足 (25-39)
 
-    if ((leftTeamMatch || rightTeamMatch) && m_bCanTriggerTeamScore) {
+
+    // ========================================================
+    // 5. 状态机：跟踪【左侧/右侧】正在打的选手的生死，触发单局击杀
+    // ========================================================
+    static bool s_leftActiveWasDead = false;
+    static bool s_rightActiveWasDead = false;
+
+    // 🎯 左边正在打的死了 -> 右边赢了这一小局！(传入 0 代表左边被击杀)
+    if (leftActiveDead && !s_leftActiveWasDead) {
+        s_leftActiveWasDead = true;
+        if (m_bCanTrigger) {
+            m_bCanTrigger = FALSE;
+            std::thread(&CDNFGameCaptureDlg::DoRetryMatchingTask, this, 0).detach();
+            SetTimer(2, 10000, NULL); // 10秒防抖，防止刚死的时候动画闪烁重复触发
+        }
+    }
+    else if (!leftActiveDead && s_leftActiveWasDead) {
+        s_leftActiveWasDead = false; // 左侧主将位置的大X消失，状态重置
+    }
+
+    // 🎯 右边正在打的死了 -> 左边赢了这一小局！(传入 1 代表右边被击杀)
+    if (rightActiveDead && !s_rightActiveWasDead) {
+        s_rightActiveWasDead = true;
+        if (m_bCanTrigger) {
+            m_bCanTrigger = FALSE;
+            std::thread(&CDNFGameCaptureDlg::DoRetryMatchingTask, this, 1).detach();
+            SetTimer(2, 10000, NULL); // 10秒防抖
+        }
+    }
+    else if (!rightActiveDead && s_rightActiveWasDead) {
+        s_rightActiveWasDead = false; // 右侧主将位置的大X消失，状态重置
+    }
+
+    // ========================================================
+    // 6. 大比分检测 (判定全队覆灭跳分)
+    // ========================================================
+    // 只要有一边 4 个人全被打上大X，就触发队伍结算逻辑
+    if ((leftTeamDead || rightTeamDead) && m_bCanTriggerTeamScore) {
         m_bCanTriggerTeamScore = FALSE;
         {
             std::lock_guard<std::mutex> dataLock(m_dataMutex);
-            m_bPendingTeamScoreWin = true;
+            m_bPendingTeamScoreWin = true; // 挂起结算标志，等待 DoRetryMatchingTask 里的战绩归属后统一加分
         }
-        SetTimer(4, 120000, NULL);
-    }
-
-    // ---- 击杀检测 ----
-    if ((matchKill(0, 1) || matchKill(2, 3)) && m_bCanTrigger) {
-        m_bCanTrigger = FALSE;
-        int killSide = matchKill(0, 1) ? 0 : 1;
-        std::thread(&CDNFGameCaptureDlg::DoRetryMatchingTask, this, killSide).detach();
-        SetTimer(2, 10000, NULL);
+        SetTimer(4, 120000, NULL); // 2分钟大局防抖（换人、换边等阶段不触发）
     }
 }
 
@@ -1349,7 +1519,21 @@ LRESULT CDNFGameCaptureDlg::OnTrayMessage(WPARAM wParam, LPARAM lParam) {
     return 0;
 }
 
-void CDNFGameCaptureDlg::DoRealExit() { m_bIsRunning = FALSE; KillTimer(1); KillTimer(2); KillTimer(3); KillTimer(4); DestroyWindow(); PostQuitMessage(0); }
+void CDNFGameCaptureDlg::DoRealExit() {
+    m_bIsRunning = FALSE;
+    KillTimer(1); KillTimer(2); KillTimer(3); KillTimer(4);
+
+    // ==========================================
+    // 【新增】：主程序退出时，拉着 OCR 一起陪葬
+    // 必须连底层的 PaddleOCR-json.exe 一起杀，防止内存泄漏泄漏！
+    // ==========================================
+    KillProcessByName(L"Umi-OCR.exe");
+    KillProcessByName(L"PaddleOCR-json.exe");
+
+    DestroyWindow();
+    PostQuitMessage(0);
+}
+
 void CDNFGameCaptureDlg::OnClose() { ShowWindow(SW_HIDE); }
 
 // ============================================================================
@@ -1388,6 +1572,10 @@ void CDNFGameCaptureDlg::OnBnClickedStart() {
     if (!m_bIsRunning) {
         m_bIsRunning = TRUE;
         m_btnStart.SetWindowText(L"停止监控");
+        // ==========================================
+        // 【新增】：点击开始监控，立刻静默唤醒同目录下的 Umi-OCR
+        // ==========================================
+        EnsureOcrRunning();
 
         HWND hGame = ::FindWindow(NULL, DNF_WINDOW_NAME);
 
@@ -1619,26 +1807,6 @@ LRESULT CDNFGameCaptureDlg::OnUpdateOcrDropdowns(WPARAM wParam, LPARAM lParam) {
 }
 void CDNFGameCaptureDlg::OnCbnSelchangeLeft() { m_viewIndexLeft = (m_cmbLeft.GetCurSel() == 0) ? -1 : (m_cmbLeft.GetCurSel() - 1); InvalidateRect(&m_previewRect, FALSE); }
 void CDNFGameCaptureDlg::OnCbnSelchangeRight() { m_viewIndexRight = (m_cmbRight.GetCurSel() == 0) ? -1 : (m_cmbRight.GetCurSel() - 1); InvalidateRect(&m_previewRect, FALSE); }
-
-void CDNFGameCaptureDlg::OnLButtonDown(UINT nFlags, CPoint point) {
-    if (m_w <= 0 || m_h <= 0) return;
-    if (m_previewRect.PtInRect(point)) {
-        if (m_selectPts.size() >= 16) m_selectPts.clear();
-        m_selectPts.push_back(CPoint(
-            (int)(((float)(point.x - m_previewRect.left) / m_previewRect.Width()) * 10000.0f),
-            (int)(((float)(point.y - m_previewRect.top) / m_previewRect.Height()) * 10000.0f)
-        ));
-        InvalidateRect(&m_previewRect, FALSE);
-        if (m_selectPts.size() == 16) {
-            CString res = L"ScorePointF g_scorePts[16] = {\r\n";
-            for (int i = 0; i < 16; i++) {
-                CString t; t.Format(L"    { %.4ff, %.4ff },\r\n", m_selectPts[i].x / 10000.0f, m_selectPts[i].y / 10000.0f); res += t;
-            }
-            m_editOcrResult.SetWindowText(res + L"};\r\n"); MessageBox(L"坐标已采集，见右侧框。");
-        }
-    }
-    CWnd::OnLButtonDown(nFlags, point);
-}
 
 // ============================================================================
 // 手动测试与核心截图逻辑
@@ -1948,7 +2116,7 @@ void CDNFGameCaptureDlg::Capture() {
                     m_bAlreadyPrompted = true;
                     if (!IsRunningAsAdmin()) {
                         KillTimer(m_bIsRunning ? 1 : 6);
-                        int ret = MessageBox(L"⚠️ 检测到画面连续黑屏\r\n请尝试以管理员身份运行软件。", L"权限不足", MB_ICONWARNING | MB_YESNO | MB_SYSTEMMODAL);
+                        int ret = ShowCenteredMsgBox(L"⚠️ 检测到画面连续黑屏\r\n请尝试以管理员身份运行软件。", L"权限不足", MB_ICONWARNING | MB_YESNO | MB_SYSTEMMODAL);
                         if (ret == IDYES) {
                             if (m_bIsRunning) { m_bIsRunning = FALSE; KillTimer(3); }
                             if (!RelaunchAsAdmin()) MessageBox(L"自动提权失败，请手动管理员运行", L"错误", MB_ICONERROR);
@@ -2053,7 +2221,7 @@ void CDNFGameCaptureDlg::WriteScoreToFile() {
 
 void CDNFGameCaptureDlg::RefreshDisplay() {
     m_editOcrResult.SetWindowText(L"");
-    CString sS; sS.Format(L"============= 总比分  %d : %d =============\r\n", m_bFlipSides ? m_totalScoreBlue : m_totalScoreRed, m_bFlipSides ? m_totalScoreRed : m_totalScoreBlue);
+    CString sS; sS.Format(L"========= 总比分  %d : %d =============\r\n", m_bFlipSides ? m_totalScoreBlue : m_totalScoreRed, m_bFlipSides ? m_totalScoreRed : m_totalScoreBlue);
     auto ap = [&](const CString& t, COLORREF c) {
         int l = m_editOcrResult.GetWindowTextLength(); m_editOcrResult.SetSel(l, l);
         CHARFORMAT cf; ZeroMemory(&cf, sizeof(cf)); cf.cbSize = sizeof(cf); cf.dwMask = CFM_COLOR; cf.crTextColor = c;
@@ -2343,11 +2511,11 @@ void CDNFGameCaptureDlg::OnPaint() {
 
 void CDNFGameCaptureDlg::Draw(CDC& dc) {
     if (m_w <= 0) return;
-    CPen p1(PS_SOLID, 2, RGB(255, 0, 0)), p3(PS_SOLID, 2, RGB(255, 165, 0)); dc.SelectStockObject(NULL_BRUSH); dc.SelectObject(&p1);
-    float pX[4] = { 0.187f, 0.157f, 0.840f, 0.810f }; float pY[4] = { 0.036f, 0.034f, 0.039f, 0.039f };
-    for (int i = 0; i < 4; i++) dc.Ellipse(m_previewRect.left + (int)(pX[i] * m_previewRect.Width()) - 5, m_previewRect.top + (int)(pY[i] * m_previewRect.Height()) - 5, m_previewRect.left + (int)(pX[i] * m_previewRect.Width()) + 5, m_previewRect.top + (int)(pY[i] * m_previewRect.Height()) + 5);
+   // CPen p1(PS_SOLID, 2, RGB(255, 0, 0)), p3(PS_SOLID, 2, RGB(255, 165, 0)); dc.SelectStockObject(NULL_BRUSH); dc.SelectObject(&p1);
+    //float pX[4] = { 0.187f, 0.157f, 0.840f, 0.810f }; float pY[4] = { 0.036f, 0.034f, 0.039f, 0.039f };
+  /*  for (int i = 0; i < 4; i++) dc.Ellipse(m_previewRect.left + (int)(pX[i] * m_previewRect.Width()) - 5, m_previewRect.top + (int)(pY[i] * m_previewRect.Height()) - 5, m_previewRect.left + (int)(pX[i] * m_previewRect.Width()) + 5, m_previewRect.top + (int)(pY[i] * m_previewRect.Height()) + 5);
     dc.SelectObject(&p3);
-    for (int i = 0; i < 16; i++) dc.Ellipse(m_previewRect.left + (int)(g_scorePts[i].x * m_previewRect.Width()) - 5, m_previewRect.top + (int)(g_scorePts[i].y * m_previewRect.Height()) - 5, m_previewRect.left + (int)(g_scorePts[i].x * m_previewRect.Width()) + 5, m_previewRect.top + (int)(g_scorePts[i].y * m_previewRect.Height()) + 5);
+    for (int i = 0; i < 16; i++) dc.Ellipse(m_previewRect.left + (int)(g_scorePts[i].x * m_previewRect.Width()) - 5, m_previewRect.top + (int)(g_scorePts[i].y * m_previewRect.Height()) - 5, m_previewRect.left + (int)(g_scorePts[i].x * m_previewRect.Width()) + 5, m_previewRect.top + (int)(g_scorePts[i].y * m_previewRect.Height()) + 5);*/
     CString h; { std::lock_guard<std::mutex> lk(m_debugMutex); h = m_debugOcrResult; }
     if (!h.IsEmpty()) {
         dc.SetBkMode(TRANSPARENT); dc.SetTextColor(RGB(0, 255, 0)); CFont f; f.CreatePointFont(105, L"黑体"); CFont* of = dc.SelectObject(&f);
@@ -2371,6 +2539,65 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
             dc.SetBkMode(TRANSPARENT); dc.SetTextColor(bC); CFont fM; fM.CreatePointFont(90, L"微软雅黑"); CFont* oM = dc.SelectObject(&fM); dc.TextOut(iX, cY - 18, i == 0 ? L"左侧提取区" : L"右侧提取区"); dc.SelectObject(oM);
             cY -= 25; SelectObject(hM, oB); DeleteDC(hM);
         }
+    }
+
+    // ===================================================
+    // 【绘制鼠标坐标采集的绿点】
+    // ===================================================
+    CPen pPoint(PS_SOLID, 2, RGB(0, 255, 0));
+    dc.SelectStockObject(NULL_BRUSH);
+    CPen* pOldPointPen = dc.SelectObject(&pPoint);
+    for (size_t i = 0; i < m_selectPts.size(); i++) {
+        int px = m_previewRect.left + (int)((m_selectPts[i].x / 10000.0f) * m_previewRect.Width());
+        int py = m_previewRect.top + (int)((m_selectPts[i].y / 10000.0f) * m_previewRect.Height());
+        dc.Ellipse(px - 3, py - 3, px + 3, py + 3);
+    }
+    dc.SelectObject(pOldPointPen);
+
+    // ===================================================
+    // 【绘制 10 倍像素级显微镜】
+    // ===================================================
+    CPoint pt; GetCursorPos(&pt); ScreenToClient(&pt);
+    if (m_previewRect.PtInRect(pt)) {
+        int origX = (int)(((float)(pt.x - m_previewRect.left) / m_previewRect.Width()) * m_w);
+        int origY = (int)(((float)(pt.y - m_previewRect.top) / m_previewRect.Height()) * m_h);
+
+        int magW = 160, magH = 160, srcSize = 16; // 抓取16x16像素，放大到160(10倍)
+
+        // 智能避让：鼠标在左边，显微镜画在右边；鼠标在右边，显微镜画在左边
+        int drawX = m_previewRect.left + 10;
+        int drawY = m_previewRect.top + 10;
+        if (pt.x < m_previewRect.left + m_previewRect.Width() / 2 && pt.y < m_previewRect.top + m_previewRect.Height() / 2) {
+            drawX = m_previewRect.right - magW - 10;
+        }
+
+        dc.FillSolidRect(drawX - 2, drawY - 2, magW + 4, magH + 4, RGB(255, 255, 255)); // 白框
+
+        std::lock_guard<std::mutex> lock(g_bmpMutex);
+        if (m_bmp) {
+            HDC hBmpDC = ::CreateCompatibleDC(dc.GetSafeHdc());
+            HGDIOBJ oldBmp = ::SelectObject(hBmpDC, m_bmp);
+
+            // 【关键】：设置 COLORONCOLOR，关闭抗锯齿，让你看清每一个原始的方形马赛克像素！
+            int oldMode = dc.SetStretchBltMode(COLORONCOLOR);
+            dc.StretchBlt(drawX, drawY, magW, magH, CDC::FromHandle(hBmpDC), origX - srcSize / 2, origY - srcSize / 2, srcSize, srcSize, SRCCOPY);
+            dc.SetStretchBltMode(oldMode);
+
+            ::SelectObject(hBmpDC, oldBmp);
+            ::DeleteDC(hBmpDC);
+        }
+
+        // 画显微镜中心的红色准星
+        CPen crossPen(PS_SOLID, 1, RGB(255, 0, 0));
+        CPen* pOldPen = dc.SelectObject(&crossPen);
+        dc.MoveTo(drawX + magW / 2, drawY); dc.LineTo(drawX + magW / 2, drawY + magH);
+        dc.MoveTo(drawX, drawY + magH / 2); dc.LineTo(drawX + magW, drawY + magH / 2);
+        dc.SelectObject(pOldPen);
+
+        // 显示采集进度提示
+        dc.SetBkMode(TRANSPARENT); dc.SetTextColor(RGB(0, 255, 0));
+        CString tip; tip.Format(L"已采: %d/40 (右键撤销)", (int)m_selectPts.size());
+        dc.TextOut(drawX + 5, drawY + magH - 25, tip);
     }
 }
 
@@ -2472,8 +2699,8 @@ void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
         }
     }
     // ==========================================
-        // 【Timer 7】: 终极系统级轮询 (无视任何消息屏蔽)
-        // ==========================================
+    // 【Timer 7】: 终极系统级轮询 (无视任何消息屏蔽)
+    // ==========================================
     else if (nID == 7) {
         static int s_idleSeconds = 0;          // 闲置秒数
         static bool s_hasFolded = true;        // 默认 true，防止刚开软件还没动就乱折叠
@@ -2627,21 +2854,28 @@ void CDNFGameCaptureDlg::CheckForUpdates(bool bSilent) {
         Sleep(800);  // 让用户有时间看到提示
         DownloadAndApplyUpdate(downloadUrl);
     }
-    else if (bSilent) {
-        // 【普通版 - 后台静默检测】：不打扰用户,只在日志里提示有新版本
-        CString logMsg;
-        logMsg.Format(L"💡 [发现新版本] 服务器版本 %s,点击菜单可手动更新", serverVersion.GetString());
-        AppLog(logMsg, RGB(100, 200, 255));
-        // 注意:这里不调用 DownloadAndApplyUpdate,等用户主动点"检查更新"
-    }
-    else {
-        // 【普通版 - 用户手动点"检查更新"】：弹窗让用户自己选
-        CString msg;
-        msg.Format(L"发现新版本:%s\n\n更新内容:\n%s\n\n是否立即更新?", serverVersion, updateLog);
-        if (MessageBox(msg, L"发现新版本", MB_YESNO | MB_ICONINFORMATION) == IDYES) {
-            DownloadAndApplyUpdate(downloadUrl);
-        }
-    }
+    //else if (bSilent) {
+    //    // 【普通版 - 后台静默检测】：不打扰用户,只在日志里提示有新版本
+    //    CString logMsg;
+    //    logMsg.Format(L"💡 [发现新版本] 服务器版本 %s,点击菜单可手动更新", serverVersion.GetString());
+    //    AppLog(logMsg, RGB(100, 200, 255));
+    //    // 注意:这里不调用 DownloadAndApplyUpdate,等用户主动点"检查更新"
+    //}
+    //else {
+        // 【普通版】：无论是后台检测还是手动检测，只要有新版本，一律弹窗！
+            CString msg;
+            msg.Format(L"发现新版本: %s\n\n更新内容:\n%s\n\n是否立即更新？", serverVersion, updateLog);
+
+            // ⬇️ 【修改点】：把 MessageBox 换成 ShowCenteredMsgBox
+            if (ShowCenteredMsgBox(msg, L"发现新版本", MB_YESNO | MB_ICONINFORMATION | MB_TOPMOST) == IDYES) {
+                DownloadAndApplyUpdate(downloadUrl);
+            }
+            else {
+                CString logMsg;
+                logMsg.Format(L"💡 [发现新版本] 服务器版本 %s，您已取消更新。右键托盘可随时更新。", serverVersion.GetString());
+                AppLog(logMsg, RGB(100, 200, 255));
+            }
+    //}
 }
 
 void CDNFGameCaptureDlg::DownloadAndApplyUpdate(CString url) {
@@ -4023,35 +4257,40 @@ bool CDNFGameCaptureDlg::RelaunchAsAdmin() {
     return false; // 用户拒绝了 UAC
 }
 
-// 检测位图是否全黑（PrintWindow 权限不足时的典型表现）
+// ========================================================
+// 【终极黑屏检测】：专门免疫 DNF“失明”状态与暗黑图特效
+// ========================================================
 bool CDNFGameCaptureDlg::IsBitmapBlank(HBITMAP hBmp, int w, int h) {
     if (!hBmp || w <= 0 || h <= 0) return true;
 
     HDC hDC = CreateCompatibleDC(NULL);
     HGDIOBJ old = SelectObject(hDC, hBmp);
 
-    // 采样检测：在画面中心区域取 9 个点
-    // 避免检测边缘（可能本来就是黑的）
-    int checkPoints[][2] = {
-        { w / 4, h / 4 },     { w / 2, h / 4 },     { w * 3 / 4, h / 4 },
-        { w / 4, h / 2 },     { w / 2, h / 2 },     { w * 3 / 4, h / 2 },
-        { w / 4, h * 3 / 4 }, { w / 2, h * 3 / 4 }, { w * 3 / 4, h * 3 / 4 },
-    };
+    bool isAllBlack = true; // 假设它是真黑屏
 
-    int blackCount = 0;
-    for (auto& pt : checkPoints) {
-        COLORREF c = GetPixel(hDC, pt[0], pt[1]);
-        // RGB 三通道加起来 < 30 视为黑色
-        if (GetRValue(c) + GetGValue(c) + GetBValue(c) < 30) {
-            blackCount++;
+    // 沿画面的【主对角线】和【副对角线】扫射 40 个点
+    // 这种扫射方式必定会穿过 DNF 的血条、技能栏、决斗场比分板或连击数区域
+    for (int i = 1; i < 20; i++) {
+        // 1. 测主对角线 (左上到右下)
+        COLORREF c1 = GetPixel(hDC, w * i / 20, h * i / 20);
+        if (c1 != RGB(0, 0, 0)) {
+            isAllBlack = false; // 发现任意非纯黑像素，立刻洗清嫌疑！
+            break;
+        }
+
+        // 2. 测副对角线 (左下到右上)
+        COLORREF c2 = GetPixel(hDC, w * i / 20, h - (h * i / 20));
+        if (c2 != RGB(0, 0, 0)) {
+            isAllBlack = false; // 发现任意非纯黑像素，立刻洗清嫌疑！
+            break;
         }
     }
 
     SelectObject(hDC, old);
     DeleteDC(hDC);
 
-    // 9 个采样点中有 8 个以上是黑的，判定为全黑
-    return (blackCount >= 8);
+    // 只有这 40 个点全部是 100% 绝对的纯黑，才会被判定为捕获失败
+    return isAllBlack;
 }
 
 // =====================================================================
