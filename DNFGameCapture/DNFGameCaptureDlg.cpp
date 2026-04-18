@@ -260,6 +260,8 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     ON_CBN_DROPDOWN(1031, &CDNFGameCaptureDlg::OnCbnDropdownTargetWindow)
     ON_CBN_CLOSEUP(1031, &CDNFGameCaptureDlg::OnCbnCloseupTargetWindow)
     ON_MESSAGE(WM_USER + 200, &CDNFGameCaptureDlg::OnWGCInitDone)
+    // ⬇️ 【新增】：绑定 1033 (我们给新列表框的ID) 的点击事件
+    ON_LBN_SELCHANGE(1033, &CDNFGameCaptureDlg::OnLbnSelchangeRecentPlayers)
     ON_WM_MOUSEMOVE()
     ON_WM_RBUTTONDOWN()
 
@@ -1353,10 +1355,34 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
         DWORD now = GetTickCount();
 
         bool isDup = false;
+        CString conflictName = L"";
+        CString conflictReason = L"";
+
+        // ==========================================
+        // ⬇️ 【修改点】：双重精准冷却法则 (20秒)
+        // ==========================================
         for (const auto& ev : m_recentEvents) {
-            if (ev.killer == finalKillerName && ev.dead == finalDeadName && (now - ev.time < 20000)) {
-                isDup = true;
-                break;
+            if (now - ev.time < 20000) { // 限制 20 秒冷却期
+
+                // 规则 1：同一个 ID，在 20 秒内绝对不能死两次！
+                if (deadResolved && finalDeadName != L"待定") {
+                    if (ev.dead == finalDeadName) {
+                        isDup = true;
+                        conflictName = finalDeadName;
+                        conflictReason = L"20S内重复死亡";
+                        break;
+                    }
+                }
+
+                // 规则 2：同一个人，在 20 秒内不能击杀同一个人两次！
+                if (killerResolved && deadResolved && finalKillerName != L"待定" && finalDeadName != L"待定") {
+                    if (ev.killer == finalKillerName && ev.dead == finalDeadName) {
+                        isDup = true;
+                        conflictName = finalKillerName + L" 击杀 " + finalDeadName;
+                        conflictReason = L"20S内重复击杀同一人";
+                        break;
+                    }
+                }
             }
         }
 
@@ -1407,6 +1433,9 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             }
 
             PostMessage(WM_UPDATE_ALL_UI, 0, 0);
+        }
+        else {
+            PushVisualLog(L"⏳ [冷却拦截] 玩家 [" + conflictName + L"] 在 20 秒内已产生过战绩，本次忽略！", RGB(255, 165, 0));
         }
     }
 
@@ -1479,7 +1508,7 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
         if (m_bCanTrigger) {
             m_bCanTrigger = FALSE;
             std::thread(&CDNFGameCaptureDlg::DoRetryMatchingTask, this, 0).detach();
-            SetTimer(2, 10000, NULL); // 10秒防抖，防止刚死的时候动画闪烁重复触发
+            SetTimer(2, 25000, NULL); // 25秒防抖，防止刚死的时候动画闪烁重复触发
         }
     }
     else if (!leftActiveDead && s_leftActiveWasDead) {
@@ -1492,7 +1521,7 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
         if (m_bCanTrigger) {
             m_bCanTrigger = FALSE;
             std::thread(&CDNFGameCaptureDlg::DoRetryMatchingTask, this, 1).detach();
-            SetTimer(2, 10000, NULL); // 10秒防抖
+            SetTimer(2, 25000, NULL); // 25秒防抖
         }
     }
     else if (!rightActiveDead && s_rightActiveWasDead) {
@@ -2425,22 +2454,47 @@ void CDNFGameCaptureDlg::OnPaint() {
         m_cmbRight.SetCurSel(0);
 
         // ==========================================
-        // 【第三排】：大面板展示区 (树状图 & 日志)
-        // ==========================================
+                // 【第三排】：大面板展示区 (树状图 & 日志)
+                // ==========================================
         int row3_Y = row2_Y + 35; // 再次垂直下移
         int row2_Bottom = r.bottom - (int)(75 * WINDOW_SCALE);
 
+        // 先算好树状图的高度（占据可用区域的 3/5）
+        int treeHeight = (row2_Bottom - row3_Y) * 3 / 5;
+
+        // 1. 树状图 (统一在这里创建和缩放，防止穿模)
+        if (!m_treePlayers.m_hWnd) {
+            m_treePlayers.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | TVS_HASLINES | TVS_LINESATROOT |
+                TVS_HASBUTTONS | TVS_SHOWSELALWAYS | TVS_EDITLABELS,
+                CRect(10, row3_Y, 10 + halfW, row3_Y + treeHeight), this, 1023); // 👈 关键：这里的高度也被限制在 treeHeight
+            m_treePlayers.SetFont(&m_font);
+        }
+        else {
+            m_treePlayers.MoveWindow(10, row3_Y, halfW, treeHeight);
+        }
+
+        // 2. 常用选手列表框（紧贴在树状图下方 5 像素处）
+        if (!m_listRecentPlayers.m_hWnd) {
+            m_listRecentPlayers.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | LBS_NOTIFY | LBS_HASSTRINGS,
+                CRect(10, row3_Y + treeHeight + 5, 10 + halfW, row2_Bottom), this, 1033);
+            static CFont listFont;
+            if (!listFont.m_hObject) listFont.CreatePointFont(110, L"微软雅黑");
+            m_listRecentPlayers.SetFont(&listFont);
+        }
+        else {
+            m_listRecentPlayers.MoveWindow(10, row3_Y + treeHeight + 5, halfW, row2_Bottom - (row3_Y + treeHeight + 5));
+        }
+
         // ==========================================
         // 【绝杀优化】：精准压缩比分板高度！
-        // 原本是 150，现在改为 115。这个高度刚好能塞下表头 + 4名选手，
-        // 挤出来的所有空间，都会自动补偿给下方的黑色日志台！
         // ==========================================
         int scoreH = (int)(122 * WINDOW_SCALE);
 
-        m_treePlayers.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | TVS_HASLINES | TVS_LINESATROOT |
-            TVS_HASBUTTONS | TVS_SHOWSELALWAYS | TVS_EDITLABELS,
-            CRect(10, row3_Y, 10 + halfW, row2_Bottom), this, 1023);
-        m_treePlayers.SetFont(&m_font);
+        static CFont listFont;
+        if (!listFont.m_hObject) {
+            listFont.CreatePointFont(110, L"微软雅黑"); // 给列表框一个更清晰的字体
+        }
+        m_listRecentPlayers.SetFont(&listFont);
 
         m_editOcrResult.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
             CRect(20 + halfW, row3_Y, r.right - 10, row3_Y + scoreH), this, 1002);
@@ -2547,6 +2601,122 @@ void CDNFGameCaptureDlg::OnPaint() {
     Draw(memDC);
     dc.BitBlt(0, 0, topHalf.Width(), topHalf.Height(), &memDC, 0, 0, SRCCOPY);
     memDC.SelectObject(pOldBmp);
+}
+
+// ==========================================
+// 【新增】：鼠标点击列表框某一项时触发自动填入
+// ==========================================
+void CDNFGameCaptureDlg::OnLbnSelchangeRecentPlayers() {
+    int curSel = m_listRecentPlayers.GetCurSel();
+
+    // ==========================================
+    // 【拦截】：如果点的是第一行的标题 (索引0) 或者空白处
+    // 直接取消高亮状态，不执行任何操作
+    // ==========================================
+    if (curSel <= 0 || curSel == LB_ERR) {
+        m_listRecentPlayers.SetCurSel(-1);
+        return;
+    }
+
+    std::lock_guard<std::mutex> lk(m_recentRecordsMutex);
+
+    // ==========================================
+    // 【修正】：因为第0项是标题，所以真实的数据索引需要 减 1
+    // ==========================================
+    int realIndex = curSel - 1;
+
+    if (realIndex >= 0 && realIndex < (int)m_recentPlayerRecords.size()) {
+        const RecentPlayerRecord& record = m_recentPlayerRecords[realIndex];
+
+        // 拼装格式填入输入框
+        CString fillText = record.mainName;
+        for (const CString& alias : record.aliases) {
+            if (!alias.IsEmpty()) fillText += L"(" + alias + L")";
+        }
+
+        m_editQuickAdd.SetWindowText(fillText);
+        m_editQuickAdd.SetFocus();
+        m_editQuickAdd.SetSel(fillText.GetLength(), fillText.GetLength());
+
+        // (注：沉底逻辑依然在点击“添加”按钮里执行，这里保持原样不移动)
+    }
+}
+
+// ==========================================
+// 【新增】：更新并刷新左下角的常用选手名单
+// ==========================================
+void CDNFGameCaptureDlg::UpdateAndRefreshRecentList() {
+    std::lock_guard<std::mutex> lk(m_recentRecordsMutex);
+
+    // 1. 提取当前在场的 8 个人，他们是最活跃的，优先插到最前面
+    for (int i = 7; i >= 0; i--) {
+        if (m_players[i].name.IsEmpty()) {
+            continue;
+        }
+
+        // 查找是否已存在，如果存在先删掉，以便稍后重新插到最前面
+        for (auto it = m_recentPlayerRecords.begin(); it != m_recentPlayerRecords.end(); ) {
+            if (it->mainName == m_players[i].name) {
+                it = m_recentPlayerRecords.erase(it);
+            }
+            else {
+                ++it;
+            }
+        }
+
+        RecentPlayerRecord r;
+        r.mainName = m_players[i].name;
+        for (const auto& a : m_players[i].aliases) {
+            r.aliases.push_back(a.name);
+        }
+        m_recentPlayerRecords.push_front(r);
+    }
+
+    // 2. 把本地库 (m_aliasDB) 里的其他人也加载进去作为候选项
+    for (auto it = m_aliasDB.begin(); it != m_aliasDB.end(); ++it) {
+        bool exists = false;
+        for (const auto& r : m_recentPlayerRecords) {
+            if (r.mainName == it->first) {
+                exists = true;
+                break;
+            }
+        }
+
+        if (!exists) {
+            RecentPlayerRecord r;
+            r.mainName = it->first;
+
+            // 将长字符串 "(小号1)(小号2)" 切割装入数组
+            int curPos = 0;
+            CString token = it->second.Tokenize(L" ()（）", curPos);
+            while (token != L"") {
+                r.aliases.push_back(token);
+                token = it->second.Tokenize(L" ()（）", curPos);
+            }
+            m_recentPlayerRecords.push_back(r);
+        }
+    }
+
+    // 3. 将最终排序好的数据渲染到 UI 列表框中
+    if (m_listRecentPlayers.m_hWnd) {
+        int lastTopIndex = m_listRecentPlayers.GetTopIndex();
+        m_listRecentPlayers.ResetContent();
+
+        // ==========================================
+        // 【新增】：直接把标题作为列表的 第0项 固定塞进去！
+        // ==========================================
+        m_listRecentPlayers.AddString(L"📋 === 选手库信息 (点击填入) ===");
+
+        // 真实选手数据从 第1项 开始往下排
+        for (const auto& record : m_recentPlayerRecords) {
+            m_listRecentPlayers.AddString(record.mainName);
+        }
+
+        // 恢复之前的滚动条位置
+        if (lastTopIndex != LB_ERR && lastTopIndex < m_listRecentPlayers.GetCount()) {
+            m_listRecentPlayers.SetTopIndex(lastTopIndex);
+        }
+    }
 }
 
 void CDNFGameCaptureDlg::Draw(CDC& dc) {
@@ -3032,6 +3202,9 @@ void CDNFGameCaptureDlg::LoadAliasDB() {
         }
         file.Close();
     }
+
+    // 【新增】：刚打开软件加载完数据库后，初始化常用选手列表
+    UpdateAndRefreshRecentList();
 }
 
 void CDNFGameCaptureDlg::SaveAliasDB() {
@@ -3078,6 +3251,9 @@ void CDNFGameCaptureDlg::SaveAliasDB() {
         file.Write(utf8.c_str(), (UINT)utf8.length());
         file.Close();
     }
+
+    // 【新增】：保存数据库后，顺便刷新常用选手列表
+    UpdateAndRefreshRecentList();
 }
 
 void CDNFGameCaptureDlg::OnChangeEditNamesInput() {
@@ -3389,12 +3565,51 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd() {
     if (currentAdded.size() > 0 || (strTeamFullAlert.IsEmpty() && strDupAliasAlert.IsEmpty())) {
         m_editQuickAdd.SetWindowText(L"");
     }
-
+ 
     SaveAliasDB();
     SaveConfigToFile();
     WriteScoreToFile();
     SyncDataToTree();
     RefreshDisplay();
+
+    // ==========================================
+    // ⬇️ 【彻底修复死锁】：添加成功后，将涉及到的选手在库中“沉底”
+    // ==========================================
+    if (!currentAdded.empty()) {
+        std::lock_guard<std::mutex> lk(m_recentRecordsMutex); // 加第一把锁保护数据
+
+        for (const auto& addedName : currentAdded) {
+            // 在内存队列中寻找该选手
+            for (auto it = m_recentPlayerRecords.begin(); it != m_recentPlayerRecords.end(); ++it) {
+                if (it->mainName == addedName) {
+                    RecentPlayerRecord r = *it; // 拷贝记录
+                    m_recentPlayerRecords.erase(it); // 从当前位置删除
+                    m_recentPlayerRecords.push_back(r); // 弄到队列最后面 (沉底)
+                    break;
+                }
+            }
+        }
+
+        // 【关键修复】：直接在这里刷新列表UI，绝不调用 UpdateAndRefreshRecentList 导致二次加锁！
+        if (m_listRecentPlayers.m_hWnd) {
+            int lastTopIndex = m_listRecentPlayers.GetTopIndex();
+            m_listRecentPlayers.ResetContent();
+            // ==========================================
+            // ⬇️ 【新增补丁】：别忘了把这行固定标题加回来！
+            // ==========================================
+            m_listRecentPlayers.AddString(L"📋 === 选手库信息 (点击填入) ===");
+
+            for (const auto& rec : m_recentPlayerRecords) {
+                m_listRecentPlayers.AddString(rec.mainName);
+            }
+
+            if (lastTopIndex != LB_ERR && lastTopIndex < m_listRecentPlayers.GetCount()) {
+                m_listRecentPlayers.SetTopIndex(lastTopIndex);
+            }
+
+            m_listRecentPlayers.SetCurSel(-1); // 取消选中高亮
+        }
+    }
 
     // 智能展开
     if (currentAdded.size() > 0) {
@@ -4153,24 +4368,25 @@ void CDNFGameCaptureDlg::OnCustomDrawTree(NMHDR* pNMHDR, LRESULT* pResult) {
 
 // DNFGameCaptureDlg.cpp
 HBRUSH CDNFGameCaptureDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor) {
-    // 先调用父类的默认处理，拿到默认的画刷
     HBRUSH hbr = CWnd::OnCtlColor(pDC, pWnd, nCtlColor);
 
-    // 1. 判断当前发消息的控件是不是我们的“快速添加框”（ID为1025）
+    // 1. 处理“快速添加框”的水印颜色
     if (pWnd->GetDlgCtrlID() == 1025) {
         CString txt;
         pWnd->GetWindowText(txt);
-
-
-        // 2. 判断内容是否为提示水印
         if (txt == PLACEHOLDER_TEXT) {
-            // 如果是水印，把画笔颜色设为灰色
             pDC->SetTextColor(RGB(160, 160, 160));
         }
         else {
-            // 如果用户开始打字了，恢复成正常的黑色
             pDC->SetTextColor(RGB(0, 0, 0));
         }
+    }
+    // ==========================================
+    // 2. 【新增】：将选手列表框 (1033) 的文字统一设为灰色
+    // ==========================================
+    else if (pWnd->GetDlgCtrlID() == 1033) {
+        pDC->SetTextColor(RGB(150, 150, 150)); // 设定为灰色
+        // 注意：这里不需要改变背景色，直接返回默认的 hbr 即可
     }
 
     return hbr;

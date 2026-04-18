@@ -13,12 +13,13 @@
 #include <map>
 #include "WGCCapture.h"
 #include "CameraCapture.h" // 【新增】
+#include <deque>
 
 #include <urlmon.h>
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"2.5.3"    //当前版本号
+#define CURRENT_VERSION L"2.5.5"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -134,6 +135,8 @@ protected:
     afx_msg LRESULT OnUpdateOcrDropdowns(WPARAM wParam, LPARAM lParam);
     afx_msg void OnCbnSelchangeLeft();
     afx_msg void OnCbnSelchangeRight();
+    // ⬇️ 【新增】：列表框点击事件
+    afx_msg void OnLbnSelchangeRecentPlayers();
 
     DECLARE_MESSAGE_MAP()
 
@@ -221,6 +224,7 @@ private:
     // 【新增】：根据进程名杀后台的黑科技函数
     void KillProcessByName(const CString& processName);
 
+
 private:
 
     WGCCapture* m_pWGC = nullptr;
@@ -248,7 +252,6 @@ private:
     CComboBox m_cmbTeamSelect; // 选择红蓝队
     CQuickAddEdit     m_editQuickAdd;  // 顶部单行快速输入框
     CButton   m_btnQuickAdd;   // 添加按钮
-    CTreeCtrl m_treePlayers;   // 树状展示列表
 
     CStatic         m_status;
     CRichEditCtrl   m_editOcrResult;
@@ -327,6 +330,23 @@ private:
 
     // 【新增】：用于防止多开的互斥体句柄
     HANDLE m_hSingleInstanceMutex;
+
+
+    CTreeCtrl m_treePlayers;   // 树状展示列表
+
+    // ⬇️ 【新增】：常用选手名单列表框
+    CListBox  m_listRecentPlayers;
+
+    // ⬇️ 【新增】：用来保存最近使用记录的数据结构
+    struct RecentPlayerRecord {
+        CString mainName;
+        std::vector<CString> aliases;
+    };
+    std::deque<RecentPlayerRecord> m_recentPlayerRecords;
+    std::mutex m_recentRecordsMutex;
+
+    // ⬇️ 【新增】：刷新列表框的核心函数
+    void UpdateAndRefreshRecentList();
 public:
 
     // 【新增下面这一行】：全局快捷键响应函数
