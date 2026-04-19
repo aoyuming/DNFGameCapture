@@ -12,36 +12,38 @@ body {
     color: var(--text-main);
     font-family: 'Microsoft YaHei', sans-serif;
     margin: 0;
-    padding: 10px; 
+    padding: 15px; 
     display: flex;
     flex-direction: column;
     align-items: center;
 }
 
+/* ================= 布局极限紧凑化 ================= */
 .main-container {
     display: flex;
-    gap: 12px; 
+    gap: 15px; 
     width: fit-content;
     transition: all 0.5s ease; 
 }
 
 .team-panel {
     background: var(--panel-bg);
-    border-radius: 8px; 
-    padding: 8px 10px 10px 10px; 
-    box-shadow: 0 8px 20px rgba(0,0,0,0.4);
-    width: auto; 
+    border-radius: 12px; 
+    padding: 12px 16px; 
+    box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+    width: max-content; 
 }
 
-.team-blue { border-top: 3px solid var(--blue-team); }
-.team-red { border-top: 3px solid var(--red-team); }
+.team-blue { border-top: 4px solid var(--blue-team); }
+.team-red { border-top: 4px solid var(--red-team); }
 
+/* ================= 顶部队伍与比分 ================= */
 .stats-header {
     display: flex;
     justify-content: space-between; 
     align-items: center;
-    padding: 0 8px 0 4px; 
-    margin-bottom: 10px; 
+    margin-bottom: 12px; 
+    gap: 15px; 
 }
 
 .team-name {
@@ -50,207 +52,138 @@ body {
     gap: 8px; 
     font-size: 22px; 
     font-weight: 900; 
-    letter-spacing: 2px;
 }
 .team-blue .team-name { color: var(--blue-team); text-shadow: 0 0 8px rgba(0, 229, 255, 0.4); }
 .team-red .team-name { color: var(--red-team); text-shadow: 0 0 8px rgba(255, 0, 85, 0.4); }
 
 .team-score-input {
-    width: 45px; 
+    width: 50px; 
     background: transparent; 
-    border: 1px solid transparent;
+    border: none;
     border-radius: 4px;
-    color: inherit; 
-    font-size: 28px; 
-    font-weight: bold;
+    font-size: 34px; 
+    font-family: 'Arial Black', Impact, sans-serif; 
+    font-weight: 900;
     text-align: center;
     outline: none;
     padding: 0;
     transition: 0.2s;
-    text-shadow: inherit; 
-}
-.team-score-input:hover { background: rgba(255,255,255,0.05); } 
-.team-score-input:focus { background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); }
-
-.stats-labels {
-    display: flex;
-    gap: 6px; 
-}
-.stats-labels span {
-    width: 40px; 
-    text-align: center;
-    font-size: 15px; 
-    color: #a3a3b5; 
-    font-weight: bold;
 }
 
+.team-blue .team-score-input { color: var(--blue-team); text-shadow: 0 0 12px rgba(0, 229, 255, 0.6); }
+.team-red .team-score-input { color: var(--red-team); text-shadow: 0 0 12px rgba(255, 0, 85, 0.6); }
+
+.stats-labels { display: flex; gap: 8px; }
+.stats-labels span { width: 45px; text-align: center; font-size: 14px; color: var(--text-muted); font-weight: bold; }
+
+/* ================= 选手数据行 ================= */
 .player-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    background: rgba(0,0,0,0.25);
-    margin-bottom: 4px; 
-    padding: 4px 8px; 
-    border-radius: 6px;
-    position: relative;
-}
-.player-row:last-child { margin-bottom: 0; }
-
-.name-wrapper {
-    position: relative;
-    display: flex;
-    align-items: center;
-    width: 90px; 
-    margin-right: 8px; 
+    display: flex; align-items: center; justify-content: space-between;
+    background: rgba(255,255,255,0.05); margin-bottom: 5px; 
+    padding: 5px 10px; border-radius: 6px; position: relative;
+    gap: 15px; 
 }
 
-.name-input {
-    width: 100%;
+/* 【核心修复 1】：只要鼠标在当前行，当前行的层级就最高，弹窗绝不会被下一行遮挡 */
+.player-row:hover, .player-row:focus-within {
+    z-index: 99;
+}
+
+.name-wrapper { position: relative; display: flex; align-items: center; width: 105px; gap: 4px; }
+
+.name-input, .stat-item input {
     background: transparent; 
     border: 1px solid transparent; 
-    color: white;
-    padding: 3px 6px; 
-    border-radius: 4px;
-    font-size: 18px; 
-    font-weight: bold;
-    text-align: center;
-    outline: none;
-    transition: 0.3s;
-}
-.name-input:hover { background: rgba(255,255,255,0.05); }
-.name-input:focus { border-color: rgba(255,255,255,0.3); background: rgba(255,255,255,0.1); }
-
-.gear-btn {
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    font-size: 16px; 
-    cursor: pointer;
-    margin-left: 2px; 
+    border-radius: 4px; 
+    color: white; 
+    font-weight: bold; 
+    text-align: center; 
+    outline: none; 
     transition: 0.2s;
-    padding: 0;
-    opacity: 0.3; 
+    text-shadow: 0 0 2px rgba(255,255,255,0.3);
 }
+
+.name-input { width: 100%; font-size: 18px; padding: 2px 4px; }
+.name-input::placeholder { color: var(--text-muted); font-weight: normal; text-shadow: none; }
+.stat-item input { width: 45px; font-size: 22px; padding: 2px 0; }
+.stats-group { display: flex; gap: 8px; }
+
+.name-input:hover, .stat-item input:hover, .team-score-input:hover { background: rgba(255,255,255,0.05); cursor: ns-resize; }
+.name-input:focus, .stat-item input:focus, .team-score-input:focus { background: rgba(255,255,255,0.1); border-color: rgba(255,255,255,0.2); }
+.name-input:hover { cursor: text; }
+
+@keyframes shake-red {
+    0%, 100% { background: transparent; }
+    50% { background: rgba(255, 0, 85, 0.3); border-color: #ff0055; }
+}
+.input-error { animation: shake-red 0.5s ease 2; }
+input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+
+.gear-btn { background: none; border: none; color: var(--text-muted); font-size: 16px; cursor: pointer; opacity: 0.3; transition: 0.2s; }
 .player-row:hover .gear-btn { opacity: 1; } 
 .gear-btn:hover { color: white; transform: rotate(90deg); }
 
-.stats-group {
-    display: flex;
-    gap: 6px; 
-}
-
-.stat-item {
-    display: flex;
-    align-items: center;
-}
-
-.stat-item input {
-    width: 40px; 
-    background: transparent; 
-    border: 1px solid transparent;
-    border-radius: 4px;
-    color: white;
-    font-size: 22px; 
-    font-weight: bold;
-    text-align: center;
-    outline: none;
-    padding: 1px 0; 
-    transition: 0.2s;
-}
-.stat-item input:hover { background: rgba(255,255,255,0.05); }
-.stat-item input:focus { border-color: rgba(255,255,255,0.3); background: rgba(255,255,255,0.1); }
-
 /* ================= 浮窗菜单 ================= */
 .popover {
-    position: absolute;
-    background: #2a2a3c;
-    border: 1px solid #444;
-    border-radius: 6px;
-    box-shadow: 0 5px 15px rgba(0,0,0,0.8);
-    z-index: 100;
-    display: none; 
-    flex-direction: column;
+    position: absolute; background: #2a2a3c; border: 1px solid #444; border-radius: 6px;
+    box-shadow: 0 5px 15px rgba(0,0,0,0.8); z-index: 100; display: none; flex-direction: column;
+    /* 【核心修复 2】：强制弹窗内的文字绝不换行，不再变成竖条面条 */
+    white-space: nowrap; 
 }
 .popover.active { display: flex; }
 
-.autocomplete-popover {
-    top: 32px;
-    left: 0;
-    width: 170px;
-}
+/* 让弹窗宽度自适应内容，不受父级限制 */
+.autocomplete-popover { top: 32px; left: 0; width: max-content; min-width: 170px; }
+.alias-popover { top: -8px; left: 80px; width: max-content; min-width: 190px; } 
 
-/* 【核心修改点】：把 left 从 105px 缩小到 82px */
-.alias-popover {
-    top: -8px;      
-    left: 82px;      /* 往左移，刚好完美盖住齿轮，贴着输入框右边缘 */
-    width: 190px;   
-}
-
-.popover-item {
-    padding: 8px 10px;
-    cursor: pointer;
-    border-bottom: 1px solid rgba(255,255,255,0.05);
-    font-size: 13px;
-    transition: 0.1s;
+.popover-item { 
+    padding: 8px 10px; cursor: pointer; border-bottom: 1px solid rgba(255,255,255,0.05); 
+    font-size: 13px; transition: 0.1s; color: white; 
+    /* 保证里面的左右元素对齐 */
+    display: flex; justify-content: space-between; align-items: center; gap: 15px;
 }
 .popover-item:hover { background: rgba(255,255,255,0.1); }
-.popover-item.keyboard-focus { background: rgba(0, 229, 255, 0.3); color: white; }
+.popover-item.keyboard-focus { background: rgba(0, 229, 255, 0.3); }
+.add-alias-btn { color: #00e5ff; font-weight: bold; text-align: center; justify-content: center; }
+.unbind-btn { color: #ff3b30; font-weight: bold; font-size: 12px; padding: 2px 6px; border-radius: 4px; background: rgba(255, 59, 48, 0.1); }
 
-.add-alias-btn { color: #00e5ff; font-weight: bold; text-align: center; }
-
-.unbind-btn {
-    color: #ff3b30;
-    font-weight: bold;
-    font-size: 12px;
-    padding: 2px 6px;
-    border-radius: 4px;
-    background: rgba(255, 59, 48, 0.1);
-    transition: 0.2s;
-}
-.unbind-btn:hover { background: #ff3b30; color: white; }
-
+/* ================= 底部按钮区 ================= */
 .control-panel {
-    margin-top: 15px; 
-    display: flex;
-    gap: 12px;
-    background: rgba(0,0,0,0.3);
-    padding: 10px 20px;
-    border-radius: 12px;
-    border: 1px solid rgba(255,255,255,0.05);
+    margin-top: 15px; display: flex; gap: 12px; background: rgba(255,255,255,0.05);
+    padding: 12px 20px; border-radius: 12px;
 }
+.ctrl-btn { padding: 8px 16px; font-size: 14px; font-weight: bold; border: none; border-radius: 6px; cursor: pointer; transition: 0.2s; color: white; }
+.ctrl-btn:hover { filter: brightness(1.2); }
 
-.ctrl-btn {
-    padding: 8px 16px;
-    font-size: 14px;
-    font-weight: bold;
-    border: none;
-    border-radius: 6px;
-    cursor: pointer;
-    transition: 0.2s;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
-/* ================= 原生数字箭头（平时隐藏，悬停显示） ================= */
-/* 1. 默认状态下隐藏箭头 */
-input[type="number"]::-webkit-outer-spin-button,
-input[type="number"]::-webkit-inner-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-}
-
-/* 2. 当鼠标悬停在输入框上时，显示箭头 */
-input[type="number"]:hover::-webkit-outer-spin-button,
-input[type="number"]:hover::-webkit-inner-spin-button {
-    -webkit-appearance: inner-spin-button;
-}
-
-.btn-swap { background: #3a3a4d; color: white; }
-.btn-swap:hover { background: #4a4a60; }
+.btn-swap { background: #4a4a60; }
 .btn-monitor-start { background: #00e5ff; color: #000; }
-.btn-monitor-start:hover { background: #00c4db; box-shadow: 0 0 10px rgba(0, 229, 255, 0.4); }
-.btn-monitor-stop { background: #ff0055; color: white; }
-.btn-monitor-stop:hover { background: #d40047; box-shadow: 0 0 10px rgba(255, 0, 85, 0.4); }
+.btn-monitor-stop { background: #ff0055; }
 .btn-auth { background: transparent; border: 1px solid #ffaa00; color: #ffaa00; }
-.btn-auth:hover { background: rgba(255, 170, 0, 0.1); }
+.btn-clear-blue { background: #0b3d60; border: 1px solid var(--blue-team); }
+.btn-clear-red { background: #600b1d; border: 1px solid var(--red-team); }
+.btn-reset { background: #8a6508; border: 1px solid #ffd700; }
+
+/* ================= 自定义内置弹窗 ================= */
+.modal-overlay {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.7); z-index: 9999;
+    display: none; justify-content: center; align-items: center;
+}
+.modal-overlay.active { display: flex; }
+.modal-box {
+    background: var(--panel-bg); padding: 25px; border-radius: 10px;
+    border: 1px solid #444; box-shadow: 0 10px 40px rgba(0,0,0,0.8);
+    width: 320px; text-align: center; color: white;
+}
+.modal-msg { margin-bottom: 20px; font-size: 16px; font-weight: bold; line-height: 1.5; }
+.modal-input {
+    width: 85%; padding: 8px; margin-bottom: 20px; border-radius: 6px;
+    border: 1px solid #555; background: rgba(0,0,0,0.5); color: white;
+    font-size: 16px; outline: none; text-align: center;
+}
+.modal-input:focus { border-color: #00e5ff; }
+.modal-btns { display: flex; justify-content: space-around; gap: 15px; }
+.modal-btn { padding: 8px 25px; border-radius: 6px; border: none; cursor: pointer; font-weight: bold; font-size: 14px; color: white; }
+.btn-cancel { background: #4a4a60; }
+.btn-confirm { background: #00e5ff; color: #000; }
+.btn-pro { background: #5a2a82; border: 1px solid #9d4edd; }

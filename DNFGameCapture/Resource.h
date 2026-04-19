@@ -7,6 +7,9 @@
 #define IDS_ABOUTBOX                    101
 #define IDR_MAINFRAME                   128
 #define IDD_DIALOG1                     130
+#define IDD_DIALOG2                     132
+#define IDD_DIALOG3                     134
+#define IDD_WEB_SCORE_DIALOG            134
 #define IDD_DNFGAMECAPTURE_DIALOG       1000
 #define IDC_STATIC_STATUS               1001
 #define IDC_EDIT2                       1003
@@ -15,13 +18,12 @@
 #define IDC_RADIO4                      1006
 #define IDC_EDIT3                       1007
 #define IDC_LIST2                       1008
-#define IDC_TREE1                       1009
 
 // Next default values for new objects
 // 
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
-#define _APS_NEXT_RESOURCE_VALUE        132
+#define _APS_NEXT_RESOURCE_VALUE        136
 #define _APS_NEXT_COMMAND_VALUE         32771
 #define _APS_NEXT_CONTROL_VALUE         1010
 #define _APS_NEXT_SYMED_VALUE           101

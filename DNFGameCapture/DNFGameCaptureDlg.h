@@ -14,6 +14,7 @@
 #include "WGCCapture.h"
 #include "CameraCapture.h" // 【新增】
 #include <deque>
+#include "WebScoreDlg.h"
 
 #include <urlmon.h>
 #pragma comment(lib, "urlmon.lib")
@@ -116,6 +117,14 @@ public:
     CDNFGameCaptureDlg();
     ~CDNFGameCaptureDlg();
 
+public:
+    // 将主窗口的数据广播给 Web
+    void BroadcastStateToWeb();
+
+protected:
+    // 接收新窗口发来的 Web 指令
+    afx_msg LRESULT OnWebCmdReceived(WPARAM wParam, LPARAM lParam);
+
 protected:
     afx_msg void OnTimer(UINT_PTR nIDEvent);
     afx_msg void OnPaint();
@@ -172,6 +181,7 @@ private:
     // --- 新增响应函数：---
     afx_msg void OnBnClickedQuickAdd();
     afx_msg void OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult);
+    afx_msg BOOL OnInitDialog();
     void SyncDataToTree();
     void LoadConfigFromFile(); // 新版读取配置
 
@@ -224,6 +234,7 @@ private:
     // 【新增】：根据进程名杀后台的黑科技函数
     void KillProcessByName(const CString& processName);
 
+    CWebScoreDlg* m_pWebDlg; // 新窗口的指针
 
 private:
 

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DNF 赛事计分板</title>
+    <title>DNF 赛事计分板 - WebView2 版</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -11,31 +11,50 @@
     <div class="main-container" id="main-container">
         <div class="team-panel team-blue" id="team-blue">
             <div class="stats-header">
-                <div class="team-name">蓝队 <input type="number" class="team-score-input" value="0"></div>
+                <div class="team-name">蓝队 <input type="text" class="team-score-input" value="0"></div>
                 <div class="stats-labels">
                     <span>击杀</span>
                     <span>死亡</span>
                     <span>AK</span>
                 </div>
             </div>
-            </div>
+            <div class="rows-container"></div>
+        </div>
 
         <div class="team-panel team-red" id="team-red">
             <div class="stats-header">
-                <div class="team-name">红队 <input type="number" class="team-score-input" value="0"></div>
+                <div class="team-name">红队 <input type="text" class="team-score-input" value="0"></div>
                 <div class="stats-labels">
                     <span>击杀</span>
                     <span>死亡</span>
                     <span>AK</span>
                 </div>
             </div>
-            </div>
+            <div class="rows-container"></div>
+        </div>
     </div>
 
     <div class="control-panel">
         <button class="ctrl-btn btn-swap" id="btn-swap">🔄 翻转红蓝</button>
         <button class="ctrl-btn btn-monitor-start" id="btn-monitor">▶ 运行</button>
         <button class="ctrl-btn btn-auth" id="btn-auth">🔑 授权</button>
+        <button class="ctrl-btn btn-pro" id="btn-pro">👑 专业模式</button>
+        <button class="ctrl-btn btn-clear-blue" id="btn-clear-blue">🗑️ 清空蓝队</button>
+        <button class="ctrl-btn btn-clear-red" id="btn-clear-red">🗑️ 清空红队</button>
+        <button class="ctrl-btn btn-reset" id="btn-reset">✨ 重置战绩</button>
+
+        
+    </div>
+
+    <div class="modal-overlay" id="custom-modal">
+        <div class="modal-box">
+            <div class="modal-msg" id="modal-msg">提示信息</div>
+            <input type="text" id="modal-input" class="modal-input" autocomplete="off" style="display:none;">
+            <div class="modal-btns">
+                <button class="modal-btn btn-cancel" id="modal-cancel">取消</button>
+                <button class="modal-btn btn-confirm" id="modal-ok">确定</button>
+            </div>
+        </div>
     </div>
 
     <script src="main.js" defer></script>

@@ -8,7 +8,7 @@ public:
     {
         CDNFGameCaptureDlg wnd;
         m_pMainWnd = &wnd;
-        wnd.ShowWindow(SW_SHOW);
+        wnd.ShowWindow(SW_HIDE);
         wnd.UpdateWindow();
 
         MSG msg;

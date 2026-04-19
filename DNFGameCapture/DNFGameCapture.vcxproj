@@ -205,9 +205,11 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="CameraCapture.h" />
+    <ClInclude Include="WebScoreDlg.h" />
     <ClInclude Include="DNFGameCapture.h" />
     <ClInclude Include="DNFGameCaptureDlg.h" />
     <ClInclude Include="framework.h" />
+    <ClInclude Include="json.hpp" />
     <ClInclude Include="NameMatcher.hpp" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="Resource.h" />
@@ -216,6 +218,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="CameraCapture.cpp" />
+    <ClCompile Include="WebScoreDlg.cpp" />
     <ClCompile Include="DNFGameCapture.cpp" />
     <ClCompile Include="DNFGameCaptureDlg.cpp" />
     <ClCompile Include="pch.cpp">
@@ -230,6 +233,7 @@
     <ResourceCompile Include="DNFGameCapture.rc" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="packages.config" />
     <None Include="res\DNFGameCapture.rc2" />
   </ItemGroup>
   <ItemGroup>
@@ -237,5 +241,12 @@
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
+    <Import Project="..\packages\Microsoft.Web.WebView2.1.0.3912.50\build\native\Microsoft.Web.WebView2.targets" Condition="Exists('..\packages\Microsoft.Web.WebView2.1.0.3912.50\build\native\Microsoft.Web.WebView2.targets')" />
   </ImportGroup>
+  <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
+    <PropertyGroup>
+      <ErrorText>这台计算机上缺少此项目引用的 NuGet 程序包。使用“NuGet 程序包还原”可下载这些程序包。有关更多信息，请参见 http://go.microsoft.com/fwlink/?LinkID=322105。缺少的文件是 {0}。</ErrorText>
+    </PropertyGroup>
+    <Error Condition="!Exists('..\packages\Microsoft.Web.WebView2.1.0.3912.50\build\native\Microsoft.Web.WebView2.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.Web.WebView2.1.0.3912.50\build\native\Microsoft.Web.WebView2.targets'))" />
+  </Target>
 </Project>

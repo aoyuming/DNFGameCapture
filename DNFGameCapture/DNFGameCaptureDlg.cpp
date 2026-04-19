@@ -17,6 +17,9 @@
 #pragma comment(lib, "Crypt32.lib")
 #pragma comment(lib, "Gdiplus.lib")
 
+#include "json.hpp"
+using json = nlohmann::json;
+
 using namespace Gdiplus;
 
 // ============================================================================
@@ -259,15 +262,14 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     ON_MESSAGE(WM_UPDATE_AUTH_TIME, &CDNFGameCaptureDlg::OnUpdateAuthTime)
     ON_CBN_DROPDOWN(1031, &CDNFGameCaptureDlg::OnCbnDropdownTargetWindow)
     ON_CBN_CLOSEUP(1031, &CDNFGameCaptureDlg::OnCbnCloseupTargetWindow)
-    ON_MESSAGE(WM_USER + 200, &CDNFGameCaptureDlg::OnWGCInitDone)
     // ⬇️ 【新增】：绑定 1033 (我们给新列表框的ID) 的点击事件
     ON_LBN_SELCHANGE(1033, &CDNFGameCaptureDlg::OnLbnSelchangeRecentPlayers)
+    ON_MESSAGE(WM_WEB_CMD_RECEIVED, &CDNFGameCaptureDlg::OnWebCmdReceived)
     ON_WM_MOUSEMOVE()
     ON_WM_RBUTTONDOWN()
 
 
 END_MESSAGE_MAP()
-
 
 void CDNFGameCaptureDlg::OnMouseMove(UINT nFlags, CPoint point) {
     // 鼠标在预览区移动时，高频重绘触发显微镜画面
@@ -674,8 +676,10 @@ void CDNFGameCaptureDlg::OutputDebugAuthInfo() {
 // 初始化与窗口过程
 // ============================================================================
 CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
+    // 1. 🚨【关键修复】：在第一行初始化 COM 组件！这能直接解决 0x800401f0 闪退报错！
+    CoInitialize(NULL);
     m_bIsAuthValid = false;
-    
+    m_pWebDlg = nullptr;
 
     m_hSingleInstanceMutex = CreateMutex(NULL, TRUE, L"Global\\DNFGameCapture_SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -746,6 +750,14 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     // 注册全局测试快捷键
     ::RegisterHotKey(m_hWnd, 8008, MOD_CONTROL, VK_F8);
     ::RegisterHotKey(m_hWnd, 8009, MOD_CONTROL, VK_F9);
+
+    // 🚨【关键修复】：断开父子绑定，这样隐藏主窗口时，Web 窗口才不会消失！
+    if (m_pWebDlg == nullptr) {
+        m_pWebDlg = new CWebScoreDlg(nullptr); // 解除了父子绑定
+        m_pWebDlg->Create(IDD_WEB_SCORE_DIALOG, GetDesktopWindow());
+    }
+    m_pWebDlg->ShowWindow(SW_SHOW); // 1. 显示现代化的 Web 计分板
+    ShowWindow(SW_HIDE);            // 2. 🚨 隐藏丑陋的 MFC 后台程序！
 }
 
 CDNFGameCaptureDlg::~CDNFGameCaptureDlg() {
@@ -761,6 +773,14 @@ CDNFGameCaptureDlg::~CDNFGameCaptureDlg() {
     if (m_hHttpSession) WinHttpCloseHandle(m_hHttpSession);
 
     GdiplusShutdown(m_gdiplusToken);
+
+    // 3. 🚨【新增清理代码】：销毁新窗口并释放 COM
+    if (m_pWebDlg) {
+        m_pWebDlg->DestroyWindow();
+        delete m_pWebDlg;
+        m_pWebDlg = nullptr;
+    }
+    CoUninitialize();
 }
 
 // ============================================================================
@@ -1770,6 +1790,8 @@ void CDNFGameCaptureDlg::OnBnClickedApply() {
     // 2. 纯粹的视觉刷新：同步左右界面的显示
     // ==========================================
     SyncDataToTree();   // 刷新左侧树状图
+    // 【加入这行】：自动识图抓到击杀后，立刻通知网页闪电跳分！
+    BroadcastStateToWeb();
     RefreshDisplay();   // 刷新右侧红蓝阵营对比图
 
     // ==========================================
@@ -1815,6 +1837,8 @@ void CDNFGameCaptureDlg::OnBnClickedReset() {
             m_players[i].currentStreak = 0; m_players[i].akCount = 0;
         }
         SyncDataToTree();
+        // 【加入这行】：自动识图抓到击杀后，立刻通知网页闪电跳分！
+        BroadcastStateToWeb();
         SaveConfigToFile();
         RefreshDisplay();
         WriteScoreToFile();
@@ -2557,6 +2581,8 @@ void CDNFGameCaptureDlg::OnPaint() {
         }
 
         SyncDataToTree();
+        // 【加入这行】：自动识图抓到击杀后，立刻通知网页闪电跳分！
+        BroadcastStateToWeb();
         RefreshDisplay();
         WriteScoreToFile();
         OutputDebugAuthInfo();
@@ -3571,6 +3597,8 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd() {
     WriteScoreToFile();
     SyncDataToTree();
     RefreshDisplay();
+    // 🚨 【新增】：点完添加按钮，立刻让网页同步
+    BroadcastStateToWeb();
 
     // ==========================================
     // ⬇️ 【彻底修复死锁】：添加成功后，将涉及到的选手在库中“沉底”
@@ -3637,8 +3665,207 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd() {
     }
 }
 
+LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
+{
+    CString* pJsonStr = (CString*)lParam;
+    if (!pJsonStr) return 0;
+
+    try {
+        std::string utf8Str = CW2A(*pJsonStr, CP_UTF8);
+        json j = json::parse(utf8Str);
+        std::string action = j["action"].get<std::string>();
+
+        // 🚨 接收前端的心跳，立马给它推送全部数据！
+        if (action == "page_ready") {
+            BroadcastStateToWeb();
+        }
+        else if (action == "update_state") {
+            std::lock_guard<std::mutex> lock(m_dataMutex);
+            auto& data = j["data"];
+
+            m_totalScoreBlue = data["blueScore"].get<int>();
+            m_totalScoreRed = data["redScore"].get<int>();
+
+            auto& players = data["players"];
+            if (players.is_array() && players.size() == 8) {
+                // Web端前4个是蓝队，写回 MFC 的 4-7
+                for (int i = 0; i < 4; i++) {
+                    int mfcIdx = i + 4;
+                    auto& p = players[i];
+                    m_players[mfcIdx].name = CA2W(p["name"].get<std::string>().c_str(), CP_UTF8);
+                    m_players[mfcIdx].team = 1;
+                    m_players[mfcIdx].kills = p["kills"].get<int>();
+                    m_players[mfcIdx].deaths = p["deaths"].get<int>();
+                    m_players[mfcIdx].akCount = p["akCount"].get<int>();
+
+                    m_players[mfcIdx].aliases.clear();
+                    for (auto& a : p["aliases"]) {
+                        AliasData ad;
+                        ad.name = CA2W(a.get<std::string>().c_str(), CP_UTF8);
+                        m_players[mfcIdx].aliases.push_back(ad);
+                    }
+                }
+                // Web端后4个是红队，写回 MFC 的 0-3
+                for (int i = 4; i < 8; i++) {
+                    int mfcIdx = i - 4;
+                    auto& p = players[i];
+                    m_players[mfcIdx].name = CA2W(p["name"].get<std::string>().c_str(), CP_UTF8);
+                    m_players[mfcIdx].team = 0;
+                    m_players[mfcIdx].kills = p["kills"].get<int>();
+                    m_players[mfcIdx].deaths = p["deaths"].get<int>();
+                    m_players[mfcIdx].akCount = p["akCount"].get<int>();
+
+                    m_players[mfcIdx].aliases.clear();
+                    for (auto& a : p["aliases"]) {
+                        AliasData ad;
+                        ad.name = CA2W(a.get<std::string>().c_str(), CP_UTF8);
+                        m_players[mfcIdx].aliases.push_back(ad);
+                    }
+                }
+            }
+            else {
+                MessageBox(L"Web端发来的数据长度不对！", L"同步异常", MB_ICONWARNING);
+            }
+
+            SaveAliasDB();
+            SaveConfigToFile();
+            WriteScoreToFile();
+            PostMessage(WM_UPDATE_ALL_UI, 0, 0);
+        }
+        else if (action == "cmd_swap") {
+            m_chkFlip.SetCheck(m_chkFlip.GetCheck() == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED);
+            OnBnClickedFlip();
+        }
+        else if (action == "cmd_monitor") {
+            bool state = j["state"].get<bool>();
+            if (m_bIsRunning != state) {
+                OnBnClickedStart();
+            }
+        }
+        // 🚨【新增】：接收前端发来的授权码并云端验证
+        else if (action == "cmd_auth") {
+            std::string codeStr = j["code"].get<std::string>();
+            CString authCode = CA2W(codeStr.c_str(), CP_UTF8);
+
+            // 1. 调用你原本的 C++ 验证函数（直接对接你的防破解核心逻辑）
+            // （这里假设你的验证函数叫 VerifyKey，返回 bool）
+            bool isValid = VerifyKey(authCode, GetMachineID());
+
+            json reply;
+            reply["action"] = "auth_result";
+            reply["success"] = isValid;
+
+            // 2. 根据验证结果，给前端返回不同的话术
+            if (isValid) {
+                // 如果验证成功，写入文件
+                SaveConfigToFile();
+
+                CString successMsg;
+                // 你还可以加上你的 m_cloudExpireTime 显示具体时间
+                successMsg.Format(L"✅ 授权验证成功！\r\n您已激活专业版。");
+                reply["message"] = std::string(CW2A(successMsg, CP_UTF8));
+            }
+            else {
+                reply["message"] = "❌ 验证失败！\r\n卡密不存在、错误或已到期。";
+            }
+
+            // 3. 将结果发回给网页展示
+            CString jsonStr = CA2W(reply.dump().c_str(), CP_UTF8);
+            if (m_pWebDlg) m_pWebDlg->SendStateToWeb(jsonStr);
+        }
+        // 🚨【新增】：处理网页发来的“专业模式”隐藏/显示指令
+        else if (action == "cmd_toggle_mfc") {
+            bool bShow = j["show"].get<bool>();
+            if (bShow) {
+                ShowWindow(SW_SHOW);          // 显示主窗口
+                SetForegroundWindow();        // 提到最前面
+            }
+            else {
+                ShowWindow(SW_HIDE);          // 隐藏主窗口
+            }
+        }
+    }
+    // 🚨 增加了显式报错：如果解析出错，直接弹窗告诉你到底哪里写错了！
+    catch (json::exception& e) {
+        CString errMsg;
+        errMsg.Format(L"JSON 数据同步失败: %S", e.what());
+        MessageBox(errMsg, L"同步报错", MB_ICONERROR);
+    }
+    catch (...) {}
+
+    delete pJsonStr;
+    return 0;
+}
+
+void CDNFGameCaptureDlg::BroadcastStateToWeb()
+{
+    if (m_pWebDlg == nullptr) return;
+
+    // 🚨 这里千万不要加 lock_guard！我已经把它拿掉了，加了必死锁！
+
+    try {
+        json j;
+        j["action"] = "sync_state";
+        j["data"]["blueScore"] = m_totalScoreBlue;
+        j["data"]["redScore"] = m_totalScoreRed;
+        // 🚨【新增】：把 MFC 的运行状态发给网页
+        j["data"]["isMonitoring"] = (m_bIsRunning == TRUE);
+
+        json playersArray = json::array();
+
+        // 蓝队 (MFC 4-7)
+        for (int i = 4; i < 8; i++) {
+            json p;
+            p["team"] = 1;
+            p["name"] = std::string(CW2A(m_players[i].name, CP_UTF8));
+            p["kills"] = m_players[i].kills;
+            p["deaths"] = m_players[i].deaths;
+            p["akCount"] = m_players[i].akCount;
+            json aliases = json::array();
+            for (auto& a : m_players[i].aliases) {
+                aliases.push_back(std::string(CW2A(a.name, CP_UTF8)));
+            }
+            p["aliases"] = aliases;
+            playersArray.push_back(p);
+        }
+
+        // 红队 (MFC 0-3)
+        for (int i = 0; i < 4; i++) {
+            json p;
+            p["team"] = 0;
+            p["name"] = std::string(CW2A(m_players[i].name, CP_UTF8));
+            p["kills"] = m_players[i].kills;
+            p["deaths"] = m_players[i].deaths;
+            p["akCount"] = m_players[i].akCount;
+            json aliases = json::array();
+            for (auto& a : m_players[i].aliases) {
+                aliases.push_back(std::string(CW2A(a.name, CP_UTF8)));
+            }
+            p["aliases"] = aliases;
+            playersArray.push_back(p);
+        }
+
+        j["data"]["players"] = playersArray;
+
+        // --- 2. 打包整个小号库，供前端补全使用 ---
+        json dbJson = json::object();
+        for (auto const& [name, aliases] : m_aliasDB) {
+            // 🚨 必须显式套上一层 std::string()，否则 JSON 库会因为类型不匹配而报错！
+            std::string utf8Name = std::string(CW2A(name, CP_UTF8));
+            std::string utf8Aliases = std::string(CW2A(aliases, CP_UTF8));
+            dbJson[utf8Name] = utf8Aliases;
+        }
+        j["data"]["fullAliasDB"] = dbJson;
+
+        CString jsonStr = CA2W(j.dump().c_str(), CP_UTF8);
+        m_pWebDlg->SendStateToWeb(jsonStr);
+    }
+    catch (...) {}
+}
+
 // 将数据同步到树状控件（带视觉状态记忆）
 void CDNFGameCaptureDlg::SyncDataToTree() {
+
     // 1. 【核心新增】：重绘前，先记住当前用户已经展开了哪些主号
     std::vector<CString> userExpandedNames;
     if (m_treePlayers.m_hWnd) { // 确保控件已创建
@@ -3962,6 +4189,8 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
 
             SaveAliasDB();
             SyncDataToTree();
+            // 【加入这行】：自动识图抓到击杀后，立刻通知网页闪电跳分！
+            BroadcastStateToWeb();
             WriteScoreToFile();
             RefreshDisplay();
             SaveConfigToFile();
@@ -4212,6 +4441,8 @@ void CDNFGameCaptureDlg::OnEndLabelEdit(NMHDR* pNMHDR, LRESULT* pResult) {
         SaveConfigToFile();
         WriteScoreToFile();
         SyncDataToTree();
+        // 【加入这行】：自动识图抓到击杀后，立刻通知网页闪电跳分！
+        BroadcastStateToWeb();
         RefreshDisplay();
         return;
     }
@@ -4319,6 +4550,8 @@ void CDNFGameCaptureDlg::OnEndLabelEdit(NMHDR* pNMHDR, LRESULT* pResult) {
     SaveConfigToFile();
     WriteScoreToFile();
     SyncDataToTree();
+    // 【加入这行】：自动识图抓到击杀后，立刻通知网页闪电跳分！
+    BroadcastStateToWeb();
     RefreshDisplay();
 }
 
@@ -4396,6 +4629,8 @@ HBRUSH CDNFGameCaptureDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor) {
 LRESULT CDNFGameCaptureDlg::OnUpdateAllUI(WPARAM wParam, LPARAM lParam) {
     // 1. 刷新软件界面的视觉显示
     SyncDataToTree();
+    // 【加入这行】：自动识图抓到击杀后，立刻通知网页闪电跳分！
+    BroadcastStateToWeb();
     RefreshDisplay();
 
     // ==========================================

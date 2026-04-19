@@ -42,6 +42,12 @@
     <ClInclude Include="CameraCapture.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="json.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="WebScoreDlg.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="DNFGameCapture.cpp">
@@ -59,6 +65,9 @@
     <ClCompile Include="CameraCapture.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="WebScoreDlg.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="DNFGameCapture.rc">
@@ -69,6 +78,7 @@
     <None Include="res\DNFGameCapture.rc2">
       <Filter>资源文件</Filter>
     </None>
+    <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="res\DNFGameCapture.ico">
