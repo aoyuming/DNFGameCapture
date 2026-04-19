@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DNF 赛事计分板</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <div class="main-container" id="main-container">
+        <div class="team-panel team-blue" id="team-blue">
+            <div class="stats-header">
+                <div class="team-name">蓝队 <input type="number" class="team-score-input" value="0"></div>
+                <div class="stats-labels">
+                    <span>击杀</span>
+                    <span>死亡</span>
+                    <span>AK</span>
+                </div>
+            </div>
+            </div>
+
+        <div class="team-panel team-red" id="team-red">
+            <div class="stats-header">
+                <div class="team-name">红队 <input type="number" class="team-score-input" value="0"></div>
+                <div class="stats-labels">
+                    <span>击杀</span>
+                    <span>死亡</span>
+                    <span>AK</span>
+                </div>
+            </div>
+            </div>
+    </div>
+
+    <div class="control-panel">
+        <button class="ctrl-btn btn-swap" id="btn-swap">🔄 翻转红蓝</button>
+        <button class="ctrl-btn btn-monitor-start" id="btn-monitor">▶ 运行</button>
+        <button class="ctrl-btn btn-auth" id="btn-auth">🔑 授权</button>
+    </div>
+
+    <script src="main.js" defer></script>
+</body>
+</html>
