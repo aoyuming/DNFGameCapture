@@ -10,7 +10,7 @@ const readline = require('readline');
 const client = new OSS({
     region: 'oss-cn-beijing',            // 你的可用区
     accessKeyId: '',     // 替换为你的 AK
-    accessKeySecret: ', // 替换为你的 SK
+    accessKeySecret: '', // 替换为你的 SK
     // stsToken: '如果有STS_TOKEN就填，用主账号AKSK就删掉这一行', 
     bucket: 'dnf-capture-update'         // 你的 Bucket 名称
 });
