@@ -145,6 +145,9 @@ function getFieldConflict(newMainName, excludeInput) {
 // ==========================================
 // 4. 渲染选手行与交互
 // ==========================================
+// ==========================================
+// 4. 渲染选手行与交互 (已修复键盘方向键与回车补齐)
+// ==========================================
 function createPlayerRow() {
     const row = document.createElement('div');
     row.className = 'player-row';
@@ -170,17 +173,56 @@ function createPlayerRow() {
     bindProNumberControls(row.querySelector('.stat-death'));
     bindProNumberControls(row.querySelector('.stat-ak'), true);
 
-    // 🚨 核心：只要触发了弹窗，就把当前行的层级强行拉满（active-row）
+    // 🚨 新增：键盘导航焦点追踪器
+    let currentFocusIndex = -1;
+    function clearActiveItems() {
+        autoPopover.querySelectorAll('.suggestion-item').forEach(item => item.classList.remove('keyboard-focus'));
+    }
+
+    // 🚨 恢复：键盘上下方向键与回车选择逻辑
+    nameInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            if (autoPopover.classList.contains('active') && currentFocusIndex > -1) {
+                const items = autoPopover.querySelectorAll('.suggestion-item');
+                if (items[currentFocusIndex]) items[currentFocusIndex].click(); 
+            } else {
+                this.blur(); // 没选列表的话，回车直接让输入框失去焦点并同步
+            }
+            return;
+        }
+
+        if (!autoPopover.classList.contains('active')) return;
+        const items = autoPopover.querySelectorAll('.suggestion-item');
+        if (items.length === 0) return;
+
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            currentFocusIndex++;
+            if (currentFocusIndex >= items.length) currentFocusIndex = 0;
+            clearActiveItems();
+            items[currentFocusIndex].classList.add('keyboard-focus');
+            items[currentFocusIndex].scrollIntoView({block: "nearest"});
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            currentFocusIndex--;
+            if (currentFocusIndex < 0) currentFocusIndex = items.length - 1;
+            clearActiveItems();
+            items[currentFocusIndex].classList.add('keyboard-focus');
+            items[currentFocusIndex].scrollIntoView({block: "nearest"});
+        }
+    });
+
     nameInput.addEventListener('click', (e) => {
         e.stopPropagation();
-        document.querySelectorAll('.popover').forEach(p => p.classList.remove('active'));
+        document.querySelectorAll('.popover').forEach(p => { if (p !== autoPopover) p.classList.remove('active'); });
         document.querySelectorAll('.player-row').forEach(r => r.classList.remove('active-row'));
         row.classList.add('active-row');
         processInputLogic(nameInput, true);
     });
 
     nameInput.addEventListener('focus', () => {
-        document.querySelectorAll('.popover').forEach(p => p.classList.remove('active'));
+        document.querySelectorAll('.popover').forEach(p => { if (p !== autoPopover) p.classList.remove('active'); });
         document.querySelectorAll('.player-row').forEach(r => r.classList.remove('active-row'));
         row.classList.add('active-row');
         processInputLogic(nameInput, true);
@@ -212,6 +254,8 @@ function createPlayerRow() {
         let availableMains = Object.keys(playerDB).filter(name => getFieldConflict(name, inputElem) === null);
         let matches = !val ? (forceShowAll ? availableMains : []) : availableMains.filter(n => n.includes(val));
         
+        currentFocusIndex = -1; // 每次列表刷新时，重置键盘焦点
+
         if (matches.length > 0) {
             matches.sort((a, b) => a.localeCompare(b, 'zh-Hans-CN', { sensitivity: 'accent' }));
             autoPopover.innerHTML = matches.map(n => `<div class="popover-item suggestion-item">${n}</div>`).join('');
