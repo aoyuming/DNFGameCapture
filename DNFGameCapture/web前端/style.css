@@ -164,7 +164,35 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 .popover-item:hover { background: rgba(255,255,255,0.1); }
 .popover-item.keyboard-focus { background: rgba(0, 229, 255, 0.3); }
 .add-alias-btn { color: #00e5ff; font-weight: bold; text-align: center; justify-content: center; }
-.unbind-btn { color: #ff3b30; font-weight: bold; font-size: 12px; padding: 2px 6px; border-radius: 4px; background: rgba(255, 59, 48, 0.1); }
+/* ================= 小号菜单按钮 ================= */
+.alias-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0; /* 关键：告诉 Flexbox 这个容器绝对不许缩小！ */
+}
+
+/* 🚨 为小号名字添加超长截断样式 */
+.alias-name {
+    flex: 1; /* 关键：占满剩余的所有空间 */
+    white-space: nowrap; /* 不允许换行 */
+    overflow: hidden; /* 超出部分隐藏 */
+    text-overflow: ellipsis; /* 隐藏部分用 ... 代替 */
+    margin-right: 10px; /* 和右边按钮保持一点距离 */
+}
+/* 配合图标化调整按钮样式 */
+.btn-temp-unbind, .btn-perm-unbind { 
+    display: flex; justify-content: center; align-items: center;
+    width: 24px; height: 24px; /* 固定正方形 */
+    font-size: 14px; 
+    border-radius: 4px; 
+    cursor: pointer;
+    transition: 0.2s;
+}
+.btn-temp-unbind { background: rgba(255, 170, 0, 0.15); }
+.btn-perm-unbind { background: rgba(255, 59, 48, 0.15); }
+
+.btn-temp-unbind:hover { background: rgba(255, 170, 0, 0.5); transform: scale(1.1); }
+.btn-perm-unbind:hover { background: rgba(255, 59, 48, 0.5); transform: scale(1.1); }
 
 /* ================= 底部控制区 ================= */
 .control-panel {
