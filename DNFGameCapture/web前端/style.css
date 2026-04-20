@@ -64,16 +64,49 @@ body {
 .stats-labels { display: flex; gap: 8px; }
 .stats-labels span { width: 45px; text-align: center; font-size: 14px; color: var(--text-muted); font-weight: bold; }
 
-/* 🚨 核心修复 2：激活的选手行，层级无限放大，绝不被任何东西挡住 */
+/* 🚨 核心修复 2：调整层级压制关系 */
 .player-row {
     display: flex; align-items: center; justify-content: space-between;
     background: rgba(255,255,255,0.05); margin-bottom: 5px; 
     padding: 5px 10px; border-radius: 6px; position: relative;
     gap: 15px; 
-    z-index: 1;
+    z-index: 1; /* 默认普通层级 */
 }
-.player-row:hover, .player-row.active-row {
-    z-index: 999;
+
+/* 鼠标单纯划过时，稍微提高一点层级即可 */
+.player-row:hover {
+    z-index: 10;
+}
+
+/* 🚨 重点：正在输入或展开了列表的行，赋予无敌层级，绝对压制其他行的 hover！ */
+.player-row.active-row {
+    z-index: 9999 !important; 
+}
+
+/* ================= 拖拽互换功能样式 ================= */
+.drag-handle {
+    color: var(--text-muted);
+    font-size: 18px;
+    font-weight: bold;
+    cursor: grab;
+    opacity: 0.3; /* 平时变暗，和之前的齿轮一样 */
+    transition: 0.2s;
+    user-select: none;
+    padding: 0 4px;
+}
+.player-row:hover .drag-handle { opacity: 1; } /* 鼠标移到这一行时亮起 */
+.drag-handle:hover { color: #00e5ff; transform: scale(1.1); }
+.drag-handle:active { cursor: grabbing; }
+
+/* 拖动时的幽灵状态 */
+.player-row.dragging {
+    opacity: 0.4;
+    background: rgba(0, 229, 255, 0.2);
+    transform: scale(0.98);
+}
+.player-row.drag-over {
+    box-shadow: inset 0 0 15px rgba(0, 229, 255, 0.8);
+    border-radius: 6px;
 }
 
 .name-wrapper { position: relative; display: flex; align-items: center; width: 105px; gap: 4px; }

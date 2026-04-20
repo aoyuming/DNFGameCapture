@@ -6,6 +6,7 @@ let isSyncingFromServer = false;
 let hasReceivedInitialData = false;
 let isMonitoring = false;
 let isProMode = false;
+let draggedRow = null; // 🚨【新增】：用于记录当前正在拖拽的选手行
 
 if (window.chrome && window.chrome.webview) {
     window.chrome.webview.addEventListener('message', function(event) {
@@ -144,17 +145,17 @@ function getFieldConflict(newMainName, excludeInput) {
 
 // ==========================================
 // 4. 渲染选手行与交互
-// ==========================================
-// ==========================================
-// 4. 渲染选手行与交互 (已修复键盘方向键与回车补齐)
-// ==========================================
 function createPlayerRow() {
     const row = document.createElement('div');
     row.className = 'player-row';
+    // 🚨 默认关闭，防止平时点到输入框误触拖拽
+    row.draggable = false; 
+
+    // 🚨 1. HTML 结构：把拖拽柄放回 name-wrapper 里面（原来齿轮的位置）
     row.innerHTML = `
         <div class="name-wrapper">
             <input type="text" class="name-input" placeholder="名字" autocomplete="off">
-            <button class="gear-btn">⚙️</button>
+            <div class="drag-handle" title="按住拖动以交换位置">⋮⋮</div>
             <div class="popover autocomplete-popover"></div>
             <div class="popover alias-popover"></div>
         </div>
@@ -167,65 +168,109 @@ function createPlayerRow() {
     const nameInput = row.querySelector('.name-input');
     const autoPopover = row.querySelector('.autocomplete-popover');
     const aliasPopover = row.querySelector('.alias-popover');
-    const gearBtn = row.querySelector('.gear-btn');
+    const dragHandle = row.querySelector('.drag-handle'); // 获取拖拽柄
 
     bindProNumberControls(row.querySelector('.stat-kill'));
     bindProNumberControls(row.querySelector('.stat-death'));
     bindProNumberControls(row.querySelector('.stat-ak'), true);
 
-    // 🚨 新增：键盘导航焦点追踪器
-    let currentFocusIndex = -1;
-    function clearActiveItems() {
-        autoPopover.querySelectorAll('.suggestion-item').forEach(item => item.classList.remove('keyboard-focus'));
-    }
+    // ==========================================
+    // 🚨 2. 精确拖拽控制 (只在按住柄时开启)
+    // ==========================================
+    dragHandle.addEventListener('mousedown', () => row.draggable = true);
+    dragHandle.addEventListener('mouseup', () => row.draggable = false);
+    dragHandle.addEventListener('mouseleave', () => row.draggable = false);
 
-    // 🚨 恢复：键盘上下方向键与回车选择逻辑
+    row.addEventListener('dragstart', function(e) {
+        document.querySelectorAll('.popover').forEach(p => p.classList.remove('active'));
+        draggedRow = this;
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', ''); 
+        setTimeout(() => this.classList.add('dragging'), 0);
+    });
+
+    row.addEventListener('dragend', function() {
+        this.classList.remove('dragging');
+        draggedRow = null;
+        document.querySelectorAll('.player-row').forEach(r => r.classList.remove('drag-over'));
+        this.draggable = false; // 拖拽完立刻关掉
+    });
+
+    row.addEventListener('dragover', function(e) {
+        e.preventDefault(); 
+        if (draggedRow !== this) this.classList.add('drag-over');
+        return false;
+    });
+
+    row.addEventListener('dragleave', function() {
+        this.classList.remove('drag-over');
+    });
+
+    row.addEventListener('drop', function(e) {
+        e.stopPropagation();
+        this.classList.remove('drag-over');
+        if (draggedRow !== this && draggedRow) {
+            swapDOMNodes(draggedRow, this); // 调用前面写的 DOM 互换函数
+            triggerSync(); 
+        }
+        return false;
+    });
+
+    // ==========================================
+    // 🚨 3. 智能焦点与补全逻辑融合
+    // ==========================================
+    let currentFocusIndex = -1;
+    function clearActiveItems() { autoPopover.querySelectorAll('.suggestion-item').forEach(item => item.classList.remove('keyboard-focus')); }
+
     nameInput.addEventListener('keydown', function(e) {
         if (e.key === 'Enter') {
             e.preventDefault();
             if (autoPopover.classList.contains('active') && currentFocusIndex > -1) {
                 const items = autoPopover.querySelectorAll('.suggestion-item');
-                if (items[currentFocusIndex]) items[currentFocusIndex].click(); 
-            } else {
-                this.blur(); // 没选列表的话，回车直接让输入框失去焦点并同步
+                // 🚨 修复 1：因为鼠标点击改成了 mousedown，键盘回车也要模拟触发 mousedown 才能生效
+                if (items[currentFocusIndex]) {
+                    items[currentFocusIndex].dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                }
+            } else if (this.value.trim() === '') {
+                // 🚨 修复 2：如果输入框是空的，按回车什么也不做（不触发失去焦点）
+                // 这样光标依然在输入框里闪烁，你可以继续按方向键找人
+                return;
+            } else { 
+                // 只有当输入框有字，且不需要从列表选人时，按回车才完成输入并失去焦点
+                this.blur(); 
             }
             return;
         }
-
+        
         if (!autoPopover.classList.contains('active')) return;
         const items = autoPopover.querySelectorAll('.suggestion-item');
         if (items.length === 0) return;
 
         if (e.key === 'ArrowDown') {
-            e.preventDefault();
-            currentFocusIndex++;
-            if (currentFocusIndex >= items.length) currentFocusIndex = 0;
-            clearActiveItems();
-            items[currentFocusIndex].classList.add('keyboard-focus');
-            items[currentFocusIndex].scrollIntoView({block: "nearest"});
+            e.preventDefault(); currentFocusIndex++; if (currentFocusIndex >= items.length) currentFocusIndex = 0;
+            clearActiveItems(); items[currentFocusIndex].classList.add('keyboard-focus'); items[currentFocusIndex].scrollIntoView({block: "nearest"});
         } else if (e.key === 'ArrowUp') {
-            e.preventDefault();
-            currentFocusIndex--;
-            if (currentFocusIndex < 0) currentFocusIndex = items.length - 1;
-            clearActiveItems();
-            items[currentFocusIndex].classList.add('keyboard-focus');
-            items[currentFocusIndex].scrollIntoView({block: "nearest"});
+            e.preventDefault(); currentFocusIndex--; if (currentFocusIndex < 0) currentFocusIndex = items.length - 1;
+            clearActiveItems(); items[currentFocusIndex].classList.add('keyboard-focus'); items[currentFocusIndex].scrollIntoView({block: "nearest"});
         }
     });
 
-    nameInput.addEventListener('click', (e) => {
-        e.stopPropagation();
-        document.querySelectorAll('.popover').forEach(p => { if (p !== autoPopover) p.classList.remove('active'); });
-        document.querySelectorAll('.player-row').forEach(r => r.classList.remove('active-row'));
-        row.classList.add('active-row');
-        processInputLogic(nameInput, true);
-    });
+    nameInput.addEventListener('click', (e) => e.stopPropagation());
 
-    nameInput.addEventListener('focus', () => {
-        document.querySelectorAll('.popover').forEach(p => { if (p !== autoPopover) p.classList.remove('active'); });
+    // 🌟 核心改动点：判断当前输入框有没有值
+    nameInput.addEventListener('focus', function() {
+        document.querySelectorAll('.popover').forEach(p => { if (p !== autoPopover && p !== aliasPopover) p.classList.remove('active'); });
         document.querySelectorAll('.player-row').forEach(r => r.classList.remove('active-row'));
         row.classList.add('active-row');
-        processInputLogic(nameInput, true);
+        
+        if (this.value.trim() !== '') {
+            // 【有名字】：弹小号设置
+            renderAliasMenu(this.value.trim(), aliasPopover);
+            aliasPopover.classList.add('active');
+        } else {
+            // 【没名字】：弹所有的补全列表！
+            processInputLogic(this, true); 
+        }
     });
 
     nameInput.addEventListener('blur', function() {
@@ -233,59 +278,102 @@ function createPlayerRow() {
             showAlert(this.getAttribute('data-error-msg'));
             this.value = ''; this.classList.remove('input-error');
         }
+        setTimeout(() => aliasPopover.classList.remove('active'), 150); 
         triggerSync();
     });
 
     let isComposing = false;
     nameInput.addEventListener('compositionstart', () => isComposing = true);
     nameInput.addEventListener('compositionend', function() { isComposing = false; processInputLogic(this, false); });
-    nameInput.addEventListener('input', function() { if (!isComposing) processInputLogic(this, false); });
+    
+    nameInput.addEventListener('input', function() { 
+            if (!isComposing) {
+                let val = this.value.trim();
+                
+                // 🚨 1. 先跑一遍查重和补全逻辑，如果名字重复，这里会给输入框加上 'input-error' 的红框
+                processInputLogic(this, val === '');          
+
+                // 🚨 2. 判断：如果名字在库里，且【没有被判定为重复报错】
+                if (val !== '' && playerDB.hasOwnProperty(val) && !this.classList.contains('input-error')) {
+                    autoPopover.classList.remove('active'); 
+                    renderAliasMenu(val, aliasPopover);
+                    aliasPopover.classList.add('active');
+                } else {
+                    // 如果有报错，或者名字没打完，就把小号列表藏起来
+                    aliasPopover.classList.remove('active'); 
+                }
+            } 
+        
+    });;
 
     function processInputLogic(inputElem, forceShowAll) {
         let val = inputElem.value.trim();
         let conflict = getFieldConflict(val, inputElem);
+        
         if (val && conflict) {
             inputElem.classList.add('input-error');
             inputElem.setAttribute('data-error-msg', `❌ 无法上场！已被【${conflict.owner}】占用。\n原因：${conflict.reason}`);
-            autoPopover.classList.remove('active'); return;
+            autoPopover.classList.remove('active'); 
+            aliasPopover.classList.remove('active'); // 🚨 修复：有冲突时强制关掉小号列表
+            return;
         }
         inputElem.classList.remove('input-error');
         
         let availableMains = Object.keys(playerDB).filter(name => getFieldConflict(name, inputElem) === null);
         let matches = !val ? (forceShowAll ? availableMains : []) : availableMains.filter(n => n.includes(val));
         
-        currentFocusIndex = -1; // 每次列表刷新时，重置键盘焦点
+        currentFocusIndex = -1; 
 
         if (matches.length > 0) {
             matches.sort((a, b) => a.localeCompare(b, 'zh-Hans-CN', { sensitivity: 'accent' }));
             autoPopover.innerHTML = matches.map(n => `<div class="popover-item suggestion-item">${n}</div>`).join('');
             autoPopover.classList.add('active');
+            
             autoPopover.querySelectorAll('.suggestion-item').forEach(item => {
-                item.addEventListener('click', (e) => {
+                // 🚨 修复：将 click 改为 mousedown
+                item.addEventListener('mousedown', (e) => {
+                    // 🚨 核心：阻止默认事件！防止输入框失去焦点触发 blur 里的隐藏代码
+                    e.preventDefault(); 
                     e.stopPropagation();
+                    
                     inputElem.value = item.innerText;
-                    autoPopover.classList.remove('active');
-                    renderAliasMenu(inputElem.value, aliasPopover);
-                    aliasPopover.classList.add('active');
+                    
+                    // 赋值后再跑一遍查重逻辑确保万无一失
+                    processInputLogic(inputElem, false);
+                    
+                    // 如果选中的人没冲突，就无缝切出他的小号列表
+                    if (!inputElem.classList.contains('input-error')) {
+                        autoPopover.classList.remove('active');
+                        renderAliasMenu(inputElem.value, aliasPopover);
+                        aliasPopover.classList.add('active');
+                    }
                     triggerSync();
                 });
             });
-        } else { autoPopover.classList.remove('active'); }
+        } else { 
+            autoPopover.classList.remove('active'); 
+        }
     }
 
-    gearBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        document.querySelectorAll('.popover').forEach(p => p.classList.remove('active'));
-        document.querySelectorAll('.player-row').forEach(r => r.classList.remove('active-row'));
-        
-        if (nameInput.value.trim()) { 
-            row.classList.add('active-row');
-            renderAliasMenu(nameInput.value.trim(), aliasPopover); 
-            aliasPopover.classList.add('active'); 
-        }
-    });
-
     return row;
+}
+
+// 🚨 拖拽数据安全交换函数 (直接在底层互换整个 DOM 节点，解决一切幽灵状态)
+function swapDOMNodes(node1, node2) {
+    // 创建一个临时占位符
+    const marker = document.createElement('div');
+    
+    // 将占位符插入到 node1 的位置
+    node1.parentNode.insertBefore(marker, node1);
+    
+    // 把 node1 挪到 node2 的位置
+    node2.parentNode.insertBefore(node1, node2);
+    
+    // 把 node2 挪到占位符的位置
+    marker.parentNode.insertBefore(node2, marker);
+    
+    // 清理占位符
+    marker.parentNode.removeChild(marker);
 }
 
 // 辅助函数：数字控制 (支持滚轮、右键、以及手动打字输入)
