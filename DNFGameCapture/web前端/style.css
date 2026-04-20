@@ -108,8 +108,21 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     white-space: nowrap; 
 }
 .popover.active { display: flex; }
-.autocomplete-popover { top: 32px; left: 0; width: max-content; min-width: 170px; }
-.alias-popover { top: -8px; left: 80px; width: max-content; min-width: 190px; } 
+.autocomplete-popover { 
+    top: 32px; left: 0; width: max-content; min-width: 170px; 
+    max-height: 240px; /* 限制最大高度 */
+    overflow-y: auto;  /* 超出内容自动显示滚动条 */
+}
+.alias-popover { 
+    top: -8px; left: 80px; width: max-content; min-width: 190px; 
+    max-height: 240px; 
+    overflow-y: auto; 
+}
+/* 🚨 顺手给这个弹出菜单加个好看的暗黑电竞风滚动条 */
+.popover::-webkit-scrollbar { width: 6px; }
+.popover::-webkit-scrollbar-thumb { background: #555; border-radius: 3px; }
+.popover::-webkit-scrollbar-thumb:hover { background: #00e5ff; }
+.popover::-webkit-scrollbar-track { background: transparent; }
 
 .popover-item { 
     padding: 8px 10px; cursor: pointer; border-bottom: 1px solid rgba(255,255,255,0.05); 

@@ -820,6 +820,14 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     // 【终极解决隐藏】：先让 Web 窗口出来，主窗口直接深埋后台
     m_pWebDlg->ShowWindow(SW_SHOW);
     ShowWindow(SW_HIDE);
+
+    // ==========================================
+    // 🚨 恢复：开机自动在后台检查更新！
+    // ==========================================
+    std::thread([this]() {
+        Sleep(2000); // 稍微延迟 2 秒，等软件 UI 完全加载完再去联网，防止开机卡顿
+        CheckForUpdates(true); // true 代表静默检测模式
+        }).detach();
 }
 
 CDNFGameCaptureDlg::~CDNFGameCaptureDlg() {
