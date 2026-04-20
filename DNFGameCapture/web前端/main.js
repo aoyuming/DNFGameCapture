@@ -525,14 +525,19 @@ function bindProNumberControls(inputElem, isAK = false) {
 }
 
 function renderAliasMenu(playerName, popElement) {
-    let html = (playerDB[playerName] || []).map((a, i) => `
+    let html = (playerDB[playerName] || []).map((a, i) => {
+        // 🚨 核心改动：判断名字长度，超过 6 个字符就截断并拼上 "..."
+        let displayName = a.length > 6 ? a.substring(0, 6) + '...' : a;
+
+        return `
         <div class="popover-item">
-            <span class="alias-name" title="${a}">🎮 ${a}</span>
+            <span class="alias-name" title="${a}">🎮 ${displayName}</span>
             <div class="alias-actions">
                 <span class="btn-temp-unbind" data-idx="${i}" title="临时解绑 (本次添加隐藏此ID不参与名称匹配，删除主号后重新添加即可恢复)">X</span>
                 <span class="btn-perm-unbind" data-idx="${i}" title="永久解绑 (从库选手信息里面彻底删除)">🗑️</span>
             </div>
-        </div>`).join('');
+        </div>`;
+    }).join('');
     html += `<div class="popover-item add-alias-btn">+ 绑定新小号</div>`;
     popElement.innerHTML = html;
 
