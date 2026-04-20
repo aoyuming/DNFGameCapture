@@ -20,7 +20,7 @@
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"2.5.5"    //当前版本号
+#define CURRENT_VERSION L"3.0.0"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -28,6 +28,17 @@
 #define DNF_WINDOW_NAME L"地下城与勇士：创新世纪"
 #define COLOR_BLUE      RGB(0,0,255)
 #define COLOR_RED       RGB(255,0,0)
+
+// =========================================
+// 🚨 【新增】：核心检测与冷却时间配置宏 (单位:毫秒)
+// 如果你调高倍速看录像，请务必等比例缩小这些时间！
+// 比如 2倍速：25000 -> 12500，240 -> 120
+// ==========================================
+#define POLL_COLOR_INTERVAL     240    // 画面颜色轮询间隔 (默认240ms，倍速太快容易漏掉大X，可改小如 100)
+#define COOLDOWN_KILL_TRIGGER   21000  // 单人击杀大X防抖冷却时间 (默认25000ms = 25秒)
+#define COOLDOWN_TEAM_SCORE     120000 // 队伍覆灭大比分防抖冷却时间 (默认120000ms = 2分钟)
+#define DUP_KILL_LIMIT_TIME     40000  // 重复击杀判定拦截时间 (默认20000ms = 20秒内同一个人死两次不计)
+#define DUP_KILL_CLEAN_TIME     25000  // 战绩历史清理时间 (必须比 DUP_KILL_LIMIT_TIME 大一点)
 
 // ==========================================
 // 【新增】：历史回溯截图的宏定义
@@ -43,8 +54,8 @@
 
 // =========================================================
 // 【编译环境切换开关】
-// 设为 1：开启云端测试模式（捕获全屏幕桌面，用于云端播放录像测试）
-// 设为 0：正式发布模式（精准捕获 DNF 窗口，用于发给用户的正式版）
+// 设为 0：开启云端测试模式（捕获全屏幕桌面，用于云端播放录像测试）
+// 设为 1：正式发布模式（精准捕获 DNF 窗口，用于发给用户的正式版）
 // =========================================================
 #define ENABLE_CLOUD_TEST_MODE 0
 
@@ -159,6 +170,9 @@ protected:
 
     std::vector<CString> m_autoExpandedNodes; // 【新增】：记忆刚才修改过，需要临时展开3秒的主号
 
+    // 🚨 C++ 战场级查重引擎：检查某个即将上场的主号及其小号，是否与场上现有的选手冲突
+    CString CheckFieldConflict(const CString& newMain, const std::vector<CString>& extraAliases, int excludeIdx);
+
 private:
     void Capture();
     void CheckColorTrigger();
@@ -236,10 +250,13 @@ private:
 
     CWebScoreDlg* m_pWebDlg; // 新窗口的指针
 
+
 private:
 
     WGCCapture* m_pWGC = nullptr;
     bool m_bUseWGC = false;   // 是否使用 WGC 模式
+    // 🚨【新增】：WGC 线程安全延迟销毁器
+    void SafeDeleteWGC();
 
     std::map<CString, CString> m_aliasDB;        // 本地小号数据库
     void LoadAliasDB();                          // 加载数据库
@@ -316,6 +333,8 @@ private:
 
     // 【新版授权系统】
     void CheckTrialAndLicense();
+    // 🚨 【新增】：标记是否是用户手动点击的授权验证
+    bool m_bIsManualAuthCheck = false;
 
     // 【新增】：云端授权回调变量与消息
     long long m_keyDuration = 0;     // 存放解析出的时长

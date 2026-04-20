@@ -29,6 +29,11 @@ protected:
 	virtual BOOL OnInitDialog();
 	afx_msg void OnSize(UINT nType, int cx, int cy);
 
+	// 🚨 【新增】：拦截各种会导致窗口消失的按键和动作
+	virtual void OnCancel();
+	virtual void OnOK();
+	afx_msg void OnClose();
+
 	DECLARE_MESSAGE_MAP()
 
 private:

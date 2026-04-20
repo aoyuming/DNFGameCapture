@@ -22,19 +22,37 @@ void CWebScoreDlg::DoDataExchange(CDataExchange* pDX)
 
 BEGIN_MESSAGE_MAP(CWebScoreDlg, CDialogEx)
 	ON_WM_SIZE()
+    ON_WM_CLOSE() // 🚨 【新增】：绑定点 X 的消息
 END_MESSAGE_MAP()
 
 
 BOOL CWebScoreDlg::OnInitDialog()
 {
-	CDialogEx::OnInitDialog();
+    CDialogEx::OnInitDialog();
 
-	// 设置窗口标题
-	SetWindowText(L"DNF 赛事计分板 (Web展示端)");
+    // 🚨 动态读取版本号并设置窗口标题
+    CString title;
+    title.Format(L"DNF点将计分器 - v%s", CURRENT_VERSION);
+    SetWindowText(title);
 
-	InitWebView2();
+    InitWebView2();
 
-	return TRUE;
+    return TRUE;
+}
+
+// ==========================================
+// 🚨 窗口生命周期控制：彻底禁止 Web 窗口销毁，改为隐藏
+// ==========================================
+void CWebScoreDlg::OnClose() {
+    ShowWindow(SW_HIDE); // 点 X 只是隐藏
+}
+
+void CWebScoreDlg::OnCancel() {
+    ShowWindow(SW_HIDE); // 按 Esc 只是隐藏
+}
+
+void CWebScoreDlg::OnOK() {
+    // 拦截回车键，什么都不做，防止意外关闭
 }
 
 void CWebScoreDlg::InitWebView2()

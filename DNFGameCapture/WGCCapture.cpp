@@ -38,7 +38,8 @@ bool WGCCapture::IsSupported() {
     static thread_local bool s_initialized = false;
     if (!s_initialized) {
         try {
-            winrt::init_apartment(winrt::apartment_type::multi_threaded);
+            // 🚨 全部替换为下面这句（强制使用单线程模式，匹配 MFC）：
+            winrt::init_apartment(winrt::apartment_type::single_threaded);
         }
         catch (...) {}
         s_initialized = true;
@@ -279,7 +280,10 @@ HBITMAP WGCCapture::TextureToHBitmap(ID3D11Texture2D* pTexture) {
         }
     }
 
-    m_d3dContext->Unmap(pTexture, 0);
+    // 🚨【终极防崩溃】：在解除映射时再次确认指针依然存活
+    if (m_d3dContext) {
+        m_d3dContext->Unmap(pTexture, 0);
+    }
     return hBmp;
 }
 

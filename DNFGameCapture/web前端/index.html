@@ -9,9 +9,9 @@
 <body>
 
     <div class="main-container" id="main-container">
-        <div class="team-panel team-blue" id="team-blue">
+        <div class="team-panel team-red" id="team-red">
             <div class="stats-header">
-                <div class="team-name">蓝队 <input type="text" class="team-score-input" value="0"></div>
+                <div class="team-name">红队 <input type="text" class="team-score-input" value="0"></div>
                 <div class="stats-labels">
                     <span>击杀</span>
                     <span>死亡</span>
@@ -21,9 +21,9 @@
             <div class="rows-container"></div>
         </div>
 
-        <div class="team-panel team-red" id="team-red">
+        <div class="team-panel team-blue" id="team-blue">
             <div class="stats-header">
-                <div class="team-name">红队 <input type="text" class="team-score-input" value="0"></div>
+                <div class="team-name">蓝队 <input type="text" class="team-score-input" value="0"></div>
                 <div class="stats-labels">
                     <span>击杀</span>
                     <span>死亡</span>
@@ -39,11 +39,11 @@
         <button class="ctrl-btn btn-monitor-start" id="btn-monitor">▶ 运行</button>
         <button class="ctrl-btn btn-auth" id="btn-auth">🔑 授权</button>
         <button class="ctrl-btn btn-pro" id="btn-pro">👑 专业模式</button>
-        <button class="ctrl-btn btn-clear-blue" id="btn-clear-blue">🗑️ 清空蓝队</button>
         <button class="ctrl-btn btn-clear-red" id="btn-clear-red">🗑️ 清空红队</button>
+        <button class="ctrl-btn btn-clear-blue" id="btn-clear-blue">🗑️ 清空蓝队</button>
         <button class="ctrl-btn btn-reset" id="btn-reset">✨ 重置战绩</button>
-
         
+        <div class="dir-bar" id="dir-display" title="点击可更改 TXT 输出目录">📁 战绩输出目录：获取中...</div>
     </div>
 
     <div class="modal-overlay" id="custom-modal">
