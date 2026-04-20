@@ -3,7 +3,7 @@
 // 1. 核心：WebView2 同步引擎
 // ==========================================
 let playerDB = {}; 
-let savedDB = {}; // 🚨 新增：专门用于存放发给 C++ 写入本地 TXT 的永久库
+let savedDB = {}; 
 let isSyncingFromServer = false;
 let hasReceivedInitialData = false;
 let isMonitoring = false;
@@ -19,7 +19,6 @@ window.chrome.webview.addEventListener('message', function(event) {
             if (msg.action === 'sync_state') {
                 hasReceivedInitialData = true;
                 
-                // 🚨 进化版：精准增量合并逻辑 (Smart Delta Merge)
                 if (msg.data.fullAliasDB) {
                     let newSavedDB = {};
                     
@@ -28,18 +27,12 @@ window.chrome.webview.addEventListener('message', function(event) {
                         newSavedDB[key] = [...arr];
 
                         if (!playerDB[key]) {
-                            // 情况 A：完全是 MFC 侧新加的选手，直接接收
                             playerDB[key] = [...arr];
                         } else {
-                            // 情况 B：选手已存在，执行增量对比
                             let oldSaved = savedDB[key] || [];
-                            
-                            // 1. 找出 MFC 侧刚加的 (在传来的 arr 中，但不在旧 savedDB 中)
                             let newFromMFC = arr.filter(a => !oldSaved.includes(a));
-                            // 2. 找出 MFC 侧刚删的 (在旧 savedDB 中，但不在传来的 arr 中)
                             let deletedFromMFC = oldSaved.filter(a => !arr.includes(a));
 
-                            // 3. 将 MFC 的真实操作应用到 Web 端的 playerDB，同时保留 Web 端的“临时解绑”状态
                             let updatedPlayerDB = [...playerDB[key]];
                             newFromMFC.forEach(a => { if (!updatedPlayerDB.includes(a)) updatedPlayerDB.push(a); });
                             updatedPlayerDB = updatedPlayerDB.filter(a => !deletedFromMFC.includes(a));
@@ -48,19 +41,29 @@ window.chrome.webview.addEventListener('message', function(event) {
                         }
                     }
                     
-                    // 清理 MFC 侧已经彻底删除的选手
                     for (let key in playerDB) {
                         if (!msg.data.fullAliasDB[key]) {
                             delete playerDB[key];
                         }
                     }
-
-                    savedDB = newSavedDB; // 更新永久库底座
+                    savedDB = newSavedDB; 
                 }
-                
+
+                // ========================================================
+                // 🚨 核心修复：无条件服从 C++ 的场上活跃选手状态！
+                // ========================================================
+                if (msg.data.players) {
+                    msg.data.players.forEach(p => {
+                        // 如果这个选手正在场上（红蓝两队 8 个框里）
+                        if (p.name && p.name.trim() !== '') {
+                            // 直接用 C++ 传来的最新小号列表，强行覆盖 Web 端的展示库！
+                            // 这样 C++ 无论是加回来、还是在 C++ 里临时删掉，Web 端都能瞬间无缝同步！
+                            playerDB[p.name] = [...p.aliases];
+                        }
+                    });
+                }
                 applyStateFromServer(msg.data);
 
-                // 🚨 体验优化：如果你正好打开着某个选手的弹窗，MFC 发来同步时立刻自动刷新弹窗 HTML！
                 let activeRowInput = document.querySelector('.player-row.active-row .name-input');
                 let aliasPopover = document.querySelector('.alias-popover.active');
                 if (activeRowInput && aliasPopover) {
@@ -384,6 +387,20 @@ function createPlayerRow() {
     });;
 
     function processInputLogic(inputElem, forceShowAll) {
+        // ========================================================
+        // 🚨 终极强行同步：键盘每敲一下，就扫描全场，立刻恢复被“临时解绑”的下场选手！
+        // ========================================================
+        let activeNames = Array.from(document.querySelectorAll('.name-input'))
+                               .map(inp => inp.value.trim())
+                               .filter(name => name !== '');
+                               
+        for (let name in savedDB) {
+            // 只要发现永久库里的人没在场上，无条件瞬间恢复他的所有小号！
+            if (!activeNames.includes(name)) {
+                playerDB[name] = [...savedDB[name]]; 
+            }
+        }
+        
         let val = inputElem.value.trim();
         let conflict = getFieldConflict(val, inputElem);
         
@@ -508,20 +525,20 @@ function bindProNumberControls(inputElem, isAK = false) {
 }
 
 function renderAliasMenu(playerName, popElement) {
-    // 🚨 1. 修改了 HTML 结构，加入两个按钮的布局
-    // 找到这行代码并替换：
     let html = (playerDB[playerName] || []).map((a, i) => `
         <div class="popover-item">
             <span class="alias-name" title="${a}">🎮 ${a}</span>
             <div class="alias-actions">
                 <span class="btn-temp-unbind" data-idx="${i}" title="临时解绑 (本次添加隐藏此ID不参与名称匹配，删除主号后重新添加即可恢复)">X</span>
-                <span class="btn-perm-unbind" data-idx="${i}" title="永久解绑 (从库选手信息里面删除)">🗑️</span>
+                <span class="btn-perm-unbind" data-idx="${i}" title="永久解绑 (从库选手信息里面彻底删除)">🗑️</span>
             </div>
         </div>`).join('');
     html += `<div class="popover-item add-alias-btn">+ 绑定新小号</div>`;
     popElement.innerHTML = html;
 
-    // --- 绑定新小号逻辑 ---
+    // ==========================================
+    // 1. 绑定新小号逻辑
+    // ==========================================
     popElement.querySelector('.add-alias-btn').addEventListener('mousedown', (e) => {
         e.preventDefault(); e.stopPropagation(); 
         showPrompt(`为【${playerName}】绑定新小号:`, (newAlias) => {
@@ -536,13 +553,14 @@ function renderAliasMenu(playerName, popElement) {
                         return;
                     }
                 }
+                
                 if(!playerDB[playerName]) playerDB[playerName] = [];
-                if(!savedDB[playerName]) savedDB[playerName] = []; // 确保永久库也初始化
+                if(!savedDB[playerName]) savedDB[playerName] = []; 
                 
                 if (playerDB[playerName].includes(aliasTrimmed)) return;
                 
                 playerDB[playerName].push(aliasTrimmed);
-                savedDB[playerName].push(aliasTrimmed); // 🚨 新增小号时，同时写入永久库
+                savedDB[playerName].push(aliasTrimmed); 
 
                 renderAliasMenu(playerName, popElement); 
                 popElement.classList.add('active');
@@ -551,35 +569,47 @@ function renderAliasMenu(playerName, popElement) {
         });
     });
 
-    // --- 临时解绑逻辑 (只删 UI 内存，不影响 C++) ---
+    // ==========================================
+    // 2. 临时解绑逻辑 (只删 UI 内存，换人后自动恢复)
+    // ==========================================
     popElement.querySelectorAll('.btn-temp-unbind').forEach(btn => {
         btn.addEventListener('mousedown', (e) => {
             e.preventDefault(); e.stopPropagation(); 
             const idx = e.target.getAttribute('data-idx');
-            const targetAlias = playerDB[playerName][idx];
             
-            // 临时解绑就不弹确认框了，直接闪电移除，体验更好
+            // 从当前活跃库中移除
             playerDB[playerName].splice(idx, 1); 
             
             renderAliasMenu(playerName, popElement); 
             popElement.classList.add('active');
-            triggerSync(); // 这里触发的同步，里面带的依然是完整的 savedDB，所以 C++ 不会删掉它
+            
+            // 触发同步（这会告诉 C++ 场上目前没这个小号了，但不会从底层库里抹除它）
+            triggerSync(); 
         });
     });
 
-    // --- 永久解绑逻辑 (删 UI 内存 + 删永久库) ---
+    // ==========================================
+    // 3. 永久解绑逻辑 (通知 C++ 彻底删库)
+    // ==========================================
     popElement.querySelectorAll('.btn-perm-unbind').forEach(btn => {
         btn.addEventListener('mousedown', (e) => {
             e.preventDefault(); e.stopPropagation(); 
             const idx = e.target.getAttribute('data-idx');
             const targetAlias = playerDB[playerName][idx];
 
-            showConfirm(`⚠️ 确定要【永久删除】小号 [${targetAlias}] 吗？<br><span style="font-size:12px;color:#aaa">删除后本地库将同步更新</span>`, (isOk) => {
+            showConfirm(`⚠️ 确定要【永久删除】小号 [${targetAlias}] 吗？`, (isOk) => {
                 if(isOk) {
-                    // 1. 删展示库
+                    // 发送专属的终极删除指令给 C++
+                    if (window.chrome && window.chrome.webview) {
+                        window.chrome.webview.postMessage({ 
+                            action: "cmd_delete_alias", 
+                            mainName: playerName, 
+                            aliasName: targetAlias 
+                        });
+                    }
+
+                    // 前端同步清理内存，保证 UI 瞬间反应
                     playerDB[playerName].splice(idx, 1); 
-                    
-                    // 2. 删永久库
                     if (savedDB[playerName]) {
                         let sIdx = savedDB[playerName].indexOf(targetAlias);
                         if (sIdx > -1) savedDB[playerName].splice(sIdx, 1);
@@ -587,7 +617,6 @@ function renderAliasMenu(playerName, popElement) {
 
                     renderAliasMenu(playerName, popElement); 
                     popElement.classList.add('active');
-                    triggerSync(); // 此时 savedDB 已少一人，C++ 收到后会覆写清理本地 txt
                 }
             });
         });

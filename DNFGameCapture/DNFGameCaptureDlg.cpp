@@ -3579,6 +3579,45 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
         else if (action == "cmd_browse_dir") {
             OnBnClickedBrowseDir(); // 直接调用 MFC 原本的浏览目录函数
         }
+        // 🚨【新增】：处理网页发来的“彻底删除小号”指令
+        else if (action == "cmd_delete_alias") {
+            std::string mNameStr = j["mainName"].get<std::string>();
+            std::string aNameStr = j["aliasName"].get<std::string>();
+            CString mainName = CA2W(mNameStr.c_str(), CP_UTF8);
+            CString aliasName = CA2W(aNameStr.c_str(), CP_UTF8);
+
+            std::lock_guard<std::mutex> lock(m_dataMutex);
+
+            // 1. 从场上活跃选手 (m_players) 中剥离
+            for (int i = 0; i < 8; i++) {
+                if (m_players[i].name == mainName) {
+                    for (auto it = m_players[i].aliases.begin(); it != m_players[i].aliases.end(); ) {
+                        if (it->name == aliasName) {
+                            it = m_players[i].aliases.erase(it);
+                        }
+                        else {
+                            ++it;
+                        }
+                    }
+                }
+            }
+
+            // 2. 从底层数据库 (m_aliasDB) 中连根拔起
+            if (m_aliasDB.find(mainName) != m_aliasDB.end()) {
+                CString& dbAliases = m_aliasDB[mainName];
+                dbAliases.Replace(L"(" + aliasName + L")", L"");
+                dbAliases.Replace(L"（" + aliasName + L"）", L"");
+                // 如果这个主号下面没有小号了，连主号一起从库里清理掉
+                if (dbAliases.IsEmpty()) {
+                    m_aliasDB.erase(mainName);
+                }
+            }
+
+            // 3. 落地保存并刷新所有界面（这会触发 BroadcastStateToWeb 告诉网页更新成功）
+            SaveAliasDB();
+            SaveConfigToFile();
+            PostMessage(WM_UPDATE_ALL_UI, 0, 0);
+        }
     }
     // 🚨 增加了显式报错：如果解析出错，直接弹窗告诉你到底哪里写错了！
     catch (json::exception& e) {
