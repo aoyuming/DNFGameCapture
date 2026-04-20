@@ -13,23 +13,63 @@ let draggedRow = null;
 let isDbInitialized = false; 
 
 if (window.chrome && window.chrome.webview) {
-    window.chrome.webview.addEventListener('message', function(event) {
+window.chrome.webview.addEventListener('message', function(event) {
         try {
             const msg = typeof event.data === 'string' ? JSON.parse(event.data) : event.data; 
             if (msg.action === 'sync_state') {
                 hasReceivedInitialData = true;
                 
-                if (msg.data.fullAliasDB && !isDbInitialized) {
-                    playerDB = {}; 
-                    savedDB = {}; // 初始化永久库
+                // 🚨 进化版：精准增量合并逻辑 (Smart Delta Merge)
+                if (msg.data.fullAliasDB) {
+                    let newSavedDB = {};
+                    
                     for (let key in msg.data.fullAliasDB) {
                         let arr = msg.data.fullAliasDB[key].split(/[()（）]/).filter(s => s.trim());
-                        playerDB[key] = [...arr];
-                        savedDB[key] = [...arr]; // 🚨 深拷贝一份作为永久底座
+                        newSavedDB[key] = [...arr];
+
+                        if (!playerDB[key]) {
+                            // 情况 A：完全是 MFC 侧新加的选手，直接接收
+                            playerDB[key] = [...arr];
+                        } else {
+                            // 情况 B：选手已存在，执行增量对比
+                            let oldSaved = savedDB[key] || [];
+                            
+                            // 1. 找出 MFC 侧刚加的 (在传来的 arr 中，但不在旧 savedDB 中)
+                            let newFromMFC = arr.filter(a => !oldSaved.includes(a));
+                            // 2. 找出 MFC 侧刚删的 (在旧 savedDB 中，但不在传来的 arr 中)
+                            let deletedFromMFC = oldSaved.filter(a => !arr.includes(a));
+
+                            // 3. 将 MFC 的真实操作应用到 Web 端的 playerDB，同时保留 Web 端的“临时解绑”状态
+                            let updatedPlayerDB = [...playerDB[key]];
+                            newFromMFC.forEach(a => { if (!updatedPlayerDB.includes(a)) updatedPlayerDB.push(a); });
+                            updatedPlayerDB = updatedPlayerDB.filter(a => !deletedFromMFC.includes(a));
+
+                            playerDB[key] = updatedPlayerDB;
+                        }
                     }
-                    isDbInitialized = true; 
+                    
+                    // 清理 MFC 侧已经彻底删除的选手
+                    for (let key in playerDB) {
+                        if (!msg.data.fullAliasDB[key]) {
+                            delete playerDB[key];
+                        }
+                    }
+
+                    savedDB = newSavedDB; // 更新永久库底座
                 }
+                
                 applyStateFromServer(msg.data);
+
+                // 🚨 体验优化：如果你正好打开着某个选手的弹窗，MFC 发来同步时立刻自动刷新弹窗 HTML！
+                let activeRowInput = document.querySelector('.player-row.active-row .name-input');
+                let aliasPopover = document.querySelector('.alias-popover.active');
+                if (activeRowInput && aliasPopover) {
+                    let activeName = activeRowInput.value.trim();
+                    if (activeName && playerDB[activeName]) {
+                        renderAliasMenu(activeName, aliasPopover);
+                        aliasPopover.classList.add('active'); 
+                    }
+                }
             }
             else if (msg.action === 'auth_result') { showAlert(msg.message); }
         } catch (e) { console.error('解析 C++ 消息失败', e); }
@@ -45,8 +85,24 @@ if (window.chrome && window.chrome.webview) {
 function pushStateToServer() {
     if (!window.chrome || !window.chrome.webview || isSyncingFromServer) return;
     
+    // ==========================================
+    // 🚨 核心逻辑：智能恢复“临时解绑”状态
+    // ==========================================
+    // 1. 获取当前所有还在 8 个输入框（场上）的选手名字
+    let activeNames = Array.from(document.querySelectorAll('.name-input'))
+                           .map(inp => inp.value.trim())
+                           .filter(name => name !== '');
+                           
+    // 2. 遍历永久库，如果选手已经下场了，就自动恢复他的所有小号
+    for (let name in savedDB) {
+        if (!activeNames.includes(name)) {
+            playerDB[name] = [...savedDB[name]]; 
+        }
+    }
+    // ==========================================
+
     let formattedDB = {};
-    // 🚨 注意这里：用 savedDB 遍历，而不是 playerDB
+    // 🚨 注意：发给 C++ 的永远是不受“临时解绑”影响的永久库
     for (let key in savedDB) { 
         if (savedDB[key] && savedDB[key].length > 0) {
             formattedDB[key] = savedDB[key].join('()');
@@ -57,7 +113,7 @@ function pushStateToServer() {
         blueScore: parseInt(document.querySelector('#team-blue .team-score-input').value) || 0,
         redScore: parseInt(document.querySelector('#team-red .team-score-input').value) || 0,
         players: [],
-        fullAliasDB: formattedDB // 发给 C++ 的是只受“永久解绑”影响的库
+        fullAliasDB: formattedDB 
     };
     
     document.querySelectorAll('#team-red .player-row').forEach(row => state.players.push(getRowData(row, 0)));
@@ -458,7 +514,7 @@ function renderAliasMenu(playerName, popElement) {
         <div class="popover-item">
             <span class="alias-name" title="${a}">🎮 ${a}</span>
             <div class="alias-actions">
-                <span class="btn-temp-unbind" data-idx="${i}" title="临时解绑 (本次隐藏不参与匹配，重启软件后恢复)">X</span>
+                <span class="btn-temp-unbind" data-idx="${i}" title="临时解绑 (本次添加隐藏此ID不参与名称匹配，删除主号后重新添加即可恢复)">X</span>
                 <span class="btn-perm-unbind" data-idx="${i}" title="永久解绑 (从库选手信息里面删除)">🗑️</span>
             </div>
         </div>`).join('');
