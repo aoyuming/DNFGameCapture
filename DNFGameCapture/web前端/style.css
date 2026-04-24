@@ -248,3 +248,9 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 .modal-btn { padding: 8px 25px; border-radius: 6px; border: none; cursor: pointer; font-weight: bold; font-size: 14px; color: white; }
 .btn-cancel { background: #4a4a60; }
 .btn-confirm { background: #00e5ff; color: #000; }
+.autocomplete-popover {
+    z-index: 5 !important;   /* 补全在下层 */
+}
+.alias-popover {
+    z-index: 10 !important;    /* 小号在上层 */
+}
