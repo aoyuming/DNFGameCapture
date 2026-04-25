@@ -254,3 +254,14 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 .alias-popover {
     z-index: 10 !important;    /* 小号在上层 */
 }
+
+.player-row.drag-source {
+    outline: 3px solid #00aaff;
+    outline-offset: -3px;
+    box-shadow: 0 0 12px rgba(0, 170, 255, 0.5);
+}
+.player-row.drag-target {
+    outline: 3px solid #ff4444;
+    outline-offset: -3px;
+    box-shadow: 0 0 12px rgba(255, 68, 68, 0.5);
+}

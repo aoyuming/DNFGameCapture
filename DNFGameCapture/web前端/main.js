@@ -1,4 +1,3 @@
-
 // ==========================================
 // 1. 核心：WebView2 同步引擎
 // ==========================================
@@ -9,8 +8,16 @@ let hasReceivedInitialData = false;
 let isMonitoring = false;
 let isProMode = false;
 let draggedRow = null;
-
 let isDbInitialized = false;
+
+// Ctrl 选择互换模式状态（与所在行无关，模块级即可，但放在 createPlayerRow 外更好）
+// 建议放在文件顶部全局区域，或至少在 createPlayerRow 外定义
+let ctrlSwapState = {
+    active: false,
+    sourceRow: null,
+    targetRow: null,
+    currentIndex: -1
+};
 
 if (window.chrome && window.chrome.webview) {
     window.chrome.webview.addEventListener('message', function (event) {
@@ -240,6 +247,7 @@ function getFieldConflict(newMainName, excludeInput) {
 // ==========================================
 // 4. 渲染选手行与交互
 function createPlayerRow() {
+
     const row = document.createElement('div');
     row.className = 'player-row';
     // 🚨 默认关闭，防止平时点到输入框误触拖拽
@@ -317,6 +325,49 @@ function createPlayerRow() {
     function clearActiveItems() { autoPopover.querySelectorAll('.suggestion-item').forEach(item => item.classList.remove('keyboard-focus')); }
 
     nameInput.addEventListener('keydown', function (e) {
+        // 对话框激活时，禁止任何名字输入框的键盘行为
+        if (customModal.classList.contains('active')) return;
+
+         // ========== Ctrl 选择互换模式 ==========
+        if (e.ctrlKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+            e.preventDefault();
+            e.stopPropagation();
+
+            const allRows = Array.from(document.querySelectorAll('.player-row'));
+            const sourceRow = this.closest('.player-row');
+            if (!sourceRow) return;
+
+            if (!ctrlSwapState.active) {
+                ctrlSwapState.active = true;
+                ctrlSwapState.sourceRow = sourceRow;
+                ctrlSwapState.currentIndex = allRows.indexOf(sourceRow);
+                sourceRow.classList.add('drag-source');
+            }
+
+            let newIndex = ctrlSwapState.currentIndex;
+            // 向上/向下：纵向移动（同一队内）
+            if (e.key === 'ArrowUp') {
+                newIndex = Math.max(0, newIndex - 1);
+            } else if (e.key === 'ArrowDown') {
+                newIndex = Math.min(allRows.length - 1, newIndex + 1);
+            } else if (e.key === 'ArrowLeft') {
+                // 左键：如果是蓝队行（索引>=4），则跳到对应的红队行；否则不变
+                if (newIndex >= 4) newIndex = newIndex - 4;
+            } else if (e.key === 'ArrowRight') {
+                // 右键：如果是红队行（索引<4），则跳到对应的蓝队行；否则不变
+                if (newIndex < 4) newIndex = newIndex + 4;
+            }
+
+            // 更新目标行高亮
+            if (newIndex !== ctrlSwapState.currentIndex) {
+                if (ctrlSwapState.targetRow) ctrlSwapState.targetRow.classList.remove('drag-target');
+                ctrlSwapState.currentIndex = newIndex;
+                ctrlSwapState.targetRow = allRows[newIndex];
+                ctrlSwapState.targetRow.classList.add('drag-target');
+            }
+            return;
+        }
+
         if (e.key === 'Enter') {
             e.preventDefault();
             const name = this.value.trim();
@@ -383,6 +434,7 @@ function createPlayerRow() {
             return;
         }
 
+      
         // ----- 方向键处理 (上/下/左/右) -----
         if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
             // 补全列表激活 + 上下键 → 用补全列表的选项切换
@@ -443,6 +495,12 @@ function createPlayerRow() {
         } else {
             // 【没名字】：弹所有的补全列表！
             processInputLogic(this, true);
+        }
+
+        // 自动将光标移动到文本末尾
+        const currentVal = this.value;
+        if (currentVal.length > 0) {
+            setTimeout(() => this.setSelectionRange(currentVal.length, currentVal.length), 0);
         }
     });
 
@@ -775,6 +833,8 @@ document.querySelectorAll('.stat-kill, .stat-death, .stat-ak').forEach(inp => {
 // 2) 全局拦截 Tab 键，手动控制名字输入框之间的焦点
 document.addEventListener('keydown', function (e) {
     if (e.key !== 'Tab') return;
+    // 对话框激活时不允许 Tab 切换
+    if (customModal.classList.contains('active')) return; // ← 增加这一行
 
     // 只处理当前焦点在一个名字输入框中时
     const focused = document.activeElement;
@@ -794,4 +854,27 @@ document.addEventListener('keydown', function (e) {
         : (currentIdx - 1 + total) % total;
 
     nameInputs[nextIdx].focus();
+});
+
+document.addEventListener('keyup', function (e) {
+    if (e.key === 'Control' && ctrlSwapState.active) {
+        // 执行交换
+        if (ctrlSwapState.targetRow && ctrlSwapState.sourceRow !== ctrlSwapState.targetRow) {
+            swapDOMNodes(ctrlSwapState.sourceRow, ctrlSwapState.targetRow);
+            triggerSync();
+        }
+        // 清理高亮样式
+        if (ctrlSwapState.sourceRow) ctrlSwapState.sourceRow.classList.remove('drag-source');
+        if (ctrlSwapState.targetRow) ctrlSwapState.targetRow.classList.remove('drag-target');
+
+        // 焦点切回源输入框（此时它已随 DOM 移动到目标位置）
+        const sourceInput = ctrlSwapState.sourceRow?.querySelector('.name-input');
+        if (sourceInput) setTimeout(() => sourceInput.focus(), 0);
+
+        // 重置状态
+        ctrlSwapState.active = false;
+        ctrlSwapState.sourceRow = null;
+        ctrlSwapState.targetRow = null;
+        ctrlSwapState.currentIndex = -1;
+    }
 });
