@@ -64,10 +64,10 @@ bool WGCCapture::CreateD3DDevice() {
         &m_d3dDevice, &fl, &m_d3dContext);
 
     if (FAILED(hr)) {
-        // 回退到 WARP 软件渲染
-        hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
-            flags, nullptr, 0, D3D11_SDK_VERSION,
-            &m_d3dDevice, &fl, &m_d3dContext);
+        //// 回退到 WARP 软件渲染
+        //hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+        //    flags, nullptr, 0, D3D11_SDK_VERSION,
+        //    &m_d3dDevice, &fl, &m_d3dContext);
     }
     return SUCCEEDED(hr);
 }
