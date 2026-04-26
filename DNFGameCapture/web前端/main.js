@@ -208,20 +208,21 @@ function showConfirm(msg, callback) { modalMsg.innerHTML = msg; modalInput.style
 function showPrompt(msg, callback) { modalMsg.innerHTML = msg; modalInput.style.display = 'inline-block'; modalInput.value = ''; customModal.classList.add('active'); modalInput.focus(); currentModalCallback = callback; }
 function showAlert(msg) { modalMsg.innerHTML = msg.replace(/\n/g, '<br>'); modalInput.style.display = 'none'; modalCancel.style.display = 'none'; customModal.classList.add('active'); currentModalCallback = () => { modalCancel.style.display = 'inline-block'; }; }
 modalCancel.onclick = () => { customModal.classList.remove('active'); if (currentModalCallback) currentModalCallback(null); };
+// 对话框的键盘事件（原位置，只需增加 stopImmediatePropagation）
 document.addEventListener('keydown', function (e) {
     if (!customModal.classList.contains('active')) return;
 
     if (e.key === 'Enter') {
         e.preventDefault();
-        // 如果有输入框且显示，Enter 触发确认（不回传任何额外值）
-        // 对于 alert，Enter 同样触发确认（关闭弹窗并回调）
         modalOk.click();
+        e.stopImmediatePropagation();   // ← 阻止后续监听器执行
     } else if (e.key === 'Escape') {
         e.preventDefault();
-        // Esc 相当于取消按钮（回调 null）
         modalCancel.click();
+        e.stopImmediatePropagation();   // ← 阻止后续监听器执行
     }
 });
+
 modalOk.onclick = () => { customModal.classList.remove('active'); if (currentModalCallback) { let res = modalInput.style.display === 'none' ? true : modalInput.value; currentModalCallback(res); } };
 
 // ==========================================
@@ -505,11 +506,19 @@ function createPlayerRow() {
     });
 
     nameInput.addEventListener('blur', function () {
+        const row = this.closest('.player-row');
+        const autoPopover = row.querySelector('.autocomplete-popover');
+        const aliasPopover = row.querySelector('.alias-popover');
+
         if (this.classList.contains('input-error')) {
             showAlert(this.getAttribute('data-error-msg'));
             this.value = ''; this.classList.remove('input-error');
         }
-        setTimeout(() => aliasPopover.classList.remove('active'), 150);
+        // 延迟隐藏两个弹窗（保持和原来一样的时间）
+        setTimeout(() => {
+            if (autoPopover) autoPopover.classList.remove('active');
+            if (aliasPopover) aliasPopover.classList.remove('active');
+        }, 150);
         triggerSync();
     });
 
@@ -830,30 +839,58 @@ document.querySelectorAll('.stat-kill, .stat-death, .stat-ak').forEach(inp => {
     inp.setAttribute('tabindex', '-1');
 });
 
-// 2) 全局拦截 Tab 键，手动控制名字输入框之间的焦点
 document.addEventListener('keydown', function (e) {
-    if (e.key !== 'Tab') return;
-    // 对话框激活时不允许 Tab 切换
-    if (customModal.classList.contains('active')) return; // ← 增加这一行
+    // ==========================================
+    // 1. Tab：名字输入框之间循环切换
+    // ==========================================
+    if (e.key === 'Tab') {
+        if (customModal.classList.contains('active')) return;
+        const focused = document.activeElement;
+        if (!focused || !focused.classList.contains('name-input')) return;
+        e.preventDefault();
+        const nameInputs = Array.from(document.querySelectorAll('.name-input'));
+        const total = nameInputs.length;
+        let currentIdx = nameInputs.indexOf(focused);
+        const forward = !e.shiftKey;
+        const nextIdx = forward ? (currentIdx + 1) % total : (currentIdx - 1 + total) % total;
+        nameInputs[nextIdx].focus();
+    }
+    // ==========================================
+    // 2. Escape：对话框关闭 / 输入框失焦
+    // ==========================================
+    else if (e.key === 'Escape') {
+        // 对话框激活：由对话框自己的监听器处理（那边已经 stopImmediatePropagation）
+        if (customModal.classList.contains('active')) return;
 
-    // 只处理当前焦点在一个名字输入框中时
-    const focused = document.activeElement;
-    if (!focused || !focused.classList.contains('name-input')) return;
+        const focused = document.activeElement;
+        // 当前有输入焦点 → 失焦（自动保存、关闭弹窗）
+        if (focused && (focused.tagName === 'INPUT' || focused.tagName === 'TEXTAREA')) {
+            e.preventDefault();
+            focused.blur();
+        }
+    }
+    // ==========================================
+    // 3. 方向键：无焦点时自动聚焦第一个名字框
+    // ==========================================
+    else if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        // 对话框激活时不理会
+        if (customModal.classList.contains('active')) return;
 
-    e.preventDefault();
+        const active = document.activeElement;
+        // 如果已经聚焦在某个输入框或文本域，方向键交给原本的控件行为处理（比如名字框内移动光标、下拉切换等）
+        if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
 
-    // 收集所有名字输入框（按 DOM 顺序：红队从上到下，然后蓝队从上到下）
-    const nameInputs = Array.from(document.querySelectorAll('.name-input'));
-    const total = nameInputs.length;
-    let currentIdx = nameInputs.indexOf(focused);
-
-    // 确定方向（Shift+Tab 反向）
-    const forward = !e.shiftKey;
-    const nextIdx = forward
-        ? (currentIdx + 1) % total
-        : (currentIdx - 1 + total) % total;
-
-    nameInputs[nextIdx].focus();
+        // 没有任何输入焦点 → 把焦点给第一个名字输入框
+        const firstInput = document.querySelector('.name-input');
+        if (firstInput) {
+            e.preventDefault();          // 阻止页面滚动（如果你不希望页面上下左右移动）
+            firstInput.focus();
+            // 如果名字框里已经有内容，全选方便直接覆盖；如果是空的，光标自然在开头
+            if (firstInput.value) {
+                firstInput.select();
+            }
+        }
+    }
 });
 
 document.addEventListener('keyup', function (e) {
