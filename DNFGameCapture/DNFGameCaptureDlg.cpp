@@ -1252,7 +1252,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             if (exactMatchCount == 1) {
                 // 唯一别名，直接锁定！安全且精确
                 resolved = true;
-                finalName = m_players[exactMatchP].aliases[exactMatchA].name;
+                finalName = m_players[exactMatchP].name; // 🚨 【换成这行】：底层查重统一使用主号！
                 outBestP = exactMatchP;
                 outBestA = exactMatchA;
 
@@ -1350,7 +1350,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
 
             if (bestP != -1 && maxScore >= passLine) {
                 resolved = true;
-                finalName = bestName.c_str();
+                finalName = m_players[bestP].name; // 🚨 这里才是 bestP！
                 outBestP = bestP;
                 outBestA = bestA;
 
@@ -1519,10 +1519,10 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
         CString conflictReason = L"";
 
         // ==========================================
-        // ⬇️ 【修改点】：双重精准冷却法则 (20秒)
+        // ⬇️ 【修改点】：双重精准冷却法则 (40秒)
         // ==========================================
         for (const auto& ev : m_recentEvents) {
-            if (now - ev.time < DUP_KILL_LIMIT_TIME) { // 🚨 改用宏
+            if (now - ev.time < DUP_KILL_LIMIT_TIME) {
 
                 // 规则 1：同一个 ID，短时间内绝对不能死两次！
                 if (deadResolved && finalDeadName != L"待定") {
@@ -1540,6 +1540,18 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                         isDup = true;
                         conflictName = finalKillerName + L" 击杀 " + finalDeadName;
                         conflictReason = L"极短时间内重复击杀同一人";
+                        break;
+                    }
+                }
+
+                // 🚨 【新增规则 3：专门绞杀结算画面幽灵击杀】
+                // 如果在防抖时间内，只认出了杀手，但死者没认出来（被结算UI挡住）
+                // 且这个杀手刚刚才拿过人头，这 100% 是大 X 闪烁重现！无情拦截！
+                if (killerResolved && !deadResolved && finalKillerName != L"待定") {
+                    if (ev.killer == finalKillerName) {
+                        isDup = true;
+                        conflictName = finalKillerName + L" (死者被遮挡)";
+                        conflictReason = L"结算画面干扰，判定为大X重现";
                         break;
                     }
                 }
@@ -1652,14 +1664,17 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
         ::DeleteDC(hMemDC);
     }
 
-    // 2. 高级色彩滤镜：判断该像素是否是大X的“死亡橙红色”
+    // 2. 终极色彩滤镜：免疫火焰与UI边框
     auto isXColor = [](COLORREF c) -> bool {
         int r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
-        // 大 X 的特征：红色值极高(>160)，且明显高于绿色和蓝色
-        return (r > 160 && r > g + 40 && r > b + 80);
+        // 真正的大 X 是极其高亮、高饱和的橙红色。
+        // 1. R 值必须极高 (>200，直接过滤掉所有暗红色边框和暗火)
+        // 2. 必须有一定量的 G (大X是橙红，不是纯血红，过滤掉狂战的血气)
+        // 3. 严格压制 B (蓝通道)
+        return (r > 200 && g > 40 && g < 150 && r > g + 60 && r > b + 120);
         };
 
-    // 3. 容错判定器：传入起始下标，检查连续的 5 个点，有 3 个符合即认为该位置的人已死
+    // 3. 容错判定器：传入起始下标，检查连续的 5 个点，必须有 3 个符合才算死亡
     auto checkDead = [&](int startIdx) -> bool {
         int matchCount = 0;
         for (int i = 0; i < 5; i++) {
@@ -1744,12 +1759,12 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
             s_lastDebugLogTime = nowTick;
         }
 
-     /*   if (rightActiveDead && (!m_bCanTrigger || s_rightActiveWasDead))
+        if (rightActiveDead && (!m_bCanTrigger || s_rightActiveWasDead))
         {
             CString reason = !m_bCanTrigger ? L"防抖冷却中" : L"状态已记录(未重置)";
             AppLog(L"🟡 右侧大X已识别但未触发匹配 (原因:" + reason + L")", RGB(255, 180, 0));
             s_lastDebugLogTime = nowTick;
-        }*/
+        }
     }
     // ========================================================
 
@@ -3725,7 +3740,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
         }
         else if (action == "cmd_monitor") {
             bool state = j["state"].get<bool>();
-            if (m_bIsRunning != state) {
+            if ((m_bIsRunning == TRUE) != state) { // 🚨 加上 == TRUE，解决 BOOL 和 bool 混合不安全的警告
                 OnBnClickedStart();
             }
         }
