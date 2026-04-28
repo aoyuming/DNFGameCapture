@@ -20,7 +20,7 @@
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"3.1.2"    //当前版本号
+#define CURRENT_VERSION L"3.1.3"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -35,7 +35,8 @@
 // 比如 2倍速：25000 -> 12500，240 -> 120
 // ==========================================
 #define POLL_COLOR_INTERVAL     240    // 画面颜色轮询间隔 (默认240ms，倍速太快容易漏掉大X，可改小如 100)
-#define COOLDOWN_KILL_TRIGGER   7  // 单人击杀大X防抖冷却时间 (默认25000ms = 25秒)
+#define COOLDOWN_KILL_TRIGGER   10000   // 普通击杀：10秒
+#define COOLDOWN_ROUND_END      35000    // 整局结束：35秒
 #define COOLDOWN_TEAM_SCORE     60000 // 队伍覆灭大比分防抖冷却时间 (默认120000ms = 2分钟)
 #define DUP_KILL_LIMIT_TIME     60000  // 重复击杀判定拦截时间 (默认20000ms = 60秒内同一个人死两次不计)
 #define DUP_KILL_CLEAN_TIME     25000  // 战绩历史清理时间 (必须比 DUP_KILL_LIMIT_TIME 大一点)

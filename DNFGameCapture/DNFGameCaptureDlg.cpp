@@ -1853,7 +1853,7 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
             std::lock_guard<std::mutex> dataLock(m_dataMutex);
             m_bPendingTeamScoreWin = true;
         }
-        SetTimer(4, COOLDOWN_TEAM_SCORE, NULL);
+        SetTimer(4, COOLDOWN_ROUND_END, NULL);
     }
 }
 
