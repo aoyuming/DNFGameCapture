@@ -1845,15 +1845,26 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
     }
 
     // ========================================================
-    // 5. 大比分检测 (判定全队覆灭跳分)
+    // 5. 大比分检测 (判定全队覆灭跳分，开启 35 秒深度结算防抖)
     // ========================================================
     if ((leftTeamDead || rightTeamDead) && m_bCanTriggerTeamScore) {
         m_bCanTriggerTeamScore = FALSE;
+
+        // 🚨 严谨操作：先显式杀掉单人击杀的 10 秒防抖，清空残留消息
+        KillTimer(2);
+
+        // 重新上锁，开启 35 秒深度防抖
+        m_bCanTrigger = FALSE;
+        SetTimer(2, COOLDOWN_ROUND_END, NULL);
+
+        AppLog(L"🏆 局间大比分变动：已启动 35 秒深度结算防抖护盾！", RGB(0, 255, 255));
+
         {
             std::lock_guard<std::mutex> dataLock(m_dataMutex);
             m_bPendingTeamScoreWin = true;
         }
-        SetTimer(4, COOLDOWN_ROUND_END, NULL);
+
+        SetTimer(4, COOLDOWN_TEAM_SCORE, NULL);
     }
 }
 
