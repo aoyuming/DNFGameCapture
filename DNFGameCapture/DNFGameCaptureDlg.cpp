@@ -46,7 +46,267 @@ const int ID_BTN_INPUT_KEY = 1020; // 输入授权码按钮ID
 const CString PLACEHOLDER_TEXT = L"输入：主号(小号1)(小号2)...";
 
 struct ScorePointF { float x; float y; };
-ScorePointF g_deathPts[40] = {
+
+
+// ========================================================
+// 小号格式校验：真实 ID 少于 3 个字符时，必须带大区或 #职业。
+// 规则说明：
+//   - “上海1夏雫” -> 真实ID=夏雫，大区=上海1，合法
+//   - “夏雫#气功师” -> 真实ID=夏雫，职业=气功师，合法
+//   - “夏雫” -> 真实ID=夏雫，且无大区/职业，不合法
+// 主号不参与 OCR 名称匹配，所以短 ID 必须补充上下文，避免两字/一字误判。
+// ========================================================
+static CString DnfTrimmedCopy(CString s)
+{
+    s.Trim();
+    return s;
+}
+
+static CString DnfStripDeclaredArea(CString body, bool& hasArea)
+{
+    static const wchar_t* kAreas[] = {
+        L"广东", L"北京", L"上海", L"江苏", L"浙江", L"福建", L"四川", L"山东", L"河南", L"湖北", L"湖南",
+        L"河北", L"辽宁", L"吉林", L"黑龙江", L"安徽", L"江西", L"广西", L"陕西", L"山西", L"重庆", L"天津",
+        L"云南", L"贵州", L"新疆", L"西藏", L"青海", L"甘肃", L"宁夏", L"内蒙古", L"东北", L"西北", L"西南", L"跨"
+    };
+
+    hasArea = false;
+    for (const wchar_t* area : kAreas) {
+        for (int n = 1; n <= 9; ++n) {
+            CString token;
+            token.Format(L"%s%d", area, n);
+            int pos = body.Find(token);
+            if (pos >= 0) {
+                CString left = body.Left(pos);
+                CString right = body.Mid(pos + token.GetLength());
+                body = left + right;
+                body.Trim();
+                hasArea = true;
+                return body;
+            }
+        }
+    }
+    return body;
+}
+
+static CString DnfExtractAliasRealId(const CString& aliasRaw, bool& hasArea, bool& hasJob)
+{
+    hasArea = false;
+    hasJob = false;
+
+    CString body = aliasRaw;
+    body.Trim();
+
+    int sharp = body.Find(L'#');
+    if (sharp >= 0) {
+        CString job = body.Mid(sharp + 1);
+        job.Trim();
+        if (!job.IsEmpty()) hasJob = true;
+        body = body.Left(sharp);
+        body.Trim();
+    }
+
+    body = DnfStripDeclaredArea(body, hasArea);
+    body.Trim();
+    return body;
+}
+
+
+struct TDnfSimpleAliasMeta
+{
+    CString raw;
+    CString realId;
+    CString area;
+    CString job;
+    bool hasArea = false;
+    bool hasJob = false;
+};
+
+static CString DnfNormalizeLooseText(CString s)
+{
+    s.Trim();
+    s.Replace(L" ", L"");
+    s.Replace(L"　", L"");
+    s.Replace(L"-", L"");
+    s.Replace(L"_", L"");
+    s.Replace(L"·", L"");
+    s.Replace(L"・", L"");
+    s.MakeLower();
+    return s;
+}
+
+static bool DnfTryExtractAreaToken(CString& body, CString& areaOut)
+{
+    static const wchar_t* kAreas[] = {
+        L"广东", L"北京", L"上海", L"江苏", L"浙江", L"福建", L"四川", L"山东", L"河南", L"湖北", L"湖南",
+        L"河北", L"辽宁", L"吉林", L"黑龙江", L"安徽", L"江西", L"广西", L"陕西", L"山西", L"重庆", L"天津",
+        L"云南", L"贵州", L"新疆", L"西藏", L"青海", L"甘肃", L"宁夏", L"内蒙古", L"东北", L"西北", L"西南", L"跨"
+    };
+
+    CString compact = DnfNormalizeLooseText(body);
+    for (const wchar_t* area : kAreas) {
+        for (int n = 1; n <= 9; ++n) {
+            CString token;
+            token.Format(L"%s%d", area, n);
+            CString ntoken = DnfNormalizeLooseText(token);
+            int pos = compact.Find(ntoken);
+            if (pos >= 0) {
+                // 用原始 body 再查一次，保证能从原字符串中删除真实 token。
+                int rawPos = body.Find(token);
+                if (rawPos < 0) rawPos = pos;
+                if (rawPos >= 0 && rawPos + token.GetLength() <= body.GetLength()) {
+                    body = body.Left(rawPos) + body.Mid(rawPos + token.GetLength());
+                    body.Trim();
+                }
+                areaOut = token;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static TDnfSimpleAliasMeta DnfParseAliasMeta(const CString& rawText)
+{
+    TDnfSimpleAliasMeta meta;
+    meta.raw = rawText;
+    CString body = rawText;
+    body.Trim();
+
+    int sharp = body.Find(L'#');
+    if (sharp >= 0) {
+        meta.job = body.Mid(sharp + 1);
+        meta.job.Trim();
+        meta.hasJob = !meta.job.IsEmpty();
+        body = body.Left(sharp);
+        body.Trim();
+    }
+
+    meta.hasArea = DnfTryExtractAreaToken(body, meta.area);
+    body.Trim();
+    meta.realId = body;
+    meta.realId.Trim();
+    return meta;
+}
+
+static bool DnfAliasMetaExactSame(const TDnfSimpleAliasMeta& a, const TDnfSimpleAliasMeta& b)
+{
+    CString aid = DnfNormalizeLooseText(a.realId);
+    CString bid = DnfNormalizeLooseText(b.realId);
+    if (aid.IsEmpty() || bid.IsEmpty() || aid != bid) return false;
+
+    if (a.hasArea && b.hasArea && a.area != b.area) return false;
+    if (a.hasJob && b.hasJob && a.job.CompareNoCase(b.job) != 0) return false;
+    return true;
+}
+
+static int DnfMetaContextScore(const TDnfSimpleAliasMeta& cand, const TDnfSimpleAliasMeta& ocr, int visibleIdLen, bool& strongContext)
+{
+    int score = 0;
+    strongContext = false;
+
+    if (cand.hasArea && ocr.hasArea) {
+        if (cand.area == ocr.area) {
+            score += (visibleIdLen <= 2) ? 28 : 16;
+            strongContext = true;
+        }
+        else {
+            score -= (visibleIdLen <= 2) ? 35 : 22;
+        }
+    }
+
+    if (cand.hasJob && ocr.hasJob) {
+        if (cand.job.CompareNoCase(ocr.job) == 0) {
+            score += (visibleIdLen <= 2) ? 24 : 12;
+            strongContext = true;
+        }
+        else {
+            score -= (visibleIdLen <= 2) ? 28 : 14;
+        }
+    }
+
+    return score;
+}
+
+static bool DnfIsLegacyShortAliasWithoutMeta(const CString& aliasRaw)
+{
+    CString alias = aliasRaw;
+    alias.Trim();
+    if (alias.IsEmpty()) return false;
+
+    bool hasArea = false;
+    bool hasJob = false;
+    CString realId = DnfExtractAliasRealId(alias, hasArea, hasJob);
+    realId.Trim();
+
+    return (!realId.IsEmpty() && realId.GetLength() < 3 && !hasArea && !hasJob);
+}
+
+static CString DnfLegacyShortAliasDeleteReason(const CString& aliasRaw)
+{
+    CString alias = aliasRaw;
+    alias.Trim();
+    CString msg;
+    msg.Format(L"小号【%s】是旧库短ID，真实ID少于3个字符且没有大区/#职业，容易误识别；已允许直接从小号列表和本地库删除。", (LPCTSTR)alias);
+    return msg;
+}
+
+static bool DnfValidateAliasShortMeta(const CString& aliasRaw, CString& errorMsg)
+{
+    CString alias = aliasRaw;
+    alias.Trim();
+    if (alias.IsEmpty()) {
+        errorMsg = L"小号不能为空";
+        return false;
+    }
+
+    bool hasArea = false;
+    bool hasJob = false;
+    CString realId = DnfExtractAliasRealId(alias, hasArea, hasJob);
+
+    if (realId.IsEmpty()) {
+        errorMsg.Format(L"小号【%s】缺少真实ID，不能只填大区或职业。", (LPCTSTR)alias);
+        return false;
+    }
+
+    if (realId.GetLength() < 3 && !hasArea && !hasJob) {
+        errorMsg.Format(
+            L"小号【%s】真实ID少于3个字符，必须加大区或 #职业，例如：上海1%s 或 %s#气功师。",
+            (LPCTSTR)alias, (LPCTSTR)realId, (LPCTSTR)realId);
+        return false;
+    }
+
+    return true;
+}
+
+static bool DnfValidateAliasListShortMeta(const std::vector<CString>& aliases, CString& errorMsg)
+{
+    for (const auto& alias : aliases) {
+        if (!DnfValidateAliasShortMeta(alias, errorMsg)) return false;
+    }
+    return true;
+}
+
+// ========================================================
+// 死亡 X 逻辑点：8 个最终判定点
+// 索引约定：0-3 = 左侧，4-7 = 右侧
+// 0 左主将，1 左下第1，2 左下第2，3 左下第3
+// 4 右主将，5 右下第1，6 右下第2，7 右下第3
+//
+// v4：检测恢复使用旧版 40 点候选数据，但输出仍然是 8 个逻辑点。
+// 每个逻辑点对应旧版 5 个候选点；每个候选点都执行 X 两条斜边射线检测。
+// 无效/低分候选点自动丢弃，ROI 红色统计只辅助，不单独判死。
+// ========================================================
+constexpr int DEATH_POINT_COUNT = 8;
+constexpr int DEATH_RAW_POINT_COUNT = 40;
+constexpr int DP_LEFT_ACTIVE  = 0;
+constexpr int DP_RIGHT_ACTIVE = 4;
+
+// 回滚到旧版 40 点坐标。每 5 个一组，但真正参与死亡判定的只有每组第 0 个点：
+// 右侧：0、5、10、15；左侧：20、25、30、35。
+// 其余点保留只是兼容旧采点输出，不参与逻辑判断。
+ScorePointF g_deathPts[DEATH_RAW_POINT_COUNT] = {
+    // 右侧：0-19，顺序：右主将、右下第1、右下第2、右下第3
     { 0.8266f, 0.0366f },
     { 0.8297f, 0.0348f },
     { 0.8297f, 0.0422f },
@@ -67,6 +327,8 @@ ScorePointF g_deathPts[40] = {
     { 0.6181f, 0.1119f },
     { 0.6181f, 0.1119f },
     { 0.6181f, 0.1119f },
+
+    // 左侧：20-39，顺序：左主将、左下第1、左下第2、左下第3
     { 0.1754f, 0.0366f },
     { 0.1754f, 0.0366f },
     { 0.1754f, 0.0366f },
@@ -89,6 +351,58 @@ ScorePointF g_deathPts[40] = {
     { 0.3808f, 0.1119f },
 };
 
+static int GetDeathRawIndex(int logicalIdx)
+{
+    static const int map[DEATH_POINT_COUNT] = {
+        20, 25, 30, 35,  // 0-3：左侧
+        0, 5, 10, 15     // 4-7：右侧
+    };
+    if (logicalIdx < 0 || logicalIdx >= DEATH_POINT_COUNT) return 0;
+    return map[logicalIdx];
+}
+
+static ScorePointF GetDeathLogicPoint(int logicalIdx)
+{
+    return g_deathPts[GetDeathRawIndex(logicalIdx)];
+}
+
+// ========================================================
+// 【实时调试】8 个死亡 X 的检测快照
+// 说明：CheckColorTrigger() 每次刷新这里，Draw() 直接画到预览画面上。
+// drawX/drawY 显示当前 8 个逻辑 X 的有效中心点，方便调参。
+// ========================================================
+struct DeathXDebugState {
+    bool dead[DEATH_POINT_COUNT];
+    int matchCount[DEATH_POINT_COUNT];
+    int roiHits[DEATH_POINT_COUNT];
+    COLORREF centerColor[DEATH_POINT_COUNT];
+    float drawX[DEATH_POINT_COUNT];
+    float drawY[DEATH_POINT_COUNT];
+    bool centerGate[DEATH_POINT_COUNT];
+    int hitCount[DEATH_POINT_COUNT];
+    float hitX[DEATH_POINT_COUNT][16];
+    float hitY[DEATH_POINT_COUNT][16];
+    int hitDir[DEATH_POINT_COUNT][16];
+    DWORD lastTick;
+};
+
+DeathXDebugState g_deathXDebug = {};
+std::mutex g_deathXDebugMutex;
+
+static const wchar_t* GetDeathPointName(int idx)
+{
+    switch (idx) {
+    case 0: return L"左主";
+    case 1: return L"左1";
+    case 2: return L"左2";
+    case 3: return L"左3";
+    case 4: return L"右主";
+    case 5: return L"右1";
+    case 6: return L"右2";
+    case 7: return L"右3";
+    default: return L"?";
+    }
+}
 
 
 // ========================================================
@@ -197,8 +511,17 @@ CString FormatTimeStamp(long long ts) {
 }
 
 
+// 写入本地匹配日志。AppLog 需要提前声明，用来把被 UI 过滤的详细日志写入文件。
+void WriteMatchLog(const CString& logLine);
+
 // 【新增】：全局通用的 UI 日志输出助手，随处可用
 void AppLog(const CString& msg, COLORREF color) {
+    // 软件内不显示身份融合相关细节，只写入文件，避免 UI 刷屏。
+    if (msg.Find(L"身份融合") >= 0) {
+        WriteMatchLog(msg);
+        return;
+    }
+
     time_t now_t = time(0); tm t; localtime_s(&t, &now_t);
     CString tStr; tStr.Format(L"[%02d:%02d:%02d] %s", t.tm_hour, t.tm_min, t.tm_sec, (LPCTSTR)msg);
     std::lock_guard<std::mutex> lk(g_visualLogMutex);
@@ -295,7 +618,7 @@ void CDNFGameCaptureDlg::OnRButtonDown(UINT nFlags, CPoint point) {
 void CDNFGameCaptureDlg::OnLButtonDown(UINT nFlags, CPoint point) {
     if (m_w <= 0 || m_h <= 0) return;
     if (m_previewRect.PtInRect(point)) {
-        if (m_selectPts.size() >= 40) m_selectPts.clear(); // 改为 40 个点
+        if (m_selectPts.size() >= DEATH_RAW_POINT_COUNT) m_selectPts.clear(); // 改为 8 个关键点
         m_selectPts.push_back(CPoint(
             (int)(((float)(point.x - m_previewRect.left) / m_previewRect.Width()) * 10000.0f),
             (int)(((float)(point.y - m_previewRect.top) / m_previewRect.Height()) * 10000.0f)
@@ -303,9 +626,10 @@ void CDNFGameCaptureDlg::OnLButtonDown(UINT nFlags, CPoint point) {
         InvalidateRect(&m_previewRect, FALSE);
 
         // 凑齐 40 个点后，直接生成全新的数组代码
-        if (m_selectPts.size() == 40) {
-            CString res = L"ScorePointF g_deathPts[40] = {\r\n";
-            for (int i = 0; i < 40; i++) {
+        if (m_selectPts.size() == DEATH_RAW_POINT_COUNT) {
+            CString res;
+            res.Format(L"ScorePointF g_deathPts[%d] = {\r\n", DEATH_RAW_POINT_COUNT);
+            for (int i = 0; i < DEATH_RAW_POINT_COUNT; i++) {
                 CString t; t.Format(L"    { %.4ff, %.4ff },\r\n", m_selectPts[i].x / 10000.0f, m_selectPts[i].y / 10000.0f); res += t;
             }
             m_editOcrResult.SetWindowText(res + L"};\r\n");
@@ -918,6 +1242,14 @@ OcrResultData CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaI
     if (!m_hHttpConnect)
         return result;
 
+    // 关键修复：RunOCR_Internal 会被左右框并行调用。
+    // Windows GDI 的同一个 HBITMAP 不能同时被选入多个 DC；如果左右 OCR 线程同时 SelectObject 同一张快照，
+    // 其中一边的 StretchBlt 可能失败，最终只剩白底 padding，看起来就是“纯白图”。
+    // 所以每次 OCR 先克隆一份私有位图，后续只操作这份本地副本。
+    HBITMAP hLocalTargetBmp = (HBITMAP)::CopyImage(hTargetBmp, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
+    if (!hLocalTargetBmp)
+        hLocalTargetBmp = hTargetBmp;
+
     // ---- 1. 计算截取区域 ----
     RECT cropRect;
     if (nAreaIndex == 0) {
@@ -946,7 +1278,7 @@ OcrResultData CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaI
     HDC hDstDC = ::CreateCompatibleDC(NULL);
     HBITMAP hWorkBmp = ::CreateCompatibleBitmap(hScreenDC, dstW, dstH);
 
-    HGDIOBJ oldSrc = ::SelectObject(hSrcDC, hTargetBmp);
+    HGDIOBJ oldSrc = ::SelectObject(hSrcDC, hLocalTargetBmp);
     HGDIOBJ oldDst = ::SelectObject(hDstDC, hWorkBmp);
 
     // ---- 3. 白底填充 + 缩放拷贝 ----
@@ -956,33 +1288,23 @@ OcrResultData CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaI
     ::DeleteObject(whiteBrush);
 
     ::SetStretchBltMode(hDstDC, HALFTONE);
-    ::StretchBlt(hDstDC, padding, padding, srcW * scale, srcH * scale,
+    BOOL bltOk = ::StretchBlt(hDstDC, padding, padding, srcW * scale, srcH * scale,
         hSrcDC, cropRect.left, cropRect.top, srcW, srcH, SRCCOPY);
 
-    // ---- 4. 灰度二值化处理 ----
-    BITMAP bm;
-    ::GetObject(hWorkBmp, sizeof(BITMAP), &bm);
-
-    BITMAPINFO bi = {};
-    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bi.bmiHeader.biWidth = bm.bmWidth;
-    bi.bmiHeader.biHeight = -bm.bmHeight; // 自上而下
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
-
-    std::vector<BYTE> pixels(bm.bmWidth * bm.bmHeight * 4);
-    ::GetDIBits(hDstDC, hWorkBmp, 0, bm.bmHeight, pixels.data(), &bi, DIB_RGB_COLORS);
-
-    for (size_t i = 0; i < pixels.size(); i += 4) {
-        // 加权灰度公式：0.299R + 0.587G + 0.114B
-        int gray = (pixels[i + 2] * 299 + pixels[i + 1] * 587 + pixels[i] * 114) / 1000;
-        BYTE binaryVal = (gray > 90) ? 0 : 255;
-        pixels[i] = binaryVal; // B
-        pixels[i + 1] = binaryVal; // G
-        pixels[i + 2] = binaryVal; // R
+    // 如果 StretchBlt 偶发失败，至少留下明显提示色，避免误以为 OCR 内容是白图。
+    // 正常情况下这里不会触发；真正的修复是上面的私有 HBITMAP 克隆。
+    if (!bltOk) {
+        RECT failRect = { padding, padding, padding + srcW * scale, padding + srcH * scale };
+        HBRUSH failBrush = ::CreateSolidBrush(RGB(255, 220, 220));
+        ::FillRect(hDstDC, &failRect, failBrush);
+        ::DeleteObject(failBrush);
     }
-    ::SetDIBits(hDstDC, hWorkBmp, 0, bm.bmHeight, pixels.data(), &bi, DIB_RGB_COLORS);
+
+    // ---- 4. OCR 原图直传：不做二值化/颜色过滤 ----
+    // 说明：这里保留上面的“裁剪 + 2倍缩放 + 白边 padding”，
+    // 但不再把图像转成黑白，也不再做颜色感知处理。
+    // 目的：观察 Umi-OCR/PaddleOCR 对原始 HUD 字体的识别效果，
+    // 避免二值化造成右侧文字虚线、断裂或整块变黑。
 
     // ---- 5. 保存预览用的副本 ----
     result.hBmp = (HBITMAP)::CopyImage(hWorkBmp, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
@@ -1019,6 +1341,8 @@ OcrResultData CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaI
     ::DeleteObject(hWorkBmp);
     ::DeleteDC(hSrcDC);
     ::DeleteDC(hDstDC);
+    if (hLocalTargetBmp && hLocalTargetBmp != hTargetBmp)
+        ::DeleteObject(hLocalTargetBmp);
     ::ReleaseDC(NULL, hScreenDC);  // ★ 原代码遗漏，导致 DC 泄漏
 
     // ---- 8. 去掉 Base64 尾部的空字符 ----
@@ -1100,6 +1424,16 @@ OcrResultData CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaI
     ocrText.Trim();
 
     result.text = ocrText;
+
+    // ============================================================
+    // 【身份融合补丁】把每次固定红框 OCR 结果喂给时间窗缓存。
+    // 注意：这里不直接判定玩家，只记录“大区/ID帧/职业帧”证据。
+    // nAreaIndex: 0=左框(ID+大区)，1=右框(大区+ID)。
+    // ============================================================
+    if (!ocrText.IsEmpty() && ocrText.Find(L"No text") == -1) {
+        UpdateIdentityPanelCache(nAreaIndex, ocrText);
+    }
+
     return result;
 }
 
@@ -1139,6 +1473,14 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
 
     // 日志输出辅助
     auto PushVisualLog = [&](const CString& msg, COLORREF color) {
+        // 文件日志保留完整细节；软件内可视日志对“身份融合”做降噪，只显示更关键的结果级信息。
+        WriteMatchLog(msg);
+
+        // 软件内完全不显示身份融合相关日志；详细内容仍由上面的 WriteMatchLog(msg) 写入文件。
+        if (msg.Find(L"身份融合") >= 0) {
+            return;
+        }
+
         time_t now_t = time(0);
         tm t;
         localtime_s(&t, &now_t);
@@ -1146,7 +1488,6 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
         tStr.Format(L"[%02d:%02d:%02d] %s", t.tm_hour, t.tm_min, t.tm_sec, (LPCTSTR)msg);
         std::lock_guard<std::mutex> lk(g_visualLogMutex);
         g_visualLogs.push_back({ tStr, color });
-        WriteMatchLog(msg);
         };
 
 
@@ -1228,8 +1569,14 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 isKiller ? L"找杀手" : L"找死者", frameIdx, (LPCTSTR)ocrResult);
             PushVisualLog(logMsg, RGB(180, 180, 180));
 
+            TDnfSimpleAliasMeta ocrMeta = DnfParseAliasMeta(ocrResult);
+
             // ====================================================
-            // 【新增】: 精确别名命中检测（仅当唯一时才采纳）
+            // 精确小号命中检测（仅当唯一时才采纳）
+            // 现在会先解析“大区/真实ID/#职业”，因此：
+            //   上海1夏雫 == 夏雫上海1
+            //   夏雫#气功师 也能按真实ID命中。
+            // 主号仍然不参与名称匹配。
             // ====================================================
             int exactMatchCount = 0;
             int exactMatchP = -1, exactMatchA = -1;
@@ -1238,14 +1585,16 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 for (int p = 0; p < 8; p++) {
                     if (m_players[p].name.IsEmpty()) continue;
                     for (size_t a = 0; a < m_players[p].aliases.size(); a++) {
-                        if (m_players[p].aliases[a].name.CompareNoCase(ocrResult) == 0) {
+                        TDnfSimpleAliasMeta aliasMeta = DnfParseAliasMeta(m_players[p].aliases[a].name);
+                        bool exactFull = (DnfNormalizeLooseText(m_players[p].aliases[a].name) == DnfNormalizeLooseText(ocrResult));
+                        bool exactMeta = DnfAliasMetaExactSame(aliasMeta, ocrMeta);
+                        if (exactFull || exactMeta) {
                             exactMatchCount++;
                             exactMatchP = p;
                             exactMatchA = (int)a;
-                            break; // 同一玩家内有重复别名？不管，只算一个
+                            break;
                         }
                     }
-                    // 如果已经超过1个，提前退出
                     if (exactMatchCount > 1) break;
                 }
                 m_dataMutex.unlock();
@@ -1278,6 +1627,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             // 没有唯一别名命中，进入原有匹配逻辑
             // ====================================================
             int maxScore = -2, bestP = -1, bestA = -1, bestRealLen = 0;
+            bool bestHasMetaContext = false;
             std::wstring bestName;
 
             m_dataMutex.lock();
@@ -1290,27 +1640,46 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 if (!isKiller && lockedKillerTeam != -1 && m_players[p].team == lockedKillerTeam)
                     teamPenalty = 20;
 
-                int curScore = m_matcher.GetMatchScore(
-                    m_players[p].name.GetString(), ocrResult.GetString(), isAggressive);
-                if (curScore == -1) { maxScore = -1; break; }
-                curScore -= teamPenalty;
-
-                std::wstring curBestName = m_players[p].name.GetString();
+                // 主号只作为归属 owner，不再参与 OCR 名称匹配。
+                // 这样主号可以是备注名/真实主号，也允许与自己的小号重复；真正用于命中的只有小号列表。
+                int curScore = -2;
+                std::wstring curBestName;
                 int curBestAlias = -1;
-                int curRealLen = m_players[p].name.GetLength();
+                int curRealLen = 0;
+                bool curBestMetaContext = false;
 
                 for (size_t a = 0; a < m_players[p].aliases.size(); a++) {
-                    int aliasScore = m_matcher.GetMatchScore(
-                        m_players[p].aliases[a].name.GetString(), ocrResult.GetString(), isAggressive);
-                    if (aliasScore == -1) { maxScore = -1; break; }
+                    if (m_players[p].aliases[a].name.IsEmpty()) continue;
+
+                    TDnfSimpleAliasMeta aliasMeta = DnfParseAliasMeta(m_players[p].aliases[a].name);
+                    CString candId = aliasMeta.realId.IsEmpty() ? m_players[p].aliases[a].name : aliasMeta.realId;
+                    CString ocrId = ocrMeta.realId.IsEmpty() ? ocrResult : ocrMeta.realId;
+
+                    int aliasScore = m_matcher.GetMatchScore(candId.GetString(), ocrId.GetString(), isAggressive);
+                    if (aliasScore == -1) {
+                        // 如果 OCR 是纯职业帧，保持旧逻辑：本帧职业干扰，跳过。
+                        maxScore = -1;
+                        break;
+                    }
+
+                    bool strongMetaContext = false;
+                    int metaScore = DnfMetaContextScore(aliasMeta, ocrMeta, candId.GetLength(), strongMetaContext);
+                    aliasScore += metaScore;
+
+                    // 如果 OCR 文本里包含大区，而候选小号也声明了同一大区，
+                    // 大区在前/在后都等价加分，专门保护两字 ID 被 OCR 错一字的场景。
+                    if (aliasScore > 160) aliasScore = 160;
                     aliasScore -= teamPenalty;
+
                     if (aliasScore > curScore) {
                         curScore = aliasScore;
                         curBestName = m_players[p].aliases[a].name.GetString();
                         curBestAlias = (int)a;
-                        curRealLen = m_players[p].aliases[a].name.GetLength();
+                        curRealLen = candId.GetLength();
+                        curBestMetaContext = strongMetaContext;
                     }
                 }
+                if (curBestAlias == -1) continue;
                 if (maxScore == -1) break;
 
                 if (curScore > maxScore || (curScore == maxScore && maxScore > 0 && curRealLen > bestRealLen)) {
@@ -1319,6 +1688,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                     bestA = curBestAlias;
                     bestName = curBestName;
                     bestRealLen = curRealLen;
+                    bestHasMetaContext = curBestMetaContext;
                 }
             }
             m_dataMutex.unlock();
@@ -1351,6 +1721,20 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             }
 
             if (bestP != -1 && maxScore >= passLine) {
+                // ============================================================
+                // 【身份融合补丁】两字 ID 保护：
+                // 旧算法对两字名的“包含命中”很容易过强，这里不再让两字名
+                // 单帧直接锁定，而是交给固定红框时间窗融合做最终确认。
+                // 精确唯一别名命中仍在上方提前通过。
+                // ============================================================
+                if (bestRealLen <= 2 && !bestHasMetaContext) {
+                    CString guardLog;
+                    guardLog.Format(L"  └ [🛡短名保护] 旧算法命中候选[%s] %d分/线%d，但长度=%d；缺少大区/#职业上下文，暂不单帧锁定",
+                        bestName.c_str(), maxScore, passLine, bestRealLen);
+                    PushVisualLog(guardLog, RGB(255, 210, 80));
+                    return false;
+                }
+
                 resolved = true;
                 finalName = m_players[bestP].name; // 🚨 这里才是 bestP！
                 outBestP = bestP;
@@ -1378,6 +1762,99 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             }
 
             return false;
+        };
+
+    // ============================================================
+    // 【身份融合补丁】固定红框时间窗融合兜底
+    // 说明：首轮逐帧 OCR 会不断调用 UpdateIdentityPanelCache() 写入缓存。
+    // 首轮结束后，先用缓存做一次融合评分，再决定是否进入二轮降级。
+    // ============================================================
+    auto tryFusionMatch = [&](bool isKiller, int areaIndex, bool& resolved, CString& finalName,
+        int& outBestP, int& outBestA, int& lockedTeam) -> bool
+        {
+            TDnfPanelSide side = (areaIndex == 0) ? TDnfPanelSide::LeftNameArea : TDnfPanelSide::RightAreaName;
+            TDnfPanelMatchResult fusion = MatchIdentityPanel(side);
+
+            CString tag = isKiller ? L"杀手" : L"死者";
+            CString sideText = (side == TDnfPanelSide::LeftNameArea) ? L"左框" : L"右框";
+
+            if (!fusion.ok) {
+                CString fLog;
+                fLog.Format(L"▶ [身份融合-%s] %s 未通过：best=%s final=%d gap=%d cacheInsufficient=%s",
+                    (LPCTSTR)tag, (LPCTSTR)sideText,
+                    fusion.best.candidate.name.IsEmpty() ? L"无" : fusion.best.candidate.name.GetString(),
+                    fusion.best.finalScore, fusion.best.gapToSecond,
+                    fusion.cacheInsufficient ? L"是" : L"否");
+                PushVisualLog(fLog, RGB(140, 140, 140));
+                return false;
+            }
+
+            int pIdx = -1;
+            int aIdx = -1;
+            int team = -1;
+            CString owner = fusion.best.candidate.ownerName;
+            CString hitName = fusion.best.candidate.name;
+
+            {
+                std::lock_guard<std::mutex> dataLock(m_dataMutex);
+                for (int p = 0; p < 8; ++p) {
+                    if (m_players[p].name == owner) {
+                        pIdx = p;
+                        team = m_players[p].team;
+                        if (fusion.best.candidate.isAlias) {
+                            for (size_t a = 0; a < m_players[p].aliases.size(); ++a) {
+                                if (m_players[p].aliases[a].name == hitName) {
+                                    aIdx = (int)a;
+                                    break;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if (pIdx < 0) {
+                CString fLog;
+                fLog.Format(L"▶ [身份融合-%s] %s 通过但无法回填到场上玩家：owner=%s hit=%s",
+                    (LPCTSTR)tag, (LPCTSTR)sideText, (LPCTSTR)owner, (LPCTSTR)hitName);
+                PushVisualLog(fLog, RGB(255, 120, 80));
+                return false;
+            }
+
+            // 与另一侧已锁定队伍冲突时，拒绝本次融合结果。
+            if (isKiller && lockedDeadTeam != -1 && team == lockedDeadTeam) {
+                PushVisualLog(L"  └ [身份融合拒绝] 杀手候选与已锁死者同队，按队伍约束丢弃", RGB(255, 120, 80));
+                return false;
+            }
+            if (!isKiller && lockedKillerTeam != -1 && team == lockedKillerTeam) {
+                PushVisualLog(L"  └ [身份融合拒绝] 死者候选与已锁杀手同队，按队伍约束丢弃", RGB(255, 120, 80));
+                return false;
+            }
+
+            if (!resolved) {
+                resolved = true;
+                finalName = owner;       // 底层战绩仍按主号归集
+                outBestP = pIdx;
+                outBestA = aIdx;
+                lockedTeam = team;
+
+                CString okLog;
+                okLog.Format(L"  └ [🧩身份融合命中-%s] %s => 主号[%s] 命中[%s] final=%d id=%d gap=%d areaCtx=%+d jobCtx=%+d",
+                    (LPCTSTR)tag, (LPCTSTR)sideText, (LPCTSTR)owner, (LPCTSTR)hitName,
+                    fusion.best.finalScore, fusion.best.idScore, fusion.best.gapToSecond,
+                    fusion.best.areaCtxScore, fusion.best.jobCtxScore);
+                COLORREF teamColor = (team == 0) ? RGB(255, 80, 80) : RGB(80, 180, 255);
+                PushVisualLog(okLog, teamColor);
+            }
+            else {
+                CString learnLog;
+                learnLog.Format(L"  └ [身份融合学习-%s] %s 已由旧算法锁定，本次融合仅用于学习缓存：%s final=%d",
+                    (LPCTSTR)tag, (LPCTSTR)sideText, (LPCTSTR)hitName, fusion.best.finalScore);
+                PushVisualLog(learnLog, RGB(120, 220, 255));
+            }
+
+            return true;
         };
 
     // ========================================================
@@ -1447,6 +1924,14 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
         ::InvalidateRect(m_hWnd, &m_previewRect, FALSE);
     }
 
+    // ============================================================
+    // 【身份融合补丁】首轮 OCR 扫描结束后，先做一次固定红框融合。
+    // 这一步特别保护两字 ID：旧算法短名命中不会直接锁，先到这里确认。
+    // ============================================================
+    PushVisualLog(L"▶ [身份融合] 首轮扫描结束，开始固定红框时间窗评分...", RGB(120, 220, 255));
+    tryFusionMatch(true, killerArea, killerResolved, finalKillerName, killerBestP, killerBestA, lockedKillerTeam);
+    tryFusionMatch(false, deadArea, deadResolved, finalDeadName, deadBestP, deadBestA, lockedDeadTeam);
+
     // ---- 二轮降级匹配（杀手） ----
     if (!killerResolved && !historyKTexts.empty()) {
         PushVisualLog(L"▶ [找杀手] 启动【二轮降级匹配】...", RGB(255, 165, 0));
@@ -1467,6 +1952,13 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 deadBestP, deadBestA, dScore, true, frame.frameIdx);
             if (deadResolved) break;
         }
+    }
+
+    // 二轮后再尝试一次融合；如果二轮遇到职业帧/短名保护未锁定，这里仍可用缓存确认。
+    if (!killerResolved || !deadResolved) {
+        PushVisualLog(L"▶ [身份融合] 二轮结束后再次尝试融合确认...", RGB(120, 220, 255));
+        tryFusionMatch(true, killerArea, killerResolved, finalKillerName, killerBestP, killerBestA, lockedKillerTeam);
+        tryFusionMatch(false, deadArea, deadResolved, finalDeadName, deadBestP, deadBestA, lockedDeadTeam);
     }
 
     //// ---- 全局兜底 ----
@@ -1490,15 +1982,9 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
     //}
 
     if (!killerResolved || !deadResolved) {
-        // 利用 Beep 函数(频率, 持续毫秒)，制造极其刺耳的“滴-嘟-滴-嘟”双声调报警！
-        // 因为是新开一个线程发声，所以绝不会卡顿你的匹配逻辑和游戏画面！
+        // 匹配失败提示音：只响 2 下，避免实战时太吵。
+        // 新开线程发声，不阻塞匹配逻辑和游戏画面。
         std::thread([]() {
-            ::Beep(900, 150); // 高音 滴
-            ::Beep(600, 150); // 低音 嘟
-            ::Beep(900, 150); // 高音 滴
-            ::Beep(600, 150); // 低音 嘟
-            ::Beep(900, 150); // 高音 滴
-            ::Beep(600, 150); // 低音 嘟
             ::Beep(900, 150); // 高音 滴
             ::Beep(600, 150); // 低音 嘟
             }).detach();
@@ -1594,8 +2080,11 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 m_lastKillerTeam = m_players[killerBestP].team;
             }
 
-            if (deadResolved && deadBestP != -1)
+            if (deadResolved && deadBestP != -1) {
                 m_players[deadBestP].deaths++;
+                // 【身份融合补丁】击杀成立后，只切死者侧身份段；杀手侧继续留场。
+                NotifyIdentityKillConfirmed(m_players[deadBestP].team, finalDeadName);
+            }
 
             if (m_bPendingTeamScoreWin) {
                 m_bPendingTeamScoreWin = false;
@@ -1603,7 +2092,20 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 else if (m_lastKillerTeam == 1)  m_totalScoreBlue++;
                 for (int p = 0; p < 8; p++)
                     m_players[p].currentStreak = 0;
-                PushVisualLog(L"🏆 [结算] 局间大比分变动！所有人连击清零！", RGB(0, 255, 100));
+
+                // 大比分真正落账时也强制启动 ROUND_END 冷却。
+                // 原来只在“全队 X 视觉检测”阶段启动；如果比分是在击杀结算线程里落账，
+                // 或视觉全队 X 未稳定触发，就可能只走普通击杀冷却，导致 COOLDOWN_ROUND_END 没生效。
+                KillTimer(2);
+                m_bCanTrigger = FALSE;
+                SetTimer(2, COOLDOWN_ROUND_END, NULL);
+                m_bCanTriggerTeamScore = FALSE;
+                KillTimer(4);
+                SetTimer(4, COOLDOWN_TEAM_SCORE, NULL);
+
+                PushVisualLog(L"🏆 [结算] 局间大比分变动！所有人连击清零！ROUND_END 冷却已启动。", RGB(0, 255, 100));
+                // 【身份融合补丁】新一局开始，两边固定框都可能换人，清空身份段和运行时学习。
+                NotifyIdentityRoundReset(L"局间大比分变动/新一局开始");
             }
 
             PostMessage(WM_UPDATE_ALL_UI, 0, 0);
@@ -1655,15 +2157,17 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
     if (!m_bmp || !m_bIsRunning)
         return;
 
-    // 1. 黑色边框滤镜：判断该像素是否是大X的“黑色外描边”
-    auto isXColor = [](COLORREF c) -> bool {
-        int r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
-        return (r < 45 && g < 45 && b < 45 &&
-            abs(r - g) < 15 && abs(r - b) < 15 && abs(g - b) < 15);
-        };
-
-    bool isDeadArr[8] = { false };
-    COLORREF colorDeath[40]; // 保留原数组，为了让下方黄色的调试日志能正常输出
+    bool isDeadArr[DEATH_POINT_COUNT] = { false };
+    COLORREF colorDeath[DEATH_POINT_COUNT] = { 0 };
+    int debugMatchCount[DEATH_POINT_COUNT] = { 0 };
+    int debugRoiHits[DEATH_POINT_COUNT] = { 0 };
+    float debugDrawX[DEATH_POINT_COUNT] = { 0 };
+    float debugDrawY[DEATH_POINT_COUNT] = { 0 };
+    bool debugCenterGate[DEATH_POINT_COUNT] = { false };
+    int debugHitCount[DEATH_POINT_COUNT] = { 0 };
+    float debugHitX[DEATH_POINT_COUNT][16] = { 0 };
+    float debugHitY[DEATH_POINT_COUNT][16] = { 0 };
+    int debugHitDir[DEATH_POINT_COUNT][16] = { 0 };
 
     {
         std::lock_guard<std::mutex> lock(g_bmpMutex);
@@ -1672,88 +2176,378 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
         HDC hMemDC = ::CreateCompatibleDC(NULL);
         HGDIOBJ oldBmp = ::SelectObject(hMemDC, m_bmp);
 
-        // 提取原始你手工点的 40 个点，仅用于保留旧版的警告日志功能
-        for (int i = 0; i < 40; i++) {
-            colorDeath[i] = ::GetPixel(hMemDC, (int)(m_w * g_deathPts[i].x), (int)(m_h * g_deathPts[i].y));
-        }
+        // 视频/投影兼容版：收紧后的软红橙检测。
+        // 关键修正：红队血条/红色底板本身也是红色，不能再把“暗红/纯红背景”当作 X。
+        // 现在只接受更像 X 笔画的“亮红/橙红/压缩后仍有亮度的红”，并过滤低亮度红底。
+        auto isXRedLike = [](COLORREF c, bool isActive) -> bool {
+            int r = GetRValue(c);
+            int g = GetGValue(c);
+            int b = GetBValue(c);
 
-        // 1. 极窄“基因色”滤镜：死锁 #D32E00 (RGB: 211, 46, 0)
-        auto isExactXColor = [](COLORREF c) -> bool {
-            int r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
+            // 死亡 X 的基准色来自实测：#D53000 = RGB(213, 48, 0)。
+            // 这里按“接近这个橙红色”做容差，而不是泛泛地识别所有红色。
+            // 目的：过滤红队血条/红底/头像红边，只保留更像死亡 X 笔画的橙红色。
+            const int baseR = 0xD5;
+            const int baseG = 0x30;
+            const int baseB = 0x00;
 
-            // 围绕 211, 46, 0 进行极其严苛的上下限卡位：
-            // 1. R 必须极高 (170~255)
-            // 2. G 必须卡在暗橙色的区间 (15~75) —— 超过75绝对是散打的黄火，低于15是纯血红
-            // 3. B 必须几乎没有 (0~30) —— 过滤掉紫红色的技能特效
-            // 4. R 的亮度必须至少是 G 的 3 倍以上
-            return (r > 170 && g > 15 && g < 75 && b >= 0 && b < 30 && r > g * 3);
-            };
+            // 亮度下限：小 X 像素少，略放宽；主将大 X 稍稳，也保留一定容差。
+            if (r < (isActive ? 120 : 125)) return false;
 
-        // 2. 骨架射线探测器 (容错率大幅降低)
-        auto checkDead = [&](int startIdx) -> bool {
-            float cx = g_deathPts[startIdx].x;
-            float cy = g_deathPts[startIdx].y;
-            if (cx <= 0 || cy <= 0) return false;
+            // 死亡 X 是橙红：R 最高，G 有一定值，B 很低。
+            // 纯深红血条常见特征是 G 太低；黄色/金边常见特征是 G 太高。
+            if (g < 12 || g > 120) return false;
+            if (b > 95) return false;
+            if (r < g + 55) return false;
+            if (r < b + 95) return false;
 
-            int matchCount = 0;
+            int dr = abs(r - baseR);
+            int dg = abs(g - baseG);
+            int db = abs(b - baseB);
 
-            // 检查中心点
-            if (isExactXColor(::GetPixel(hMemDC, (int)(cx * m_w), (int)(cy * m_h)))) {
-                matchCount++;
+            // 加权距离：G/B 偏离对色相影响更大，权重更高。
+            int weightedDist = dr + dg * 2 + db * 2;
+            int distLimit = isActive ? 175 : 185;
+
+            // 常规容差：覆盖 #D53000 在录屏/投影/缩放后的变暗、偏橙、轻微偏粉。
+            if (weightedDist <= distLimit) {
+                return true;
             }
 
-            // 动态步长
-            float stepX = 0.015f / 4.0f;
-            float stepY = 0.025f / 4.0f;
-
-            // 🚨 容错大幅降低：因为颜色滤镜极其变态，能通过的像素极少
-            int requiredMatches = 5; // 主将：17个点只要有 5 个命中 #D32E00 就算死！
-
-            if (startIdx != 0 && startIdx != 20) { // 替补席
-                stepX /= 2.0f;
-                stepY /= 2.0f;
-                requiredMatches = 3; // 替补：17个点只要有 3 个命中就算死！
+            // 补充：非常亮的橙红高光。仍然要求 G 不能太低、B 不能太高，避免红底/白光误判。
+            if (r >= 220 && g >= 22 && g <= 115 && b <= 80 &&
+                r > g + 80 && r > b + 135) {
+                return true;
             }
 
-            // 发射 16 条射线扫描
-            for (int i = 1; i <= 4; i++) {
-                float ptsX[4][2] = {
-                    { cx - i * stepX, cy - i * stepY },
-                    { cx + i * stepX, cy + i * stepY },
-                    { cx + i * stepX, cy - i * stepY },
-                    { cx - i * stepX, cy + i * stepY }
-                };
-                for (int j = 0; j < 4; j++) {
-                    int px = (int)(ptsX[j][0] * m_w);
-                    int py = (int)(ptsX[j][1] * m_h);
-                    if (px >= 0 && px < m_w && py >= 0 && py < m_h) {
-                        if (isExactXColor(::GetPixel(hMemDC, px, py))) {
-                            matchCount++;
-                        }
+            return false;
+        };
+
+        // X 高光/前景色检测：真实 X 中心经常是白色/浅黄高光，而不是纯红色。
+        // 中心门槛允许红/橙或高光；方向采样允许前景色，但最终至少要有 1 个红/橙方向证据。
+        auto isXHighlightLike = [](COLORREF c, bool isActive) -> bool {
+            int r = GetRValue(c);
+            int g = GetGValue(c);
+            int b = GetBValue(c);
+
+            // 白色/浅黄高光：真实 X 的交叉中心和边缘高光经常落在这个范围。
+            if (r >= (isActive ? 185 : 195) &&
+                g >= (isActive ? 150 : 160) &&
+                b >= (isActive ? 115 : 125) &&
+                r >= g - 20 && g >= b - 30) {
+                return true;
+            }
+
+            // 压缩/缩放后的灰白高光：三通道都很亮，避免中心点因为不是红色而失败。
+            if (r >= (isActive ? 175 : 185) &&
+                g >= (isActive ? 175 : 185) &&
+                b >= (isActive ? 165 : 175)) {
+                return true;
+            }
+
+            return false;
+        };
+
+        auto isXForegroundLike = [&](COLORREF c, bool isActive) -> bool {
+            return isXRedLike(c, isActive) || isXHighlightLike(c, isActive);
+        };
+
+        auto hasLocalXRedColor = [&](int x, int y, int radius, bool isActive) -> bool {
+            for (int dy = -radius; dy <= radius; dy++) {
+                for (int dx = -radius; dx <= radius; dx++) {
+                    int sx = x + dx;
+                    int sy = y + dy;
+                    if (sx < 0 || sx >= m_w || sy < 0 || sy >= m_h) continue;
+                    if (isXRedLike(::GetPixel(hMemDC, sx, sy), isActive)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+
+        auto hasLocalXForegroundColor = [&](int x, int y, int radius, bool isActive) -> bool {
+            for (int dy = -radius; dy <= radius; dy++) {
+                for (int dx = -radius; dx <= radius; dx++) {
+                    int sx = x + dx;
+                    int sy = y + dy;
+                    if (sx < 0 || sx >= m_w || sy < 0 || sy >= m_h) continue;
+                    if (isXForegroundLike(::GetPixel(hMemDC, sx, sy), isActive)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+
+        // 中心点强校验：中心必须有红色系证据。
+        // 允许 5x5 小范围容错，但不再允许“白色/黄色高光”单独通过中心 gate。
+        auto hasCenterXRed = [&](int x, int y, bool isActive) -> bool {
+            const int radius = 2; // 5x5 容错范围
+            int redHits = 0;
+
+            // 正中心如果就是红色，直接认为中心通过。
+            if (x >= 0 && x < m_w && y >= 0 && y < m_h &&
+                isXRedLike(::GetPixel(hMemDC, x, y), isActive)) {
+                return true;
+            }
+
+            for (int dy = -radius; dy <= radius; dy++) {
+                for (int dx = -radius; dx <= radius; dx++) {
+                    int sx = x + dx;
+                    int sy = y + dy;
+                    if (sx < 0 || sx >= m_w || sy < 0 || sy >= m_h) continue;
+                    if (isXRedLike(::GetPixel(hMemDC, sx, sy), isActive)) {
+                        redHits++;
                     }
                 }
             }
 
-            return matchCount >= requiredMatches;
+            // 不是要求单个像素完全精准，但中心附近必须真的有红/橙 X 笔画证据。
+            return redHits >= 2;
+        };
+
+        // 红色中心 + X 四方向结构探测器：
+        // 仍然只使用每组第 0 个有效点作为中心；中心必须有红色系证据，四方向至少 3 个方向命中红色系。
+        auto checkDeadRaw = [&](int logicalIdx, int startIdx) -> bool {
+            float cx = g_deathPts[startIdx].x;
+            float cy = g_deathPts[startIdx].y;
+            if (cx <= 0 || cy <= 0) return false;
+
+            int centerX = (int)(cx * m_w);
+            int centerY = (int)(cy * m_h);
+            if (centerX < 0 || centerX >= m_w || centerY < 0 || centerY >= m_h)
+                return false;
+
+            const bool isActive = (logicalIdx == DP_LEFT_ACTIVE || logicalIdx == DP_RIGHT_ACTIVE);
+            const int localRadius = isActive ? 3 : 3;
+            const int requiredDirections = 3; // 中心点通过后，四个斜向射线方向中至少 3 个方向命中红色系
+
+            int matchCount = 0;
+            int diagDownHits = 0; // \ 方向：左上 <-> 右下，仅用于调试计数
+            int diagUpHits = 0;   // / 方向：右上 <-> 左下，仅用于调试计数
+            bool hitLeftUp = false;
+            bool hitRightDown = false;
+            bool hitRightUp = false;
+            bool hitLeftDown = false;
+            bool redLeftUp = false;
+            bool redRightDown = false;
+            bool redRightUp = false;
+            bool redLeftDown = false;
+            COLORREF centerColor = ::GetPixel(hMemDC, centerX, centerY);
+            auto appendDebugHit = [&](float hx, float hy, int dirTag) {
+                int idx = debugHitCount[logicalIdx];
+                if (idx < 16) {
+                    debugHitX[logicalIdx][idx] = hx;
+                    debugHitY[logicalIdx][idx] = hy;
+                    debugHitDir[logicalIdx][idx] = dirTag;
+                    debugHitCount[logicalIdx]++;
+                }
             };
 
-        // 遍历检测 8 个人的状态 (0, 5, 10, 15, 20, 25, 30, 35)
-        for (int i = 0; i < 8; i++) {
-            isDeadArr[i] = checkDead(i * 5);
+            // 关键：中心点必须命中红色系 X 笔画。
+            // 允许中心附近 5x5 容错，但不允许白色/黄色高光单独通过。
+            bool centerGate = hasCenterXRed(centerX, centerY, isActive);
+            debugCenterGate[logicalIdx] = centerGate;
+            if (!centerGate) {
+                colorDeath[logicalIdx] = centerColor;
+                debugMatchCount[logicalIdx] = 0;
+                debugRoiHits[logicalIdx] = 0;
+                debugDrawX[logicalIdx] = cx;
+                debugDrawY[logicalIdx] = cy;
+                return false;
+            }
+            matchCount++;
+
+            // 动态步长：主将大 X 使用原步长，替补小 X 步长减半。
+            float stepX = 0.015f / 4.0f;
+            float stepY = 0.025f / 4.0f;
+            if (!isActive) {
+                stepX /= 2.0f;
+                stepY /= 2.0f;
+            }
+
+            // 沿 X 的两条斜边四个方向采样。每个方向必须命中红色系才算通过。
+            for (int i = 1; i <= 4; i++) {
+                // \ 方向
+                float p1x = cx - i * stepX;
+                float p1y = cy - i * stepY;
+                float p2x = cx + i * stepX;
+                float p2y = cy + i * stepY;
+
+                int px = (int)(p1x * m_w);
+                int py = (int)(p1y * m_h);
+                if (px >= 0 && px < m_w && py >= 0 && py < m_h) {
+                    bool red = hasLocalXRedColor(px, py, localRadius, isActive);
+                    if (red) {
+                        diagDownHits++;
+                        matchCount++;
+                        hitLeftUp = true;
+                        redLeftUp = true;
+                        appendDebugHit(p1x, p1y, 0);
+                    }
+                }
+
+                px = (int)(p2x * m_w);
+                py = (int)(p2y * m_h);
+                if (px >= 0 && px < m_w && py >= 0 && py < m_h) {
+                    bool red = hasLocalXRedColor(px, py, localRadius, isActive);
+                    if (red) {
+                        diagDownHits++;
+                        matchCount++;
+                        hitRightDown = true;
+                        redRightDown = true;
+                        appendDebugHit(p2x, p2y, 1);
+                    }
+                }
+
+                // / 方向
+                float p3x = cx + i * stepX;
+                float p3y = cy - i * stepY;
+                float p4x = cx - i * stepX;
+                float p4y = cy + i * stepY;
+
+                px = (int)(p3x * m_w);
+                py = (int)(p3y * m_h);
+                if (px >= 0 && px < m_w && py >= 0 && py < m_h) {
+                    bool red = hasLocalXRedColor(px, py, localRadius, isActive);
+                    if (red) {
+                        diagUpHits++;
+                        matchCount++;
+                        hitRightUp = true;
+                        redRightUp = true;
+                        appendDebugHit(p3x, p3y, 2);
+                    }
+                }
+
+                px = (int)(p4x * m_w);
+                py = (int)(p4y * m_h);
+                if (px >= 0 && px < m_w && py >= 0 && py < m_h) {
+                    bool red = hasLocalXRedColor(px, py, localRadius, isActive);
+                    if (red) {
+                        diagUpHits++;
+                        matchCount++;
+                        hitLeftDown = true;
+                        redLeftDown = true;
+                        appendDebugHit(p4x, p4y, 3);
+                    }
+                }
+            }
+
+            // 水平/垂直方向统计只保留为调试参考，不参与死亡判定。
+            // 判定只依赖中心点颜色 + 两条 X 斜边。
+            int axisHits = 0;
+            int axisRadius = max(1, localRadius - 1);
+            for (int i = 1; i <= 4; i++) {
+                float ax1 = cx - i * stepX;
+                float ax2 = cx + i * stepX;
+                float ay1 = cy - i * stepY;
+                float ay2 = cy + i * stepY;
+
+                int px = (int)(ax1 * m_w);
+                int py = centerY;
+                if (px >= 0 && px < m_w && py >= 0 && py < m_h && hasLocalXForegroundColor(px, py, axisRadius, isActive)) axisHits++;
+
+                px = (int)(ax2 * m_w);
+                py = centerY;
+                if (px >= 0 && px < m_w && py >= 0 && py < m_h && hasLocalXForegroundColor(px, py, axisRadius, isActive)) axisHits++;
+
+                px = centerX;
+                py = (int)(ay1 * m_h);
+                if (px >= 0 && px < m_w && py >= 0 && py < m_h && hasLocalXForegroundColor(px, py, axisRadius, isActive)) axisHits++;
+
+                px = centerX;
+                py = (int)(ay2 * m_h);
+                if (px >= 0 && px < m_w && py >= 0 && py < m_h && hasLocalXForegroundColor(px, py, axisRadius, isActive)) axisHits++;
+            }
+
+            // 只作调试参考：统计中心附近红橙像素数量，不单独判死。
+            int roiHits = 0;
+            int rx = isActive ? 18 : 14;
+            int ry = isActive ? 16 : 12;
+            for (int dy = -ry; dy <= ry; dy += 3) {
+                for (int dx = -rx; dx <= rx; dx += 3) {
+                    int sx = centerX + dx;
+                    int sy = centerY + dy;
+                    if (sx < 0 || sx >= m_w || sy < 0 || sy >= m_h) continue;
+                    if (isXRedLike(::GetPixel(hMemDC, sx, sy), isActive)) roiHits++;
+                }
+            }
+
+            colorDeath[logicalIdx] = centerColor;
+            debugMatchCount[logicalIdx] = matchCount;
+            debugRoiHits[logicalIdx] = roiHits;
+            debugDrawX[logicalIdx] = cx;
+            debugDrawY[logicalIdx] = cy;
+
+            int directionHits = 0;
+            if (hitLeftUp) directionHits++;
+            if (hitRightDown) directionHits++;
+            if (hitRightUp) directionHits++;
+            if (hitLeftDown) directionHits++;
+
+            int redDirectionHits = 0;
+            if (redLeftUp) redDirectionHits++;
+            if (redRightDown) redDirectionHits++;
+            if (redRightUp) redDirectionHits++;
+            if (redLeftDown) redDirectionHits++;
+
+            // 新判定：中心点必须有红色系证据；四个斜向方向中至少 3 个方向有红色系证据。
+            // 高光不再单独参与死亡判定，只用于必要时观察画面，不用于通过条件。
+            debugMatchCount[logicalIdx] = directionHits * 10 + redDirectionHits;
+            return directionHits >= requiredDirections;
+        };
+
+        // 8 个逻辑状态，使用旧 40 点中每组第 0 个有效点：
+        // 0-3 左侧，4-7 右侧。
+        for (int logicalIdx = 0; logicalIdx < DEATH_POINT_COUNT; logicalIdx++) {
+            int startIdx = GetDeathRawIndex(logicalIdx);
+            isDeadArr[logicalIdx] = checkDeadRaw(logicalIdx, startIdx);
         }
 
-        ::SelectObject(hMemDC, oldBmp);   ::DeleteDC(hMemDC);
+        // 实时调试快照：只显示 8 个逻辑状态，不参与判定。
+        {
+            std::lock_guard<std::mutex> dbgLock(g_deathXDebugMutex);
+            for (int i = 0; i < DEATH_POINT_COUNT; i++) {
+                g_deathXDebug.dead[i] = isDeadArr[i];
+                g_deathXDebug.matchCount[i] = debugMatchCount[i];
+                g_deathXDebug.roiHits[i] = debugRoiHits[i];
+                g_deathXDebug.centerColor[i] = colorDeath[i];
+                g_deathXDebug.drawX[i] = debugDrawX[i];
+                g_deathXDebug.drawY[i] = debugDrawY[i];
+                g_deathXDebug.centerGate[i] = debugCenterGate[i];
+                g_deathXDebug.hitCount[i] = debugHitCount[i];
+                for (int k = 0; k < 16; k++) {
+                    g_deathXDebug.hitX[i][k] = debugHitX[i][k];
+                    g_deathXDebug.hitY[i][k] = debugHitY[i][k];
+                    g_deathXDebug.hitDir[i][k] = debugHitDir[i][k];
+                }
+            }
+            g_deathXDebug.lastTick = GetTickCount();
+        }
+
+        ::SelectObject(hMemDC, oldBmp);
+        ::DeleteDC(hMemDC);
     }
-     
+
+    // 让专业后台预览区实时刷新 8 个 X 状态，不刷日志、不打扰比赛。
+    static DWORD s_lastDeathXDebugPaintTick = 0;
+    DWORD debugNowTick = GetTickCount();
+    if (debugNowTick - s_lastDeathXDebugPaintTick >= 150) {
+        s_lastDeathXDebugPaintTick = debugNowTick;
+        if (::IsWindow(m_hWnd) && m_previewRect.Width() > 0 && m_previewRect.Height() > 0) {
+            ::InvalidateRect(m_hWnd, &m_previewRect, FALSE);
+        }
+    }
 
     // 3. 提取各位置的生死状态
-    // 右边 (0-19)
-    bool rightActiveDead = isDeadArr[0];  // 右边主将
-    bool rightTeamDead = isDeadArr[0] && isDeadArr[1] && isDeadArr[2] && isDeadArr[3]; // 右边全队
+    // 左侧：0-3
+    bool leftActiveDead = isDeadArr[0];
+    bool leftTeamDead = isDeadArr[0] && isDeadArr[1] && isDeadArr[2] && isDeadArr[3];
 
-    // 左边 (20-39)
-    bool leftActiveDead = isDeadArr[4];   // 左边主将
-    bool leftTeamDead = isDeadArr[4] && isDeadArr[5] && isDeadArr[6] && isDeadArr[7];  // 左边全队
+    // 右侧：4-7
+    bool rightActiveDead = isDeadArr[4];
+    bool rightTeamDead = isDeadArr[4] && isDeadArr[5] && isDeadArr[6] && isDeadArr[7];
 
     // ========================================================
     // 4. 状态机：跟踪【左侧/右侧】正在打的选手的生死，触发单局击杀
@@ -1762,33 +2556,12 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
     static bool s_rightActiveWasDead = false;
 
     // ========================================================
-    // 日志输出 (仅监控中心点的疑似干扰)
+    // 日志输出：只提示主将 X 已识别但未触发，避免刷屏
     // ========================================================
     static DWORD s_lastDebugLogTime = 0;
     DWORD nowTick = GetTickCount();
-    if (nowTick - s_lastDebugLogTime > 1000)   // 每秒最多一次
+    if (nowTick - s_lastDebugLogTime > 1000)
     {
-        //// ---- 左侧区域 (索引 20-24) ----
-        //int leftMatchCount = 0;
-        //for (int i = 0; i < 5; i++)
-        //    if (isXColor(colorDeath[20 + i]))
-        //        leftMatchCount++;
-
-        //if (leftMatchCount >= 2 && !leftActiveDead)
-        //{
-        //    CString logLine;
-        //    logLine.Format(L"🔴 左侧疑似中心受干扰:%d (未达触发)  RGB:", leftMatchCount);
-        //    for (int i = 0; i < 5; i++)
-        //    {
-        //        COLORREF c = colorDeath[20 + i];
-        //        CString pix;
-        //        pix.Format(L" [%d,%d,%d]", GetRValue(c), GetGValue(c), GetBValue(c));
-        //        logLine += pix;
-        //    }
-        //    AppLog(logLine, RGB(255, 180, 0));
-        //    s_lastDebugLogTime = nowTick;
-        //}
-
         if (leftActiveDead && (!m_bCanTrigger || s_leftActiveWasDead))
         {
             CString reason = !m_bCanTrigger ? L"防抖冷却中" : L"状态已记录(未重置)";
@@ -1796,26 +2569,12 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
             s_lastDebugLogTime = nowTick;
         }
 
-        //// ---- 右侧区域 (索引 0-4) ----
-        //int rightMatchCount = 0;
-        //for (int i = 0; i < 5; i++)
-        //    if (isXColor(colorDeath[i]))
-        //        rightMatchCount++;
-
-        //if (rightMatchCount >= 2 && !rightActiveDead)
-        //{
-        //    CString logLine;
-        //    logLine.Format(L"🔴 右侧疑似中心受干扰:%d (未达触发)  RGB:", rightMatchCount);
-        //    for (int i = 0; i < 5; i++)
-        //    {
-        //        COLORREF c = colorDeath[i];
-        //        CString pix;
-        //        pix.Format(L" [%d,%d,%d]", GetRValue(c), GetGValue(c), GetBValue(c));
-        //        logLine += pix;
-        //    }
-        //    AppLog(logLine, RGB(255, 180, 0));
-        //    s_lastDebugLogTime = nowTick;
-        //}
+        if (rightActiveDead && (!m_bCanTrigger || s_rightActiveWasDead))
+        {
+            CString reason = !m_bCanTrigger ? L"防抖冷却中" : L"状态已记录(未重置)";
+            AppLog(L"🟡 右侧大X已识别但未触发匹配 (原因:" + reason + L")", RGB(255, 180, 0));
+            s_lastDebugLogTime = nowTick;
+        }
     }
 
     // 🎯 左边正在打的死了 -> 右边赢了这一小局！(传入 0 代表左边被击杀)
@@ -1824,11 +2583,11 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
         if (m_bCanTrigger) {
             m_bCanTrigger = FALSE;
             std::thread(&CDNFGameCaptureDlg::DoRetryMatchingTask, this, 0).detach();
-            SetTimer(2, COOLDOWN_KILL_TRIGGER, NULL); // 防抖冷却
+            SetTimer(2, COOLDOWN_KILL_TRIGGER, NULL);
         }
     }
     else if (!leftActiveDead && s_leftActiveWasDead) {
-        s_leftActiveWasDead = false; // 左侧主将位置的大X消失，状态重置
+        s_leftActiveWasDead = false;
     }
 
     // 🎯 右边正在打的死了 -> 左边赢了这一小局！(传入 1 代表右边被击杀)
@@ -1837,23 +2596,20 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
         if (m_bCanTrigger) {
             m_bCanTrigger = FALSE;
             std::thread(&CDNFGameCaptureDlg::DoRetryMatchingTask, this, 1).detach();
-            SetTimer(2, COOLDOWN_KILL_TRIGGER, NULL); // 防抖冷却
+            SetTimer(2, COOLDOWN_KILL_TRIGGER, NULL);
         }
     }
     else if (!rightActiveDead && s_rightActiveWasDead) {
-        s_rightActiveWasDead = false; // 右侧主将位置的大X消失，状态重置
+        s_rightActiveWasDead = false;
     }
 
     // ========================================================
-    // 5. 大比分检测 (判定全队覆灭跳分，开启 35 秒深度结算防抖)
+    // 5. 大比分检测
     // ========================================================
     if ((leftTeamDead || rightTeamDead) && m_bCanTriggerTeamScore) {
         m_bCanTriggerTeamScore = FALSE;
 
-        // 🚨 严谨操作：先显式杀掉单人击杀的 10 秒防抖，清空残留消息
         KillTimer(2);
-
-        // 重新上锁，开启 35 秒深度防抖
         m_bCanTrigger = FALSE;
         SetTimer(2, COOLDOWN_ROUND_END, NULL);
 
@@ -1998,6 +2754,8 @@ void CDNFGameCaptureDlg::OnBnClickedStart()
     if (!m_bIsRunning) {
         m_bIsRunning = TRUE;
         m_btnStart.SetWindowText(L"停止监控");
+        // 【身份融合补丁】开始监控时清空上一段录像/上一局残留缓存。
+        NotifyIdentityRoundReset(L"开始监控，清空上一段身份缓存");
         // ==========================================
         // 【新增】：点击开始监控，立刻静默唤醒同目录下的 Umi-OCR
         // ==========================================
@@ -2194,6 +2952,7 @@ void CDNFGameCaptureDlg::OnBnClickedReset() {
         RefreshDisplay();
         WriteScoreToFile();
         if (m_editVisualLogs.m_hWnd) m_editVisualLogs.SetWindowText(L"");
+        NotifyIdentityRoundReset(L"手动战绩归零/重置对局");
         OutputDebugAuthInfo();
         m_status.SetWindowText(L"战绩已归零！");
     }
@@ -2943,37 +3702,38 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
     dc.SelectObject(pOldPointPen);
 
     // ===================================================
-    // 绘制 8 个大 X 中心点及“真实探测射线网” (高亮狙击准星)
+    // 极简死亡 X 调试显示
+    // 未检测到死亡：沿用原来的青蓝色 X；检测到死亡：同一个 X 改成红色。
+    // 不再额外绘制圆点、文字、总览面板，避免遮挡游戏画面。
     // ===================================================
     if (m_previewRect.Width() > 0 && m_previewRect.Height() > 0) {
-        // 使用醒目的青蓝色，线宽 2 像素
-        CPen centerPen(PS_SOLID, 2, RGB(0, 255, 255));
-        CPen* pOldPen = dc.SelectObject(&centerPen);
+        DeathXDebugState snap = {};
+        {
+            std::lock_guard<std::mutex> dbgLock(g_deathXDebugMutex);
+            snap = g_deathXDebug;
+        }
+
         dc.SelectStockObject(NULL_BRUSH);
 
-        // 遍历 8 个头像组的起始点 (0, 5, 10, 15, 20, 25, 30, 35)
-        for (int i = 0; i < 40; i += 5) {
-            float cx = g_deathPts[i].x;
-            float cy = g_deathPts[i].y;
+        // 遍历 8 个关键死亡 X 中心点
+        for (int i = 0; i < DEATH_POINT_COUNT; i++) {
+            ScorePointF logicPt = GetDeathLogicPoint(i);
+            float cx = logicPt.x;
+            float cy = logicPt.y;
 
-            // 基础射线的伸展步长 (与底层检测代码绝对同步)
+            // 基础射线的伸展步长，与底层检测代码保持同步
             float stepX = 0.015f / 4.0f;
             float stepY = 0.025f / 4.0f;
 
-            // 替补席动态缩放 3 倍
-            if (i != 0 && i != 20) {
+            // 替补席小 X 缩小采样范围
+            if (i != DP_LEFT_ACTIVE && i != DP_RIGHT_ACTIVE) {
                 stepX /= 2.0f;
                 stepY /= 2.0f;
             }
 
-            // 转换中心点到预览窗口像素坐标
-            int px = m_previewRect.left + (int)(cx * m_previewRect.Width());
-            int py = m_previewRect.top + (int)(cy * m_previewRect.Height());
-
-            // 1. 在中心套一个小方框，表示瞄准原点
-            //dc.Rectangle(px - 4, py - 4, px + 5, py + 5);
-
-            // 2. 绘制真实的射线 X 网 (向外延伸 4 个步长，两端相连画直线)
+            COLORREF xColor = snap.dead[i] ? RGB(255, 0, 0) : RGB(0, 255, 255); // 上方 8 个检测位：触发画红色，未触发画蓝色
+            CPen centerPen(PS_SOLID, 2, xColor);
+            CPen* pOldPen = dc.SelectObject(&centerPen);
 
             // 绘制: 左上 (\) 到 右下 (\)
             int tl_x = m_previewRect.left + (int)((cx - 4 * stepX) * m_previewRect.Width());
@@ -2990,9 +3750,235 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
             int bl_y = m_previewRect.top + (int)((cy + 4 * stepY) * m_previewRect.Height());
             dc.MoveTo(tr_x, tr_y);
             dc.LineTo(bl_x, bl_y);
+
+            for (int k = 0; k < snap.hitCount[i] && k < 16; k++) {
+                int dirTag = snap.hitDir[i][k];
+                COLORREF hitColor = RGB(255, 255, 0);
+                if (dirTag == 1) hitColor = RGB(0, 255, 0);
+                else if (dirTag == 2) hitColor = RGB(255, 0, 255);
+                else if (dirTag == 3) hitColor = RGB(255, 128, 0);
+
+                int hx = m_previewRect.left + (int)(snap.hitX[i][k] * m_previewRect.Width());
+                int hy = m_previewRect.top + (int)(snap.hitY[i][k] * m_previewRect.Height());
+
+                CPen hitPen(PS_SOLID, 1, RGB(0, 0, 0));
+                CBrush hitBrush(hitColor);
+                CPen* pOldHitPen = dc.SelectObject(&hitPen);
+                CBrush* pOldHitBrush = dc.SelectObject(&hitBrush);
+                dc.Ellipse(hx - 4, hy - 4, hx + 4, hy + 4);
+                dc.SelectObject(pOldHitBrush);
+                dc.SelectObject(pOldHitPen);
+            }
+
+            if (snap.centerGate[i]) {
+                int ccx = m_previewRect.left + (int)(cx * m_previewRect.Width());
+                int ccy = m_previewRect.top + (int)(cy * m_previewRect.Height());
+                CPen centerGatePen(PS_SOLID, 1, RGB(255, 255, 255));
+                CPen* pOldGatePen = dc.SelectObject(&centerGatePen);
+                dc.MoveTo(ccx - 4, ccy - 4); dc.LineTo(ccx + 4, ccy - 4);
+                dc.LineTo(ccx + 4, ccy + 4); dc.LineTo(ccx - 4, ccy + 4);
+                dc.LineTo(ccx - 4, ccy - 4);
+                dc.SelectObject(pOldGatePen);
+            }
+            dc.SelectObject(pOldPen);
         }
-        dc.SelectObject(pOldPen);
     }
+
+    // ===================================================
+    // 左右放大框：把每个 X 的检查区域放大显示，方便观察中心点和射线命中位置。
+    // 左框显示左侧 4 个 X，蓝框显示右侧 4 个 X。
+    // ===================================================
+    {
+        DeathXDebugState snap = {};
+        {
+            std::lock_guard<std::mutex> dbgLock(g_deathXDebugMutex);
+            snap = g_deathXDebug;
+        }
+        const wchar_t* slotNames[4] = { L"主", L"1", L"2", L"3" };
+        CRect teamPanels[2];
+
+        int panelW = max(300, m_previewRect.Width() / 4);
+        int panelH = max(250, m_previewRect.Height() / 3);
+        int panelY = m_previewRect.top + max(90, m_previewRect.Height() / 5);
+
+        teamPanels[0] = CRect(m_previewRect.left + 10, panelY,
+            m_previewRect.left + 10 + panelW, panelY + panelH);
+        teamPanels[1] = CRect(m_previewRect.left + m_previewRect.Width() / 2 - panelW / 2, panelY,
+            m_previewRect.left + m_previewRect.Width() / 2 + panelW / 2, panelY + panelH);
+
+        std::lock_guard<std::mutex> bmpLock(g_bmpMutex);
+        if (m_bmp) {
+            HDC hBmpDC = ::CreateCompatibleDC(dc.GetSafeHdc());
+            HGDIOBJ oldBmp = ::SelectObject(hBmpDC, m_bmp);
+
+            for (int team = 0; team < 2; ++team) {
+                COLORREF panelColor = (team == 0) ? RGB(255, 80, 80) : RGB(80, 180, 255);
+                CRect panel = teamPanels[team];
+                dc.FillSolidRect(&panel, RGB(16, 16, 16));
+                dc.FillSolidRect(panel.left - 2, panel.top - 2, panel.Width() + 4, 2, panelColor);
+                dc.FillSolidRect(panel.left - 2, panel.bottom, panel.Width() + 4, 2, panelColor);
+                dc.FillSolidRect(panel.left - 2, panel.top - 2, 2, panel.Height() + 4, panelColor);
+                dc.FillSolidRect(panel.right, panel.top - 2, 2, panel.Height() + 4, panelColor);
+
+                CString title = (team == 0) ? L"左侧X检测放大区" : L"右侧X检测放大区";
+                dc.SetBkMode(TRANSPARENT);
+                dc.SetTextColor(panelColor);
+                CFont fTitle;
+                fTitle.CreatePointFont(95, L"微软雅黑");
+                CFont* oldTitleFont = dc.SelectObject(&fTitle);
+                dc.TextOut(panel.left + 8, panel.top - 22, title);
+                dc.SelectObject(oldTitleFont);
+
+                int innerPad = 8;
+                int titlePad = 8;
+                int gridTop = panel.top + innerPad + titlePad;
+                int cellGap = 8;
+
+                // “凸”字布局：
+                // 上面居中放正在打的玩家（主位 / 当前在场位），
+                // 下面一排放还没上场或已经死亡的 3 个位置。
+                int usableW = panel.Width() - innerPad * 2;
+                int usableH = panel.Height() - innerPad * 2 - titlePad;
+                int topCellH = max(70, usableH * 5 / 11);
+                int bottomCellH = max(58, usableH - topCellH - cellGap);
+                int topCellW = max(96, usableW * 5 / 9);
+                int bottomCellW = max(54, (usableW - cellGap * 2) / 3);
+                int topCellX = panel.left + innerPad + (usableW - topCellW) / 2;
+                int bottomY = gridTop + topCellH + cellGap;
+
+                for (int local = 0; local < 4; ++local) {
+                    // 放大格位置 local：0=上方主位，1/2/3=下方左/中/右。
+                    // 右侧 HUD 的下方 3 个位置在画面上是从中间向右排列，和左侧方向相反；
+                    // 因此右侧下方显示时把两端调换为 3/2/1，保证和上方实际 HUD 顺序一致。
+                    int sourceLocal = local;
+                    if (team == 1 && local > 0) {
+                        sourceLocal = 4 - local;
+                    }
+                    int idx = team * 4 + sourceLocal;
+                    CRect cell;
+                    if (local == 0) {
+                        cell = CRect(topCellX,
+                            gridTop,
+                            topCellX + topCellW,
+                            gridTop + topCellH);
+                    }
+                    else {
+                        int bottomCol = local - 1;
+                        int x = panel.left + innerPad + bottomCol * (bottomCellW + cellGap);
+                        cell = CRect(x,
+                            bottomY,
+                            x + bottomCellW,
+                            bottomY + bottomCellH);
+                    }
+
+                    ScorePointF logicPt = GetDeathLogicPoint(idx);
+                    int srcCX = (int)(logicPt.x * m_w);
+                    int srcCY = (int)(logicPt.y * m_h);
+                    bool isActive = (idx == DP_LEFT_ACTIVE || idx == DP_RIGHT_ACTIVE);
+
+                    // 这里只放大“蓝色 X 实际检查范围”，不再带大量周边无效画面。
+                    float stepX = 0.015f / 4.0f;
+                    float stepY = 0.025f / 4.0f;
+                    if (!isActive) {
+                        stepX /= 2.0f;
+                        stepY /= 2.0f;
+                    }
+
+                    int rayHalfW = max(10, (int)(4.0f * stepX * m_w));
+                    int rayHalfH = max(10, (int)(4.0f * stepY * m_h));
+                    int padW = isActive ? 12 : 8;
+                    int padH = isActive ? 12 : 8;
+                    int cropHalfW = rayHalfW + padW;
+                    int cropHalfH = rayHalfH + padH;
+                    int cropW = max(28, cropHalfW * 2);
+                    int cropH = max(28, cropHalfH * 2);
+                    int sx = max(0, min(m_w - cropW, srcCX - cropHalfW));
+                    int sy = max(0, min(m_h - cropH, srcCY - cropHalfH));
+
+                    dc.FillSolidRect(&cell, RGB(8, 8, 8));
+                    int oldMode = dc.SetStretchBltMode(HALFTONE);
+                    dc.StretchBlt(cell.left + 1, cell.top + 1, cell.Width() - 2, cell.Height() - 2,
+                        CDC::FromHandle(hBmpDC), sx, sy, cropW, cropH, SRCCOPY);
+                    dc.SetStretchBltMode(oldMode);
+
+                    COLORREF cellBorder = snap.dead[idx] ? RGB(255, 0, 0) : panelColor;
+                    dc.FillSolidRect(cell.left, cell.top, cell.Width(), 1, cellBorder);
+                    dc.FillSolidRect(cell.left, cell.bottom - 1, cell.Width(), 1, cellBorder);
+                    dc.FillSolidRect(cell.left, cell.top, 1, cell.Height(), cellBorder);
+                    dc.FillSolidRect(cell.right - 1, cell.top, 1, cell.Height(), cellBorder);
+
+                    CString cellTitle;
+                    cellTitle.Format(L"%s%s", slotNames[sourceLocal], snap.dead[idx] ? L" 死" : L" 活");
+                    dc.SetTextColor(cellBorder);
+                    CFont fCell;
+                    fCell.CreatePointFont(82, L"微软雅黑");
+                    CFont* oldCellFont = dc.SelectObject(&fCell);
+                    dc.TextOut(cell.left + 4, cell.top + 2, cellTitle);
+                    dc.SelectObject(oldCellFont);
+
+                    auto mapToCellX = [&](float nx) -> int {
+                        return cell.left + 1 + (int)(((nx * m_w) - sx) / (float)cropW * (cell.Width() - 2));
+                    };
+                    auto mapToCellY = [&](float ny) -> int {
+                        return cell.top + 1 + (int)(((ny * m_h) - sy) / (float)cropH * (cell.Height() - 2));
+                    };
+
+                    int tlx = mapToCellX(logicPt.x - 4 * stepX);
+                    int tly = mapToCellY(logicPt.y - 4 * stepY);
+                    int brx = mapToCellX(logicPt.x + 4 * stepX);
+                    int bry = mapToCellY(logicPt.y + 4 * stepY);
+                    int trx = mapToCellX(logicPt.x + 4 * stepX);
+                    int try_ = mapToCellY(logicPt.y - 4 * stepY);
+                    int blx = mapToCellX(logicPt.x - 4 * stepX);
+                    int bly = mapToCellY(logicPt.y + 4 * stepY);
+
+                    // 下方放大框 8 个检测位：未触发时都不画蓝色 X，只在触发死亡时画红色 X。
+                    bool drawCellX = snap.dead[idx];
+                    if (drawCellX) {
+                        COLORREF xColor = RGB(255, 0, 0);
+                        CPen cellXPen(PS_SOLID, 2, xColor);
+                        CPen* oldXP = dc.SelectObject(&cellXPen);
+                        dc.MoveTo(tlx, tly); dc.LineTo(brx, bry);
+                        dc.MoveTo(trx, try_); dc.LineTo(blx, bly);
+                        dc.SelectObject(oldXP);
+                    }
+
+                    if (snap.centerGate[idx]) {
+                        int ccx = mapToCellX(logicPt.x);
+                        int ccy = mapToCellY(logicPt.y);
+                        CPen gatePen(PS_SOLID, 1, RGB(255, 255, 255));
+                        CPen* oldGatePen = dc.SelectObject(&gatePen);
+                        dc.MoveTo(ccx - 4, ccy - 4); dc.LineTo(ccx + 4, ccy - 4);
+                        dc.LineTo(ccx + 4, ccy + 4); dc.LineTo(ccx - 4, ccy + 4);
+                        dc.LineTo(ccx - 4, ccy - 4);
+                        dc.SelectObject(oldGatePen);
+                    }
+
+                    for (int k = 0; k < snap.hitCount[idx] && k < 16; ++k) {
+                        int dirTag = snap.hitDir[idx][k];
+                        COLORREF hitColor = RGB(255, 255, 0);
+                        if (dirTag == 1) hitColor = RGB(0, 255, 0);
+                        else if (dirTag == 2) hitColor = RGB(255, 0, 255);
+                        else if (dirTag == 3) hitColor = RGB(255, 128, 0);
+
+                        int hx = mapToCellX(snap.hitX[idx][k]);
+                        int hy = mapToCellY(snap.hitY[idx][k]);
+                        CPen hitPen(PS_SOLID, 1, RGB(0, 0, 0));
+                        CBrush hitBrush(hitColor);
+                        CPen* oldHitPen = dc.SelectObject(&hitPen);
+                        CBrush* oldHitBrush = dc.SelectObject(&hitBrush);
+                        dc.Ellipse(hx - 3, hy - 3, hx + 4, hy + 4);
+                        dc.SelectObject(oldHitBrush);
+                        dc.SelectObject(oldHitPen);
+                    }
+                }
+            }
+
+            ::SelectObject(hBmpDC, oldBmp);
+            ::DeleteDC(hBmpDC);
+        }
+    }
+
 
     // ===================================================
     // 绘制 10 倍像素级显微镜
@@ -3044,7 +4030,7 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
         dc.SetBkMode(TRANSPARENT);
         dc.SetTextColor(RGB(0, 255, 0));
         CString tip;
-        tip.Format(L"已采: %d/40 (右键撤销)", (int)m_selectPts.size());
+        tip.Format(L"已采: %d/%d (右键撤销)", (int)m_selectPts.size(), DEATH_POINT_COUNT);
         dc.TextOut(drawX + 5, drawY + magH - 25, tip);
     }
 }
@@ -3691,8 +4677,22 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd()
                 line = text.Tokenize(L"\r\n ", curPos); continue;
             }
 
+            CString aliasRuleError;
+            if (!DnfValidateAliasListShortMeta(parsedAliases, aliasRuleError)) {
+                strDupAliasAlert += L"【" + mainName + L"】小号格式不合格 -> " + aliasRuleError + L"\n";
+                line = text.Tokenize(L"\r\n ", curPos);
+                continue;
+            }
+
             int targetIdx = -1;
             for (int i = 0; i < 8; i++) { if (m_players[i].name == mainName) { targetIdx = i; break; } }
+
+            // 主号不参与名称匹配，所以新上场选手必须至少绑定 1 个小号。
+            if (targetIdx == -1 && parsedAliases.empty()) {
+                strDupAliasAlert += L"【" + mainName + L"】无法上场 -> 必须至少添加一个小号，格式：主号(小号)\n";
+                line = text.Tokenize(L"\r\n ", curPos);
+                continue;
+            }
 
             // ================== 尝试添加到场上新位置 ==================
             if (targetIdx == -1) {
@@ -3793,10 +4793,32 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                     m_players[mfcIdx].akCount = p["akCount"].get<int>();
 
                     m_players[mfcIdx].aliases.clear();
+                    bool aliasFormatInvalid = false;
+                    CString aliasFormatError;
                     for (auto& a : p["aliases"]) {
                         AliasData ad;
                         ad.name = CA2W(a.get<std::string>().c_str(), CP_UTF8);
-                        m_players[mfcIdx].aliases.push_back(ad);
+                        ad.name.Trim();
+                        if (!ad.name.IsEmpty()) {
+                            CString oneAliasError;
+                            if (!DnfValidateAliasShortMeta(ad.name, oneAliasError)) {
+                                aliasFormatInvalid = true;
+                                aliasFormatError = oneAliasError;
+                                break;
+                            }
+                            m_players[mfcIdx].aliases.push_back(ad);
+                        }
+                    }
+                    if (!m_players[mfcIdx].name.IsEmpty() && aliasFormatInvalid) {
+                        AppLog(L"❌ [Web同步拦截] [" + m_players[mfcIdx].name + L"] 小号格式不合格：" + aliasFormatError, RGB(255, 120, 80));
+                        m_players[mfcIdx].name.Empty();
+                        m_players[mfcIdx].aliases.clear();
+                        m_players[mfcIdx].kills = m_players[mfcIdx].deaths = m_players[mfcIdx].akCount = 0;
+                    }
+                    if (!m_players[mfcIdx].name.IsEmpty() && m_players[mfcIdx].aliases.empty()) {
+                        AppLog(L"❌ [Web同步拦截] [" + m_players[mfcIdx].name + L"] 缺少小号，已拒绝上场。", RGB(255, 120, 80));
+                        m_players[mfcIdx].name.Empty();
+                        m_players[mfcIdx].kills = m_players[mfcIdx].deaths = m_players[mfcIdx].akCount = 0;
                     }
                 }
                 // 🚨 Web端后4个是蓝队，写回 MFC 的 4-7
@@ -3810,10 +4832,32 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                     m_players[mfcIdx].akCount = p["akCount"].get<int>();
 
                     m_players[mfcIdx].aliases.clear();
+                    bool aliasFormatInvalid = false;
+                    CString aliasFormatError;
                     for (auto& a : p["aliases"]) {
                         AliasData ad;
                         ad.name = CA2W(a.get<std::string>().c_str(), CP_UTF8);
-                        m_players[mfcIdx].aliases.push_back(ad);
+                        ad.name.Trim();
+                        if (!ad.name.IsEmpty()) {
+                            CString oneAliasError;
+                            if (!DnfValidateAliasShortMeta(ad.name, oneAliasError)) {
+                                aliasFormatInvalid = true;
+                                aliasFormatError = oneAliasError;
+                                break;
+                            }
+                            m_players[mfcIdx].aliases.push_back(ad);
+                        }
+                    }
+                    if (!m_players[mfcIdx].name.IsEmpty() && aliasFormatInvalid) {
+                        AppLog(L"❌ [Web同步拦截] [" + m_players[mfcIdx].name + L"] 小号格式不合格：" + aliasFormatError, RGB(255, 120, 80));
+                        m_players[mfcIdx].name.Empty();
+                        m_players[mfcIdx].aliases.clear();
+                        m_players[mfcIdx].kills = m_players[mfcIdx].deaths = m_players[mfcIdx].akCount = 0;
+                    }
+                    if (!m_players[mfcIdx].name.IsEmpty() && m_players[mfcIdx].aliases.empty()) {
+                        AppLog(L"❌ [Web同步拦截] [" + m_players[mfcIdx].name + L"] 缺少小号，已拒绝上场。", RGB(255, 120, 80));
+                        m_players[mfcIdx].name.Empty();
+                        m_players[mfcIdx].kills = m_players[mfcIdx].deaths = m_players[mfcIdx].akCount = 0;
                     }
                 }
             }
@@ -3890,35 +4934,52 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
 
             std::lock_guard<std::mutex> lock(m_dataMutex);
 
-            // 1. 从场上活跃选手 (m_players) 中剥离
+            bool blockedDelete = false;
+            bool legacyShortAlias = DnfIsLegacyShortAliasWithoutMeta(aliasName);
+            // 主号不参与名称匹配，场上选手必须至少保留 1 个小号。
+            // 例外：旧库中已经存在的短 ID 小号可以直接删除，避免脏数据卡住用户。
             for (int i = 0; i < 8; i++) {
-                if (m_players[i].name == mainName) {
-                    for (auto it = m_players[i].aliases.begin(); it != m_players[i].aliases.end(); ) {
-                        if (it->name == aliasName) {
-                            it = m_players[i].aliases.erase(it);
-                        }
-                        else {
-                            ++it;
+                if (m_players[i].name == mainName && m_players[i].aliases.size() <= 1 && !legacyShortAlias) {
+                    AppLog(L"❌ [删除小号失败] [" + mainName + L"] 至少要保留一个小号。", RGB(255, 120, 80));
+                    blockedDelete = true;
+                    break;
+                }
+            }
+
+            if (!blockedDelete) {
+                if (legacyShortAlias) {
+                    AppLog(L"⚠️ [旧库短ID清理] [" + mainName + L"] " + DnfLegacyShortAliasDeleteReason(aliasName), RGB(255, 180, 0));
+                }
+
+                // 1. 从场上活跃选手 (m_players) 中剥离
+                for (int i = 0; i < 8; i++) {
+                    if (m_players[i].name == mainName) {
+                        for (auto it = m_players[i].aliases.begin(); it != m_players[i].aliases.end(); ) {
+                            if (it->name == aliasName) {
+                                it = m_players[i].aliases.erase(it);
+                            }
+                            else {
+                                ++it;
+                            }
                         }
                     }
                 }
-            }
 
-            // 2. 从底层数据库 (m_aliasDB) 中连根拔起
-            if (m_aliasDB.find(mainName) != m_aliasDB.end()) {
-                CString& dbAliases = m_aliasDB[mainName];
-                dbAliases.Replace(L"(" + aliasName + L")", L"");
-                dbAliases.Replace(L"（" + aliasName + L"）", L"");
-                // 如果这个主号下面没有小号了，连主号一起从库里清理掉
-                if (dbAliases.IsEmpty()) {
-                    m_aliasDB.erase(mainName);
+                // 2. 从底层数据库 (m_aliasDB) 中连根拔起
+                if (m_aliasDB.find(mainName) != m_aliasDB.end()) {
+                    CString& dbAliases = m_aliasDB[mainName];
+                    dbAliases.Replace(L"(" + aliasName + L")", L"");
+                    dbAliases.Replace(L"（" + aliasName + L"）", L"");
+                    if (dbAliases.IsEmpty()) {
+                        m_aliasDB.erase(mainName);
+                    }
                 }
-            }
 
-            // 3. 落地保存并刷新所有界面（这会触发 BroadcastStateToWeb 告诉网页更新成功）
-            SaveAliasDB();
-            SaveConfigToFile();
-            PostMessage(WM_UPDATE_ALL_UI, 0, 0);
+                // 3. 落地保存并刷新所有界面（这会触发 BroadcastStateToWeb 告诉网页更新成功）
+                SaveAliasDB();
+                SaveConfigToFile();
+                PostMessage(WM_UPDATE_ALL_UI, 0, 0);
+            }
         }
     }
     // 🚨 增加了显式报错：如果解析出错，直接弹窗告诉你到底哪里写错了！
@@ -4308,6 +5369,14 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
                 CString mainName = m_players[pIdx].name;
                 CString subName = m_players[pIdx].aliases[aIdx].name;
 
+                bool legacyShortAlias = DnfIsLegacyShortAliasWithoutMeta(subName);
+                if (m_players[pIdx].aliases.size() <= 1 && !legacyShortAlias) {
+                    AppLog(L"❌ [删除小号失败] [" + mainName + L"] 至少要保留一个小号。", RGB(255, 120, 80));
+                }
+                if (legacyShortAlias) {
+                    AppLog(L"⚠️ [旧库短ID清理] [" + mainName + L"] " + DnfLegacyShortAliasDeleteReason(subName), RGB(255, 180, 0));
+                }
+
                 if (m_aliasDB.find(mainName) != m_aliasDB.end()) {
                     CString& dbAliases = m_aliasDB[mainName];
                     dbAliases.Replace(L"(" + subName + L")", L"");
@@ -4491,7 +5560,7 @@ void CDNFGameCaptureDlg::LoadConfigFromFile() {
                 CString aName = tokens[i]; aName.Trim();
                 bool aDup = false;
                 for (int k = 0; k < 8; k++) {
-                    if (m_players[k].name == aName) { aDup = true; break; }
+                    if (m_players[k].name == aName && k != targetIdx) { aDup = true; break; }
                     for (auto& ea : m_players[k].aliases) { if (ea.name == aName) { aDup = true; break; } }
                 }
                 if (!aDup && !aName.IsEmpty()) m_players[targetIdx].aliases.push_back({ aName });
@@ -4561,7 +5630,7 @@ void CDNFGameCaptureDlg::LoadConfigFromFile() {
             for (const auto& aN : parsedAliases) {
                 bool aDup = false;
                 for (int k = 0; k < 8; k++) {
-                    if (m_players[k].name == aN) { aDup = true; break; }
+                    if (m_players[k].name == aN && k != targetIdx) { aDup = true; break; }
                     for (auto& ea : m_players[k].aliases) {
                         if (ea.name == aN) { aDup = true; break; }
                     }
@@ -4661,12 +5730,19 @@ void CDNFGameCaptureDlg::OnEndLabelEdit(NMHDR* pNMHDR, LRESULT* pResult) {
     for (int i = 0; i < 8 && !isDup; i++) {
         if (m_players[i].name.IsEmpty()) continue;
 
-        if (m_players[i].name == newNameOnly && !(i == curPIdx && curAIdx == -1)) {
-            isDup = true; break;
+        if (i != curPIdx) {
+            if (m_players[i].name == newNameOnly) { isDup = true; break; }
+            for (int j = 0; j < (int)m_players[i].aliases.size(); j++) {
+                if (m_players[i].aliases[j].name == newNameOnly) { isDup = true; break; }
+            }
         }
-        for (int j = 0; j < (int)m_players[i].aliases.size(); j++) {
-            if (m_players[i].aliases[j].name == newNameOnly && !(i == curPIdx && j == curAIdx)) {
-                isDup = true; break;
+        else {
+            // 同一名选手内部允许：主号名称 == 自己的小号名称。
+            // 但仍然禁止同一名选手的小号之间互相重名。
+            if (curAIdx != -1) {
+                for (int j = 0; j < (int)m_players[i].aliases.size(); j++) {
+                    if (j != curAIdx && m_players[i].aliases[j].name == newNameOnly) { isDup = true; break; }
+                }
             }
         }
     }

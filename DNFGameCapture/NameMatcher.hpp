@@ -50,7 +50,10 @@ public:
                 }
             }
         }
-        if (isJob && !aggressive) return -1; // 纯职业帧，直接打回，去查下一帧
+        // 职业帧是硬防线：二轮降级也不能把纯职业当成玩家 ID。
+        // 新增的 TemporalIdentityMatcher 会把职业作为上下文证据缓存，
+        // 但 GetMatchScore 本身绝不直接把职业帧匹配成玩家。
+        if (isJob) return -1; // 纯职业帧，直接打回，去查下一帧
 
         // ==========================================
         // 3. 完美包含秒杀
@@ -96,6 +99,26 @@ public:
         return 30;
     }
 
+    // ================================================================
+    // 【新增】给固定红框身份融合算法使用的只读/工具接口
+    // 说明：不改动原有 ID 匹配主流程，只把职业表、归一化和 LCS 暴露给外层。
+    // ================================================================
+    const std::vector<std::wstring>& GetProfessions() const {
+        return m_professions;
+    }
+
+    std::wstring NormalizeForOcr(const std::wstring& s) {
+        return PreprocessString(s);
+    }
+
+    std::wstring StripNoisePublic(std::wstring s) {
+        return StripNoise(s);
+    }
+
+    int GetRawLCSLength(const std::wstring& a, const std::wstring& b) {
+        return GetLCSLength(a, b);
+    }
+
 private:
     std::unordered_map<wchar_t, wchar_t> m_confusableMap;
     std::vector<std::wstring> m_professions;
@@ -122,7 +145,7 @@ private:
             L"气功师", L"男气功", L"女气功", L"狂虎帝", L"念皇·光风霁月", L"极诣·气功师", L"百花缭乱", L"念帝", L"归元·气功师",
             L"散打", L"武极", L"极武皇", L"极诣·散打", L"武神", L"极武圣", L"归元·散打",
             L"街霸", L"千手罗汉", L"暗街之王", L"极诣·街霸", L"毒王", L"毒神绝", L"归元·街霸",
-            L"柔道家", L"宗师", L"傲之最", L"极诣·柔道家", L"暴风眼", L"风暴女皇", L"归元·柔道家",
+            L"柔道家", L"柔道", L"宗师", L"傲之最", L"极诣·柔道家", L"暴风眼", L"风暴女皇", L"归元·柔道家",
 
             // [男/女神枪手]
             L"神枪手",
@@ -130,7 +153,7 @@ private:
             L"枪炮师",  L"狂暴者", L"毁灭者", L"重霄·枪炮师", L"重炮掌控者", L"风暴骑兵",
             L"机械师", L"机械战神", L"机械元首", L"重霄·机械师", L"机械之心", L"机械之光",
             L"弹药专家", L"大将军", L"战场统治者", L"重霄·弹药专家", L"战争女神", L"芙蕾雅",
-            L"合金战士", L"钢铁之心", L"超能终结者", L"重霄·合金战士",
+            L"合金战士", L"食金战士", L"台金战士", L"钢铁之心", L"超能终结者", L"重霄·合金战士",
 
             // [男/女魔法师]
             L"魔法师", L"男法", L"女法",
@@ -148,7 +171,7 @@ private:
             // [男/女圣职者]
             L"圣职者", L"男圣职", L"女圣职",
             L"圣骑士", L"光明骑士", L"奶爸", L"奶妈", L"天启者", L"神思者", L"光启·圣骑士", L"福音传道者", L"炽天使",
-            L"蓝拳圣使", L"神之手", L"正义仲裁者", L"光启·蓝拳圣使",
+            L"蓝拳圣使", L"蓝拳", L"蓝拳使者", L"神之手", L"正义仲裁者", L"光启·蓝拳圣使",
             L"驱魔师", L"龙斗士", L"真龙星君", L"光启·驱魔师",
             L"复仇者", L"四叔", L"末日审判者", L"永生者", L"光启·复仇者",
             L"异端审判者", L"团长", L"神焰处刑官", L"炎狱裁决者", L"光启·异端审判者",
@@ -212,6 +235,9 @@ private:
         m_confusableMap[L'捉'] = L'打'; // 散捉 -> 散打
         m_confusableMap[L'绘'] = L'枪'; // 漫游绘手 -> 漫游枪手
         m_confusableMap[L'惑'] = L'辨'; // 无心分惑 -> 无心分辨
+        m_confusableMap[L'恬'] = L'师'; // 猩红法恬 -> 猩红法师
+        m_confusableMap[L'工'] = L'丁'; // 帅工 -> 帅丁
+        m_confusableMap[L'汀'] = L'丁'; // 帅汀 -> 帅丁
     }
 
     int GetLCSLength(const std::wstring& s1, const std::wstring& s2) {

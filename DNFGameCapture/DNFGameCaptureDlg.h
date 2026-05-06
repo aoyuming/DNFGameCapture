@@ -10,6 +10,7 @@
 #include <future>
 #include <winhttp.h>
 #include "NameMatcher.hpp"
+#include "TemporalIdentityMatcher.hpp" // 【新增】：固定红框时间窗身份融合匹配
 #include <map>
 #include "WGCCapture.h"
 #include "CameraCapture.h" // 【新增】
@@ -20,7 +21,7 @@
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"3.1.3"    //当前版本号
+#define CURRENT_VERSION L"3.2.0"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -182,6 +183,20 @@ private:
     OcrResultData RunOCR_Internal(HBITMAP hTargetBmp, int nAreaIndex);
 
     void DoRetryMatchingTask(int triggerSide);
+
+    // =========================================================
+    // 【新增】：固定红框身份融合辅助接口
+    // 说明：实现放在 DNFGameCaptureDlg.cpp 中调用即可。
+    // - 左框：ID + 大区
+    // - 右框：大区 + ID
+    // - 职业帧进入缓存，不再当 ID 直接匹配
+    // =========================================================
+    void UpdateIdentityPanelCache(int areaIndex, const CString& rawOcrText);
+    std::vector<TDnfCandidateIdentity> BuildIdentityCandidatesForPanel(TDnfPanelSide side);
+    TDnfPanelMatchResult MatchIdentityPanel(TDnfPanelSide side);
+    void NotifyIdentityKillConfirmed(int deadTeam, const CString& deadName);
+    void NotifyIdentityRoundReset(const CString& reason);
+
     void FilterLivePlatformPrefixes();
     void WriteScoreToFile();
     void AppendResultText(const CString& t, COLORREF c);
@@ -304,6 +319,8 @@ private:
 
     PlayerData m_players[8];
     CNameMatcher m_matcher;
+    CTemporalIdentityMatcher m_identityMatcher; // 【新增】：左/右固定红框 ID+大区+职业 时间窗融合缓存
+    std::mutex m_identityMutex;                 // 【新增】：保护身份缓存，RunOCR 并发线程会同时写入左右框
     std::vector<RecentEvent> m_recentEvents;
 
     HBITMAP m_historyBmps[MAX_HISTORY_FRAMES];

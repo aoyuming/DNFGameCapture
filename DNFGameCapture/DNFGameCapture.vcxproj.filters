@@ -48,6 +48,9 @@
     <ClInclude Include="WebScoreDlg.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="TemporalIdentityMatcher.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="DNFGameCapture.cpp">
@@ -66,6 +69,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="WebScoreDlg.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="DNFGameCaptureDlg_IdentityPatch.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

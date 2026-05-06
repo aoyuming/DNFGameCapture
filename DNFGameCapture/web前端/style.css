@@ -265,3 +265,60 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     outline-offset: -3px;
     box-shadow: 0 0 12px rgba(255, 68, 68, 0.5);
 }
+
+.modal-input-help {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border: 1px solid rgba(0, 229, 255, 0.22);
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.22);
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.55;
+    text-align: left;
+}
+.alias-help-title { color: #00e5ff; font-weight: 700; margin-bottom: 6px; }
+.alias-help-examples { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.alias-help-examples span { padding: 2px 7px; border-radius: 999px; background: rgba(0, 229, 255, 0.12); border: 1px solid rgba(0, 229, 255, 0.22); color: #fff; }
+.alias-help-note { color: var(--text-muted); margin-top: 4px; }
+.alias-parse-result { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.1); color: #fff; }
+.alias-help-warning { margin-top: 6px; color: #ffcc66; }
+.alias-help-info { margin-top: 6px; color: #9be7ff; }
+
+/* 旧库短ID提醒：真实ID少于3且未带大区/#职业，允许用户清理重加 */
+.alias-legacy-short {
+    border-left: 3px solid #ff9800;
+    background: rgba(255, 152, 0, 0.12);
+}
+.alias-legacy-short .alias-name {
+    color: #ffcc80;
+}
+
+/* 开始前短 ID 安全拦截：上场选手存在未带大区/#职业的两字/短 ID */
+.player-row.short-id-block-row {
+    background: rgba(255, 0, 85, 0.26) !important;
+    box-shadow: 0 0 0 2px rgba(255, 0, 85, 0.95), 0 0 18px rgba(255, 0, 85, 0.45) !important;
+}
+.player-row.short-id-block-row .name-input {
+    color: #ffccd9 !important;
+    text-shadow: 0 0 8px rgba(255, 0, 85, 0.95) !important;
+}
+.player-row.short-id-block-row::after {
+    content: "短ID需补大区/职业";
+    position: absolute;
+    left: 8px;
+    top: -18px;
+    color: #ff7aa2;
+    font-size: 11px;
+    font-weight: 900;
+    text-shadow: 0 0 6px rgba(0,0,0,0.9);
+    pointer-events: none;
+}
+#btn-monitor.btn-monitor-disabled,
+#btn-monitor:disabled {
+    background: #4a4a55 !important;
+    color: #999 !important;
+    box-shadow: none !important;
+    cursor: not-allowed !important;
+    filter: grayscale(1) brightness(0.75) !important;
+}

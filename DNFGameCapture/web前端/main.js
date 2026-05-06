@@ -9,6 +9,9 @@ let isMonitoring = false;
 let isProMode = false;
 let draggedRow = null;
 let isDbInitialized = false;
+// 新主号首次绑定小号时，弹窗会让输入框失焦；用这个标记避免 blur 提前同步空小号状态。
+let pendingAliasPromptActive = false;
+let pendingAliasPromptName = '';
 
 // Ctrl 选择互换模式状态（与所在行无关，模块级即可，但放在 createPlayerRow 外更好）
 // 建议放在文件顶部全局区域，或至少在 createPlayerRow 外定义
@@ -135,12 +138,17 @@ function getRowData(row, teamId) {
     let nameElem = row.querySelector('.name-input');
     let name = nameElem.value.trim();
     if (nameElem.classList.contains('input-error')) name = '';
+
+    const aliases = name ? getCleanAliases(name) : [];
+    // 主号不参与 OCR 名称匹配，所以没有小号的选手不向 C++ 上场同步。
+    if (name && aliases.length === 0) name = '';
+
     return {
         team: teamId, name: name,
         kills: parseInt(row.querySelector('.stat-kill').value) || 0,
         deaths: parseInt(row.querySelector('.stat-death').value) || 0,
         akCount: parseInt(row.querySelector('.stat-ak').value) || 0,
-        aliases: playerDB[name] || []
+        aliases: name ? aliases : []
     };
 }
 
@@ -190,9 +198,13 @@ function applyStateFromServer(state) {
         row.querySelector('.stat-ak').value = p.akCount === 0 ? '-' : p.akCount;
     });
     isSyncingFromServer = false;
+    updateStartButtonGuard();
 }
 
-const triggerSync = () => pushStateToServer();
+const triggerSync = () => {
+    updateStartButtonGuard();
+    pushStateToServer();
+};
 
 // ==========================================
 // 2. 内置弹窗系统
@@ -200,13 +212,210 @@ const triggerSync = () => pushStateToServer();
 const customModal = document.getElementById('custom-modal');
 const modalMsg = document.getElementById('modal-msg');
 const modalInput = document.getElementById('modal-input');
+const modalInputHelp = document.getElementById('modal-input-help');
 const modalCancel = document.getElementById('modal-cancel');
 const modalOk = document.getElementById('modal-ok');
 let currentModalCallback = null;
 
-function showConfirm(msg, callback) { modalMsg.innerHTML = msg; modalInput.style.display = 'none'; customModal.classList.add('active'); currentModalCallback = callback; }
-function showPrompt(msg, callback) { modalMsg.innerHTML = msg; modalInput.style.display = 'inline-block'; modalInput.value = ''; customModal.classList.add('active'); modalInput.focus(); currentModalCallback = callback; }
-function showAlert(msg) { modalMsg.innerHTML = msg.replace(/\n/g, '<br>'); modalInput.style.display = 'none'; modalCancel.style.display = 'none'; customModal.classList.add('active'); currentModalCallback = () => { modalCancel.style.display = 'inline-block'; }; }
+let currentModalOptions = {};
+
+const DNF_AREA_RE = /(广东|北京|上海|江苏|浙江|福建|四川|山东|河南|湖北|湖南|河北|辽宁|吉林|黑龙江|安徽|江西|广西|陕西|山西|重庆|天津|云南|贵州|新疆|西藏|青海|甘肃|宁夏|内蒙古|东北|西北|西南|跨)([1-9])/;
+const DNF_JOB_KEYWORDS = [
+    '鬼剑士','剑魂','狂战士','阿修罗','鬼泣','剑影','驭剑士','暗殿骑士','契魔者','流浪武士','刃影',
+    '格斗家','气功师','散打','街霸','柔道','柔道家','男柔道','女柔道',
+    '神枪手','漫游枪手','枪炮师','机械师','弹药专家','合金战士',
+    '魔法师','元素师','召唤师','战斗法师','魔道学者','小魔女','次元行者','血法师','逐风者','冰结师',
+    '圣职者','圣骑士','蓝拳','蓝拳圣使','蓝拳使者','驱魔师','复仇者','巫女','异端审判者','诱魔者','帕拉丁',
+    '暗夜使者','刺客','死灵术士','忍者','影舞者',
+    '守护者','精灵骑士','混沌魔灵','龙骑士','黑暗武士','缔造者'
+];
+
+function escapeHtml(str) {
+    return String(str || '').replace(/[&<>'"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[ch]));
+}
+
+function parseAliasInput(raw) {
+    const original = (raw || '').trim();
+    const parts = original.split('#');
+    let body = (parts[0] || '').trim();
+    const declaredJob = parts.length > 1 ? parts.slice(1).join('#').trim() : '';
+    const areaMatch = body.match(DNF_AREA_RE);
+    const declaredArea = areaMatch ? areaMatch[0] : '';
+    let realId = body;
+    if (declaredArea) realId = (body.slice(0, areaMatch.index) + body.slice(areaMatch.index + declaredArea.length)).trim();
+    const isOnlyArea = !!declaredArea && realId === '' && !declaredJob;
+    const jobLike = DNF_JOB_KEYWORDS.some(job => original === job || original.includes(job));
+    const isSymbolLike = realId !== '' && !/[\u4e00-\u9fa5A-Za-z0-9]/.test(realId);
+    return { original, realId, declaredArea, declaredJob, isOnlyArea, jobLike, isSymbolLike };
+}
+
+function getAliasValidationError(raw) {
+    const alias = (raw || '').trim();
+    if (!alias) return '小号不能为空';
+    const p = parseAliasInput(alias);
+    if (!p.realId) return `小号【${alias}】缺少真实ID，不能只填大区或职业。`;
+    const realLen = Array.from(p.realId).length;
+    if (realLen < 3 && !p.declaredArea && !p.declaredJob) {
+        return `小号【${alias}】真实ID少于3个字符，必须加大区或 #职业，例如“上海1${p.realId}”或“${p.realId}#枪炮师”。`;
+    }
+    return '';
+}
+
+function isLegacyShortAliasWithoutMeta(raw) {
+    const alias = (raw || '').trim();
+    if (!alias) return false;
+    const p = parseAliasInput(alias);
+    const realLen = Array.from(p.realId || '').length;
+    return !!p.realId && realLen < 3 && !p.declaredArea && !p.declaredJob;
+}
+
+function getLegacyShortAliasDeleteReason(raw) {
+    return `小号【${raw}】是旧库短ID，真实ID少于3个字符且没有大区/#职业，容易误识别。可以直接从小号列表和本地库删除，然后重新添加为“上海1${parseAliasInput(raw).realId || raw}”或“${parseAliasInput(raw).realId || raw}#职业”。`;
+}
+
+function getActiveShortIdViolations() {
+    const violations = [];
+    document.querySelectorAll('.player-row').forEach(row => {
+        const input = row.querySelector('.name-input');
+        if (!input) return;
+        const playerName = input.value.trim();
+        if (!playerName || input.classList.contains('input-error')) return;
+        const aliases = getCleanAliases(playerName);
+        const badAliases = aliases.filter(a => isLegacyShortAliasWithoutMeta(a));
+        if (badAliases.length > 0) {
+            violations.push({ row, input, playerName, badAliases });
+        }
+    });
+    return violations;
+}
+
+function updateStartButtonGuard() {
+    const btnMonitor = document.getElementById('btn-monitor');
+    if (!btnMonitor) return [];
+
+    document.querySelectorAll('.player-row.short-id-block-row').forEach(row => {
+        row.classList.remove('short-id-block-row');
+        row.removeAttribute('data-short-id-warning');
+    });
+
+    const violations = getActiveShortIdViolations();
+    violations.forEach(v => {
+        const msg = `该选手存在未带大区/#职业的短ID：${v.badAliases.join('、')}。请删除后重新添加为“大区+真实ID”或“真实ID#职业”。`;
+        v.row.classList.add('short-id-block-row');
+        v.row.setAttribute('data-short-id-warning', msg);
+        if (v.input) v.input.title = msg;
+    });
+
+    // 已经在监控时，停止按钮不能禁用；只阻止“开始运行”。
+    const shouldBlockStart = !isMonitoring && violations.length > 0;
+    btnMonitor.disabled = shouldBlockStart;
+    btnMonitor.classList.toggle('btn-monitor-disabled', shouldBlockStart);
+
+    if (shouldBlockStart) {
+        const names = violations.map(v => `${v.playerName}(${v.badAliases.join('、')})`).join('；');
+        btnMonitor.title = `无法开始：存在未带大区/#职业的短ID：${names}`;
+    } else {
+        btnMonitor.title = '';
+    }
+
+    return violations;
+}
+
+function getShortIdGuardMessage(violations = getActiveShortIdViolations()) {
+    if (!violations.length) return '';
+    const lines = violations.map(v => `【${v.playerName}】存在短ID：${v.badAliases.join('、')}`);
+    return `检测到上场选手存在未带大区/#职业的短ID，暂不能开始监控：\n\n${lines.join('\n')}\n\n请删除这些旧短ID，并重新添加为“大区+真实ID”或“真实ID#职业”，例如“上海1夏雫”或“夏雫#气功师”。`;
+}
+
+
+function isAliasInputValid(raw) {
+    return !getAliasValidationError(raw);
+}
+
+function renderAliasInputHelp() {
+    if (!modalInputHelp || currentModalOptions.type !== 'alias') return;
+    const val = modalInput.value.trim();
+    const p = parseAliasInput(val);
+    let html = `
+        <div class="alias-help-title">推荐写法：命中率 大区+真实ID+#职业 &gt; 大区+真实ID &gt; 真实ID</div>
+        <div class="alias-help-examples">
+            <span>王大枪</span><span>上海1王大枪</span><span>王大枪上海1</span><span>上海1王大枪#枪炮师</span>
+        </div>
+        <div class="alias-help-note">普通ID直接填；纯符号/难OCR的ID建议加大区；职业要作为属性请写在 <b>#</b> 后面。</div>
+        <div class="alias-help-note">真实ID本身就是职业词也会按ID保存；但真实ID少于3个字符时，仍必须加大区或 #职业。</div>
+    `;
+    if (val) {
+        html += `<div class="alias-parse-result">已识别：ID=<b>${escapeHtml(p.realId || '未检测到')}</b>`;
+        if (p.declaredArea) html += `　大区=<b>${escapeHtml(p.declaredArea)}</b>`;
+        if (p.declaredJob) html += `　职业=<b>${escapeHtml(p.declaredJob)}</b>`;
+        html += `</div>`;
+        const aliasRuleError = getAliasValidationError(val);
+        if (p.isOnlyArea) html += `<div class="alias-help-warning">当前只检测到大区，缺少真实ID，例如“${escapeHtml(p.declaredArea)}一~一.”。</div>`;
+        else if (aliasRuleError) html += `<div class="alias-help-warning">${escapeHtml(aliasRuleError)}</div>`;
+        else if (p.realId && !p.declaredArea && p.isSymbolLike) html += `<div class="alias-help-warning">这是纯符号/难OCR ID，建议加大区提高命中率。</div>`;
+        else if (p.jobLike && !p.declaredJob && !p.declaredArea) html += `<div class="alias-help-info">检测到职业词：会按真实ID保存；如要声明职业属性，请写成“真实ID#职业”。</div>`;
+    }
+    modalInputHelp.innerHTML = html;
+}
+
+function resetModalInputUi() {
+    modalInput.placeholder = '';
+    currentModalOptions = {};
+    if (modalInputHelp) {
+        modalInputHelp.style.display = 'none';
+        modalInputHelp.innerHTML = '';
+    }
+}
+
+modalInput.addEventListener('input', () => {
+    if (currentModalOptions.type === 'alias') renderAliasInputHelp();
+});
+
+function showAliasPrompt(playerName, callback, msg = null) {
+    pendingAliasPromptActive = true;
+    pendingAliasPromptName = (playerName || '').trim();
+
+    showPrompt(msg || `为【${playerName}】绑定新小号:`, (val) => {
+        pendingAliasPromptActive = false;
+        pendingAliasPromptName = '';
+        callback(val);
+    }, {
+        type: 'alias',
+        placeholder: '例如：王大枪 / 上海1王大枪#枪炮师'
+    });
+}
+
+
+function showConfirm(msg, callback) {
+    resetModalInputUi();
+    modalMsg.innerHTML = msg;
+    modalInput.style.display = 'none';
+    customModal.classList.add('active');
+    currentModalCallback = callback;
+}
+function showPrompt(msg, callback, options = {}) {
+    currentModalOptions = options || {};
+    modalMsg.innerHTML = msg;
+    modalInput.style.display = 'inline-block';
+    modalInput.value = '';
+    modalInput.placeholder = options.placeholder || '';
+    if (modalInputHelp) {
+        modalInputHelp.style.display = options.type === 'alias' ? 'block' : 'none';
+        modalInputHelp.innerHTML = '';
+    }
+    customModal.classList.add('active');
+    if (options.type === 'alias') renderAliasInputHelp();
+    modalInput.focus();
+    currentModalCallback = callback;
+}
+function showAlert(msg) {
+    resetModalInputUi();
+    modalMsg.innerHTML = msg.replace(/\n/g, '<br>');
+    modalInput.style.display = 'none';
+    modalCancel.style.display = 'none';
+    customModal.classList.add('active');
+    currentModalCallback = () => { modalCancel.style.display = 'inline-block'; };
+}
 modalCancel.onclick = () => { customModal.classList.remove('active'); if (currentModalCallback) currentModalCallback(null); };
 // 对话框的键盘事件（原位置，只需增加 stopImmediatePropagation）
 document.addEventListener('keydown', function (e) {
@@ -224,6 +433,37 @@ document.addEventListener('keydown', function (e) {
 });
 
 modalOk.onclick = () => { customModal.classList.remove('active'); if (currentModalCallback) { let res = modalInput.style.display === 'none' ? true : modalInput.value; currentModalCallback(res); } };
+
+function getCleanAliases(playerName) {
+    return (playerDB[playerName] || []).map(a => (a || '').trim()).filter(a => a !== '');
+}
+
+function hasAtLeastOneAlias(playerName) {
+    return getCleanAliases(playerName).length > 0;
+}
+
+function bindAliasToPlayer(playerName, aliasName) {
+    const aliasClean = (aliasName || '').trim();
+    if (!playerName || !aliasClean) return false;
+    if (!playerDB[playerName]) playerDB[playerName] = [];
+    if (!savedDB[playerName]) savedDB[playerName] = [];
+    if (!playerDB[playerName].includes(aliasClean)) playerDB[playerName].push(aliasClean);
+    if (!savedDB[playerName].includes(aliasClean)) savedDB[playerName].push(aliasClean);
+    return true;
+}
+
+function findAliasConflict(playerName, aliasName, selfInput = null) {
+    const aliasClean = (aliasName || '').trim();
+    if (!aliasClean) return null;
+    for (let inp of document.querySelectorAll('.name-input')) {
+        if (selfInput && inp === selfInput) continue;
+        let otherMain = inp.value.trim();
+        if (!otherMain || otherMain === playerName) continue;
+        if (otherMain === aliasClean) return otherMain;
+        if (playerDB[otherMain] && playerDB[otherMain].includes(aliasClean)) return otherMain;
+    }
+    return null;
+}
 
 // ==========================================
 // 3. 战场级查重引擎
@@ -400,17 +640,19 @@ function createPlayerRow() {
             // 无论是否有小号，按回车都弹出添加对话框
             const self = this;
             setTimeout(() => {
-                showPrompt(`为【${name}】绑定新小号:`, (newAlias) => {
+                showAliasPrompt(name, (newAlias) => {
                     if (newAlias && newAlias.trim()) {
                         const aliasClean = newAlias.trim();
-                        let conflictOwner = null;
-                        document.querySelectorAll('.name-input').forEach(inp => {
-                            if (inp === self) return;
-                            const other = inp.value.trim();
-                            if (!other) return;
-                            if (other === aliasClean) conflictOwner = other;
-                            else if (playerDB[other] && playerDB[other].includes(aliasClean)) conflictOwner = other;
-                        });
+                        const aliasError = getAliasValidationError(aliasClean);
+                        if (aliasError) {
+                            customModal.classList.remove('active');
+                            setTimeout(() => {
+                                showAlert(`❌ ${aliasError}`);
+                                self.focus();
+                            }, 100);
+                            return;
+                        }
+                        let conflictOwner = findAliasConflict(name, aliasClean, self);
                         if (conflictOwner) {
                             customModal.classList.remove('active');
                             setTimeout(() => {
@@ -419,12 +661,7 @@ function createPlayerRow() {
                             }, 100);
                             return;
                         }
-                        if (!playerDB[name]) playerDB[name] = [];
-                        if (!savedDB[name]) savedDB[name] = [];
-                        if (!playerDB[name].includes(aliasClean)) {
-                            playerDB[name].push(aliasClean);
-                            savedDB[name].push(aliasClean);
-                        }
+                        bindAliasToPlayer(name, aliasClean);
                         triggerSync();
                         renderAliasMenu(name, aliasPopover);
                         aliasPopover.classList.add('active');
@@ -513,6 +750,49 @@ function createPlayerRow() {
         if (this.classList.contains('input-error')) {
             showAlert(this.getAttribute('data-error-msg'));
             this.value = ''; this.classList.remove('input-error');
+        }
+
+        const currentName = this.value.trim();
+
+        // 如果是“新主号首次绑定小号”弹窗导致的失焦，不能立刻 triggerSync；
+        // 否则 getRowData 会因为小号为空把主号清空，C++ 再同步回来就会把输入框清掉。
+        if (currentName && !hasAtLeastOneAlias(currentName) && pendingAliasPromptActive && pendingAliasPromptName === currentName) {
+            return;
+        }
+
+        if (currentName && !hasAtLeastOneAlias(currentName)) {
+            const self = this;
+            setTimeout(() => {
+                showAliasPrompt(currentName, (aliasVal) => {
+                    const aliasClean = (aliasVal || '').trim();
+                    if (!aliasClean) {
+                        self.value = '';
+                        if (aliasPopover) aliasPopover.classList.remove('active');
+                        triggerSync();
+                        return;
+                    }
+                    const aliasError = getAliasValidationError(aliasClean);
+                    if (aliasError) {
+                        self.value = '';
+                        showAlert(`❌ ${aliasError}`);
+                        triggerSync();
+                        return;
+                    }
+                    const conflictOwner = findAliasConflict(currentName, aliasClean, self);
+                    if (conflictOwner) {
+                        self.value = '';
+                        showAlert(`小号【${aliasClean}】已被场上选手【${conflictOwner}】占用，无法添加！`);
+                        triggerSync();
+                        return;
+                    }
+                    self.value = currentName;
+                    bindAliasToPlayer(currentName, aliasClean);
+                    renderAliasMenu(currentName, aliasPopover);
+                    if (aliasPopover) aliasPopover.classList.add('active');
+                    triggerSync();
+                });
+            }, 30);
+            return;
         }
         // 延迟隐藏两个弹窗（保持和原来一样的时间）
         setTimeout(() => {
@@ -685,10 +965,13 @@ function renderAliasMenu(playerName, popElement) {
     let html = (playerDB[playerName] || []).map((a, i) => {
         // 🚨 核心改动：判断名字长度，超过 6 个字符就截断并拼上 "..."
         let displayName = a.length > 6 ? a.substring(0, 6) + '...' : a;
+        const legacyShort = isLegacyShortAliasWithoutMeta(a);
+        const itemClass = legacyShort ? 'popover-item alias-legacy-short' : 'popover-item';
+        const aliasTitle = legacyShort ? getLegacyShortAliasDeleteReason(a) : a;
 
         return `
-        <div class="popover-item">
-            <span class="alias-name" title="${a}">🎮 ${displayName}</span>
+        <div class="${itemClass}">
+            <span class="alias-name" title="${escapeHtml(aliasTitle)}">${legacyShort ? '⚠️' : '🎮'} ${escapeHtml(displayName)}</span>
             <div class="alias-actions">
                 <span class="btn-temp-unbind" data-idx="${i}" title="临时解绑 (本次添加隐藏此ID不参与名称匹配，删除主号后重新添加即可恢复)">X</span>
                 <span class="btn-perm-unbind" data-idx="${i}" title="永久解绑 (从库选手信息里面彻底删除)">🗑️</span>
@@ -703,26 +986,22 @@ function renderAliasMenu(playerName, popElement) {
     // ==========================================
     popElement.querySelector('.add-alias-btn').addEventListener('mousedown', (e) => {
         e.preventDefault(); e.stopPropagation();
-        showPrompt(`为【${playerName}】绑定新小号:`, (newAlias) => {
+        showAliasPrompt(playerName, (newAlias) => {
             if (newAlias && newAlias.trim() !== '') {
                 const aliasTrimmed = newAlias.trim();
-                let fieldInputs = document.querySelectorAll('.name-input');
-                for (let inp of fieldInputs) {
-                    let otherMain = inp.value.trim();
-                    if (!otherMain || otherMain === playerName) continue;
-                    if (otherMain === aliasTrimmed || (playerDB[otherMain] && playerDB[otherMain].includes(aliasTrimmed))) {
-                        showAlert(`❌ 绑定失败！该小号已被场上选手【${otherMain}】占用！`);
-                        return;
-                    }
+                const aliasError = getAliasValidationError(aliasTrimmed);
+                if (aliasError) {
+                    showAlert(`❌ ${aliasError}`);
+                    return;
+                }
+                let conflictOwner = findAliasConflict(playerName, aliasTrimmed);
+                if (conflictOwner) {
+                    showAlert(`❌ 绑定失败！该小号已被场上选手【${conflictOwner}】占用！`);
+                    return;
                 }
 
-                if (!playerDB[playerName]) playerDB[playerName] = [];
-                if (!savedDB[playerName]) savedDB[playerName] = [];
-
-                if (playerDB[playerName].includes(aliasTrimmed)) return;
-
-                playerDB[playerName].push(aliasTrimmed);
-                savedDB[playerName].push(aliasTrimmed);
+                if (playerDB[playerName] && playerDB[playerName].includes(aliasTrimmed)) return;
+                bindAliasToPlayer(playerName, aliasTrimmed);
 
                 renderAliasMenu(playerName, popElement);
                 popElement.classList.add('active');
@@ -738,6 +1017,35 @@ function renderAliasMenu(playerName, popElement) {
         btn.addEventListener('mousedown', (e) => {
             e.preventDefault(); e.stopPropagation();
             const idx = e.target.getAttribute('data-idx');
+            const targetAlias = playerDB[playerName][idx];
+            const legacyShort = isLegacyShortAliasWithoutMeta(targetAlias);
+            if ((playerDB[playerName] || []).length <= 1 && !legacyShort) {
+                showAlert('❌ 至少要保留一个小号，主号不参与名称匹配。');
+                return;
+            }
+
+            if (legacyShort) {
+                showConfirm(`⚠️ ${getLegacyShortAliasDeleteReason(targetAlias)}\n\n是否直接从小号列表和本地库删除？`, (isOk) => {
+                    if (!isOk) return;
+                    if (window.chrome && window.chrome.webview) {
+                        window.chrome.webview.postMessage({
+                            action: "cmd_delete_alias",
+                            mainName: playerName,
+                            aliasName: targetAlias
+                        });
+                    }
+                    playerDB[playerName].splice(idx, 1);
+                    if (savedDB[playerName]) {
+                        let sIdx = savedDB[playerName].indexOf(targetAlias);
+                        if (sIdx > -1) savedDB[playerName].splice(sIdx, 1);
+                    }
+                    showAlert(`已删除旧库短ID：${targetAlias}`);
+                    renderAliasMenu(playerName, popElement);
+                    popElement.classList.add('active');
+                    triggerSync();
+                });
+                return;
+            }
 
             // 从当前活跃库中移除
             playerDB[playerName].splice(idx, 1);
@@ -758,8 +1066,17 @@ function renderAliasMenu(playerName, popElement) {
             e.preventDefault(); e.stopPropagation();
             const idx = e.target.getAttribute('data-idx');
             const targetAlias = playerDB[playerName][idx];
+            const legacyShort = isLegacyShortAliasWithoutMeta(targetAlias);
+            if ((playerDB[playerName] || []).length <= 1 && !legacyShort) {
+                showAlert('❌ 至少要保留一个小号，主号不参与名称匹配。');
+                return;
+            }
 
-            showConfirm(`⚠️ 确定要【永久删除】小号 [${targetAlias}] 吗？`, (isOk) => {
+            const confirmText = legacyShort
+                ? `⚠️ ${getLegacyShortAliasDeleteReason(targetAlias)}\n\n是否直接从小号列表和本地库删除？`
+                : `⚠️ 确定要【永久删除】小号 [${targetAlias}] 吗？`;
+
+            showConfirm(confirmText, (isOk) => {
                 if (isOk) {
                     // 发送专属的终极删除指令给 C++
                     if (window.chrome && window.chrome.webview) {
@@ -796,6 +1113,7 @@ for (let i = 0; i < 4; i++) {
 }
 
 document.querySelectorAll('.team-score-input').forEach(input => { input.type = 'text'; bindProNumberControls(input); });
+updateStartButtonGuard();
 
 document.addEventListener('click', (e) => {
     if (e.target.closest('#custom-modal') || e.target.classList.contains('name-input') || e.target.classList.contains('gear-btn')) return;
@@ -804,8 +1122,21 @@ document.addEventListener('click', (e) => {
     document.querySelectorAll('.player-row').forEach(r => r.classList.remove('active-row'));
 });
 
+document.addEventListener('input', (e) => {
+    if (e.target && e.target.classList && e.target.classList.contains('name-input')) {
+        updateStartButtonGuard();
+    }
+});
+
 document.getElementById('btn-swap').addEventListener('click', () => window.chrome.webview.postMessage({ action: "cmd_swap" }));
-document.getElementById('btn-monitor').addEventListener('click', () => window.chrome.webview.postMessage({ action: "cmd_monitor", state: !isMonitoring }));
+document.getElementById('btn-monitor').addEventListener('click', () => {
+    const violations = updateStartButtonGuard();
+    if (!isMonitoring && violations.length > 0) {
+        showAlert(getShortIdGuardMessage(violations));
+        return;
+    }
+    window.chrome.webview.postMessage({ action: "cmd_monitor", state: !isMonitoring });
+});
 document.getElementById('btn-auth').addEventListener('click', () => { showPrompt("请输入授权卡密 (CDK):", (c) => { if (c) window.chrome.webview.postMessage({ action: "cmd_auth", code: c.trim() }); }); });
 document.getElementById('btn-pro').addEventListener('click', () => window.chrome.webview.postMessage({ action: "cmd_toggle_mfc", show: !isProMode }));
 
