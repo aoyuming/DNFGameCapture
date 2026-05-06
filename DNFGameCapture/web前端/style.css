@@ -310,6 +310,23 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     pointer-events: none;
 }
 
+
+/* 同队相同职业的短ID/纯符号ID：只提醒，不阻止运行 */
+.player-row.same-job-warn-row {
+    box-shadow: 0 0 0 1px rgba(255, 204, 102, 0.85), 0 0 12px rgba(255, 204, 102, 0.22) !important;
+}
+.player-row.same-job-warn-row::before {
+    content: "同职";
+    position: absolute;
+    right: 28px;
+    top: -18px;
+    color: #ffcc66;
+    font-size: 11px;
+    font-weight: 900;
+    text-shadow: 0 0 6px rgba(0,0,0,0.9);
+    pointer-events: none;
+}
+
 /* 主号没有任何小号：阻止开始运行，但不从列表删除 */
 .player-row.no-alias-block-row {
     background: rgba(255, 0, 85, 0.26) !important;

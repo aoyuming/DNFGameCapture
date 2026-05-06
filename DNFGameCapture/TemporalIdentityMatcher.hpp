@@ -290,53 +290,53 @@ public:
             // 声明式大区上下文：小号里手动写了大区时，直接参与评分。
             // 这让“大区在前/在后”等价，也解决首次识别还没学习画像时没有上下文分的问题。
             if (!areaTop.value.IsEmpty() && cand.hasDeclaredArea) {
-                if (areaTop.value == cand.declaredArea) {
+                if (AreaFuzzySame(areaTop.value, cand.declaredArea)) {
                     s.areaMatched = true;
-                    s.areaCtxScore += symbolIdMode ? 42 : ((nameLen <= 2) ? 34 : 16);
+                    // 大区只做弱辅助，不能单独决定身份。
+                    s.areaCtxScore += symbolIdMode ? 20 : ((nameLen <= 2) ? 16 : 8);
                 }
                 else {
                     s.areaConflict = true;
-                    s.penalty += symbolIdMode ? 40 : ((nameLen <= 2) ? 36 : 20);
+                    s.penalty += symbolIdMode ? 8 : ((nameLen <= 2) ? 8 : 4);
                 }
             }
 
             // 动态大区上下文：仍然保留已学习画像。若候选已经声明大区并匹配，这里不重复加太多分。
             CString learnedArea = BestVote(hint.areaVotes).value;
             if (!areaTop.value.IsEmpty() && !learnedArea.IsEmpty()) {
-                if (areaTop.value == learnedArea) {
+                if (AreaFuzzySame(areaTop.value, learnedArea)) {
                     s.areaMatched = true;
-                    s.areaCtxScore += (nameLen <= 2) ? 18 : 8;
+                    s.areaCtxScore += (nameLen <= 2) ? 10 : 5;
                 }
                 else if (!cand.hasDeclaredArea) {
                     s.areaConflict = true;
-                    s.penalty += (nameLen <= 2) ? 35 : 20;
+                    s.penalty += (nameLen <= 2) ? 8 : 4;
                 }
             }
 
             // 声明式职业上下文：小号里手动写了 #职业 时，首次识别也能加分。
             if (!jobTop.value.IsEmpty() && cand.hasDeclaredJob) {
-                if (jobTop.value.CompareNoCase(cand.declaredJob) == 0) {
+                if (JobFuzzySame(jobTop.value, cand.declaredJob)) {
                     s.jobMatched = true;
-                    // 纯符号 ID 主要靠职业唯一性兜底，所以职业分要足够强；
-                    // 多个同职业候选时 gap 仍为 0，不会误通过。
+                    // 职业做模糊匹配：柔道/柔道家/柔道室 等价。
                     s.jobCtxScore += symbolIdMode ? 58 : ((nameLen <= 2) ? 28 : 12);
                 }
                 else {
                     s.jobConflict = true;
-                    s.penalty += symbolIdMode ? 42 : ((nameLen <= 2) ? 30 : 15);
+                    s.penalty += symbolIdMode ? 10 : ((nameLen <= 2) ? 8 : 4);
                 }
             }
 
             // 动态职业上下文，同样保留已学习职业。
             CString learnedJob = BestVote(hint.jobVotes).value;
             if (!jobTop.value.IsEmpty() && !learnedJob.IsEmpty()) {
-                if (jobTop.value == learnedJob) {
+                if (JobFuzzySame(jobTop.value, learnedJob)) {
                     s.jobMatched = true;
                     s.jobCtxScore += (nameLen <= 2) ? 16 : 7;
                 }
                 else if (!cand.hasDeclaredJob) {
                     s.jobConflict = true;
-                    s.penalty += (nameLen <= 2) ? 28 : 15;
+                    s.penalty += (nameLen <= 2) ? 8 : 4;
                 }
             }
 
@@ -510,6 +510,78 @@ private:
     static const int JOB_ACCEPT_SCORE = 84;
     static const int MIN_NAME_AREA_FRAMES_FOR_STABLE = 2;
     static const int SOFT_SWITCH_CONFIRM_FRAMES = 2;
+
+    static CString NormalizeLoose(CString s) {
+        s.Trim();
+        s.Replace(L" ", L"");
+        s.Replace(L"　", L"");
+        s.Replace(L"-", L"");
+        s.Replace(L"_", L"");
+        s.Replace(L"·", L"");
+        s.Replace(L"・", L"");
+        s.MakeLower();
+        return s;
+    }
+
+    static int LongestCommonSubstringLen(const CString& a, const CString& b) {
+        CString x = NormalizeLoose(a), y = NormalizeLoose(b);
+        int best = 0;
+        for (int i = 0; i < x.GetLength(); ++i) {
+            for (int j = 0; j < y.GetLength(); ++j) {
+                int k = 0;
+                while (i + k < x.GetLength() && j + k < y.GetLength() && x[i + k] == y[j + k]) ++k;
+                if (k > best) best = k;
+            }
+        }
+        return best;
+    }
+
+    static int FuzzyTextScore(const CString& a, const CString& b) {
+        CString x = NormalizeLoose(a), y = NormalizeLoose(b);
+        if (x.IsEmpty() || y.IsEmpty()) return 0;
+        if (x == y) return 100;
+        if (x.Find(y) >= 0 || y.Find(x) >= 0) return (std::min)(x.GetLength(), y.GetLength()) >= 2 ? 88 : 70;
+        int lcs = LongestCommonSubstringLen(x, y);
+        int mx = (std::max)(x.GetLength(), y.GetLength());
+        int mn = (std::min)(x.GetLength(), y.GetLength());
+        int score = mx > 0 ? (lcs * 100) / mx : 0;
+        if (lcs >= 2 && mn <= 3) score = (std::max)(score, 76);
+        return score;
+    }
+
+    static CString NormalizeJobAlias(CString s) {
+        CString n = NormalizeLoose(s);
+        if (n.Find(L"柔道") >= 0) return L"柔道家";
+        if (n.Find(L"枪炮") >= 0 || n.Find(L"大枪") >= 0) return L"枪炮师";
+        if (n.Find(L"漫游") >= 0) return L"漫游枪手";
+        if (n.Find(L"蓝拳") >= 0) return L"蓝拳使者";
+        if (n.Find(L"次元") >= 0) return L"次元行者";
+        if (n.Find(L"魔道") >= 0) return L"魔道学者";
+        if (n.Find(L"驱魔") >= 0) return L"驱魔师";
+        if (n.Find(L"气功") >= 0) return L"气功师";
+        if (n.Find(L"合金") >= 0) return L"合金战士";
+        return n;
+    }
+
+    static bool JobFuzzySame(const CString& a, const CString& b) {
+        return FuzzyTextScore(NormalizeJobAlias(a), NormalizeJobAlias(b)) >= 72;
+    }
+
+    static CString AreaBase(CString s) {
+        s.Trim();
+        while (!s.IsEmpty()) {
+            wchar_t ch = s[s.GetLength() - 1];
+            if (ch >= L'0' && ch <= L'9') s.Delete(s.GetLength() - 1, 1);
+            else break;
+        }
+        return s;
+    }
+
+    static bool AreaFuzzySame(const CString& a, const CString& b) {
+        CString aa = AreaBase(a), bb = AreaBase(b);
+        if (aa.IsEmpty() || bb.IsEmpty()) return false;
+        return FuzzyTextScore(aa, bb) >= 70;
+    }
 
     struct RuntimeHint {
         std::deque<TDnfVote> areaVotes;

@@ -232,6 +232,16 @@ function escapeHtml(str) {
     return String(str || '').replace(/[&<>'"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[ch]));
 }
 
+function parseInlineMainAliasInput(raw) {
+    const text = (raw || '').trim();
+    const sep = text.indexOf('|');
+    if (sep <= 0 || sep >= text.length - 1) return null;
+    const mainName = text.slice(0, sep).trim();
+    const aliasName = text.slice(sep + 1).trim();
+    if (!mainName || !aliasName) return null;
+    return { mainName, aliasName };
+}
+
 function parseAliasInput(raw) {
     const original = (raw || '').trim();
     const parts = original.split('#');
@@ -254,7 +264,7 @@ function getAliasValidationError(raw) {
     if (!p.realId) return `小号【${alias}】缺少真实ID，不能只填大区或职业。`;
     const realLen = Array.from(p.realId).length;
     if (realLen < 3 && !p.declaredArea && !p.declaredJob) {
-        return `小号【${alias}】真实ID少于3个字符，必须加大区或 #职业，例如“上海1${p.realId}”或“${p.realId}#气功师”。`;
+        return `小号【${alias}】真实ID少于3个字符，必须加大区或 #职业，例如“上海1${p.realId}#职业”。`;
     }
     return '';
 }
@@ -303,14 +313,62 @@ function getActiveNoAliasViolations() {
     return violations;
 }
 
+function getActiveSameJobShortWarnings() {
+    const warnings = [];
+    const teamGroups = [
+        Array.from(document.querySelectorAll('#team-red .player-row')),
+        Array.from(document.querySelectorAll('#team-blue .player-row'))
+    ];
+
+    teamGroups.forEach((rows, teamIdx) => {
+        const byJob = new Map();
+        rows.forEach(row => {
+            const input = row.querySelector('.name-input');
+            if (!input) return;
+            const playerName = input.value.trim();
+            if (!playerName || input.classList.contains('input-error')) return;
+            const aliases = getCleanAliases(playerName);
+            aliases.forEach(alias => {
+                const meta = parseAliasInput(alias);
+                const realLen = Array.from(meta.realId || '').length;
+                const isShortOrSymbol = meta.isSymbolLike || (realLen > 0 && realLen < 3);
+                if (!isShortOrSymbol || !meta.declaredJob) return;
+                const key = meta.declaredJob.trim();
+                if (!key) return;
+                if (!byJob.has(key)) byJob.set(key, []);
+                byJob.get(key).push({ row, input, playerName, alias, job: key, teamIdx });
+            });
+        });
+
+        byJob.forEach(items => {
+            const uniquePlayers = new Set(items.map(x => x.playerName));
+            if (uniquePlayers.size < 2) return;
+            const names = Array.from(uniquePlayers).join('、');
+            items.forEach(item => {
+                warnings.push({
+                    row: item.row,
+                    input: item.input,
+                    playerName: item.playerName,
+                    alias: item.alias,
+                    job: item.job,
+                    message: `同队存在多个短ID/纯符号ID声明了 #${item.job}：${names}。如果 OCR 只读到职业，程序不会强判；建议补更完整ID或大区。`
+                });
+            });
+        });
+    });
+
+    return warnings;
+}
+
 function updateStartButtonGuard() {
     const btnMonitor = document.getElementById('btn-monitor');
     if (!btnMonitor) return [];
 
-    document.querySelectorAll('.player-row.short-id-block-row, .player-row.short-id-warn-row, .player-row.no-alias-block-row').forEach(row => {
-        row.classList.remove('short-id-block-row', 'short-id-warn-row', 'no-alias-block-row');
+    document.querySelectorAll('.player-row.short-id-block-row, .player-row.short-id-warn-row, .player-row.same-job-warn-row, .player-row.no-alias-block-row').forEach(row => {
+        row.classList.remove('short-id-block-row', 'short-id-warn-row', 'same-job-warn-row', 'no-alias-block-row');
         row.removeAttribute('data-short-id-warning');
         row.removeAttribute('data-no-alias-warning');
+        row.removeAttribute('data-same-job-warning');
     });
 
     const shortWarnings = getActiveShortIdViolations();
@@ -319,6 +377,13 @@ function updateStartButtonGuard() {
         v.row.classList.add('short-id-warn-row');
         v.row.setAttribute('data-short-id-warning', msg);
         if (v.input) v.input.title = msg;
+    });
+
+    const sameJobWarnings = getActiveSameJobShortWarnings();
+    sameJobWarnings.forEach(v => {
+        v.row.classList.add('same-job-warn-row');
+        v.row.setAttribute('data-same-job-warning', v.message);
+        if (v.input && !v.input.title) v.input.title = v.message;
     });
 
     const noAliasViolations = getActiveNoAliasViolations();
@@ -338,7 +403,10 @@ function updateStartButtonGuard() {
         const names = noAliasViolations.map(v => v.playerName).join('、');
         btnMonitor.title = `无法开始：以下选手没有绑定小号：${names}`;
     } else {
-        btnMonitor.title = shortWarnings.length ? '提示：存在旧库短ID，建议补充大区或 #职业，但不影响运行。' : '';
+        const titleParts = [];
+        if (shortWarnings.length) titleParts.push('存在旧库短ID，建议补充大区或 #职业，但不影响运行。');
+        if (sameJobWarnings.length) titleParts.push('同队存在相同 #职业 的短ID/纯符号ID；只靠职业时不会强判。');
+        btnMonitor.title = titleParts.join(' ');
     }
 
     return noAliasViolations;
@@ -359,12 +427,12 @@ function renderAliasInputHelp() {
     const val = modalInput.value.trim();
     const p = parseAliasInput(val);
     let html = `
-        <div class="alias-help-title">推荐写法：命中率 大区+真实ID+#职业 &gt; 大区+真实ID &gt; 真实ID</div>
+        <div class="alias-help-title">推荐格式：</div>
         <div class="alias-help-examples">
-            <span>庄大崩</span><span>上海1一~一.</span><span>一~一.上海1</span><span>上海1一~一.#次元行者</span>
+            <span>王大枪</span><span>上海1王大枪</span><span>王大枪上海1</span><span>上海1王大枪#枪炮师</span>
         </div>
-        <div class="alias-help-note">普通ID直接填；纯符号/难OCR的ID建议加大区；职业要作为属性请写在 <b>#</b> 后面。</div>
-        <div class="alias-help-note">真实ID本身就是职业词也会按ID保存；但真实ID少于3个字符时，仍必须加大区或 #职业。</div>
+        <div class="alias-help-note">职业属性写在 <b>#</b> 后面。更容易识别成功</div>
+        <div class="alias-help-note">真实ID少于3个字符时最好加上大区或者职业。</div>
     `;
     if (val) {
         html += `<div class="alias-parse-result">已识别：ID=<b>${escapeHtml(p.realId || '未检测到')}</b>`;
@@ -403,7 +471,7 @@ function showAliasPrompt(playerName, callback, msg = null) {
         callback(val);
     }, {
         type: 'alias',
-        placeholder: '例如：庄大崩 / 上海1一~一. / 一~一.上海1 / 上海1一~一.#次元行者'
+        placeholder: '例：“王大枪”或者“上海1王大枪#枪炮师”'
     });
 }
 
@@ -519,7 +587,7 @@ function createPlayerRow() {
     // 🚨 1. HTML 结构：把拖拽柄放回 name-wrapper 里面（原来齿轮的位置）
     row.innerHTML = `
         <div class="name-wrapper">
-            <input type="text" class="name-input" placeholder="名字" autocomplete="off">
+            <input type="text" class="name-input" placeholder="" autocomplete="off">
             <div class="drag-handle" title="按住拖动以交换位置">⋮⋮</div>
             <div class="popover autocomplete-popover"></div>
             <div class="popover alias-popover"></div>
@@ -645,6 +713,27 @@ function createPlayerRow() {
             }
 
             if (name === '') return;
+
+            const inlinePair = parseInlineMainAliasInput(name);
+            if (inlinePair) {
+                const aliasError = getAliasValidationError(inlinePair.aliasName);
+                if (aliasError) {
+                    showAlert(`❌ ${aliasError}`);
+                    return;
+                }
+                const conflictOwner = findAliasConflict(inlinePair.mainName, inlinePair.aliasName, this);
+                if (conflictOwner) {
+                    showAlert(`小号【${inlinePair.aliasName}】已被场上选手【${conflictOwner}】占用，无法添加！`);
+                    return;
+                }
+                this.value = inlinePair.mainName;
+                bindAliasToPlayer(inlinePair.mainName, inlinePair.aliasName);
+                autoPopover.classList.remove('active');
+                renderAliasMenu(inlinePair.mainName, aliasPopover);
+                aliasPopover.classList.add('active');
+                triggerSync();
+                return;
+            }
 
             // 检查冲突
             if (this.classList.contains('input-error')) {
@@ -775,6 +864,30 @@ function createPlayerRow() {
         }
 
         const currentName = this.value.trim();
+
+        const inlinePair = parseInlineMainAliasInput(currentName);
+        if (inlinePair) {
+            const aliasError = getAliasValidationError(inlinePair.aliasName);
+            if (aliasError) {
+                this.value = '';
+                showAlert(`❌ ${aliasError}`);
+                triggerSync();
+                return;
+            }
+            const conflictOwner = findAliasConflict(inlinePair.mainName, inlinePair.aliasName, this);
+            if (conflictOwner) {
+                this.value = '';
+                showAlert(`小号【${inlinePair.aliasName}】已被场上选手【${conflictOwner}】占用，无法添加！`);
+                triggerSync();
+                return;
+            }
+            this.value = inlinePair.mainName;
+            bindAliasToPlayer(inlinePair.mainName, inlinePair.aliasName);
+            renderAliasMenu(inlinePair.mainName, aliasPopover);
+            if (aliasPopover) aliasPopover.classList.add('active');
+            triggerSync();
+            return;
+        }
 
         // 如果是“新主号首次绑定小号”弹窗导致的失焦，不能立刻 triggerSync；
         // 否则 getRowData 会因为小号为空把主号清空，C++ 再同步回来就会把输入框清掉。
