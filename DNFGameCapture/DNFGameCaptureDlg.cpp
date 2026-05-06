@@ -1571,6 +1571,16 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
 
             TDnfSimpleAliasMeta ocrMeta = DnfParseAliasMeta(ocrResult);
 
+            CString weakOcrId = ocrMeta.realId.IsEmpty() ? ocrResult : ocrMeta.realId;
+            CString weakOcrNorm = DnfNormalizeLooseText(weakOcrId);
+            bool weakSingleCharOcr = (weakOcrNorm.GetLength() <= 1 && !ocrMeta.hasArea && !ocrMeta.hasJob);
+            if (weakSingleCharOcr) {
+                CString guardLog;
+                guardLog.Format(L"  └ [🛡单字OCR保护] 本帧只读到 [%s]，没有大区/#职业，不参与名称匹配，避免误命中长ID", (LPCTSTR)ocrResult);
+                PushVisualLog(guardLog, RGB(255, 210, 80));
+                return false;
+            }
+
             // ====================================================
             // 精确小号命中检测（仅当唯一时才采纳）
             // 现在会先解析“大区/真实ID/#职业”，因此：
@@ -2252,18 +2262,23 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
             return isXRedLike(c, isActive) || isXHighlightLike(c, isActive);
         };
 
-        auto hasLocalXRedColor = [&](int x, int y, int radius, bool isActive) -> bool {
+        auto countLocalXRedColor = [&](int x, int y, int radius, bool isActive) -> int {
+            int hits = 0;
             for (int dy = -radius; dy <= radius; dy++) {
                 for (int dx = -radius; dx <= radius; dx++) {
                     int sx = x + dx;
                     int sy = y + dy;
                     if (sx < 0 || sx >= m_w || sy < 0 || sy >= m_h) continue;
                     if (isXRedLike(::GetPixel(hMemDC, sx, sy), isActive)) {
-                        return true;
+                        hits++;
                     }
                 }
             }
-            return false;
+            return hits;
+        };
+
+        auto hasLocalXRedColor = [&](int x, int y, int radius, bool isActive) -> bool {
+            return countLocalXRedColor(x, y, radius, isActive) > 0;
         };
 
         auto hasLocalXForegroundColor = [&](int x, int y, int radius, bool isActive) -> bool {
@@ -2334,6 +2349,8 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
             bool redRightDown = false;
             bool redRightUp = false;
             bool redLeftDown = false;
+            int dirRedCount[4] = { 0, 0, 0, 0 };
+            bool dirFarHit[4] = { false, false, false, false };
             COLORREF centerColor = ::GetPixel(hMemDC, centerX, centerY);
             auto appendDebugHit = [&](float hx, float hy, int dirTag) {
                 int idx = debugHitCount[logicalIdx];
@@ -2378,8 +2395,11 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
                 int px = (int)(p1x * m_w);
                 int py = (int)(p1y * m_h);
                 if (px >= 0 && px < m_w && py >= 0 && py < m_h) {
-                    bool red = hasLocalXRedColor(px, py, localRadius, isActive);
+                    int redHitsLocal = countLocalXRedColor(px, py, localRadius, isActive);
+                    bool red = redHitsLocal > 0;
                     if (red) {
+                        dirRedCount[0] += redHitsLocal;
+                        if (i >= 3) dirFarHit[0] = true;
                         diagDownHits++;
                         matchCount++;
                         hitLeftUp = true;
@@ -2391,8 +2411,11 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
                 px = (int)(p2x * m_w);
                 py = (int)(p2y * m_h);
                 if (px >= 0 && px < m_w && py >= 0 && py < m_h) {
-                    bool red = hasLocalXRedColor(px, py, localRadius, isActive);
+                    int redHitsLocal = countLocalXRedColor(px, py, localRadius, isActive);
+                    bool red = redHitsLocal > 0;
                     if (red) {
+                        dirRedCount[1] += redHitsLocal;
+                        if (i >= 3) dirFarHit[1] = true;
                         diagDownHits++;
                         matchCount++;
                         hitRightDown = true;
@@ -2410,8 +2433,11 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
                 px = (int)(p3x * m_w);
                 py = (int)(p3y * m_h);
                 if (px >= 0 && px < m_w && py >= 0 && py < m_h) {
-                    bool red = hasLocalXRedColor(px, py, localRadius, isActive);
+                    int redHitsLocal = countLocalXRedColor(px, py, localRadius, isActive);
+                    bool red = redHitsLocal > 0;
                     if (red) {
+                        dirRedCount[2] += redHitsLocal;
+                        if (i >= 3) dirFarHit[2] = true;
                         diagUpHits++;
                         matchCount++;
                         hitRightUp = true;
@@ -2423,8 +2449,11 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
                 px = (int)(p4x * m_w);
                 py = (int)(p4y * m_h);
                 if (px >= 0 && px < m_w && py >= 0 && py < m_h) {
-                    bool red = hasLocalXRedColor(px, py, localRadius, isActive);
+                    int redHitsLocal = countLocalXRedColor(px, py, localRadius, isActive);
+                    bool red = redHitsLocal > 0;
                     if (red) {
+                        dirRedCount[3] += redHitsLocal;
+                        if (i >= 3) dirFarHit[3] = true;
                         diagUpHits++;
                         matchCount++;
                         hitLeftDown = true;
@@ -2479,6 +2508,16 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
             debugRoiHits[logicalIdx] = roiHits;
             debugDrawX[logicalIdx] = cx;
             debugDrawY[logicalIdx] = cy;
+
+            // 主将大 X 容易压在头像上；头像本身可能有红色帽子/衣服。
+            // 所以主将大 X 不能只看“某个方向有红点”，必须看该方向是否有连续红色证据，
+            // 并且远端采样点也命中，避免头像局部红色沿斜线误触发。
+            if (isActive) {
+                hitLeftUp = redLeftUp = (dirRedCount[0] >= 2 && dirFarHit[0]);
+                hitRightDown = redRightDown = (dirRedCount[1] >= 2 && dirFarHit[1]);
+                hitRightUp = redRightUp = (dirRedCount[2] >= 2 && dirFarHit[2]);
+                hitLeftDown = redLeftDown = (dirRedCount[3] >= 2 && dirFarHit[3]);
+            }
 
             int directionHits = 0;
             if (hitLeftUp) directionHits++;

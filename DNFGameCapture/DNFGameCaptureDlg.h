@@ -21,7 +21,7 @@
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"3.2.0"    //当前版本号
+#define CURRENT_VERSION L"3.2.1"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -45,7 +45,7 @@
 // ==========================================
 // 【新增】：历史回溯截图的宏定义
 // ==========================================
-#define MAX_HISTORY_FRAMES 20      // 历史缓存的总帧数（决定了最多能回溯多少张图）
+#define MAX_HISTORY_FRAMES 10      // 历史缓存的总帧数（决定了最多能回溯多少张图）
 #define HISTORY_INTERVAL_MS 1000   // 截图的时间间隔(毫秒)，1000代表每秒1张
 
 #define WM_UPDATE_OCR_DROPDOWNS (WM_USER + 100)

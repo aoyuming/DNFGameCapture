@@ -1,5 +1,6 @@
 ﻿#include "pch.h"
 #include "DNFGameCaptureDlg.h"
+#include <cwctype>
 
 void WriteMatchLog(const CString& logLine);
 
@@ -42,6 +43,26 @@ namespace {
         s.Replace(L"　", L"");
         s.MakeLower();
         return s;
+    }
+
+    static bool DnfIdentityIsSymbolLikeId(const CString& raw) {
+        CString s = DnfIdentityNormalize(raw);
+        if (s.IsEmpty()) return true;
+
+        int meaningful = 0;
+        int symbol = 0;
+        for (int i = 0; i < s.GetLength(); ++i) {
+            wchar_t ch = s[i];
+            bool isCjk = (ch >= 0x4E00 && ch <= 0x9FFF);
+            bool isAlphaNum = !!iswalnum(ch);
+            if (isCjk || isAlphaNum) meaningful++;
+            else symbol++;
+        }
+
+        if (meaningful == 0) return true;
+        if (meaningful <= 1 && symbol >= 1) return true;
+        if (meaningful <= 2 && symbol >= meaningful) return true;
+        return false;
     }
 
     static bool DnfIdentityExtractArea(CString& body, CString& areaOut) {
@@ -110,13 +131,15 @@ void CDNFGameCaptureDlg::UpdateIdentityPanelCache(int areaIndex, const CString& 
 std::vector<TDnfCandidateIdentity> CDNFGameCaptureDlg::BuildIdentityCandidatesForPanel(TDnfPanelSide side)
 {
     std::vector<TDnfCandidateIdentity> out;
-    int team = PanelSideToTeam(side);
-
     std::lock_guard<std::mutex> lock(m_dataMutex);
 
     for (int i = 0; i < 8; ++i) {
         if (m_players[i].name.IsEmpty()) continue;
-        if (m_players[i].team != team) continue;
+
+        // 不再在候选构建阶段强行按“左框=蓝队/右框=红队”过滤。
+        // 原因：录像翻转、红蓝互换或用户手动翻转时，固定框与队伍映射可能变化；
+        // 纯符号 ID 兜底更需要从 8 人中按“职业/大区唯一性”判断。
+        // 最终若两侧候选同队，DoRetryMatchingTask 里仍会按 lockedTeam 做冲突拒绝。
 
         // 主号只作为归属 owner，不参与身份融合名称匹配。
         // 真正用于 OCR 命中的候选只有小号。
@@ -134,6 +157,7 @@ std::vector<TDnfCandidateIdentity> CDNFGameCaptureDlg::BuildIdentityCandidatesFo
             alias.declaredJob = meta.job;
             alias.hasDeclaredArea = meta.hasArea;
             alias.hasDeclaredJob = meta.hasJob;
+            alias.isSymbolicId = DnfIdentityIsSymbolLikeId(alias.matchName);
 
             out.push_back(alias);
         }

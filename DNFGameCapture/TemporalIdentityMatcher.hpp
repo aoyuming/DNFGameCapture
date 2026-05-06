@@ -75,6 +75,10 @@ struct TDnfCandidateIdentity {
     CString declaredJob;
     bool hasDeclaredArea = false;
     bool hasDeclaredJob = false;
+
+    // 纯符号/弱 ID 小号：例如 ---#次元行者、一~一.#次元行者。
+    // 这类 ID OCR 往往完全读不到，允许后续用“职业/大区唯一性”兜底。
+    bool isSymbolicId = false;
 };
 
 struct TDnfCandidateScore {
@@ -247,8 +251,10 @@ public:
 
         result.cacheInsufficient = c.nameAreaFrameCount < MIN_NAME_AREA_FRAMES_FOR_STABLE;
 
-        if (c.nameTexts.empty()) {
-            result.debugText = Format(L"[融合匹配][%s] 失败：缓存中没有 ID+大区帧。raw=%d 职业帧=%d\r\n",
+        // 纯符号 ID 场景：OCR 可能永远读不到 ID，只能读到职业或弱大区。
+        // 因此不能在 nameTexts 为空时直接失败；只要有职业/大区证据，仍进入候选评分。
+        if (c.nameTexts.empty() && areaTop.value.IsEmpty() && jobTop.value.IsEmpty()) {
+            result.debugText = Format(L"[融合匹配][%s] 失败：缓存中没有 ID/大区/职业有效证据。raw=%d 职业帧=%d\r\n",
                 SideName(side).GetString(), c.rawFrameCount, c.professionFrameCount);
             Log(debug, result.debugText);
             return result;
@@ -264,15 +270,17 @@ public:
             s.jobNow = jobTop.value;
 
             CString candMatchName = cand.matchName.IsEmpty() ? cand.name : cand.matchName;
+            const bool symbolIdMode = cand.isSymbolicId || IsSymbolLikeId(candMatchName);
 
             // ID 分：取最近窗口内所有 nameText 的最高分。
-            // 注意：这里使用解析后的真实 ID，而不是原始小号串。
-            // 例如候选“上海1夏雫#气功师”会用“夏雫”去匹配 OCR 的“夏乘”。
-            for (const auto& nt : c.nameTexts) {
-                int idScore = m_nameMatcher.GetMatchScore(ToW(candMatchName), ToW(nt.value), false);
-                if (idScore > s.idScore) {
-                    s.idScore = idScore;
-                    s.bestIdText = nt.value;
+            // 注意：纯符号 ID 不强求 ID 分，因为 OCR 很可能只读到职业/大区。
+            if (!symbolIdMode) {
+                for (const auto& nt : c.nameTexts) {
+                    int idScore = m_nameMatcher.GetMatchScore(ToW(candMatchName), ToW(nt.value), false);
+                    if (idScore > s.idScore) {
+                        s.idScore = idScore;
+                        s.bestIdText = nt.value;
+                    }
                 }
             }
 
@@ -284,11 +292,11 @@ public:
             if (!areaTop.value.IsEmpty() && cand.hasDeclaredArea) {
                 if (areaTop.value == cand.declaredArea) {
                     s.areaMatched = true;
-                    s.areaCtxScore += (nameLen <= 2) ? 34 : 16;
+                    s.areaCtxScore += symbolIdMode ? 42 : ((nameLen <= 2) ? 34 : 16);
                 }
                 else {
                     s.areaConflict = true;
-                    s.penalty += (nameLen <= 2) ? 36 : 20;
+                    s.penalty += symbolIdMode ? 40 : ((nameLen <= 2) ? 36 : 20);
                 }
             }
 
@@ -309,11 +317,13 @@ public:
             if (!jobTop.value.IsEmpty() && cand.hasDeclaredJob) {
                 if (jobTop.value.CompareNoCase(cand.declaredJob) == 0) {
                     s.jobMatched = true;
-                    s.jobCtxScore += (nameLen <= 2) ? 28 : 12;
+                    // 纯符号 ID 主要靠职业唯一性兜底，所以职业分要足够强；
+                    // 多个同职业候选时 gap 仍为 0，不会误通过。
+                    s.jobCtxScore += symbolIdMode ? 58 : ((nameLen <= 2) ? 28 : 12);
                 }
                 else {
                     s.jobConflict = true;
-                    s.penalty += (nameLen <= 2) ? 30 : 15;
+                    s.penalty += symbolIdMode ? 42 : ((nameLen <= 2) ? 30 : 15);
                 }
             }
 
@@ -331,7 +341,7 @@ public:
             }
 
             if (c.nameAreaFrameCount >= 2) s.stableBonus += 5;
-            if (c.professionFrameCount >= 2) s.stableBonus += 3;
+            if (c.professionFrameCount >= 2) s.stableBonus += symbolIdMode ? 8 : 3;
 
             s.finalScore = s.idScore + s.areaCtxScore + s.jobCtxScore + s.stableBonus - s.penalty;
             if (s.finalScore < 0) s.finalScore = 0;
@@ -356,7 +366,7 @@ public:
             SideName(side).GetString(), areaTop.value.GetString(), jobTop.value.GetString(),
             c.nameAreaFrameCount, c.professionFrameCount, result.cacheInsufficient ? L"是" : L"否"));
 
-        int topN = (int)std::min<size_t>(3, scores.size());
+        int topN = (int)(scores.size() < 3 ? scores.size() : 3);
         for (int i = 0; i < topN; ++i) {
             const auto& s = scores[i];
             Log(debug, Format(L"  ├ Top%d 候选=%s(owner=%s%s) id=%d text=\"%s\" areaCtx=%+d jobCtx=%+d stable=%+d penalty=-%d final=%d\r\n",
@@ -593,6 +603,23 @@ private:
         int gap = best.finalScore - second.finalScore;
         best.gapToSecond = gap;
 
+        const bool symbolIdMode = best.candidate.isSymbolicId || IsSymbolLikeId(bestMatchName);
+
+        if (symbolIdMode) {
+            // 纯符号 ID：允许“职业/大区唯一”通过。
+            // 要求分差足够大，避免同队多个相同职业时误判。
+            if (best.jobMatched && best.finalScore >= 58 && gap >= 25) {
+                best.decisionReason = L"纯符号 ID：#职业唯一锁定";
+                return true;
+            }
+            if (best.areaMatched && best.jobMatched && best.finalScore >= 78 && gap >= 18) {
+                best.decisionReason = L"纯符号 ID：大区 + #职业 上下文锁定";
+                return true;
+            }
+            best.decisionReason = L"纯符号 ID 保护：职业/大区不唯一或证据不足";
+            return false;
+        }
+
         if (cacheInsufficient) {
             // 缓存不足时仍然谨慎：
             // 1) 高置信 ID 可以过；
@@ -637,6 +664,27 @@ private:
             return true;
         }
         best.decisionReason = L"长 ID 分数或分差不足";
+        return false;
+    }
+
+    static bool IsSymbolLikeId(const CString& raw) {
+        CString s = NormalizeRaw(raw);
+        if (s.IsEmpty()) return true;
+
+        int meaningful = 0;
+        int symbol = 0;
+        for (int i = 0; i < s.GetLength(); ++i) {
+            wchar_t ch = s[i];
+            bool isCjk = (ch >= 0x4E00 && ch <= 0x9FFF);
+            bool isAlphaNum = !!iswalnum(ch);
+            if (isCjk || isAlphaNum) meaningful++;
+            else symbol++;
+        }
+
+        // 纯符号，或符号占比高且可读字符过少，都视为“无法依赖 OCR ID”。
+        if (meaningful == 0) return true;
+        if (meaningful <= 1 && symbol >= 1) return true;
+        if (meaningful <= 2 && symbol >= meaningful) return true;
         return false;
     }
 
