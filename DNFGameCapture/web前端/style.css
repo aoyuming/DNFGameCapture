@@ -285,7 +285,7 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 .alias-help-warning { margin-top: 6px; color: #ffcc66; }
 .alias-help-info { margin-top: 6px; color: #9be7ff; }
 
-/* 旧库短ID提醒：真实ID少于3且未带大区/#职业，允许用户清理重加 */
+/* 旧库短ID提醒：真实ID少于3且未带大区/#职业，只提醒，不自动删除、不阻止运行 */
 .alias-legacy-short {
     border-left: 3px solid #ff9800;
     background: rgba(255, 152, 0, 0.12);
@@ -294,17 +294,33 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     color: #ffcc80;
 }
 
-/* 开始前短 ID 安全拦截：上场选手存在未带大区/#职业的两字/短 ID */
-.player-row.short-id-block-row {
+.player-row.short-id-warn-row {
+    box-shadow: 0 0 0 1px rgba(255, 152, 0, 0.85), 0 0 12px rgba(255, 152, 0, 0.22) !important;
+}
+.player-row.short-id-warn-row::after {
+    content: "⚠";
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #ffcc66;
+    font-size: 18px;
+    font-weight: 900;
+    text-shadow: 0 0 8px rgba(0,0,0,0.95);
+    pointer-events: none;
+}
+
+/* 主号没有任何小号：阻止开始运行，但不从列表删除 */
+.player-row.no-alias-block-row {
     background: rgba(255, 0, 85, 0.26) !important;
     box-shadow: 0 0 0 2px rgba(255, 0, 85, 0.95), 0 0 18px rgba(255, 0, 85, 0.45) !important;
 }
-.player-row.short-id-block-row .name-input {
+.player-row.no-alias-block-row .name-input {
     color: #ffccd9 !important;
     text-shadow: 0 0 8px rgba(255, 0, 85, 0.95) !important;
 }
-.player-row.short-id-block-row::after {
-    content: "短ID需补大区/职业";
+.player-row.no-alias-block-row::after {
+    content: "缺少小号";
     position: absolute;
     left: 8px;
     top: -18px;

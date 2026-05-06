@@ -140,8 +140,6 @@ function getRowData(row, teamId) {
     if (nameElem.classList.contains('input-error')) name = '';
 
     const aliases = name ? getCleanAliases(name) : [];
-    // 主号不参与 OCR 名称匹配，所以没有小号的选手不向 C++ 上场同步。
-    if (name && aliases.length === 0) name = '';
 
     return {
         team: teamId, name: name,
@@ -256,7 +254,7 @@ function getAliasValidationError(raw) {
     if (!p.realId) return `小号【${alias}】缺少真实ID，不能只填大区或职业。`;
     const realLen = Array.from(p.realId).length;
     if (realLen < 3 && !p.declaredArea && !p.declaredJob) {
-        return `小号【${alias}】真实ID少于3个字符，必须加大区或 #职业，例如“上海1${p.realId}”或“${p.realId}#枪炮师”。`;
+        return `小号【${alias}】真实ID少于3个字符，必须加大区或 #职业，例如“上海1${p.realId}”或“${p.realId}#气功师”。`;
     }
     return '';
 }
@@ -270,7 +268,8 @@ function isLegacyShortAliasWithoutMeta(raw) {
 }
 
 function getLegacyShortAliasDeleteReason(raw) {
-    return `小号【${raw}】是旧库短ID，真实ID少于3个字符且没有大区/#职业，容易误识别。可以直接从小号列表和本地库删除，然后重新添加为“上海1${parseAliasInput(raw).realId || raw}”或“${parseAliasInput(raw).realId || raw}#职业”。`;
+    const id = parseAliasInput(raw).realId || raw;
+    return `小号【${raw}】是旧库短ID，真实ID少于3个字符且没有大区/#职业，容易误识别。不会自动删除；建议后续改成“上海1${id}”或“${id}#职业”。`;
 }
 
 function getActiveShortIdViolations() {
@@ -289,44 +288,67 @@ function getActiveShortIdViolations() {
     return violations;
 }
 
+function getActiveNoAliasViolations() {
+    const violations = [];
+    document.querySelectorAll('.player-row').forEach(row => {
+        const input = row.querySelector('.name-input');
+        if (!input) return;
+        const playerName = input.value.trim();
+        if (!playerName || input.classList.contains('input-error')) return;
+        const aliases = getCleanAliases(playerName);
+        if (aliases.length === 0) {
+            violations.push({ row, input, playerName });
+        }
+    });
+    return violations;
+}
+
 function updateStartButtonGuard() {
     const btnMonitor = document.getElementById('btn-monitor');
     if (!btnMonitor) return [];
 
-    document.querySelectorAll('.player-row.short-id-block-row').forEach(row => {
-        row.classList.remove('short-id-block-row');
+    document.querySelectorAll('.player-row.short-id-block-row, .player-row.short-id-warn-row, .player-row.no-alias-block-row').forEach(row => {
+        row.classList.remove('short-id-block-row', 'short-id-warn-row', 'no-alias-block-row');
         row.removeAttribute('data-short-id-warning');
+        row.removeAttribute('data-no-alias-warning');
     });
 
-    const violations = getActiveShortIdViolations();
-    violations.forEach(v => {
-        const msg = `该选手存在未带大区/#职业的短ID：${v.badAliases.join('、')}。请删除后重新添加为“大区+真实ID”或“真实ID#职业”。`;
-        v.row.classList.add('short-id-block-row');
+    const shortWarnings = getActiveShortIdViolations();
+    shortWarnings.forEach(v => {
+        const msg = `该选手存在旧库短ID：${v.badAliases.join('、')}。不会自动删除，但建议补充大区或 #职业。`;
+        v.row.classList.add('short-id-warn-row');
         v.row.setAttribute('data-short-id-warning', msg);
         if (v.input) v.input.title = msg;
     });
 
-    // 已经在监控时，停止按钮不能禁用；只阻止“开始运行”。
-    const shouldBlockStart = !isMonitoring && violations.length > 0;
+    const noAliasViolations = getActiveNoAliasViolations();
+    noAliasViolations.forEach(v => {
+        const msg = `该选手只有主号，没有绑定小号。主号不参与 OCR 名称匹配，请至少绑定一个小号。`;
+        v.row.classList.add('no-alias-block-row');
+        v.row.setAttribute('data-no-alias-warning', msg);
+        if (v.input) v.input.title = msg;
+    });
+
+    // 已有短ID只提示，不阻止运行；只有“主号无小号”阻止开始。
+    const shouldBlockStart = !isMonitoring && noAliasViolations.length > 0;
     btnMonitor.disabled = shouldBlockStart;
     btnMonitor.classList.toggle('btn-monitor-disabled', shouldBlockStart);
 
     if (shouldBlockStart) {
-        const names = violations.map(v => `${v.playerName}(${v.badAliases.join('、')})`).join('；');
-        btnMonitor.title = `无法开始：存在未带大区/#职业的短ID：${names}`;
+        const names = noAliasViolations.map(v => v.playerName).join('、');
+        btnMonitor.title = `无法开始：以下选手没有绑定小号：${names}`;
     } else {
-        btnMonitor.title = '';
+        btnMonitor.title = shortWarnings.length ? '提示：存在旧库短ID，建议补充大区或 #职业，但不影响运行。' : '';
     }
 
-    return violations;
+    return noAliasViolations;
 }
 
-function getShortIdGuardMessage(violations = getActiveShortIdViolations()) {
+function getNoAliasGuardMessage(violations = getActiveNoAliasViolations()) {
     if (!violations.length) return '';
-    const lines = violations.map(v => `【${v.playerName}】存在短ID：${v.badAliases.join('、')}`);
-    return `检测到上场选手存在未带大区/#职业的短ID，暂不能开始监控：\n\n${lines.join('\n')}\n\n请删除这些旧短ID，并重新添加为“大区+真实ID”或“真实ID#职业”，例如“上海1夏雫”或“夏雫#气功师”。`;
+    const lines = violations.map(v => `【${v.playerName}】没有绑定任何小号`);
+    return `检测到上场选手只有主号、没有小号，暂不能开始监控：\n\n${lines.join('\n')}\n\n主号不参与 OCR 名称匹配，请至少绑定一个小号。`;
 }
-
 
 function isAliasInputValid(raw) {
     return !getAliasValidationError(raw);
@@ -339,7 +361,7 @@ function renderAliasInputHelp() {
     let html = `
         <div class="alias-help-title">推荐写法：命中率 大区+真实ID+#职业 &gt; 大区+真实ID &gt; 真实ID</div>
         <div class="alias-help-examples">
-            <span>王大枪</span><span>上海1王大枪</span><span>王大枪上海1</span><span>上海1王大枪#枪炮师</span>
+            <span>庄大崩</span><span>上海1一~一.</span><span>一~一.上海1</span><span>上海1一~一.#次元行者</span>
         </div>
         <div class="alias-help-note">普通ID直接填；纯符号/难OCR的ID建议加大区；职业要作为属性请写在 <b>#</b> 后面。</div>
         <div class="alias-help-note">真实ID本身就是职业词也会按ID保存；但真实ID少于3个字符时，仍必须加大区或 #职业。</div>
@@ -381,7 +403,7 @@ function showAliasPrompt(playerName, callback, msg = null) {
         callback(val);
     }, {
         type: 'alias',
-        placeholder: '例如：王大枪 / 上海1王大枪#枪炮师'
+        placeholder: '例如：庄大崩 / 上海1一~一. / 一~一.上海1 / 上海1一~一.#次元行者'
     });
 }
 
@@ -1018,35 +1040,8 @@ function renderAliasMenu(playerName, popElement) {
             e.preventDefault(); e.stopPropagation();
             const idx = e.target.getAttribute('data-idx');
             const targetAlias = playerDB[playerName][idx];
-            const legacyShort = isLegacyShortAliasWithoutMeta(targetAlias);
-            if ((playerDB[playerName] || []).length <= 1 && !legacyShort) {
-                showAlert('❌ 至少要保留一个小号，主号不参与名称匹配。');
-                return;
-            }
 
-            if (legacyShort) {
-                showConfirm(`⚠️ ${getLegacyShortAliasDeleteReason(targetAlias)}\n\n是否直接从小号列表和本地库删除？`, (isOk) => {
-                    if (!isOk) return;
-                    if (window.chrome && window.chrome.webview) {
-                        window.chrome.webview.postMessage({
-                            action: "cmd_delete_alias",
-                            mainName: playerName,
-                            aliasName: targetAlias
-                        });
-                    }
-                    playerDB[playerName].splice(idx, 1);
-                    if (savedDB[playerName]) {
-                        let sIdx = savedDB[playerName].indexOf(targetAlias);
-                        if (sIdx > -1) savedDB[playerName].splice(sIdx, 1);
-                    }
-                    showAlert(`已删除旧库短ID：${targetAlias}`);
-                    renderAliasMenu(playerName, popElement);
-                    popElement.classList.add('active');
-                    triggerSync();
-                });
-                return;
-            }
-
+            // 允许临时解绑最后一个小号；选手保留，选手框会变红，运行按钮会被禁用。
             // 从当前活跃库中移除
             playerDB[playerName].splice(idx, 1);
 
@@ -1066,15 +1061,10 @@ function renderAliasMenu(playerName, popElement) {
             e.preventDefault(); e.stopPropagation();
             const idx = e.target.getAttribute('data-idx');
             const targetAlias = playerDB[playerName][idx];
-            const legacyShort = isLegacyShortAliasWithoutMeta(targetAlias);
-            if ((playerDB[playerName] || []).length <= 1 && !legacyShort) {
-                showAlert('❌ 至少要保留一个小号，主号不参与名称匹配。');
-                return;
-            }
 
-            const confirmText = legacyShort
-                ? `⚠️ ${getLegacyShortAliasDeleteReason(targetAlias)}\n\n是否直接从小号列表和本地库删除？`
-                : `⚠️ 确定要【永久删除】小号 [${targetAlias}] 吗？`;
+            const confirmText = `⚠️ 确定要【永久删除】小号 [${targetAlias}] 吗？
+
+如果这是最后一个小号，选手会保留在列表中，但运行按钮会变灰，直到重新绑定小号。`;
 
             showConfirm(confirmText, (isOk) => {
                 if (isOk) {
@@ -1132,7 +1122,7 @@ document.getElementById('btn-swap').addEventListener('click', () => window.chrom
 document.getElementById('btn-monitor').addEventListener('click', () => {
     const violations = updateStartButtonGuard();
     if (!isMonitoring && violations.length > 0) {
-        showAlert(getShortIdGuardMessage(violations));
+        showAlert(getNoAliasGuardMessage(violations));
         return;
     }
     window.chrome.webview.postMessage({ action: "cmd_monitor", state: !isMonitoring });

@@ -2791,6 +2791,34 @@ void CDNFGameCaptureDlg::OnBnClickedStart()
     }
 
     if (!m_bIsRunning) {
+        CString missingAliasPlayers;
+        {
+            std::lock_guard<std::mutex> dataLock(m_dataMutex);
+            for (int i = 0; i < 8; ++i) {
+                CString n = m_players[i].name;
+                n.Trim();
+                if (!n.IsEmpty() && m_players[i].aliases.empty()) {
+                    if (!missingAliasPlayers.IsEmpty()) missingAliasPlayers += L"、";
+                    missingAliasPlayers += n;
+                }
+            }
+        }
+        if (!missingAliasPlayers.IsEmpty()) {
+            CString msg = L"无法开始监控：以下选手只有主号，没有绑定任何小号：" + missingAliasPlayers + L"。主号不参与 OCR 名称匹配，请至少绑定一个小号。";
+            AppLog(L"❌ [开始拦截] " + msg, RGB(255, 120, 80));
+            if (!IsWindowVisible() && m_pWebDlg) {
+                json reply; reply["action"] = "auth_result"; reply["success"] = false;
+                reply["message"] = std::string(CW2A(msg, CP_UTF8));
+                CString jsonStr = CA2W(reply.dump().c_str(), CP_UTF8);
+                m_pWebDlg->SendStateToWeb(jsonStr);
+            }
+            else {
+                ShowCenteredMsgBox(msg, L"缺少小号", MB_ICONWARNING);
+            }
+            BroadcastStateToWeb();
+            return;
+        }
+
         m_bIsRunning = TRUE;
         m_btnStart.SetWindowText(L"停止监控");
         // 【身份融合补丁】开始监控时清空上一段录像/上一局残留缓存。
@@ -4839,26 +4867,12 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                         ad.name = CA2W(a.get<std::string>().c_str(), CP_UTF8);
                         ad.name.Trim();
                         if (!ad.name.IsEmpty()) {
-                            CString oneAliasError;
-                            if (!DnfValidateAliasShortMeta(ad.name, oneAliasError)) {
-                                aliasFormatInvalid = true;
-                                aliasFormatError = oneAliasError;
-                                break;
-                            }
+                            // Web 同步阶段不再清理旧库短 ID；已有短 ID 仅在 Web 端显示感叹号提醒。
+                            // 新增短 ID 仍由 Web/C++ 添加入口拦截。
                             m_players[mfcIdx].aliases.push_back(ad);
                         }
                     }
-                    if (!m_players[mfcIdx].name.IsEmpty() && aliasFormatInvalid) {
-                        AppLog(L"❌ [Web同步拦截] [" + m_players[mfcIdx].name + L"] 小号格式不合格：" + aliasFormatError, RGB(255, 120, 80));
-                        m_players[mfcIdx].name.Empty();
-                        m_players[mfcIdx].aliases.clear();
-                        m_players[mfcIdx].kills = m_players[mfcIdx].deaths = m_players[mfcIdx].akCount = 0;
-                    }
-                    if (!m_players[mfcIdx].name.IsEmpty() && m_players[mfcIdx].aliases.empty()) {
-                        AppLog(L"❌ [Web同步拦截] [" + m_players[mfcIdx].name + L"] 缺少小号，已拒绝上场。", RGB(255, 120, 80));
-                        m_players[mfcIdx].name.Empty();
-                        m_players[mfcIdx].kills = m_players[mfcIdx].deaths = m_players[mfcIdx].akCount = 0;
-                    }
+                    // 无小号的选手不再从列表中删除；保留到 C++，开始监控时统一拦截并提示。
                 }
                 // 🚨 Web端后4个是蓝队，写回 MFC 的 4-7
                 for (int i = 4; i < 8; i++) {
@@ -4878,26 +4892,12 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                         ad.name = CA2W(a.get<std::string>().c_str(), CP_UTF8);
                         ad.name.Trim();
                         if (!ad.name.IsEmpty()) {
-                            CString oneAliasError;
-                            if (!DnfValidateAliasShortMeta(ad.name, oneAliasError)) {
-                                aliasFormatInvalid = true;
-                                aliasFormatError = oneAliasError;
-                                break;
-                            }
+                            // Web 同步阶段不再清理旧库短 ID；已有短 ID 仅在 Web 端显示感叹号提醒。
+                            // 新增短 ID 仍由 Web/C++ 添加入口拦截。
                             m_players[mfcIdx].aliases.push_back(ad);
                         }
                     }
-                    if (!m_players[mfcIdx].name.IsEmpty() && aliasFormatInvalid) {
-                        AppLog(L"❌ [Web同步拦截] [" + m_players[mfcIdx].name + L"] 小号格式不合格：" + aliasFormatError, RGB(255, 120, 80));
-                        m_players[mfcIdx].name.Empty();
-                        m_players[mfcIdx].aliases.clear();
-                        m_players[mfcIdx].kills = m_players[mfcIdx].deaths = m_players[mfcIdx].akCount = 0;
-                    }
-                    if (!m_players[mfcIdx].name.IsEmpty() && m_players[mfcIdx].aliases.empty()) {
-                        AppLog(L"❌ [Web同步拦截] [" + m_players[mfcIdx].name + L"] 缺少小号，已拒绝上场。", RGB(255, 120, 80));
-                        m_players[mfcIdx].name.Empty();
-                        m_players[mfcIdx].kills = m_players[mfcIdx].deaths = m_players[mfcIdx].akCount = 0;
-                    }
+                    // 无小号的选手不再从列表中删除；保留到 C++，开始监控时统一拦截并提示。
                 }
             }
             else {
@@ -4973,23 +4973,8 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
 
             std::lock_guard<std::mutex> lock(m_dataMutex);
 
-            bool blockedDelete = false;
-            bool legacyShortAlias = DnfIsLegacyShortAliasWithoutMeta(aliasName);
-            // 主号不参与名称匹配，场上选手必须至少保留 1 个小号。
-            // 例外：旧库中已经存在的短 ID 小号可以直接删除，避免脏数据卡住用户。
-            for (int i = 0; i < 8; i++) {
-                if (m_players[i].name == mainName && m_players[i].aliases.size() <= 1 && !legacyShortAlias) {
-                    AppLog(L"❌ [删除小号失败] [" + mainName + L"] 至少要保留一个小号。", RGB(255, 120, 80));
-                    blockedDelete = true;
-                    break;
-                }
-            }
-
-            if (!blockedDelete) {
-                if (legacyShortAlias) {
-                    AppLog(L"⚠️ [旧库短ID清理] [" + mainName + L"] " + DnfLegacyShortAliasDeleteReason(aliasName), RGB(255, 180, 0));
-                }
-
+            // 允许删除最后一个小号；选手不会被移出列表，开始监控时会因“无小号”被拦截。
+            {
                 // 1. 从场上活跃选手 (m_players) 中剥离
                 for (int i = 0; i < 8; i++) {
                     if (m_players[i].name == mainName) {
@@ -5408,14 +5393,7 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
                 CString mainName = m_players[pIdx].name;
                 CString subName = m_players[pIdx].aliases[aIdx].name;
 
-                bool legacyShortAlias = DnfIsLegacyShortAliasWithoutMeta(subName);
-                if (m_players[pIdx].aliases.size() <= 1 && !legacyShortAlias) {
-                    AppLog(L"❌ [删除小号失败] [" + mainName + L"] 至少要保留一个小号。", RGB(255, 120, 80));
-                }
-                if (legacyShortAlias) {
-                    AppLog(L"⚠️ [旧库短ID清理] [" + mainName + L"] " + DnfLegacyShortAliasDeleteReason(subName), RGB(255, 180, 0));
-                }
-
+                // 允许删除最后一个小号；选手保留，但开始监控会提示需要绑定小号。
                 if (m_aliasDB.find(mainName) != m_aliasDB.end()) {
                     CString& dbAliases = m_aliasDB[mainName];
                     dbAliases.Replace(L"(" + subName + L")", L"");
