@@ -482,6 +482,77 @@ static bool DnfValidateAliasListShortMeta(const std::vector<CString>& aliases, C
     return true;
 }
 
+static std::vector<CString> DnfParseAliasListString(const CString& aliasesRaw)
+{
+    std::vector<CString> aliases;
+    CString text = aliasesRaw;
+    int curPos = 0;
+    CString token = text.Tokenize(L"()（） \t\r\n", curPos);
+    while (token != L"") {
+        token.Trim();
+        if (!token.IsEmpty() && std::find(aliases.begin(), aliases.end(), token) == aliases.end()) {
+            aliases.push_back(token);
+        }
+        token = text.Tokenize(L"()（） \t\r\n", curPos);
+    }
+    return aliases;
+}
+
+static CString DnfFormatAliasListString(const std::vector<CString>& aliases)
+{
+    CString out;
+    std::vector<CString> uniqueAliases;
+    for (auto alias : aliases) {
+        alias.Trim();
+        if (alias.IsEmpty()) continue;
+        if (std::find(uniqueAliases.begin(), uniqueAliases.end(), alias) != uniqueAliases.end()) continue;
+        uniqueAliases.push_back(alias);
+        out += L"(" + alias + L")";
+    }
+    return out;
+}
+
+static CString DnfNormalizeAliasListString(const CString& aliasesRaw)
+{
+    return DnfFormatAliasListString(DnfParseAliasListString(aliasesRaw));
+}
+
+static CString DnfRemoveAliasFromAliasListString(const CString& aliasesRaw, const CString& aliasToRemove)
+{
+    CString target = aliasToRemove;
+    target.Trim();
+    std::vector<CString> kept;
+    for (auto alias : DnfParseAliasListString(aliasesRaw)) {
+        alias.Trim();
+        if (!target.IsEmpty() && alias == target) continue;
+        kept.push_back(alias);
+    }
+    return DnfFormatAliasListString(kept);
+}
+
+static CString DnfRenameAliasInAliasListString(const CString& aliasesRaw, const CString& oldAlias, const CString& newAlias)
+{
+    CString oldClean = oldAlias;
+    CString newClean = newAlias;
+    oldClean.Trim();
+    newClean.Trim();
+
+    bool renamed = false;
+    std::vector<CString> out;
+    for (auto alias : DnfParseAliasListString(aliasesRaw)) {
+        alias.Trim();
+        if (!oldClean.IsEmpty() && alias == oldClean) {
+            renamed = true;
+            if (!newClean.IsEmpty()) out.push_back(newClean);
+        }
+        else {
+            out.push_back(alias);
+        }
+    }
+    if (!renamed && !newClean.IsEmpty()) out.push_back(newClean);
+    return DnfFormatAliasListString(out);
+}
+
 // ========================================================
 // 死亡 X 逻辑点：8 个最终判定点
 // 索引约定：0-3 = 左侧，4-7 = 右侧
@@ -4420,12 +4491,8 @@ void CDNFGameCaptureDlg::UpdateAndRefreshRecentList() {
             RecentPlayerRecord r;
             r.mainName = it->first;
 
-            // 将长字符串 "(小号1)(小号2)" 切割装入数组
-            int curPos = 0;
-            CString token = it->second.Tokenize(L" ()（）", curPos);
-            while (token != L"") {
+            for (const CString& token : DnfParseAliasListString(it->second)) {
                 r.aliases.push_back(token);
-                token = it->second.Tokenize(L" ()（）", curPos);
             }
             m_recentPlayerRecords.push_back(r);
         }
@@ -5266,8 +5333,10 @@ void CDNFGameCaptureDlg::LoadAliasDB() {
                     aliases.Trim();
 
                     if (!mainName.IsEmpty()) {
-                        // 🚨 纯净读取：不管库里有没有重复，直接装载进内存，不弹窗不管它
-                        m_aliasDB[mainName] = aliases;
+                        CString normalizedAliases = DnfNormalizeAliasListString(aliases);
+                        if (!normalizedAliases.IsEmpty()) {
+                            m_aliasDB[mainName] = normalizedAliases;
+                        }
                     }
                 }
             }
@@ -5285,22 +5354,32 @@ void CDNFGameCaptureDlg::SaveAliasDB() {
         mName.Trim();
 
         if (!mName.IsEmpty() && !m_players[i].aliases.empty()) {
-            // 获取数据库中已有的该主号的小号字符串（如果没有则为空）
-            CString existingAliases = m_aliasDB[mName];
+            std::vector<CString> mergedAliases = DnfParseAliasListString(m_aliasDB[mName]);
 
             for (const auto& a : m_players[i].aliases) {
                 CString aName = a.name;
                 aName.Trim();
-                CString target1 = L"(" + aName + L")";
-                CString target2 = L"（" + aName + L"）"; // 兼容中文括号
-
-                // 【核心：增量合并过滤】如果数据库里没有这个小号，才追加进去
-                if (existingAliases.Find(target1) == -1 && existingAliases.Find(target2) == -1) {
-                    existingAliases += target1;
+                if (!aName.IsEmpty() && std::find(mergedAliases.begin(), mergedAliases.end(), aName) == mergedAliases.end()) {
+                    mergedAliases.push_back(aName);
                 }
             }
-            // 更新内存中的数据库
-            m_aliasDB[mName] = existingAliases;
+
+            CString normalizedAliases = DnfFormatAliasListString(mergedAliases);
+            if (!normalizedAliases.IsEmpty()) {
+                m_aliasDB[mName] = normalizedAliases;
+            }
+        }
+    }
+
+    for (auto it = m_aliasDB.begin(); it != m_aliasDB.end(); ) {
+        CString normalizedAliases = DnfNormalizeAliasListString(it->second);
+        if (it->first.IsEmpty() || normalizedAliases.IsEmpty()) {
+            auto eraseIt = it++;
+            m_aliasDB.erase(eraseIt);
+        }
+        else {
+            it->second = normalizedAliases;
+            ++it;
         }
     }
 
@@ -5312,9 +5391,7 @@ void CDNFGameCaptureDlg::SaveAliasDB() {
 
     CString content;
     for (const auto& pair : m_aliasDB) {
-        if (!pair.second.IsEmpty()) { // 防止写入空主号
-            content += pair.first + L"=" + pair.second + L"\r\n";
-        }
+        content += pair.first + L"=" + pair.second + L"\r\n";
     }
 
     CFile file;
@@ -5438,22 +5515,14 @@ void CDNFGameCaptureDlg::OnChangeEditNamesInput() {
     m_dataMutex.unlock();
 
     CString aliasesToInsert = L"";
-    int c = 0;
-    while (true) {
-        CString tS = dbAliases.Mid(c);
-        int Lr = tS.Find(L'('); if (Lr == -1) Lr = tS.Find(L'（');
-        int Rr = tS.Find(L')'); if (Rr == -1) Rr = tS.Find(L'）');
-        if (Lr == -1 || Rr == -1 || Rr <= Lr) break;
-
-        CString aN = tS.Mid(Lr + 1, Rr - Lr - 1); aN.Trim();
-
+    for (auto aN : DnfParseAliasListString(dbAliases)) {
+        aN.Trim();
         bool exists = false;
         for (const auto& ea : existAliases) {
             if (ea == aN) { exists = true; break; }
         }
 
         if (!exists && !aN.IsEmpty()) aliasesToInsert += L"(" + aN + L")";
-        c += Rr + 1;
     }
 
     if (!aliasesToInsert.IsEmpty()) {
@@ -5633,8 +5702,9 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                     CString aliases = CA2W(it.value().get<std::string>().c_str(), CP_UTF8);
                     mainName.Trim();
                     aliases.Trim();
-                    if (!mainName.IsEmpty() && !aliases.IsEmpty()) {
-                        m_aliasDB[mainName] = aliases;
+                    CString normalizedAliases = DnfNormalizeAliasListString(aliases);
+                    if (!mainName.IsEmpty() && !normalizedAliases.IsEmpty()) {
+                        m_aliasDB[mainName] = normalizedAliases;
                     }
                 }
             }
@@ -5799,8 +5869,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 // 2. 从底层数据库 (m_aliasDB) 中连根拔起
                 if (m_aliasDB.find(mainName) != m_aliasDB.end()) {
                     CString& dbAliases = m_aliasDB[mainName];
-                    dbAliases.Replace(L"(" + aliasName + L")", L"");
-                    dbAliases.Replace(L"（" + aliasName + L"）", L"");
+                    dbAliases = DnfRemoveAliasFromAliasListString(dbAliases, aliasName);
                     if (dbAliases.IsEmpty()) {
                         m_aliasDB.erase(mainName);
                     }
@@ -5899,7 +5968,8 @@ void CDNFGameCaptureDlg::BroadcastStateToWeb()
         for (auto const& [name, aliases] : m_aliasDB) {
             // 🚨 必须显式套上一层 std::string()，否则 JSON 库会因为类型不匹配而报错！
             std::string utf8Name = std::string(CW2A(name, CP_UTF8));
-            std::string utf8Aliases = std::string(CW2A(aliases, CP_UTF8));
+            CString normalizedAliases = DnfNormalizeAliasListString(aliases);
+            std::string utf8Aliases = std::string(CW2A(normalizedAliases, CP_UTF8));
             dbJson[utf8Name] = utf8Aliases;
         }
         j["data"]["fullAliasDB"] = dbJson;
@@ -6212,8 +6282,7 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
 
                 if (m_aliasDB.find(mainName) != m_aliasDB.end()) {
                     CString& dbAliases = m_aliasDB[mainName];
-                    dbAliases.Replace(L"(" + subName + L")", L"");
-                    dbAliases.Replace(L"（" + subName + L"）", L"");
+                    dbAliases = DnfRemoveAliasFromAliasListString(dbAliases, subName);
                     if (dbAliases.IsEmpty()) {
                         m_aliasDB.erase(mainName);
                     }
@@ -6264,11 +6333,8 @@ CString CDNFGameCaptureDlg::CheckFieldConflict(const CString& newMain, const std
     std::vector<CString> allAliases = extraAliases;
     auto it = m_aliasDB.find(newMain);
     if (it != m_aliasDB.end()) {
-        int curPos = 0;
-        CString token = it->second.Tokenize(L" ()（）", curPos);
-        while (token != L"") {
+        for (const auto& token : DnfParseAliasListString(it->second)) {
             if (std::find(allAliases.begin(), allAliases.end(), token) == allAliases.end()) allAliases.push_back(token);
-            token = it->second.Tokenize(L" ()（）", curPos);
         }
     }
 
@@ -6594,8 +6660,7 @@ void CDNFGameCaptureDlg::OnEndLabelEdit(NMHDR* pNMHDR, LRESULT* pResult) {
 
         if (m_aliasDB.find(mainName) != m_aliasDB.end()) {
             CString& dbAliases = m_aliasDB[mainName];
-            dbAliases.Replace(L"(" + oldAliasName + L")", L"(" + line + L")");
-            dbAliases.Replace(L"（" + oldAliasName + L"）", L"（" + line + L"）");
+            dbAliases = DnfRenameAliasInAliasListString(dbAliases, oldAliasName, line);
         }
         m_players[curPIdx].aliases[curAIdx].name = line;
     }
@@ -6637,7 +6702,7 @@ void CDNFGameCaptureDlg::OnEndLabelEdit(NMHDR* pNMHDR, LRESULT* pResult) {
 
         if (oldMainName != newMainName && !oldMainName.IsEmpty()) {
             if (m_aliasDB.find(oldMainName) != m_aliasDB.end()) {
-                m_aliasDB[newMainName] = m_aliasDB[oldMainName];
+                m_aliasDB[newMainName] = DnfNormalizeAliasListString(m_aliasDB[oldMainName]);
                 m_aliasDB.erase(oldMainName);
             }
         }

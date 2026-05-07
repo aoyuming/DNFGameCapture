@@ -42,6 +42,10 @@ function uniqueAliasArray(arr) {
     return out;
 }
 
+function formatAliasArrayForCpp(arr) {
+    return uniqueAliasArray(arr).map(alias => `(${alias})`).join('');
+}
+
 function normalizeAllAliasStores() {
     for (const key in playerDB) {
         playerDB[key] = uniqueAliasArray(playerDB[key]);
@@ -179,7 +183,7 @@ function pushStateToServer() {
     for (let key in savedDB) {
         savedDB[key] = uniqueAliasArray(savedDB[key]);
         if (savedDB[key] && savedDB[key].length > 0) {
-            formattedDB[key] = savedDB[key].join('()');
+            formattedDB[key] = formatAliasArrayForCpp(savedDB[key]);
         }
     }
 
