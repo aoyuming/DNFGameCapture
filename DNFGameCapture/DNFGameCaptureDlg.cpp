@@ -2986,6 +2986,68 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
             return false;
         };
 
+        // 距离动态容差：只给“斜边射线远端”使用，中心点仍然用严格 isXRedLike。
+        // 目的：真实大 X 下半边越往外越暗，固定 #D53000 容差会漏；但不能全局放宽导致红底误判。
+        auto isXRedLikeAtDistance = [&](COLORREF c, bool isActive, int stepIndex) -> bool {
+            if (isXRedLike(c, isActive)) return true; // 严格红优先
+
+            int r = GetRValue(c);
+            int g = GetGValue(c);
+            int b = GetBValue(c);
+
+            // stepIndex 越大，离中心越远，允许更暗；但仍要求红橙色相，不能接受纯红底/血条。
+            int minR = 120;
+            int minG = 12;
+            int maxG = 120;
+            int maxB = 95;
+            int rgGap = 55;
+            int rbGap = 95;
+            int distLimit = isActive ? 175 : 185;
+
+            if (stepIndex >= 4) {
+                minR = isActive ? 74 : 82;
+                minG = 3;
+                maxG = 135;
+                maxB = 130;
+                rgGap = 24;
+                rbGap = 38;
+                distLimit = isActive ? 255 : 235;
+            }
+            else if (stepIndex >= 3) {
+                minR = isActive ? 86 : 95;
+                minG = 5;
+                maxG = 130;
+                maxB = 120;
+                rgGap = 32;
+                rbGap = 52;
+                distLimit = isActive ? 230 : 215;
+            }
+            else if (stepIndex >= 2) {
+                minR = isActive ? 100 : 108;
+                minG = 7;
+                maxG = 125;
+                maxB = 110;
+                rgGap = 42;
+                rbGap = 68;
+                distLimit = isActive ? 205 : 200;
+            }
+
+            if (r < minR) return false;
+            if (g < minG || g > maxG) return false;
+            if (b > maxB) return false;
+            if (r < g + rgGap) return false;
+            if (r < b + rbGap) return false;
+
+            const int baseR = 0xD5;
+            const int baseG = 0x30;
+            const int baseB = 0x00;
+            int dr = abs(r - baseR);
+            int dg = abs(g - baseG);
+            int db = abs(b - baseB);
+            int weightedDist = dr + dg * 2 + db * 2;
+            return weightedDist <= distLimit;
+        };
+
         auto isXForegroundLike = [&](COLORREF c, bool isActive) -> bool {
             return isXRedLike(c, isActive) || isXHighlightLike(c, isActive);
         };
@@ -3007,6 +3069,26 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
 
         auto hasLocalXRedColor = [&](int x, int y, int radius, bool isActive) -> bool {
             return countLocalXRedColor(x, y, radius, isActive) > 0;
+        };
+
+        struct XRayColorStat {
+            int strongHits;
+            int weakHits;
+        };
+
+        auto countLocalXRedColorDynamic = [&](int x, int y, int radius, bool isActive, int stepIndex) -> XRayColorStat {
+            XRayColorStat stat = { 0, 0 };
+            for (int dy = -radius; dy <= radius; dy++) {
+                for (int dx = -radius; dx <= radius; dx++) {
+                    int sx = x + dx;
+                    int sy = y + dy;
+                    if (sx < 0 || sx >= m_w || sy < 0 || sy >= m_h) continue;
+                    COLORREF c = ::GetPixel(hMemDC, sx, sy);
+                    if (isXRedLike(c, isActive)) stat.strongHits++;
+                    else if (isXRedLikeAtDistance(c, isActive, stepIndex)) stat.weakHits++;
+                }
+            }
+            return stat;
         };
 
         auto hasLocalXForegroundColor = [&](int x, int y, int radius, bool isActive) -> bool {
@@ -3064,8 +3146,7 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
 
             const bool isActive = (logicalIdx == DP_LEFT_ACTIVE || logicalIdx == DP_RIGHT_ACTIVE);
             const int localRadius = isActive ? 3 : 3;
-            const int requiredDirections = 3; // 中心点通过后，四个斜向射线方向中至少 3 个方向命中红色系
-
+            
             int matchCount = 0;
             int diagDownHits = 0; // \ 方向：左上 <-> 右下，仅用于调试计数
             int diagUpHits = 0;   // / 方向：右上 <-> 左下，仅用于调试计数
@@ -3112,83 +3193,46 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
                 stepY /= 2.0f;
             }
 
-            // 沿 X 的两条斜边四个方向采样。每个方向必须命中红色系才算通过。
+            // 沿 X 的两条斜边四个方向采样。
+            // 最终判定不再看单方向/远端，只统计上边两条边和下边两条边的橙红命中采样点数量。
+            int dirScore[4] = { 0, 0, 0, 0 };
+            int dirStrongSamples[4] = { 0, 0, 0, 0 };
+            int dirWeakSamples[4] = { 0, 0, 0, 0 };
+
+            auto sampleDirectionPoint = [&](int dirIdx, int stepIndex, float nx, float ny) {
+                int px = (int)(nx * m_w);
+                int py = (int)(ny * m_h);
+                if (px < 0 || px >= m_w || py < 0 || py >= m_h) return;
+
+                XRayColorStat stat = countLocalXRedColorDynamic(px, py, localRadius, isActive, stepIndex);
+                if (stat.strongHits <= 0 && stat.weakHits <= 0) return;
+
+                // 一个采样点最多给本方向一次分：严格红 +2，动态弱红 +1。
+                if (stat.strongHits > 0) {
+                    dirScore[dirIdx] += 2;
+                    dirStrongSamples[dirIdx]++;
+                }
+                else {
+                    dirScore[dirIdx] += 1;
+                    dirWeakSamples[dirIdx]++;
+                }
+
+                dirRedCount[dirIdx] += stat.strongHits + stat.weakHits;
+                if (stepIndex >= 3) dirFarHit[dirIdx] = true;
+                if (dirIdx == 0 || dirIdx == 1) diagDownHits++;
+                else diagUpHits++;
+                matchCount++;
+                appendDebugHit(nx, ny, dirIdx);
+            };
+
             for (int i = 1; i <= 4; i++) {
-                // \ 方向
-                float p1x = cx - i * stepX;
-                float p1y = cy - i * stepY;
-                float p2x = cx + i * stepX;
-                float p2y = cy + i * stepY;
+                // \ 方向：左上、右下
+                sampleDirectionPoint(0, i, cx - i * stepX, cy - i * stepY);
+                sampleDirectionPoint(1, i, cx + i * stepX, cy + i * stepY);
 
-                int px = (int)(p1x * m_w);
-                int py = (int)(p1y * m_h);
-                if (px >= 0 && px < m_w && py >= 0 && py < m_h) {
-                    int redHitsLocal = countLocalXRedColor(px, py, localRadius, isActive);
-                    bool red = redHitsLocal > 0;
-                    if (red) {
-                        dirRedCount[0] += redHitsLocal;
-                        if (i >= 3) dirFarHit[0] = true;
-                        diagDownHits++;
-                        matchCount++;
-                        hitLeftUp = true;
-                        redLeftUp = true;
-                        appendDebugHit(p1x, p1y, 0);
-                    }
-                }
-
-                px = (int)(p2x * m_w);
-                py = (int)(p2y * m_h);
-                if (px >= 0 && px < m_w && py >= 0 && py < m_h) {
-                    int redHitsLocal = countLocalXRedColor(px, py, localRadius, isActive);
-                    bool red = redHitsLocal > 0;
-                    if (red) {
-                        dirRedCount[1] += redHitsLocal;
-                        if (i >= 3) dirFarHit[1] = true;
-                        diagDownHits++;
-                        matchCount++;
-                        hitRightDown = true;
-                        redRightDown = true;
-                        appendDebugHit(p2x, p2y, 1);
-                    }
-                }
-
-                // / 方向
-                float p3x = cx + i * stepX;
-                float p3y = cy - i * stepY;
-                float p4x = cx - i * stepX;
-                float p4y = cy + i * stepY;
-
-                px = (int)(p3x * m_w);
-                py = (int)(p3y * m_h);
-                if (px >= 0 && px < m_w && py >= 0 && py < m_h) {
-                    int redHitsLocal = countLocalXRedColor(px, py, localRadius, isActive);
-                    bool red = redHitsLocal > 0;
-                    if (red) {
-                        dirRedCount[2] += redHitsLocal;
-                        if (i >= 3) dirFarHit[2] = true;
-                        diagUpHits++;
-                        matchCount++;
-                        hitRightUp = true;
-                        redRightUp = true;
-                        appendDebugHit(p3x, p3y, 2);
-                    }
-                }
-
-                px = (int)(p4x * m_w);
-                py = (int)(p4y * m_h);
-                if (px >= 0 && px < m_w && py >= 0 && py < m_h) {
-                    int redHitsLocal = countLocalXRedColor(px, py, localRadius, isActive);
-                    bool red = redHitsLocal > 0;
-                    if (red) {
-                        dirRedCount[3] += redHitsLocal;
-                        if (i >= 3) dirFarHit[3] = true;
-                        diagUpHits++;
-                        matchCount++;
-                        hitLeftDown = true;
-                        redLeftDown = true;
-                        appendDebugHit(p4x, p4y, 3);
-                    }
-                }
+                // / 方向：右上、左下
+                sampleDirectionPoint(2, i, cx + i * stepX, cy - i * stepY);
+                sampleDirectionPoint(3, i, cx - i * stepX, cy + i * stepY);
             }
 
             // 水平/垂直方向统计只保留为调试参考，不参与死亡判定。
@@ -3237,32 +3281,29 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
             debugDrawX[logicalIdx] = cx;
             debugDrawY[logicalIdx] = cy;
 
-            // 主将大 X 容易压在头像上；头像本身可能有红色帽子/衣服。
-            // 所以主将大 X 不能只看“某个方向有红点”，必须看该方向是否有连续红色证据，
-            // 并且远端采样点也命中，避免头像局部红色沿斜线误触发。
-            if (isActive) {
-                hitLeftUp = redLeftUp = (dirRedCount[0] >= 2 && dirFarHit[0]);
-                hitRightDown = redRightDown = (dirRedCount[1] >= 2 && dirFarHit[1]);
-                hitRightUp = redRightUp = (dirRedCount[2] >= 2 && dirFarHit[2]);
-                hitLeftDown = redLeftDown = (dirRedCount[3] >= 2 && dirFarHit[3]);
-            }
+            // 新判定：不再按“单方向通过/远端证据”判断。
+            // 用户实测大 X 只有黑色和橙红色，重点是橙红采样点数量：
+            //   1) 中心点必须通过严格红色检测；
+            //   2) 上边两条边（左上 + 右上）命中采样点总数 >= 5；
+            //   3) 下边两条边（右下 + 左下）命中采样点总数 >= 2。
+            // 这里的“命中采样点”按射线上的采样点计数，不再要求远端命中。
+            int upperHitSamples = dirStrongSamples[0] + dirWeakSamples[0]
+                                + dirStrongSamples[2] + dirWeakSamples[2];
+            int lowerHitSamples = dirStrongSamples[1] + dirWeakSamples[1]
+                                + dirStrongSamples[3] + dirWeakSamples[3];
 
-            int directionHits = 0;
-            if (hitLeftUp) directionHits++;
-            if (hitRightDown) directionHits++;
-            if (hitRightUp) directionHits++;
-            if (hitLeftDown) directionHits++;
+            // 下面这些布尔值只用于调试绘制/状态观察，不再作为最终通过条件。
+            hitLeftUp = redLeftUp = (dirStrongSamples[0] + dirWeakSamples[0]) > 0;
+            hitRightDown = redRightDown = (dirStrongSamples[1] + dirWeakSamples[1]) > 0;
+            hitRightUp = redRightUp = (dirStrongSamples[2] + dirWeakSamples[2]) > 0;
+            hitLeftDown = redLeftDown = (dirStrongSamples[3] + dirWeakSamples[3]) > 0;
 
-            int redDirectionHits = 0;
-            if (redLeftUp) redDirectionHits++;
-            if (redRightDown) redDirectionHits++;
-            if (redRightUp) redDirectionHits++;
-            if (redLeftDown) redDirectionHits++;
+            bool upperPass = upperHitSamples >= 5;
+            bool lowerPass = lowerHitSamples >= 2;
 
-            // 新判定：中心点必须有红色系证据；四个斜向方向中至少 3 个方向有红色系证据。
-            // 高光不再单独参与死亡判定，只用于必要时观察画面，不用于通过条件。
-            debugMatchCount[logicalIdx] = directionHits * 10 + redDirectionHits;
-            return directionHits >= requiredDirections;
+            // 调试编码：十位/百位为上边命中数，个位为下边命中数，方便看日志/断点。
+            debugMatchCount[logicalIdx] = upperHitSamples * 10 + lowerHitSamples;
+            return upperPass && lowerPass;
         };
 
         // 8 个逻辑状态，使用旧 40 点中每组第 0 个有效点：
