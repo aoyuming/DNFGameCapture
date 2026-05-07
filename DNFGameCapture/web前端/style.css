@@ -180,7 +180,7 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     margin-right: 10px; /* 和右边按钮保持一点距离 */
 }
 /* 配合图标化调整按钮样式 */
-.btn-temp-unbind, .btn-perm-unbind { 
+.btn-edit-alias, .btn-temp-unbind, .btn-perm-unbind { 
     display: flex; justify-content: center; align-items: center;
     width: 24px; height: 24px; /* 固定正方形 */
     font-size: 14px; 
@@ -188,9 +188,11 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     cursor: pointer;
     transition: 0.2s;
 }
+.btn-edit-alias { background: rgba(0, 229, 255, 0.15); }
 .btn-temp-unbind { background: rgba(255, 170, 0, 0.15); }
 .btn-perm-unbind { background: rgba(255, 59, 48, 0.15); }
 
+.btn-edit-alias:hover { background: rgba(0, 229, 255, 0.5); transform: scale(1.1); }
 .btn-temp-unbind:hover { background: rgba(255, 170, 0, 0.5); transform: scale(1.1); }
 .btn-perm-unbind:hover { background: rgba(255, 59, 48, 0.5); transform: scale(1.1); }
 

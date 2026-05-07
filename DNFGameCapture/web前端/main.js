@@ -9,6 +9,8 @@ let isMonitoring = false;
 let isProMode = false;
 let draggedRow = null;
 let isDbInitialized = false;
+// Web 端编辑小号后，C++ 可能会立刻推回一次旧状态；这里短时间记录改名映射，避免旧小号被同步回来。
+let pendingAliasRenameRecords = [];
 // 新主号首次绑定小号时，弹窗会让输入框失焦；用这个标记避免 blur 提前同步空小号状态。
 let pendingAliasPromptActive = false;
 let pendingAliasPromptName = '';
@@ -22,6 +24,51 @@ let ctrlSwapState = {
     currentIndex: -1
 };
 
+function normalizeAliasTextForCompare(s) {
+    return (s || '').trim();
+}
+
+function uniqueAliasArray(arr) {
+    const out = [];
+    const seen = new Set();
+    (arr || []).forEach(item => {
+        const clean = normalizeAliasTextForCompare(item);
+        if (!clean) return;
+        const key = clean;
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push(clean);
+    });
+    return out;
+}
+
+function normalizeAllAliasStores() {
+    for (const key in playerDB) {
+        playerDB[key] = uniqueAliasArray(playerDB[key]);
+    }
+    for (const key in savedDB) {
+        savedDB[key] = uniqueAliasArray(savedDB[key]);
+    }
+}
+
+function removeAliasFromArray(arr, aliasName) {
+    const target = normalizeAliasTextForCompare(aliasName);
+    return uniqueAliasArray((arr || []).filter(a => normalizeAliasTextForCompare(a) !== target));
+}
+
+function applyPendingAliasRenamesToDb(dbObj) {
+    const now = Date.now();
+    pendingAliasRenameRecords = pendingAliasRenameRecords.filter(r => r && r.until > now);
+    for (const r of pendingAliasRenameRecords) {
+        if (!r.playerName || !dbObj[r.playerName]) continue;
+        dbObj[r.playerName] = removeAliasFromArray(dbObj[r.playerName], r.oldAlias);
+        const newAlias = normalizeAliasTextForCompare(r.newAlias);
+        dbObj[r.playerName] = uniqueAliasArray(dbObj[r.playerName]);
+        if (newAlias && !dbObj[r.playerName].includes(newAlias)) dbObj[r.playerName].push(newAlias);
+        dbObj[r.playerName] = uniqueAliasArray(dbObj[r.playerName]);
+    }
+}
+
 if (window.chrome && window.chrome.webview) {
     window.chrome.webview.addEventListener('message', function (event) {
         try {
@@ -33,22 +80,29 @@ if (window.chrome && window.chrome.webview) {
                     let newSavedDB = {};
 
                     for (let key in msg.data.fullAliasDB) {
-                        let arr = msg.data.fullAliasDB[key].split(/[()（）]/).filter(s => s.trim());
+                        let arr = uniqueAliasArray(msg.data.fullAliasDB[key].split(/[()（）]/).filter(s => s.trim()));
                         newSavedDB[key] = [...arr];
 
                         if (!playerDB[key]) {
-                            playerDB[key] = [...arr];
+                            playerDB[key] = uniqueAliasArray(arr);
                         } else {
                             let oldSaved = savedDB[key] || [];
                             let newFromMFC = arr.filter(a => !oldSaved.includes(a));
                             let deletedFromMFC = oldSaved.filter(a => !arr.includes(a));
 
-                            let updatedPlayerDB = [...playerDB[key]];
+                            let updatedPlayerDB = uniqueAliasArray(playerDB[key]);
                             newFromMFC.forEach(a => { if (!updatedPlayerDB.includes(a)) updatedPlayerDB.push(a); });
                             updatedPlayerDB = updatedPlayerDB.filter(a => !deletedFromMFC.includes(a));
 
-                            playerDB[key] = updatedPlayerDB;
+                            playerDB[key] = uniqueAliasArray(updatedPlayerDB);
                         }
+                    }
+
+                    // 如果刚刚在 Web 端改过小号名，而 C++ 推回来的是旧库，先按本地改名记录修正。
+                    applyPendingAliasRenamesToDb(newSavedDB);
+                    for (let key in newSavedDB) {
+                        if (!playerDB[key]) playerDB[key] = [];
+                        applyPendingAliasRenamesToDb(playerDB);
                     }
 
                     for (let key in playerDB) {
@@ -57,6 +111,7 @@ if (window.chrome && window.chrome.webview) {
                         }
                     }
                     savedDB = newSavedDB;
+                    normalizeAllAliasStores();
                 }
 
                 // ========================================================
@@ -68,10 +123,14 @@ if (window.chrome && window.chrome.webview) {
                         if (p.name && p.name.trim() !== '') {
                             // 直接用 C++ 传来的最新小号列表，强行覆盖 Web 端的展示库！
                             // 这样 C++ 无论是加回来、还是在 C++ 里临时删掉，Web 端都能瞬间无缝同步！
-                            playerDB[p.name] = [...p.aliases];
+                            // C++ 推回的场上小号也要去重；否则 Web 添加一次后，旧同步/新同步叠加会显示多份。
+                            playerDB[p.name] = uniqueAliasArray(p.aliases);
+                            if (!savedDB[p.name]) savedDB[p.name] = [];
+                            savedDB[p.name] = uniqueAliasArray(savedDB[p.name]);
                         }
                     });
                 }
+                normalizeAllAliasStores();
                 applyStateFromServer(msg.data);
 
                 let activeRowInput = document.querySelector('.player-row.active-row .name-input');
@@ -109,14 +168,16 @@ function pushStateToServer() {
     // 2. 遍历永久库，如果选手已经下场了，就自动恢复他的所有小号
     for (let name in savedDB) {
         if (!activeNames.includes(name)) {
-            playerDB[name] = [...savedDB[name]];
+            playerDB[name] = uniqueAliasArray(savedDB[name]);
         }
     }
     // ==========================================
 
     let formattedDB = {};
     // 🚨 注意：发给 C++ 的永远是不受“临时解绑”影响的永久库
+    normalizeAllAliasStores();
     for (let key in savedDB) {
+        savedDB[key] = uniqueAliasArray(savedDB[key]);
         if (savedDB[key] && savedDB[key].length > 0) {
             formattedDB[key] = savedDB[key].join('()');
         }
@@ -475,7 +536,7 @@ modalInput.addEventListener('input', () => {
     if (currentModalOptions.type === 'alias') renderAliasInputHelp();
 });
 
-function showAliasPrompt(playerName, callback, msg = null) {
+function showAliasPrompt(playerName, callback, msg = null, initialValue = '') {
     pendingAliasPromptActive = true;
     pendingAliasPromptName = (playerName || '').trim();
 
@@ -485,7 +546,8 @@ function showAliasPrompt(playerName, callback, msg = null) {
         callback(val);
     }, {
         type: 'alias',
-        placeholder: '例：“王大枪”或者“上海1王大枪#枪炮师”'
+        placeholder: '例：“王大枪”或者“上海1王大枪#枪炮师”',
+        value: initialValue || ''
     });
 }
 
@@ -501,7 +563,7 @@ function showPrompt(msg, callback, options = {}) {
     currentModalOptions = options || {};
     modalMsg.innerHTML = msg;
     modalInput.style.display = 'inline-block';
-    modalInput.value = '';
+    modalInput.value = options.value || '';
     modalInput.placeholder = options.placeholder || '';
     if (modalInputHelp) {
         modalInputHelp.style.display = options.type === 'alias' ? 'block' : 'none';
@@ -539,7 +601,8 @@ document.addEventListener('keydown', function (e) {
 modalOk.onclick = () => { customModal.classList.remove('active'); if (currentModalCallback) { let res = modalInput.style.display === 'none' ? true : modalInput.value; currentModalCallback(res); } };
 
 function getCleanAliases(playerName) {
-    return (playerDB[playerName] || []).map(a => (a || '').trim()).filter(a => a !== '');
+    playerDB[playerName] = uniqueAliasArray(playerDB[playerName]);
+    return playerDB[playerName];
 }
 
 function hasAtLeastOneAlias(playerName) {
@@ -547,12 +610,45 @@ function hasAtLeastOneAlias(playerName) {
 }
 
 function bindAliasToPlayer(playerName, aliasName) {
-    const aliasClean = (aliasName || '').trim();
+    const aliasClean = normalizeAliasTextForCompare(aliasName);
     if (!playerName || !aliasClean) return false;
     if (!playerDB[playerName]) playerDB[playerName] = [];
     if (!savedDB[playerName]) savedDB[playerName] = [];
+    playerDB[playerName] = uniqueAliasArray(playerDB[playerName]);
+    savedDB[playerName] = uniqueAliasArray(savedDB[playerName]);
     if (!playerDB[playerName].includes(aliasClean)) playerDB[playerName].push(aliasClean);
     if (!savedDB[playerName].includes(aliasClean)) savedDB[playerName].push(aliasClean);
+    playerDB[playerName] = uniqueAliasArray(playerDB[playerName]);
+    savedDB[playerName] = uniqueAliasArray(savedDB[playerName]);
+    return true;
+}
+
+function updateAliasForPlayer(playerName, oldAlias, newAlias) {
+    const oldClean = (oldAlias || '').trim();
+    const newClean = (newAlias || '').trim();
+    if (!playerName || !oldClean || !newClean) return false;
+
+    if (!playerDB[playerName]) playerDB[playerName] = [];
+    if (!savedDB[playerName]) savedDB[playerName] = [];
+
+    // 关键：先从“当前列表”和“永久库”里彻底删掉旧名称，再写入新名称。
+    // 这样不会出现库里同时存在“修改前名称”和“修改后名称”。
+    playerDB[playerName] = removeAliasFromArray(playerDB[playerName], oldClean);
+    savedDB[playerName] = removeAliasFromArray(savedDB[playerName], oldClean);
+
+    if (!playerDB[playerName].includes(newClean)) playerDB[playerName].push(newClean);
+    if (!savedDB[playerName].includes(newClean)) savedDB[playerName].push(newClean);
+
+    playerDB[playerName] = uniqueAliasArray(playerDB[playerName]);
+    savedDB[playerName] = uniqueAliasArray(savedDB[playerName]);
+
+    // 短时间内屏蔽 C++ 旧状态回推，把旧名称再次刷回 Web 库。
+    pendingAliasRenameRecords.push({
+        playerName,
+        oldAlias: oldClean,
+        newAlias: newClean,
+        until: Date.now() + 10000
+    });
     return true;
 }
 
@@ -784,6 +880,12 @@ function createPlayerRow() {
                                 showAlert(`小号【${aliasClean}】已被场上选手【${conflictOwner}】占用，无法添加！`);
                                 self.focus();
                             }, 100);
+                            return;
+                        }
+                        if (getCleanAliases(name).includes(aliasClean)) {
+                            showAlert(`小号【${aliasClean}】已经存在，不会重复添加。`);
+                            renderAliasMenu(name, aliasPopover);
+                            aliasPopover.classList.add('active');
                             return;
                         }
                         bindAliasToPlayer(name, aliasClean);
@@ -1084,7 +1186,9 @@ function bindProNumberControls(inputElem, isAK = false) {
 }
 
 function renderAliasMenu(playerName, popElement) {
-    let html = (playerDB[playerName] || []).map((a, i) => {
+    playerDB[playerName] = uniqueAliasArray(playerDB[playerName]);
+    savedDB[playerName] = uniqueAliasArray(savedDB[playerName]);
+    let html = getCleanAliases(playerName).map((a, i) => {
         // 🚨 核心改动：判断名字长度，超过 6 个字符就截断并拼上 "..."
         let displayName = a.length > 6 ? a.substring(0, 6) + '...' : a;
         const legacyShort = isLegacyShortAliasWithoutMeta(a);
@@ -1095,6 +1199,7 @@ function renderAliasMenu(playerName, popElement) {
         <div class="${itemClass}">
             <span class="alias-name" title="${escapeHtml(aliasTitle)}">${legacyShort ? '⚠️' : '🎮'} ${escapeHtml(displayName)}</span>
             <div class="alias-actions">
+                <span class="btn-edit-alias" data-idx="${i}" title="修改小号名称，并同步修改永久小号库">✎</span>
                 <span class="btn-temp-unbind" data-idx="${i}" title="临时解绑 (本次添加隐藏此ID不参与名称匹配，删除主号后重新添加即可恢复)">X</span>
                 <span class="btn-perm-unbind" data-idx="${i}" title="永久解绑 (从库选手信息里面彻底删除)">🗑️</span>
             </div>
@@ -1122,7 +1227,12 @@ function renderAliasMenu(playerName, popElement) {
                     return;
                 }
 
-                if (playerDB[playerName] && playerDB[playerName].includes(aliasTrimmed)) return;
+                if (getCleanAliases(playerName).includes(aliasTrimmed)) {
+                    showAlert(`小号【${aliasTrimmed}】已经存在，不会重复添加。`);
+                    renderAliasMenu(playerName, popElement);
+                    popElement.classList.add('active');
+                    return;
+                }
                 bindAliasToPlayer(playerName, aliasTrimmed);
 
                 renderAliasMenu(playerName, popElement);
@@ -1133,13 +1243,60 @@ function renderAliasMenu(playerName, popElement) {
     });
 
     // ==========================================
+    // 2. 修改小号名称逻辑：当前选手列表 + 永久小号库一起修改
+    // ==========================================
+    popElement.querySelectorAll('.btn-edit-alias').forEach(btn => {
+        btn.addEventListener('mousedown', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            const idx = parseInt(e.target.getAttribute('data-idx'), 10);
+            const oldAlias = getCleanAliases(playerName)[idx];
+            if (!oldAlias) return;
+
+            showAliasPrompt(playerName, (editedAlias) => {
+                if (editedAlias === null) return;
+                const aliasTrimmed = (editedAlias || '').trim();
+                if (!aliasTrimmed) return;
+
+                const aliasError = getAliasValidationError(aliasTrimmed);
+                if (aliasError) {
+                    showAlert(`❌ ${aliasError}`);
+                    return;
+                }
+
+                if (aliasTrimmed === oldAlias) {
+                    renderAliasMenu(playerName, popElement);
+                    popElement.classList.add('active');
+                    return;
+                }
+
+                const samePlayerAliases = (playerDB[playerName] || []).filter((_, i) => i !== idx);
+                if (samePlayerAliases.includes(aliasTrimmed)) {
+                    showAlert(`❌ 修改失败！该选手已经有小号【${aliasTrimmed}】。`);
+                    return;
+                }
+
+                const conflictOwner = findAliasConflict(playerName, aliasTrimmed);
+                if (conflictOwner) {
+                    showAlert(`❌ 修改失败！该小号已被场上选手【${conflictOwner}】占用！`);
+                    return;
+                }
+
+                updateAliasForPlayer(playerName, oldAlias, aliasTrimmed);
+                renderAliasMenu(playerName, popElement);
+                popElement.classList.add('active');
+                triggerSync();
+            }, `修改【${playerName}】的小号名称：`, oldAlias);
+        });
+    });
+
+    // ==========================================
     // 2. 临时解绑逻辑 (只删 UI 内存，换人后自动恢复)
     // ==========================================
     popElement.querySelectorAll('.btn-temp-unbind').forEach(btn => {
         btn.addEventListener('mousedown', (e) => {
             e.preventDefault(); e.stopPropagation();
             const idx = e.target.getAttribute('data-idx');
-            const targetAlias = playerDB[playerName][idx];
+            const targetAlias = getCleanAliases(playerName)[idx];
 
             // 允许临时解绑最后一个小号；选手保留，选手框会变红，运行按钮会被禁用。
             // 从当前活跃库中移除
@@ -1160,7 +1317,7 @@ function renderAliasMenu(playerName, popElement) {
         btn.addEventListener('mousedown', (e) => {
             e.preventDefault(); e.stopPropagation();
             const idx = e.target.getAttribute('data-idx');
-            const targetAlias = playerDB[playerName][idx];
+            const targetAlias = getCleanAliases(playerName)[idx];
 
             const confirmText = `⚠️ 确定要【永久删除】小号 [${targetAlias}] 吗？
 

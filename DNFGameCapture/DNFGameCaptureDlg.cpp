@@ -697,6 +697,120 @@ static int CompareVersion(const CString& a, const CString& b) {
     return 0;
 }
 
+
+// 从一行更新日志中提取开头版本号，例如："3.2.3 修复xxx" -> "3.2.3"
+static bool ExtractUpdateLogVersionPrefix(const CString& line, CString& outVersion) {
+    CString s = line;
+    s.TrimLeft();
+    outVersion.Empty();
+
+    if (s.IsEmpty() || s[0] < L'0' || s[0] > L'9')
+        return false;
+
+    int i = 0;
+    bool hasDot = false;
+    while (i < s.GetLength()) {
+        wchar_t ch = s[i];
+        if (ch >= L'0' && ch <= L'9') {
+            i++;
+            continue;
+        }
+        if (ch == L'.') {
+            hasDot = true;
+            i++;
+            continue;
+        }
+        break;
+    }
+
+    if (!hasDot || i <= 0)
+        return false;
+
+    // 版本号后面必须是空白或行尾，避免把普通文本误判为版本号
+    if (i < s.GetLength()) {
+        wchar_t next = s[i];
+        if (next != L' ' && next != L'\t' && next != L'\r' && next != L'\n')
+            return false;
+    }
+
+    outVersion = s.Left(i);
+    outVersion.Trim();
+    return !outVersion.IsEmpty();
+}
+
+// update_v2.txt 格式：
+// 第1行：服务器最新版本
+// 第2行：下载地址
+// 第3行开始：每个版本一段更新说明，版本行以 3.2.3 这种版本号开头，缩进行属于上一版本。
+// 这里只返回“大于当前版本”的更新内容，避免老版本说明一直显示给用户。
+static CString FilterUpdateLogGreaterThanCurrent(const CString& rawUpdateLog, const CString& currentVersion) {
+    CString normalized = rawUpdateLog;
+    normalized.Replace(L"\r\n", L"\n");
+    normalized.Replace(L"\r", L"\n");
+
+    std::vector<CString> visibleEntries;
+    CString currentEntry;
+    CString currentEntryVersion;
+    bool sawVersionEntry = false;
+
+    auto FlushEntry = [&]() {
+        CString entry = currentEntry;
+        entry.Trim();
+        CString ver = currentEntryVersion;
+        ver.Trim();
+        if (!entry.IsEmpty() && !ver.IsEmpty() && CompareVersion(ver, currentVersion) > 0) {
+            visibleEntries.push_back(entry);
+        }
+        currentEntry.Empty();
+        currentEntryVersion.Empty();
+    };
+
+    int pos = 0;
+    while (pos <= normalized.GetLength()) {
+        int next = normalized.Find(L'\n', pos);
+        CString line;
+        if (next < 0) {
+            line = normalized.Mid(pos);
+            pos = normalized.GetLength() + 1;
+        }
+        else {
+            line = normalized.Mid(pos, next - pos);
+            pos = next + 1;
+        }
+
+        CString ver;
+        if (ExtractUpdateLogVersionPrefix(line, ver)) {
+            sawVersionEntry = true;
+            FlushEntry();
+            currentEntryVersion = ver;
+            currentEntry = line;
+        }
+        else {
+            // 缩进行/说明行挂到上一条版本日志下
+            if (!currentEntry.IsEmpty()) {
+                currentEntry += L"\r\n";
+                currentEntry += line;
+            }
+        }
+    }
+    FlushEntry();
+
+    // 兼容旧格式：如果后续日志完全没有版本号，就沿用原文，避免用户看不到更新说明。
+    if (!sawVersionEntry) {
+        CString legacy = rawUpdateLog;
+        legacy.Trim();
+        return legacy;
+    }
+
+    CString result;
+    for (size_t i = 0; i < visibleEntries.size(); ++i) {
+        if (i > 0) result += L"\r\n\r\n";
+        result += visibleEntries[i];
+    }
+    result.Trim();
+    return result;
+}
+
 // 时间戳转字符串
 CString FormatTimeStamp(long long ts) {
     if (ts >= 0xFFFFFFF0) return L"永久有效";
@@ -5025,8 +5139,14 @@ void CDNFGameCaptureDlg::CheckForUpdates(bool bSilent) {
     //}
     //else {
         // 【普通版】：无论是后台检测还是手动检测，只要有新版本，一律弹窗！
+            CString visibleUpdateLog = FilterUpdateLogGreaterThanCurrent(updateLog, currentVersion);
+            if (visibleUpdateLog.IsEmpty()) {
+                visibleUpdateLog = L"没有找到高于当前版本的更新说明。";
+            }
+
             CString msg;
-            msg.Format(L"发现新版本: %s\n\n更新内容:\n%s\n\n是否立即更新？", serverVersion, updateLog);
+            msg.Format(L"发现新版本: %s\n当前版本: %s\n\n更新内容:\n%s\n\n是否立即更新？",
+                serverVersion.GetString(), currentVersion.GetString(), visibleUpdateLog.GetString());
 
             // ⬇️ 【修改点】：把 MessageBox 换成 ShowCenteredMsgBox
             if (ShowCenteredMsgBox(msg, L"发现新版本", MB_YESNO | MB_ICONINFORMATION | MB_TOPMOST) == IDYES) {
@@ -5504,6 +5624,21 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             m_totalScoreBlue = data["blueScore"].get<int>();
             m_totalScoreRed = data["redScore"].get<int>();
 
+            // Web 端会把永久小号库 fullAliasDB 一起传回来。
+            // 这里必须同步到 C++ 的 m_aliasDB，否则 Web 里改完小号名后，下一次 C++ 广播会用旧库把它刷回去。
+            if (data.contains("fullAliasDB") && data["fullAliasDB"].is_object()) {
+                m_aliasDB.clear();
+                for (auto it = data["fullAliasDB"].begin(); it != data["fullAliasDB"].end(); ++it) {
+                    CString mainName = CA2W(it.key().c_str(), CP_UTF8);
+                    CString aliases = CA2W(it.value().get<std::string>().c_str(), CP_UTF8);
+                    mainName.Trim();
+                    aliases.Trim();
+                    if (!mainName.IsEmpty() && !aliases.IsEmpty()) {
+                        m_aliasDB[mainName] = aliases;
+                    }
+                }
+            }
+
             auto& players = data["players"];
             if (players.is_array() && players.size() == 8) {
                 // 🚨 Web端前4个是红队，写回 MFC 的 0-3
@@ -5517,27 +5652,15 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                     m_players[mfcIdx].akCount = p["akCount"].get<int>();
 
                     m_players[mfcIdx].aliases.clear();
-                    bool aliasFormatInvalid = false;
-                    CString aliasFormatError;
+                    // Web 同步阶段只接收并保存小号，不因为 2 字短 ID 清空选手。
+                    // 裸短 ID / 无小号 的拦截统一放到“开始监控”阶段处理。
                     for (auto& a : p["aliases"]) {
                         AliasData ad;
                         ad.name = CA2W(a.get<std::string>().c_str(), CP_UTF8);
                         ad.name.Trim();
                         if (!ad.name.IsEmpty()) {
-                            CString oneAliasError;
-                            if (!DnfValidateAliasShortMeta(ad.name, oneAliasError)) {
-                                aliasFormatInvalid = true;
-                                aliasFormatError = oneAliasError;
-                                break;
-                            }
                             m_players[mfcIdx].aliases.push_back(ad);
                         }
-                    }
-                    if (!m_players[mfcIdx].name.IsEmpty() && aliasFormatInvalid) {
-                        AppLog(L"❌ [Web同步拦截] [" + m_players[mfcIdx].name + L"] 小号格式不合格：" + aliasFormatError, RGB(255, 120, 80));
-                        m_players[mfcIdx].name.Empty();
-                        m_players[mfcIdx].aliases.clear();
-                        m_players[mfcIdx].kills = m_players[mfcIdx].deaths = m_players[mfcIdx].akCount = 0;
                     }
                     if (!m_players[mfcIdx].name.IsEmpty() && m_players[mfcIdx].aliases.empty()) {
                         AppLog(L"⚠️ [Web同步提示] [" + m_players[mfcIdx].name + L"] 只有主号、没有小号：保留在选手列表中，但开始监控会被拦截。", RGB(255, 180, 0));
@@ -5554,27 +5677,15 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                     m_players[mfcIdx].akCount = p["akCount"].get<int>();
 
                     m_players[mfcIdx].aliases.clear();
-                    bool aliasFormatInvalid = false;
-                    CString aliasFormatError;
+                    // Web 同步阶段只接收并保存小号，不因为 2 字短 ID 清空选手。
+                    // 裸短 ID / 无小号 的拦截统一放到“开始监控”阶段处理。
                     for (auto& a : p["aliases"]) {
                         AliasData ad;
                         ad.name = CA2W(a.get<std::string>().c_str(), CP_UTF8);
                         ad.name.Trim();
                         if (!ad.name.IsEmpty()) {
-                            CString oneAliasError;
-                            if (!DnfValidateAliasShortMeta(ad.name, oneAliasError)) {
-                                aliasFormatInvalid = true;
-                                aliasFormatError = oneAliasError;
-                                break;
-                            }
                             m_players[mfcIdx].aliases.push_back(ad);
                         }
-                    }
-                    if (!m_players[mfcIdx].name.IsEmpty() && aliasFormatInvalid) {
-                        AppLog(L"❌ [Web同步拦截] [" + m_players[mfcIdx].name + L"] 小号格式不合格：" + aliasFormatError, RGB(255, 120, 80));
-                        m_players[mfcIdx].name.Empty();
-                        m_players[mfcIdx].aliases.clear();
-                        m_players[mfcIdx].kills = m_players[mfcIdx].deaths = m_players[mfcIdx].akCount = 0;
                     }
                     if (!m_players[mfcIdx].name.IsEmpty() && m_players[mfcIdx].aliases.empty()) {
                         AppLog(L"⚠️ [Web同步提示] [" + m_players[mfcIdx].name + L"] 只有主号、没有小号：保留在选手列表中，但开始监控会被拦截。", RGB(255, 180, 0));
