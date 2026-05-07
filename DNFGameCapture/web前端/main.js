@@ -262,10 +262,7 @@ function getAliasValidationError(raw) {
     if (!alias) return '小号不能为空';
     const p = parseAliasInput(alias);
     if (!p.realId) return `小号【${alias}】缺少真实ID，不能只填大区或职业。`;
-    const realLen = Array.from(p.realId).length;
-    if (realLen < 3 && !p.declaredArea && !p.declaredJob) {
-        return `小号【${alias}】真实ID少于3个字符，必须加大区或 #职业，例如“上海1${p.realId}#职业”。`;
-    }
+    // 允许小号列表保留 2 字短 ID；短 ID 只做警告，并在开始监控时拦截。
     return '';
 }
 
@@ -394,22 +391,39 @@ function updateStartButtonGuard() {
         if (v.input) v.input.title = msg;
     });
 
-    // 已有短ID只提示，不阻止运行；只有“主号无小号”阻止开始。
-    const shouldBlockStart = !isMonitoring && noAliasViolations.length > 0;
+    // 允许小号列表存在 2 字短 ID，但开始监控必须拦截：短 ID 容易被 OCR 误识别。
+    const shouldBlockStart = !isMonitoring && (noAliasViolations.length > 0 || shortWarnings.length > 0);
     btnMonitor.disabled = shouldBlockStart;
     btnMonitor.classList.toggle('btn-monitor-disabled', shouldBlockStart);
 
     if (shouldBlockStart) {
-        const names = noAliasViolations.map(v => v.playerName).join('、');
-        btnMonitor.title = `无法开始：以下选手没有绑定小号：${names}`;
+        const titleParts = [];
+        if (noAliasViolations.length) {
+            const names = noAliasViolations.map(v => v.playerName).join('、');
+            titleParts.push(`以下选手没有绑定小号：${names}`);
+        }
+        if (shortWarnings.length) {
+            const names = shortWarnings.map(v => `【${v.playerName}】${v.badAliases.join('、')}`).join('；');
+            titleParts.push(`以下选手存在未加大区/#职业的2字短ID：${names}`);
+        }
+        btnMonitor.title = `无法开始：${titleParts.join('；')}`;
     } else {
         const titleParts = [];
-        if (shortWarnings.length) titleParts.push('存在旧库短ID，建议补充大区或 #职业，但不影响运行。');
         if (sameJobWarnings.length) titleParts.push('同队存在相同 #职业 的短ID/纯符号ID；只靠职业时不会强判。');
         btnMonitor.title = titleParts.join(' ');
     }
 
-    return noAliasViolations;
+    return noAliasViolations.concat(shortWarnings);
+}
+
+function getStartGuardMessage() {
+    const noAlias = getActiveNoAliasViolations();
+    const shortIds = getActiveShortIdViolations();
+    const lines = [];
+    noAlias.forEach(v => lines.push(`【${v.playerName}】没有绑定任何小号`));
+    shortIds.forEach(v => lines.push(`【${v.playerName}】存在未加大区/#职业的2字短ID：${v.badAliases.join('、')}`));
+    if (!lines.length) return '';
+    return `检测到上场选手信息不完整，暂不能开始监控：\n\n${lines.join('\n')}\n\n处理方式：没有小号的选手请至少绑定一个小号；2字短ID请补充大区或 #职业。`;
 }
 
 function getNoAliasGuardMessage(violations = getActiveNoAliasViolations()) {
@@ -896,37 +910,10 @@ function createPlayerRow() {
         }
 
         if (currentName && !hasAtLeastOneAlias(currentName)) {
-            const self = this;
-            setTimeout(() => {
-                showAliasPrompt(currentName, (aliasVal) => {
-                    const aliasClean = (aliasVal || '').trim();
-                    if (!aliasClean) {
-                        self.value = '';
-                        if (aliasPopover) aliasPopover.classList.remove('active');
-                        triggerSync();
-                        return;
-                    }
-                    const aliasError = getAliasValidationError(aliasClean);
-                    if (aliasError) {
-                        self.value = '';
-                        showAlert(`❌ ${aliasError}`);
-                        triggerSync();
-                        return;
-                    }
-                    const conflictOwner = findAliasConflict(currentName, aliasClean, self);
-                    if (conflictOwner) {
-                        self.value = '';
-                        showAlert(`小号【${aliasClean}】已被场上选手【${conflictOwner}】占用，无法添加！`);
-                        triggerSync();
-                        return;
-                    }
-                    self.value = currentName;
-                    bindAliasToPlayer(currentName, aliasClean);
-                    renderAliasMenu(currentName, aliasPopover);
-                    if (aliasPopover) aliasPopover.classList.add('active');
-                    triggerSync();
-                });
-            }, 30);
+            // 允许只输入主号留在选手框中；用红色高亮和运行按钮拦截提醒，不再清空输入框。
+            renderAliasMenu(currentName, aliasPopover);
+            if (aliasPopover) aliasPopover.classList.add('active');
+            triggerSync();
             return;
         }
         // 延迟隐藏两个弹窗（保持和原来一样的时间）
@@ -1235,7 +1222,7 @@ document.getElementById('btn-swap').addEventListener('click', () => window.chrom
 document.getElementById('btn-monitor').addEventListener('click', () => {
     const violations = updateStartButtonGuard();
     if (!isMonitoring && violations.length > 0) {
-        showAlert(getNoAliasGuardMessage(violations));
+        showAlert(getStartGuardMessage());
         return;
     }
     window.chrome.webview.postMessage({ action: "cmd_monitor", state: !isMonitoring });

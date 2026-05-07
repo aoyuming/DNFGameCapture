@@ -448,7 +448,7 @@ static CString DnfLegacyShortAliasDeleteReason(const CString& aliasRaw)
     CString alias = aliasRaw;
     alias.Trim();
     CString msg;
-    msg.Format(L"小号【%s】是旧库短ID，真实ID少于3个字符且没有大区/#职业，容易误识别；已允许直接从小号列表和本地库删除。", (LPCTSTR)alias);
+    msg.Format(L"小号【%s】是2字短ID，真实ID少于3个字符且没有大区/#职业，容易误识别；不会自动删除，但开始监控前需要补充大区或 #职业。", (LPCTSTR)alias);
     return msg;
 }
 
@@ -470,13 +470,7 @@ static bool DnfValidateAliasShortMeta(const CString& aliasRaw, CString& errorMsg
         return false;
     }
 
-    if (realId.GetLength() < 3 && !hasArea && !hasJob) {
-        errorMsg.Format(
-            L"小号【%s】真实ID少于3个字符，必须加大区或 #职业，例如：上海1%s 或 %s#气功师。",
-            (LPCTSTR)alias, (LPCTSTR)realId, (LPCTSTR)realId);
-        return false;
-    }
-
+    // 允许小号列表保留 2 字短ID；短ID只在“开始监控”时拦截，不在 Web 同步阶段删除/清空。
     return true;
 }
 
@@ -3421,18 +3415,31 @@ void CDNFGameCaptureDlg::OnBnClickedStart()
 
     if (!m_bIsRunning) {
         CString missingAliasPlayers;
+        CString shortAliasPlayers;
         {
             std::lock_guard<std::mutex> dataLock(m_dataMutex);
             for (int i = 0; i < 8; ++i) {
-                if (!m_players[i].name.IsEmpty() && m_players[i].aliases.empty()) {
+                if (m_players[i].name.IsEmpty()) continue;
+                if (m_players[i].aliases.empty()) {
                     if (!missingAliasPlayers.IsEmpty()) missingAliasPlayers += L"、";
                     missingAliasPlayers += m_players[i].name;
                 }
+                for (const auto& a : m_players[i].aliases) {
+                    if (DnfIsLegacyShortAliasWithoutMeta(a.name)) {
+                        if (!shortAliasPlayers.IsEmpty()) shortAliasPlayers += L"；";
+                        shortAliasPlayers += L"【" + m_players[i].name + L"】" + a.name;
+                    }
+                }
             }
         }
-        if (!missingAliasPlayers.IsEmpty()) {
-            CString msg;
-            msg.Format(L"以下上场选手只有主号、没有任何小号，暂时不能开始监控：%s。请至少添加一个小号；主号不参与OCR名称匹配。", (LPCTSTR)missingAliasPlayers);
+        if (!missingAliasPlayers.IsEmpty() || !shortAliasPlayers.IsEmpty()) {
+            CString msg = L"检测到上场选手信息不完整，暂时不能开始监控：";
+            if (!missingAliasPlayers.IsEmpty()) {
+                msg += L"\r\n\r\n没有小号：" + missingAliasPlayers + L"。主号不参与OCR名称匹配，请至少添加一个小号。";
+            }
+            if (!shortAliasPlayers.IsEmpty()) {
+                msg += L"\r\n\r\n未加大区/#职业的2字短ID：" + shortAliasPlayers + L"。允许保留在列表中，但开始监控前请补充大区或 #职业。";
+            }
             CString blockLog = L"[开始监控拦截] ";
             blockLog += msg;
             WriteMatchLog(blockLog);
@@ -3443,7 +3450,7 @@ void CDNFGameCaptureDlg::OnBnClickedStart()
                 m_pWebDlg->SendStateToWeb(jsonStr);
             }
             else {
-                ShowCenteredMsgBox(msg, L"缺少小号", MB_ICONWARNING);
+                ShowCenteredMsgBox(msg, L"无法开始监控", MB_ICONWARNING);
             }
             BroadcastStateToWeb();
             return;
@@ -5533,9 +5540,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                         m_players[mfcIdx].kills = m_players[mfcIdx].deaths = m_players[mfcIdx].akCount = 0;
                     }
                     if (!m_players[mfcIdx].name.IsEmpty() && m_players[mfcIdx].aliases.empty()) {
-                        AppLog(L"❌ [Web同步拦截] [" + m_players[mfcIdx].name + L"] 缺少小号，已拒绝上场。", RGB(255, 120, 80));
-                        m_players[mfcIdx].name.Empty();
-                        m_players[mfcIdx].kills = m_players[mfcIdx].deaths = m_players[mfcIdx].akCount = 0;
+                        AppLog(L"⚠️ [Web同步提示] [" + m_players[mfcIdx].name + L"] 只有主号、没有小号：保留在选手列表中，但开始监控会被拦截。", RGB(255, 180, 0));
                     }
                 }
                 // 🚨 Web端后4个是蓝队，写回 MFC 的 4-7
@@ -5572,9 +5577,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                         m_players[mfcIdx].kills = m_players[mfcIdx].deaths = m_players[mfcIdx].akCount = 0;
                     }
                     if (!m_players[mfcIdx].name.IsEmpty() && m_players[mfcIdx].aliases.empty()) {
-                        AppLog(L"❌ [Web同步拦截] [" + m_players[mfcIdx].name + L"] 缺少小号，已拒绝上场。", RGB(255, 120, 80));
-                        m_players[mfcIdx].name.Empty();
-                        m_players[mfcIdx].kills = m_players[mfcIdx].deaths = m_players[mfcIdx].akCount = 0;
+                        AppLog(L"⚠️ [Web同步提示] [" + m_players[mfcIdx].name + L"] 只有主号、没有小号：保留在选手列表中，但开始监控会被拦截。", RGB(255, 180, 0));
                     }
                 }
             }
