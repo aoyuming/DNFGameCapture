@@ -21,7 +21,7 @@
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"3.2.6"    //当前版本号
+#define CURRENT_VERSION L"3.3.0"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -53,6 +53,7 @@
 #define WM_UPDATE_ALL_UI        (WM_USER + 105)// 【新增】：跨线程刷新 UI 专属消息
 #define WM_CLOUD_AUTH_FAIL      (WM_USER + 106) // 【新增】：云端授权失败专属消息
 #define WM_UPDATE_AUTH_TIME     (WM_USER + 107) // 【新增】：同步云端到期时间
+#define WM_OCR_SERVICE_FAIL     (WM_USER + 108) // 【新增】：Umi-OCR 离线/恢复失败，停止监控
 
 // =========================================================
 // 【编译环境切换开关】
@@ -169,6 +170,7 @@ protected:
     // 【新增】：跨线程刷新 UI 响应函数
     afx_msg LRESULT OnUpdateAllUI(WPARAM wParam, LPARAM lParam);
     afx_msg LRESULT OnCloudAuthFail(WPARAM wParam, LPARAM lParam); // 【新增】
+    afx_msg LRESULT OnOcrServiceFail(WPARAM wParam, LPARAM lParam); // 【新增】：OCR 服务恢复失败时停止监控并提醒
 
     std::vector<CString> m_autoExpandedNodes; // 【新增】：记忆刚才修改过，需要临时展开3秒的主号
 
@@ -201,7 +203,7 @@ private:
     void WriteScoreToFile();
     void AppendResultText(const CString& t, COLORREF c);
     void RefreshDisplay();
-    void EnsureOcrRunning();
+    bool EnsureOcrRunning();
     void SaveConfigToFile();
 
     // 托盘图标初始化与清理
@@ -234,6 +236,12 @@ private:
     int m_nBlankFrameCount = 0;
     bool m_bAlreadyPrompted = false;
 
+    const int ID_CMB_DEATH_ALGORITHM = 1034; // 死亡X算法选择下拉框 ID
+    CComboBox m_cmbDeathAlgorithm;           // 死亡X算法选择：0=大X颜色个数判断，1=打补丁红蓝判断
+    int m_nDeathAlgorithmChoice = 0;         // 0=大X颜色个数判断，1=打补丁红蓝判断
+    bool EnsureDeathPatchInstalled();        // 打补丁红蓝判断启动前自动安装 NPK
+    bool FindDnfImagePacks2Folder(CString& outDir); // 搜索地下城与勇士\ImagePacks2
+
     const int ID_CMB_CAPTURE_ENGINE = 1030; // 捕获引擎选择下拉框 ID
     CComboBox m_cmbCaptureEngine;           // 捕获引擎选择下拉框
     int m_nCaptureEngineChoice = 0;         // 0=自动, 1=WGC, 2=PrintWindow
@@ -258,6 +266,7 @@ private:
 
     // 【新增】：强制居中的自定义 MessageBox
     int ShowCenteredMsgBox(LPCTSTR lpszText, LPCTSTR lpszCaption = NULL, UINT nType = MB_OK);
+    int ShowUpdateConfirmDialog(const CString& serverVersion, const CString& currentVersion, const CString& visibleUpdateLog);
 
 
     void ClearPreview(); // 清空预览画面
@@ -405,5 +414,6 @@ public:
     void ManualTriggerKill(int killSide);
 
     afx_msg void OnChangeEditNamesInput();
+    afx_msg void OnCbnSelchangeDeathAlgorithm();
     afx_msg void OnCbnSelchangeCaptureEngine();
 };

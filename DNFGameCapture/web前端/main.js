@@ -7,6 +7,8 @@ let isSyncingFromServer = false;
 let hasReceivedInitialData = false;
 let isMonitoring = false;
 let isProMode = false;
+let deathXAlgorithm = 0;
+let deathPatchInstalled = false;
 let draggedRow = null;
 let isDbInitialized = false;
 // Web 端编辑小号后，C++ 可能会立刻推回一次旧状态；这里短时间记录改名映射，避免旧小号被同步回来。
@@ -147,7 +149,7 @@ if (window.chrome && window.chrome.webview) {
                     }
                 }
             }
-            else if (msg.action === 'auth_result') { showAlert(msg.message); }
+            else if (msg.action === 'auth_result' || msg.action === 'start_guard' || msg.action === 'patch_result') { showAlert(msg.message); }
         } catch (e) { console.error('解析 C++ 消息失败', e); }
     });
 
@@ -226,6 +228,13 @@ function applyStateFromServer(state) {
     const container = document.getElementById('main-container');
     container.style.flexDirection = state.isFlipped ? 'row-reverse' : 'row';
 
+    deathXAlgorithm = Number(state.deathXAlgorithm || 0);
+    deathPatchInstalled = !!state.deathPatchInstalled;
+    const algoSelect = document.getElementById('death-algo-select');
+    if (algoSelect && algoSelect.value !== String(deathXAlgorithm)) {
+        algoSelect.value = String(deathXAlgorithm);
+    }
+
     isProMode = state.isMfcVisible;
     const btnPro = document.getElementById('btn-pro');
     if (btnPro) {
@@ -234,12 +243,15 @@ function applyStateFromServer(state) {
     }
 
     const btnAuth = document.getElementById('btn-auth');
-    if (state.isAuthValid || (state.authText && state.authText.includes("试用"))) {
-        btnAuth.innerHTML = `🔑 授权 <span style="font-size:11px;opacity:0.8">(${state.authText})</span>`;
-        btnAuth.style.borderColor = "#00e5ff"; btnAuth.style.color = "#00e5ff";
-    } else {
-        btnAuth.innerHTML = `🔑 授权 <span style="font-size:11px;opacity:0.8">(${state.authText || '未激活'})</span>`;
-        btnAuth.style.borderColor = "#ff0055"; btnAuth.style.color = "#ff0055";
+    const authText = state.authText || '未激活';
+    const authValidLike = state.isAuthValid || (state.authText && state.authText.includes("试用"));
+    if (btnAuth) {
+        // 按钮内显示精简状态，超出部分用 ...；完整授权日期放到悬浮提示里。
+        btnAuth.innerHTML = `🔑 授权 <span class="auth-short">${escapeHtml(authText)}</span>`;
+        btnAuth.title = '';
+        btnAuth.setAttribute('data-auth-tooltip', `授权状态：${authText}`);
+        btnAuth.style.borderColor = authValidLike ? "#00e5ff" : "#ff0055";
+        btnAuth.style.color = authValidLike ? "#00e5ff" : "#ff0055";
     }
 
     // 🚨 接收来自 C++ 的最新输出目录并显示
@@ -1386,8 +1398,34 @@ document.getElementById('btn-monitor').addEventListener('click', () => {
         showAlert(getStartGuardMessage());
         return;
     }
+
+    if (!isMonitoring && deathXAlgorithm === 1 && !deathPatchInstalled) {
+        const msg = `⚠️ 当前选择的是【打补丁红蓝判断】。<br><br>` +
+            `开始监控前需要把 EXE 同目录下的 <b>sprite(击杀大XX).NPK</b> 复制到游戏的 <b>ImagePacks2</b> 文件夹。<br><br>` +
+            `请先关闭游戏客户端；如果游戏正在运行，复制后也需要重新上游戏才会生效。<br><br>` +
+            `点击【确定】开始自动打补丁并继续监控；点击【取消】则不打补丁，也不会开始监控。`;
+        showConfirm(msg, (ok) => {
+            if (!ok) {
+                updateStartButtonGuard();
+                return;
+            }
+            window.chrome.webview.postMessage({ action: "cmd_monitor", state: true });
+        });
+        return;
+    }
+
     window.chrome.webview.postMessage({ action: "cmd_monitor", state: !isMonitoring });
 });
+const deathAlgoSelect = document.getElementById('death-algo-select');
+if (deathAlgoSelect) {
+    deathAlgoSelect.addEventListener('change', () => {
+        deathXAlgorithm = parseInt(deathAlgoSelect.value, 10) || 0;
+        if (window.chrome?.webview) {
+            window.chrome.webview.postMessage({ action: "cmd_set_death_algorithm", value: deathXAlgorithm });
+        }
+    });
+}
+
 document.getElementById('btn-auth').addEventListener('click', () => { showPrompt("请输入授权卡密 (CDK):", (c) => { if (c) window.chrome.webview.postMessage({ action: "cmd_auth", code: c.trim() }); }); });
 document.getElementById('btn-pro').addEventListener('click', () => window.chrome.webview.postMessage({ action: "cmd_toggle_mfc", show: !isProMode }));
 

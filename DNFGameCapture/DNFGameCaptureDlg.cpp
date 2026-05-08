@@ -46,6 +46,19 @@ const int ID_EDIT_DIR = 1014;
 const int ID_BTN_INPUT_KEY = 1020; // 输入授权码按钮ID
 const CString PLACEHOLDER_TEXT = L"输入：主号(小号1)(小号2)...";
 
+constexpr int DEATH_X_ALGO_COLOR = 0;      // 当前颜色采样算法
+constexpr int DEATH_X_ALGO_PATCH = 1;      // 打补丁红蓝点算法
+constexpr int DEATH_X_PATCH_COLOR_TOL = 30;
+constexpr int DEATH_X_COLOR_TOL = 40;       // 当前算法：#D53000 三通道上下容差
+constexpr int DEATH_X_PATCH_REQUIRED_HITS = 3;       // 打补丁红蓝判断：左右一红一蓝 + 上/下至少一个红蓝点
+constexpr float DEATH_X_PATCH_MUL_ACTIVE = 4.6f;     // 主将大 X 的检测点外移倍数
+constexpr float DEATH_X_PATCH_MUL_NORMAL = 5.4f;     // 下方小 X 的检测点外移倍数
+static const wchar_t* DEATH_X_PATCH_FILE_NAME = L"sprite(击杀大XX).NPK";
+
+// 打补丁文件路径检查辅助函数在文件后部实现；这里提前声明，方便同步给 Web。
+static bool DnfFileExists(const CString& path);
+static CString DnfJoinPath(const CString& a, const CString& b);
+
 struct ScorePointF { float x; float y; };
 
 
@@ -649,6 +662,13 @@ struct DeathXDebugState {
     float hitX[DEATH_POINT_COUNT][16];
     float hitY[DEATH_POINT_COUNT][16];
     int hitDir[DEATH_POINT_COUNT][16];
+    COLORREF hitColor[DEATH_POINT_COUNT][16];       // 命中点实际像素颜色
+    int patchPointCount[DEATH_POINT_COUNT];
+    float patchX[DEATH_POINT_COUNT][4];             // 打补丁红蓝判断 4 个检测点
+    float patchY[DEATH_POINT_COUNT][4];
+    COLORREF patchColor[DEATH_POINT_COUNT][4];      // 4 点实际像素颜色
+    int patchClass[DEATH_POINT_COUNT][4];           // 0=不合格，1=红，2=蓝
+    bool patchPass[DEATH_POINT_COUNT];
     DWORD lastTick;
 };
 
@@ -709,12 +729,193 @@ int CDNFGameCaptureDlg::ShowCenteredMsgBox(LPCTSTR lpszText, LPCTSTR lpszCaption
     // 加锁防止多线程同时弹窗导致钩子冲突
     std::lock_guard<std::mutex> lock(g_msgBoxMutex);
 
-    g_hMsgBoxParent = this->GetSafeHwnd();
+    // 如果专业后台窗口被隐藏，就把原生对话框挂到 Web 计分板上，并居中到 Web 窗口。
+    // 这样从 Web 端操作时，确认/提醒框不会跑到隐藏的 C++ 后台窗口中心。
+    HWND hOwner = this->GetSafeHwnd();
+    if (!IsWindowVisible() && m_pWebDlg && ::IsWindow(m_pWebDlg->GetSafeHwnd()) && m_pWebDlg->IsWindowVisible()) {
+        hOwner = m_pWebDlg->GetSafeHwnd();
+    }
+
+    g_hMsgBoxParent = hOwner;
     // 挂上只针对当前线程的拦截钩子
     g_hMsgBoxHook = SetWindowsHookEx(WH_CBT, MsgBoxCBTProc, NULL, GetCurrentThreadId());
 
-    // 呼出系统的 MessageBox，它刚探出头就会被钩子按在正中间！
-    return ::MessageBox(g_hMsgBoxParent, lpszText, lpszCaption, nType);
+    // 呼出系统的 MessageBox，它刚探出头就会被钩子按在当前可见主界面正中间！
+    return ::MessageBox(hOwner, lpszText, lpszCaption, nType);
+}
+
+
+// ========================================================
+// 更新弹窗：用只读多行文本框显示更新内容，保留 update_v2.txt 原始换行/缩进。
+// MessageBox 会自动换行，导致更新日志格式看起来乱；这里改为等宽字体 + 横向滚动。
+// ========================================================
+struct TDnfUpdateDialogState {
+    CString headerText;
+    CString updateLogText;
+    int result = IDNO;
+    HFONT hUiFont = NULL;
+    HFONT hMonoFont = NULL;
+    HWND hHeader = NULL;
+    HWND hEdit = NULL;
+    HWND hQuestion = NULL;
+    HWND hYes = NULL;
+    HWND hNo = NULL;
+};
+
+static LRESULT CALLBACK DnfUpdateDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    TDnfUpdateDialogState* st = (TDnfUpdateDialogState*)::GetWindowLongPtr(hWnd, GWLP_USERDATA);
+
+    switch (msg) {
+    case WM_CREATE:
+    {
+        CREATESTRUCT* cs = (CREATESTRUCT*)lParam;
+        st = (TDnfUpdateDialogState*)cs->lpCreateParams;
+        ::SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)st);
+
+        st->hUiFont = ::CreateFontW(18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+            DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+        // 更新日志里有中文，Consolas 在部分系统/EDIT 控件里不会做中文字体回退，
+        // 会显示成方块；改用新宋体，既能显示中文，又尽量保留等宽排版。
+        st->hMonoFont = ::CreateFontW(17, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            GB2312_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+            FIXED_PITCH | FF_MODERN, L"NSimSun");
+
+        st->hHeader = ::CreateWindowExW(0, L"STATIC", st->headerText,
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            24, 18, 720, 52, hWnd, NULL, AfxGetInstanceHandle(), NULL);
+
+        st->hEdit = ::CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", st->updateLogText,
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOHSCROLL | ES_AUTOVSCROLL | WS_HSCROLL | WS_VSCROLL,
+            24, 78, 720, 330, hWnd, NULL, AfxGetInstanceHandle(), NULL);
+
+        st->hQuestion = ::CreateWindowExW(0, L"STATIC", L"是否立即更新？",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            24, 424, 260, 28, hWnd, NULL, AfxGetInstanceHandle(), NULL);
+
+        st->hYes = ::CreateWindowExW(0, L"BUTTON", L"是(&Y)",
+            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            530, 456, 96, 34, hWnd, (HMENU)IDYES, AfxGetInstanceHandle(), NULL);
+        st->hNo = ::CreateWindowExW(0, L"BUTTON", L"否(&N)",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            648, 456, 96, 34, hWnd, (HMENU)IDNO, AfxGetInstanceHandle(), NULL);
+
+        HWND ctrls[] = { st->hHeader, st->hEdit, st->hQuestion, st->hYes, st->hNo };
+        for (HWND h : ctrls) {
+            if (h) ::SendMessage(h, WM_SETFONT, (WPARAM)st->hUiFont, TRUE);
+        }
+        if (st->hEdit) ::SendMessage(st->hEdit, WM_SETFONT, (WPARAM)st->hMonoFont, TRUE);
+
+        ::SetFocus(st->hYes);
+        return 0;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDYES || LOWORD(wParam) == IDNO) {
+            if (st) st->result = LOWORD(wParam);
+            ::DestroyWindow(hWnd);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        if (st) st->result = IDNO;
+        ::DestroyWindow(hWnd);
+        return 0;
+    case WM_DESTROY:
+        if (st) {
+            if (st->hUiFont) { ::DeleteObject(st->hUiFont); st->hUiFont = NULL; }
+            if (st->hMonoFont) { ::DeleteObject(st->hMonoFont); st->hMonoFont = NULL; }
+        }
+        return 0;
+    }
+    return ::DefWindowProc(hWnd, msg, wParam, lParam);
+}
+
+static CString DnfNormalizeDialogCrlf(CString s)
+{
+    s.Replace(L"\r\n", L"\n");
+    s.Replace(L"\r", L"\n");
+    s.Replace(L"\n", L"\r\n");
+    return s;
+}
+
+int CDNFGameCaptureDlg::ShowUpdateConfirmDialog(const CString& serverVersion, const CString& currentVersion, const CString& visibleUpdateLog)
+{
+    HWND hOwner = this->GetSafeHwnd();
+    if (!IsWindowVisible() && m_pWebDlg && ::IsWindow(m_pWebDlg->GetSafeHwnd()) && m_pWebDlg->IsWindowVisible()) {
+        hOwner = m_pWebDlg->GetSafeHwnd();
+    }
+
+    TDnfUpdateDialogState st;
+    st.headerText.Format(L"发现新版本: %s\r\n当前版本: %s\r\n更新内容：以下按服务器 update_v2.txt 排版显示",
+        serverVersion.GetString(), currentVersion.GetString());
+    st.updateLogText = DnfNormalizeDialogCrlf(visibleUpdateLog);
+
+    static bool s_registered = false;
+    const wchar_t* kClassName = L"DNF_UpdateConfirmDialog";
+    if (!s_registered) {
+        WNDCLASSW wc = {};
+        wc.lpfnWndProc = DnfUpdateDialogProc;
+        wc.hInstance = AfxGetInstanceHandle();
+        wc.lpszClassName = kClassName;
+        wc.hCursor = ::LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        ::RegisterClassW(&wc);
+        s_registered = true;
+    }
+
+    const int dlgW = 790;
+    const int dlgH = 540;
+    int x = 100, y = 100;
+    RECT pr = {};
+    if (hOwner && ::IsWindow(hOwner)) {
+        ::GetWindowRect(hOwner, &pr);
+        x = pr.left + ((pr.right - pr.left) - dlgW) / 2;
+        y = pr.top + ((pr.bottom - pr.top) - dlgH) / 2;
+    }
+    else {
+        x = (::GetSystemMetrics(SM_CXSCREEN) - dlgW) / 2;
+        y = (::GetSystemMetrics(SM_CYSCREEN) - dlgH) / 2;
+    }
+    x = max(0, x);
+    y = max(0, y);
+
+    bool ownerWasEnabled = false;
+    if (hOwner && ::IsWindow(hOwner)) {
+        ownerWasEnabled = ::IsWindowEnabled(hOwner) != FALSE;
+        if (ownerWasEnabled) ::EnableWindow(hOwner, FALSE);
+    }
+
+    HWND hDlg = ::CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
+        kClassName, L"发现新版本",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        x, y, dlgW, dlgH,
+        hOwner, NULL, AfxGetInstanceHandle(), &st);
+
+    if (!hDlg) {
+        if (hOwner && ownerWasEnabled) ::EnableWindow(hOwner, TRUE);
+        CString fallback;
+        fallback.Format(L"发现新版本: %s\r\n当前版本: %s\r\n\r\n更新内容:\r\n%s\r\n\r\n是否立即更新？",
+            serverVersion.GetString(), currentVersion.GetString(), visibleUpdateLog.GetString());
+        return ShowCenteredMsgBox(fallback, L"发现新版本", MB_YESNO | MB_ICONINFORMATION | MB_TOPMOST);
+    }
+
+    ::ShowWindow(hDlg, SW_SHOW);
+    ::UpdateWindow(hDlg);
+
+    MSG msg;
+    while (::IsWindow(hDlg) && ::GetMessage(&msg, NULL, 0, 0)) {
+        if (!::IsDialogMessage(hDlg, &msg)) {
+            ::TranslateMessage(&msg);
+            ::DispatchMessage(&msg);
+        }
+    }
+
+    if (hOwner && ownerWasEnabled) {
+        ::EnableWindow(hOwner, TRUE);
+        ::SetForegroundWindow(hOwner);
+    }
+    return st.result;
 }
 
 
@@ -968,7 +1169,9 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     ON_MESSAGE(WM_UPDATE_ALL_UI, &CDNFGameCaptureDlg::OnUpdateAllUI)// 【新增】：绑定自定义 UI 刷新消息
     ON_MESSAGE(WM_CLOUD_AUTH_FAIL, &CDNFGameCaptureDlg::OnCloudAuthFail) // 【新增】
     ON_CBN_SELCHANGE(1030, &CDNFGameCaptureDlg::OnCbnSelchangeCaptureEngine)
+    ON_CBN_SELCHANGE(1034, &CDNFGameCaptureDlg::OnCbnSelchangeDeathAlgorithm)
     ON_MESSAGE(WM_UPDATE_AUTH_TIME, &CDNFGameCaptureDlg::OnUpdateAuthTime)
+    ON_MESSAGE(WM_OCR_SERVICE_FAIL, &CDNFGameCaptureDlg::OnOcrServiceFail)
     ON_CBN_DROPDOWN(1031, &CDNFGameCaptureDlg::OnCbnDropdownTargetWindow)
     ON_CBN_CLOSEUP(1031, &CDNFGameCaptureDlg::OnCbnCloseupTargetWindow)
     // ⬇️ 【新增】：绑定 1033 (我们给新列表框的ID) 的点击事件
@@ -1411,6 +1614,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_totalScoreRed = 0; m_totalScoreBlue = 0; m_lastKillerTeam = -1; m_bFlipSides = false;
     m_hDebugOcrBmp[0] = NULL; m_hDebugOcrBmp[1] = NULL;
     m_viewIndexLeft = -1; m_viewIndexRight = -1;
+    m_lastLaunchOcrTime = 0;
 
     GdiplusStartupInput gpi;
     GdiplusStartup(&m_gdiplusToken, &gpi, NULL);
@@ -1474,14 +1678,30 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     int row1_Y = splitY + 5;
     m_chkFlip.Create(L"翻转红蓝", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, CRect(10, row1_Y, 95, row1_Y + 25), this, ID_CHK_FLIP); m_chkFlip.SetFont(&m_font);
     m_btnHelp.Create(L"说明", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(100, row1_Y, 150, row1_Y + 25), this, 1021); m_btnHelp.SetFont(&m_font);
-    m_status.Create(L"就绪", WS_CHILD | WS_VISIBLE | SS_CENTER, CRect(155, row1_Y + 4, 215, row1_Y + 25), this, 1003); m_status.SetFont(&m_font);
-    m_cmbCaptureEngine.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, CRect(220, row1_Y, 380, row1_Y + 200), this, 1030); m_cmbCaptureEngine.SetFont(&m_font);
+    m_status.Create(L"就绪", WS_CHILD | WS_VISIBLE | SS_CENTER, CRect(155, row1_Y + 4, 205, row1_Y + 25), this, 1003); m_status.SetFont(&m_font);
+
+    HWND hDeathAlgoLabel = ::CreateWindowW(
+        L"STATIC", L"死亡X算法：",
+        WS_CHILD | WS_VISIBLE | SS_RIGHT,
+        210, row1_Y + 4, 85, 24,
+        this->GetSafeHwnd(), (HMENU)1035, AfxGetInstanceHandle(), NULL
+    );
+    if (hDeathAlgoLabel) ::SendMessage(hDeathAlgoLabel, WM_SETFONT, (WPARAM)m_font.GetSafeHandle(), TRUE);
+
+    m_cmbDeathAlgorithm.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, CRect(300, row1_Y, 455, row1_Y + 200), this, 1034); m_cmbDeathAlgorithm.SetFont(&m_font);
+    m_cmbDeathAlgorithm.AddString(L"大X颜色个数判断");
+    m_cmbDeathAlgorithm.AddString(L"打补丁红蓝判断");
+    m_nDeathAlgorithmChoice = GetPrivateProfileInt(L"Settings", L"DeathXAlgorithm", 0, m_iniPath);
+    if (m_nDeathAlgorithmChoice < 0 || m_nDeathAlgorithmChoice > 1) m_nDeathAlgorithmChoice = 0;
+    m_cmbDeathAlgorithm.SetCurSel(m_nDeathAlgorithmChoice);
+
+    m_cmbCaptureEngine.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, CRect(460, row1_Y, 590, row1_Y + 200), this, 1030); m_cmbCaptureEngine.SetFont(&m_font);
     m_cmbCaptureEngine.AddString(L"🔄 自动选择引擎"); m_cmbCaptureEngine.AddString(L"🎮 WGC 硬件捕获"); m_cmbCaptureEngine.AddString(L"🖥️ PrintWindow");
     m_nCaptureEngineChoice = GetPrivateProfileInt(L"Settings", L"CaptureEngine", 0, m_iniPath); if (m_nCaptureEngineChoice < 0 || m_nCaptureEngineChoice > 2) m_nCaptureEngineChoice = 0;
     m_cmbCaptureEngine.SetCurSel(m_nCaptureEngineChoice);
-    m_cmbTargetWindow.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, CRect(385, row1_Y, r.right - 100, row1_Y + 400), this, 1031); m_cmbTargetWindow.SetFont(&m_font);
+    m_cmbTargetWindow.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, CRect(595, row1_Y, r.right - 105, row1_Y + 400), this, 1031); m_cmbTargetWindow.SetFont(&m_font);
     RefreshTargetList();
-    m_chkCropTitle.Create(L"去标题栏", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, CRect(r.right - 95, row1_Y, r.right - 10, row1_Y + 25), this, 1032); m_chkCropTitle.SetFont(&m_font); m_chkCropTitle.SetCheck(BST_CHECKED);
+    m_chkCropTitle.Create(L"去标题栏", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, CRect(r.right - 100, row1_Y, r.right - 10, row1_Y + 25), this, 1032); m_chkCropTitle.SetFont(&m_font); m_chkCropTitle.SetCheck(BST_CHECKED);
     int row2_Y = row1_Y + 35; int halfW = (r.right - 30) / 2;
     m_cmbTeamSelect.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, CRect(10, row2_Y, 80, row2_Y + 200), this, 1024); m_cmbTeamSelect.SetFont(&m_font); m_cmbTeamSelect.AddString(L"[红队]"); m_cmbTeamSelect.AddString(L"[蓝队]"); m_cmbTeamSelect.SetCurSel(0);
     m_editQuickAdd.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_MULTILINE | ES_WANTRETURN | WS_VSCROLL, CRect(85, row2_Y, halfW - 55, row2_Y + 30), this, 1025); m_editQuickAdd.SetFont(&m_font); m_editQuickAdd.SetWindowText(PLACEHOLDER_TEXT);
@@ -1780,9 +2000,16 @@ OcrResultData CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaI
             }
         }
         else {
-            EnsureOcrRunning();
+            if (!EnsureOcrRunning() && m_bIsRunning) {
+                PostMessage(WM_OCR_SERVICE_FAIL, 0, 0);
+            }
         }
         WinHttpCloseHandle(hRequest);
+    }
+    else {
+        if (!EnsureOcrRunning() && m_bIsRunning) {
+            PostMessage(WM_OCR_SERVICE_FAIL, 0, 0);
+        }
     }
 
     // ---- 10. 清洗 OCR 结果中的转义字符 ----
@@ -2906,6 +3133,14 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
     float debugHitX[DEATH_POINT_COUNT][16] = { 0 };
     float debugHitY[DEATH_POINT_COUNT][16] = { 0 };
     int debugHitDir[DEATH_POINT_COUNT][16] = { 0 };
+    COLORREF debugHitColor[DEATH_POINT_COUNT][16] = { 0 };
+    int debugPatchPointCount[DEATH_POINT_COUNT] = { 0 };
+    float debugPatchX[DEATH_POINT_COUNT][4] = { 0 };
+    float debugPatchY[DEATH_POINT_COUNT][4] = { 0 };
+    COLORREF debugPatchColor[DEATH_POINT_COUNT][4] = { 0 };
+    int debugPatchClass[DEATH_POINT_COUNT][4] = { 0 };
+    bool debugPatchPass[DEATH_POINT_COUNT] = { false };
+    int currentDeathAlgorithm = m_nDeathAlgorithmChoice;
 
     {
         std::lock_guard<std::mutex> lock(g_bmpMutex);
@@ -2921,131 +3156,30 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
             int r = GetRValue(c);
             int g = GetGValue(c);
             int b = GetBValue(c);
+            (void)isActive;
 
-            // 死亡 X 的基准色来自实测：#D53000 = RGB(213, 48, 0)。
-            // 这里按“接近这个橙红色”做容差，而不是泛泛地识别所有红色。
-            // 目的：过滤红队血条/红底/头像红边，只保留更像死亡 X 笔画的橙红色。
+            // 当前算法只认死亡 X 基准色：#D53000 = RGB(213, 48, 0)，三通道上下 40 容差。
             const int baseR = 0xD5;
             const int baseG = 0x30;
             const int baseB = 0x00;
-
-            // 亮度下限：小 X 像素少，略放宽；主将大 X 稍稳，也保留一定容差。
-            if (r < (isActive ? 120 : 125)) return false;
-
-            // 死亡 X 是橙红：R 最高，G 有一定值，B 很低。
-            // 纯深红血条常见特征是 G 太低；黄色/金边常见特征是 G 太高。
-            if (g < 12 || g > 120) return false;
-            if (b > 95) return false;
-            if (r < g + 55) return false;
-            if (r < b + 95) return false;
-
-            int dr = abs(r - baseR);
-            int dg = abs(g - baseG);
-            int db = abs(b - baseB);
-
-            // 加权距离：G/B 偏离对色相影响更大，权重更高。
-            int weightedDist = dr + dg * 2 + db * 2;
-            int distLimit = isActive ? 175 : 185;
-
-            // 常规容差：覆盖 #D53000 在录屏/投影/缩放后的变暗、偏橙、轻微偏粉。
-            if (weightedDist <= distLimit) {
-                return true;
-            }
-
-            // 补充：非常亮的橙红高光。仍然要求 G 不能太低、B 不能太高，避免红底/白光误判。
-            if (r >= 220 && g >= 22 && g <= 115 && b <= 80 &&
-                r > g + 80 && r > b + 135) {
-                return true;
-            }
-
-            return false;
+            return abs(r - baseR) <= DEATH_X_COLOR_TOL &&
+                   abs(g - baseG) <= DEATH_X_COLOR_TOL &&
+                   abs(b - baseB) <= DEATH_X_COLOR_TOL;
         };
 
         // X 高光/前景色检测：真实 X 中心经常是白色/浅黄高光，而不是纯红色。
         // 中心门槛允许红/橙或高光；方向采样允许前景色，但最终至少要有 1 个红/橙方向证据。
         auto isXHighlightLike = [](COLORREF c, bool isActive) -> bool {
-            int r = GetRValue(c);
-            int g = GetGValue(c);
-            int b = GetBValue(c);
-
-            // 白色/浅黄高光：真实 X 的交叉中心和边缘高光经常落在这个范围。
-            if (r >= (isActive ? 185 : 195) &&
-                g >= (isActive ? 150 : 160) &&
-                b >= (isActive ? 115 : 125) &&
-                r >= g - 20 && g >= b - 30) {
-                return true;
-            }
-
-            // 压缩/缩放后的灰白高光：三通道都很亮，避免中心点因为不是红色而失败。
-            if (r >= (isActive ? 175 : 185) &&
-                g >= (isActive ? 175 : 185) &&
-                b >= (isActive ? 165 : 175)) {
-                return true;
-            }
-
-            return false;
+            (void)c;
+            (void)isActive;
+            return false; // 当前算法不再把白色/黄色高光当成死亡 X 命中。
         };
 
         // 距离动态容差：只给“斜边射线远端”使用，中心点仍然用严格 isXRedLike。
         // 目的：真实大 X 下半边越往外越暗，固定 #D53000 容差会漏；但不能全局放宽导致红底误判。
         auto isXRedLikeAtDistance = [&](COLORREF c, bool isActive, int stepIndex) -> bool {
-            if (isXRedLike(c, isActive)) return true; // 严格红优先
-
-            int r = GetRValue(c);
-            int g = GetGValue(c);
-            int b = GetBValue(c);
-
-            // stepIndex 越大，离中心越远，允许更暗；但仍要求红橙色相，不能接受纯红底/血条。
-            int minR = 120;
-            int minG = 12;
-            int maxG = 120;
-            int maxB = 95;
-            int rgGap = 55;
-            int rbGap = 95;
-            int distLimit = isActive ? 175 : 185;
-
-            if (stepIndex >= 4) {
-                minR = isActive ? 74 : 82;
-                minG = 3;
-                maxG = 135;
-                maxB = 130;
-                rgGap = 24;
-                rbGap = 38;
-                distLimit = isActive ? 255 : 235;
-            }
-            else if (stepIndex >= 3) {
-                minR = isActive ? 86 : 95;
-                minG = 5;
-                maxG = 130;
-                maxB = 120;
-                rgGap = 32;
-                rbGap = 52;
-                distLimit = isActive ? 230 : 215;
-            }
-            else if (stepIndex >= 2) {
-                minR = isActive ? 100 : 108;
-                minG = 7;
-                maxG = 125;
-                maxB = 110;
-                rgGap = 42;
-                rbGap = 68;
-                distLimit = isActive ? 205 : 200;
-            }
-
-            if (r < minR) return false;
-            if (g < minG || g > maxG) return false;
-            if (b > maxB) return false;
-            if (r < g + rgGap) return false;
-            if (r < b + rbGap) return false;
-
-            const int baseR = 0xD5;
-            const int baseG = 0x30;
-            const int baseB = 0x00;
-            int dr = abs(r - baseR);
-            int dg = abs(g - baseG);
-            int db = abs(b - baseB);
-            int weightedDist = dr + dg * 2 + db * 2;
-            return weightedDist <= distLimit;
+            (void)stepIndex;
+            return isXRedLike(c, isActive); // 不再按距离动态放宽，统一使用 #D53000 ±40。
         };
 
         auto isXForegroundLike = [&](COLORREF c, bool isActive) -> bool {
@@ -3074,18 +3208,26 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
         struct XRayColorStat {
             int strongHits;
             int weakHits;
+            COLORREF firstColor;
+            bool hasColor;
         };
 
         auto countLocalXRedColorDynamic = [&](int x, int y, int radius, bool isActive, int stepIndex) -> XRayColorStat {
-            XRayColorStat stat = { 0, 0 };
+            XRayColorStat stat = { 0, 0, RGB(0, 0, 0), false };
             for (int dy = -radius; dy <= radius; dy++) {
                 for (int dx = -radius; dx <= radius; dx++) {
                     int sx = x + dx;
                     int sy = y + dy;
                     if (sx < 0 || sx >= m_w || sy < 0 || sy >= m_h) continue;
                     COLORREF c = ::GetPixel(hMemDC, sx, sy);
-                    if (isXRedLike(c, isActive)) stat.strongHits++;
-                    else if (isXRedLikeAtDistance(c, isActive, stepIndex)) stat.weakHits++;
+                    if (isXRedLike(c, isActive)) {
+                        stat.strongHits++;
+                        if (!stat.hasColor) { stat.firstColor = c; stat.hasColor = true; }
+                    }
+                    else if (isXRedLikeAtDistance(c, isActive, stepIndex)) {
+                        stat.weakHits++;
+                        if (!stat.hasColor) { stat.firstColor = c; stat.hasColor = true; }
+                    }
                 }
             }
             return stat;
@@ -3132,9 +3274,128 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
             return redHits >= 2;
         };
 
+        struct PatchColorSample {
+            int cls; // 0=无效，1=红，2=蓝
+            COLORREF color;
+            int x;
+            int y;
+        };
+
+        auto patchColorDist = [](COLORREF c, int tr, int tg, int tb) -> int {
+            int r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
+            return abs(r - tr) + abs(g - tg) + abs(b - tb);
+        };
+
+        auto classifyPatchColor = [&](COLORREF c) -> int {
+            int r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
+            bool isRed = abs(r - 255) <= DEATH_X_PATCH_COLOR_TOL && g <= DEATH_X_PATCH_COLOR_TOL && b <= DEATH_X_PATCH_COLOR_TOL;
+            bool isBlue = r <= DEATH_X_PATCH_COLOR_TOL && g <= DEATH_X_PATCH_COLOR_TOL && abs(b - 255) <= DEATH_X_PATCH_COLOR_TOL;
+            if (isRed && isBlue) return patchColorDist(c, 255, 0, 0) <= patchColorDist(c, 0, 0, 255) ? 1 : 2;
+            if (isRed) return 1;
+            if (isBlue) return 2;
+            return 0;
+        };
+
+        auto findPatchColorNear = [&](int x, int y, int radius) -> PatchColorSample {
+            PatchColorSample best = { 0, RGB(0, 0, 0), x, y };
+            if (x >= 0 && x < m_w && y >= 0 && y < m_h) best.color = ::GetPixel(hMemDC, x, y);
+            int bestScore = 999999;
+            for (int dy = -radius; dy <= radius; ++dy) {
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    int sx = x + dx;
+                    int sy = y + dy;
+                    if (sx < 0 || sx >= m_w || sy < 0 || sy >= m_h) continue;
+                    COLORREF c = ::GetPixel(hMemDC, sx, sy);
+                    int cls = classifyPatchColor(c);
+                    if (cls == 0) continue;
+                    int colorScore = (cls == 1) ? patchColorDist(c, 255, 0, 0) : patchColorDist(c, 0, 0, 255);
+                    int posScore = abs(dx) + abs(dy);
+                    int score = colorScore * 10 + posScore;
+                    if (score < bestScore) {
+                        bestScore = score;
+                        best.cls = cls;
+                        best.color = c;
+                        best.x = sx;
+                        best.y = sy;
+                    }
+                }
+            }
+            return best;
+        };
+
+        // 打补丁红蓝判断：恢复上下辅助点。
+        // 点位顺序：0=上，1=下，2=左，3=右。
+        // 判定条件：左右必须都接近纯红或纯蓝，并且一红一蓝；上/下至少一个点接近纯红或纯蓝。
+        // 每个点只允许接近纯红或纯蓝，RGB 单通道容差 ±30。
+        auto checkDeadPatchRaw = [&](int logicalIdx, int startIdx) -> bool {
+            float cx = g_deathPts[startIdx].x;
+            float cy = g_deathPts[startIdx].y;
+            if (cx <= 0 || cy <= 0) return false;
+
+            int centerX = (int)(cx * m_w);
+            int centerY = (int)(cy * m_h);
+            if (centerX < 0 || centerX >= m_w || centerY < 0 || centerY >= m_h) return false;
+
+            const bool isActive = (logicalIdx == DP_LEFT_ACTIVE || logicalIdx == DP_RIGHT_ACTIVE);
+            float stepX = 0.015f / 4.0f;
+            float stepY = 0.015f / 4.0f;
+            if (!isActive) {
+                stepX /= 2.0f;
+                stepY /= 2.0f;
+            }
+
+            const float patchMul = isActive ? DEATH_X_PATCH_MUL_ACTIVE : DEATH_X_PATCH_MUL_NORMAL;
+            float pxNorm[4] = {
+                cx,
+                cx,
+                cx - patchMul * stepX,
+                cx + patchMul * stepX
+            };
+            float pyNorm[4] = {
+                cy - patchMul * stepY,
+                cy + patchMul * stepY,
+                cy,
+                cy
+            };
+
+            int okCount = 0;
+            for (int pidx = 0; pidx < 4; ++pidx) {
+                int sx = (int)(pxNorm[pidx] * m_w);
+                int sy = (int)(pyNorm[pidx] * m_h);
+                PatchColorSample sample = findPatchColorNear(sx, sy, 2);
+                debugPatchX[logicalIdx][pidx] = sample.x / (float)max(1, m_w);
+                debugPatchY[logicalIdx][pidx] = sample.y / (float)max(1, m_h);
+                debugPatchColor[logicalIdx][pidx] = sample.color;
+                debugPatchClass[logicalIdx][pidx] = sample.cls;
+                if (sample.cls != 0) okCount++;
+            }
+            debugPatchPointCount[logicalIdx] = 4;
+            debugDrawX[logicalIdx] = cx;
+            debugDrawY[logicalIdx] = cy;
+            colorDeath[logicalIdx] = ::GetPixel(hMemDC, centerX, centerY);
+            debugRoiHits[logicalIdx] = okCount;
+
+            bool leftRightOpposite = debugPatchClass[logicalIdx][2] != 0 &&
+                                     debugPatchClass[logicalIdx][3] != 0 &&
+                                     debugPatchClass[logicalIdx][2] != debugPatchClass[logicalIdx][3];
+
+            bool upDownHasColor = debugPatchClass[logicalIdx][0] != 0 ||
+                                  debugPatchClass[logicalIdx][1] != 0;
+
+            bool pass = leftRightOpposite && upDownHasColor;
+            debugCenterGate[logicalIdx] = pass;
+            debugPatchPass[logicalIdx] = pass;
+            debugMatchCount[logicalIdx] = (leftRightOpposite ? 20 : 0) + (upDownHasColor ? 10 : 0) + okCount;
+            return pass;
+        };
+
         // 红色中心 + X 四方向结构探测器：
         // 仍然只使用每组第 0 个有效点作为中心；中心必须有红色系证据，四方向至少 3 个方向命中红色系。
         auto checkDeadRaw = [&](int logicalIdx, int startIdx) -> bool {
+            if (currentDeathAlgorithm == DEATH_X_ALGO_PATCH) {
+                return checkDeadPatchRaw(logicalIdx, startIdx);
+            }
+
             float cx = g_deathPts[startIdx].x;
             float cy = g_deathPts[startIdx].y;
             if (cx <= 0 || cy <= 0) return false;
@@ -3161,12 +3422,13 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
             int dirRedCount[4] = { 0, 0, 0, 0 };
             bool dirFarHit[4] = { false, false, false, false };
             COLORREF centerColor = ::GetPixel(hMemDC, centerX, centerY);
-            auto appendDebugHit = [&](float hx, float hy, int dirTag) {
+            auto appendDebugHit = [&](float hx, float hy, int dirTag, COLORREF actualColor) {
                 int idx = debugHitCount[logicalIdx];
                 if (idx < 16) {
                     debugHitX[logicalIdx][idx] = hx;
                     debugHitY[logicalIdx][idx] = hy;
                     debugHitDir[logicalIdx][idx] = dirTag;
+                    debugHitColor[logicalIdx][idx] = actualColor;
                     debugHitCount[logicalIdx]++;
                 }
             };
@@ -3222,7 +3484,7 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
                 if (dirIdx == 0 || dirIdx == 1) diagDownHits++;
                 else diagUpHits++;
                 matchCount++;
-                appendDebugHit(nx, ny, dirIdx);
+                appendDebugHit(nx, ny, dirIdx, stat.hasColor ? stat.firstColor : ::GetPixel(hMemDC, px, py));
             };
 
             for (int i = 1; i <= 4; i++) {
@@ -3329,6 +3591,15 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
                     g_deathXDebug.hitX[i][k] = debugHitX[i][k];
                     g_deathXDebug.hitY[i][k] = debugHitY[i][k];
                     g_deathXDebug.hitDir[i][k] = debugHitDir[i][k];
+                    g_deathXDebug.hitColor[i][k] = debugHitColor[i][k];
+                }
+                g_deathXDebug.patchPointCount[i] = debugPatchPointCount[i];
+                g_deathXDebug.patchPass[i] = debugPatchPass[i];
+                for (int k = 0; k < 4; k++) {
+                    g_deathXDebug.patchX[i][k] = debugPatchX[i][k];
+                    g_deathXDebug.patchY[i][k] = debugPatchY[i][k];
+                    g_deathXDebug.patchColor[i][k] = debugPatchColor[i][k];
+                    g_deathXDebug.patchClass[i][k] = debugPatchClass[i][k];
                 }
             }
             g_deathXDebug.lastTick = GetTickCount();
@@ -3696,14 +3967,38 @@ void CDNFGameCaptureDlg::OnBnClickedStart()
     }
 
     if (!m_bIsRunning) {
+        if (m_nDeathAlgorithmChoice == DEATH_X_ALGO_PATCH && !EnsureDeathPatchInstalled()) {
+            BroadcastStateToWeb();
+            return;
+        }
+
+        // ==========================================
+        // 【新增】：开始监控前必须确认 Umi-OCR 可用。
+        // 如果未运行，先自动拉起；恢复失败则提醒用户并拒绝继续监控，避免 OCR 原文一直为空。
+        // ==========================================
+        if (!EnsureOcrRunning()) {
+            m_bIsRunning = FALSE;
+            m_btnStart.SetWindowText(L"开始监控");
+            m_status.SetWindowText(L"OCR未运行");
+            CString msg = L"❌ 未检测到 Umi-OCR 服务，已尝试自动启动但没有恢复成功。\r\n\r\n请手动打开软件同目录下的 Umi-OCR.exe，等待 OCR 服务启动完成后，再点击【开始监控】。\r\n\r\n为避免大X触发后 OCR 原文为空，本次不会继续监控。";
+            AppLog(L"❌ [开始监控拦截] Umi-OCR 未运行或恢复失败，已取消启动监控。", RGB(255, 80, 80));
+            if (!IsWindowVisible() && m_pWebDlg) {
+                json reply; reply["action"] = "start_guard"; reply["success"] = false;
+                reply["message"] = std::string(CW2A(msg, CP_UTF8));
+                CString jsonStr = CA2W(reply.dump().c_str(), CP_UTF8);
+                m_pWebDlg->SendStateToWeb(jsonStr);
+            }
+            else {
+                ShowCenteredMsgBox(msg, L"Umi-OCR 未运行", MB_ICONWARNING);
+            }
+            BroadcastStateToWeb();
+            return;
+        }
+
         m_bIsRunning = TRUE;
         m_btnStart.SetWindowText(L"停止监控");
         // 【身份融合补丁】开始监控时清空上一段录像/上一局残留缓存。
         NotifyIdentityRoundReset(L"开始监控，清空上一段身份缓存");
-        // ==========================================
-        // 【新增】：点击开始监控，立刻静默唤醒同目录下的 Umi-OCR
-        // ==========================================
-        EnsureOcrRunning();
 
         HWND hGame = ::FindWindow(NULL, DNF_WINDOW_NAME);
 
@@ -3778,6 +4073,38 @@ void CDNFGameCaptureDlg::OnBnClickedStart()
     }
     // 🚨 每次点击开始或停止，必须通知网页同步按钮状态
     BroadcastStateToWeb();
+}
+
+LRESULT CDNFGameCaptureDlg::OnOcrServiceFail(WPARAM wParam, LPARAM lParam) {
+    static DWORD s_lastOcrFailPrompt = 0;
+    DWORD now = GetTickCount();
+    if (now - s_lastOcrFailPrompt < 15000) return 0;
+    s_lastOcrFailPrompt = now;
+
+    if (m_bIsRunning) {
+        m_bIsRunning = FALSE;
+        KillTimer(1);
+        KillTimer(3);
+        m_btnStart.SetWindowText(L"开始监控");
+        m_status.SetWindowText(L"OCR已停止");
+    }
+
+    CString msg = L"❌ Umi-OCR 已关闭或服务无响应。\r\n\r\n软件已经尝试自动恢复，但 OCR 服务仍不可用，所以已自动停止监控。\r\n\r\n请手动打开软件同目录下的 Umi-OCR.exe，确认 OCR 服务启动后，再重新开始监控。";
+    AppLog(L"❌ [Umi-OCR] 服务离线且自动恢复失败，已停止监控，避免继续产生 OCR 空结果。", RGB(255, 80, 80));
+    WriteMatchLog(L"[Umi-OCR] 服务离线且自动恢复失败，已停止监控。" );
+
+    if (!IsWindowVisible() && m_pWebDlg) {
+        json reply; reply["action"] = "start_guard"; reply["success"] = false;
+        reply["message"] = std::string(CW2A(msg, CP_UTF8));
+        CString jsonStr = CA2W(reply.dump().c_str(), CP_UTF8);
+        m_pWebDlg->SendStateToWeb(jsonStr);
+    }
+    else {
+        ShowCenteredMsgBox(msg, L"Umi-OCR 服务异常", MB_ICONWARNING);
+    }
+
+    BroadcastStateToWeb();
+    return 0;
 }
 
 void CDNFGameCaptureDlg::OnBnClickedInputKey() {
@@ -4312,11 +4639,74 @@ void CDNFGameCaptureDlg::Capture() {
 
 
 
-void CDNFGameCaptureDlg::EnsureOcrRunning() {
-    std::lock_guard<std::mutex> lk(m_launchMutex); DWORD now = GetTickCount();
-    if (now - m_lastLaunchOcrTime < 10000 || GetFileAttributes(m_ocrExePath) == INVALID_FILE_ATTRIBUTES) return;
-    m_lastLaunchOcrTime = now;
-    SHELLEXECUTEINFO s = { sizeof(s) }; s.fMask = SEE_MASK_FLAG_NO_UI; s.lpVerb = L"open"; s.lpFile = m_ocrExePath; s.nShow = SW_SHOWMINNOACTIVE; ShellExecuteEx(&s);
+bool CDNFGameCaptureDlg::EnsureOcrRunning() {
+    std::lock_guard<std::mutex> lk(m_launchMutex);
+
+    auto ensureHttpHandles = [&]() -> bool {
+        if (!m_hHttpSession) {
+            m_hHttpSession = WinHttpOpen(L"DNF Capture", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+            if (m_hHttpSession) WinHttpSetTimeouts(m_hHttpSession, 800, 800, 800, 800);
+        }
+        if (!m_hHttpSession) return false;
+        if (!m_hHttpConnect) {
+            m_hHttpConnect = WinHttpConnect(m_hHttpSession, L"127.0.0.1", 1224, 0);
+        }
+        return m_hHttpConnect != NULL;
+    };
+
+    auto probeOcr = [&]() -> bool {
+        if (!ensureHttpHandles()) return false;
+        HINTERNET hProbe = WinHttpOpenRequest(
+            m_hHttpConnect, L"GET", L"/",
+            NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+        if (!hProbe) return false;
+        WinHttpSetTimeouts(hProbe, 800, 800, 800, 800);
+        BOOL ok = WinHttpSendRequest(hProbe, NULL, 0, NULL, 0, 0, 0) && WinHttpReceiveResponse(hProbe, NULL);
+        WinHttpCloseHandle(hProbe);
+        return ok == TRUE;
+    };
+
+    // 先探测端口：Umi-OCR 已经在运行时，不重复启动。
+    if (probeOcr()) return true;
+
+    if (GetFileAttributes(m_ocrExePath) == INVALID_FILE_ATTRIBUTES) {
+        CString msg;
+        msg.Format(L"❌ [Umi-OCR] 未找到 OCR 程序：%s", (LPCTSTR)m_ocrExePath);
+        AppLog(msg, RGB(255, 80, 80));
+        WriteMatchLog(msg);
+        return false;
+    }
+
+    DWORD now = GetTickCount();
+    if (now - m_lastLaunchOcrTime >= 10000) {
+        m_lastLaunchOcrTime = now;
+        SHELLEXECUTEINFO sei = { sizeof(sei) };
+        sei.fMask = SEE_MASK_FLAG_NO_UI;
+        sei.lpVerb = L"open";
+        sei.lpFile = m_ocrExePath;
+        sei.nShow = SW_SHOWMINNOACTIVE;
+        if (!ShellExecuteEx(&sei)) {
+            CString msg;
+            msg.Format(L"❌ [Umi-OCR] 自动启动失败：%s", (LPCTSTR)m_ocrExePath);
+            AppLog(msg, RGB(255, 80, 80));
+            WriteMatchLog(msg);
+            return false;
+        }
+        AppLog(L"🔄 [Umi-OCR] 未检测到 OCR 服务，已尝试自动启动 Umi-OCR...", RGB(255, 200, 0));
+    }
+
+    // 等待 Umi-OCR 拉起端口。这里最多等 6 秒，避免继续监控时 OCR 永远为空。
+    for (int i = 0; i < 12; ++i) {
+        Sleep(500);
+        if (probeOcr()) {
+            AppLog(L"✅ [Umi-OCR] OCR 服务已恢复，可以继续监控。", RGB(0, 255, 100));
+            return true;
+        }
+    }
+
+    AppLog(L"❌ [Umi-OCR] 自动恢复失败，OCR 服务未响应。", RGB(255, 80, 80));
+    WriteMatchLog(L"[Umi-OCR] 自动恢复失败：127.0.0.1:1224 未响应。已阻止/停止监控，避免大X触发后 OCR 原文为空。" );
+    return false;
 }
 
 
@@ -4697,11 +5087,8 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
             dc.LineTo(bl_x, bl_y);
 
             for (int k = 0; k < snap.hitCount[i] && k < 16; k++) {
-                int dirTag = snap.hitDir[i][k];
-                COLORREF hitColor = RGB(255, 255, 0);
-                if (dirTag == 1) hitColor = RGB(0, 255, 0);
-                else if (dirTag == 2) hitColor = RGB(255, 0, 255);
-                else if (dirTag == 3) hitColor = RGB(255, 128, 0);
+                COLORREF hitColor = snap.hitColor[i][k];
+                if (hitColor == 0) hitColor = RGB(255, 255, 0);
 
                 int hx = m_previewRect.left + (int)(snap.hitX[i][k] * m_previewRect.Width());
                 int hy = m_previewRect.top + (int)(snap.hitY[i][k] * m_previewRect.Height());
@@ -4713,6 +5100,20 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
                 dc.Ellipse(hx - 4, hy - 4, hx + 4, hy + 4);
                 dc.SelectObject(pOldHitBrush);
                 dc.SelectObject(pOldHitPen);
+            }
+
+            for (int k = 0; k < snap.patchPointCount[i] && k < 4; ++k) {
+                int px = m_previewRect.left + (int)(snap.patchX[i][k] * m_previewRect.Width());
+                int py = m_previewRect.top + (int)(snap.patchY[i][k] * m_previewRect.Height());
+                COLORREF pc = snap.patchColor[i][k];
+                COLORREF outline = snap.patchClass[i][k] == 0 ? RGB(255, 255, 255) : RGB(0, 0, 0);
+                CPen patchPen(PS_SOLID, 2, outline);
+                CBrush patchBrush(pc);
+                CPen* oldPatchPen = dc.SelectObject(&patchPen);
+                CBrush* oldPatchBrush = dc.SelectObject(&patchBrush);
+                dc.Ellipse(px - 5, py - 5, px + 5, py + 5);
+                dc.SelectObject(oldPatchBrush);
+                dc.SelectObject(oldPatchPen);
             }
 
             if (snap.centerGate[i]) {
@@ -4900,11 +5301,8 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
                     }
 
                     for (int k = 0; k < snap.hitCount[idx] && k < 16; ++k) {
-                        int dirTag = snap.hitDir[idx][k];
-                        COLORREF hitColor = RGB(255, 255, 0);
-                        if (dirTag == 1) hitColor = RGB(0, 255, 0);
-                        else if (dirTag == 2) hitColor = RGB(255, 0, 255);
-                        else if (dirTag == 3) hitColor = RGB(255, 128, 0);
+                        COLORREF hitColor = snap.hitColor[idx][k];
+                        if (hitColor == 0) hitColor = RGB(255, 255, 0);
 
                         int hx = mapToCellX(snap.hitX[idx][k]);
                         int hy = mapToCellY(snap.hitY[idx][k]);
@@ -4915,6 +5313,26 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
                         dc.Ellipse(hx - 3, hy - 3, hx + 4, hy + 4);
                         dc.SelectObject(oldHitBrush);
                         dc.SelectObject(oldHitPen);
+                    }
+
+                    for (int k = 0; k < snap.patchPointCount[idx] && k < 4; ++k) {
+                        int px = mapToCellX(snap.patchX[idx][k]);
+                        int py = mapToCellY(snap.patchY[idx][k]);
+                        COLORREF pc = snap.patchColor[idx][k];
+                        COLORREF outline = snap.patchClass[idx][k] == 0 ? RGB(255, 255, 255) : RGB(0, 0, 0);
+                        CPen patchPen(PS_SOLID, 2, outline);
+                        CBrush patchBrush(pc);
+                        CPen* oldPatchPen = dc.SelectObject(&patchPen);
+                        CBrush* oldPatchBrush = dc.SelectObject(&patchBrush);
+                        dc.Ellipse(px - 4, py - 4, px + 5, py + 5);
+                        dc.SelectObject(oldPatchBrush);
+                        dc.SelectObject(oldPatchPen);
+
+                        CString label;
+                        label.Format(L"%d", k + 1);
+                        dc.SetBkMode(TRANSPARENT);
+                        dc.SetTextColor(outline == RGB(0, 0, 0) ? RGB(255, 255, 255) : RGB(255, 220, 0));
+                        dc.TextOut(px + 5, py - 7, label);
                     }
                 }
             }
@@ -5170,22 +5588,54 @@ void CDNFGameCaptureDlg::CheckForUpdates(bool bSilent) {
         return;
     }
 
-    // --- 读取并转换 UTF-8 内容 ---
+    // --- 读取并转换更新配置内容 ---
+    // 服务器文件可能是 UTF-8，也可能被编辑器保存成 ANSI/GBK。
+    // 先严格按 UTF-8 解；失败再按 GBK/系统代码页解，避免中文更新日志乱码。
     ULONGLONG dwLength = file.GetLength();
-    char* pBuf = new char[(size_t)dwLength + 1];  // 加上 (size_t) 消除警告
-    memset(pBuf, 0, (size_t)dwLength + 1);        // 加上 (size_t) 消除警告
+    char* pBuf = new char[(size_t)dwLength + 1];
+    memset(pBuf, 0, (size_t)dwLength + 1);
     file.Read(pBuf, (UINT)dwLength);
     file.Close();
     ::DeleteFile(tempFile);
 
-    int nLen = MultiByteToWideChar(CP_UTF8, 0, pBuf, -1, NULL, 0);
-    wchar_t* pWBuf = new wchar_t[nLen + 1];
-    memset(pWBuf, 0, (nLen + 1) * sizeof(wchar_t));
-    MultiByteToWideChar(CP_UTF8, 0, pBuf, -1, pWBuf, nLen);
+    CString content;
+    const char* pRaw = pBuf;
+    int byteLen = (dwLength > 0x7fffffffULL) ? 0x7fffffff : (int)dwLength;
 
-    CString content(pWBuf);
+    // UTF-16 LE BOM 兼容。
+    if (byteLen >= 2 &&
+        (unsigned char)pRaw[0] == 0xFF &&
+        (unsigned char)pRaw[1] == 0xFE) {
+        int wcharCount = (byteLen - 2) / 2;
+        content = CString((LPCWSTR)(pRaw + 2), wcharCount);
+    }
+    else {
+        // UTF-8 BOM 兼容。
+        if (byteLen >= 3 &&
+            (unsigned char)pRaw[0] == 0xEF &&
+            (unsigned char)pRaw[1] == 0xBB &&
+            (unsigned char)pRaw[2] == 0xBF) {
+            pRaw += 3;
+            byteLen -= 3;
+        }
+
+        auto DecodeBytes = [&](UINT codePage, DWORD flags) -> bool {
+            int nLen = MultiByteToWideChar(codePage, flags, pRaw, byteLen, NULL, 0);
+            if (nLen <= 0) return false;
+            std::vector<wchar_t> wbuf(nLen + 1, 0);
+            if (MultiByteToWideChar(codePage, flags, pRaw, byteLen, wbuf.data(), nLen) <= 0) return false;
+            content = CString(wbuf.data(), nLen);
+            return true;
+        };
+
+        if (!DecodeBytes(CP_UTF8, MB_ERR_INVALID_CHARS)) {
+            if (!DecodeBytes(936, 0)) {
+                DecodeBytes(CP_ACP, 0);
+            }
+        }
+    }
+
     delete[] pBuf;
-    delete[] pWBuf;
 
     // ==========================================
     // 拦截 3：格式解析失败，提前返回
@@ -5252,12 +5702,9 @@ void CDNFGameCaptureDlg::CheckForUpdates(bool bSilent) {
                 visibleUpdateLog = L"没有找到高于当前版本的更新说明。";
             }
 
-            CString msg;
-            msg.Format(L"发现新版本: %s\n当前版本: %s\n\n更新内容:\n%s\n\n是否立即更新？",
-                serverVersion.GetString(), currentVersion.GetString(), visibleUpdateLog.GetString());
-
-            // ⬇️ 【修改点】：把 MessageBox 换成 ShowCenteredMsgBox
-            if (ShowCenteredMsgBox(msg, L"发现新版本", MB_YESNO | MB_ICONINFORMATION | MB_TOPMOST) == IDYES) {
+            // 用专用更新弹窗显示，保留 update_v2.txt 的换行、缩进和空行；
+            // 不再用 MessageBox 自动换行，避免更新说明格式被打乱。
+            if (ShowUpdateConfirmDialog(serverVersion, currentVersion, visibleUpdateLog) == IDYES) {
                 DownloadAndApplyUpdate(downloadUrl);
             }
             else {
@@ -5822,6 +6269,20 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 OnBnClickedStart();
             }
         }
+        else if (action == "cmd_set_death_algorithm") {
+            int algo = j["value"].get<int>();
+            if (algo < 0 || algo > 1) algo = 0;
+            m_nDeathAlgorithmChoice = algo;
+            if (m_cmbDeathAlgorithm.m_hWnd) m_cmbDeathAlgorithm.SetCurSel(m_nDeathAlgorithmChoice);
+
+            CString val;
+            val.Format(L"%d", m_nDeathAlgorithmChoice);
+            WritePrivateProfileString(L"Settings", L"DeathXAlgorithm", val, m_iniPath);
+
+            CString names[] = { L"大X颜色个数判断", L"打补丁红蓝判断" };
+            AppLog(L"⚙️ [设置] 死亡X算法已切换为: " + names[m_nDeathAlgorithmChoice], RGB(0, 255, 255));
+            BroadcastStateToWeb();
+        }
         else if (action == "cmd_auth") {
             std::string codeStr = j["code"].get<std::string>();
             CString newAuthCode = CA2W(codeStr.c_str(), CP_UTF8);
@@ -5949,6 +6410,17 @@ void CDNFGameCaptureDlg::BroadcastStateToWeb()
         j["data"]["isMonitoring"] = (m_bIsRunning == TRUE);
         j["data"]["isFlipped"] = (m_bFlipSides == true);         // 👈 新增
         j["data"]["isMfcVisible"] = (IsWindowVisible() == TRUE); // 👈 新增
+        j["data"]["deathXAlgorithm"] = m_nDeathAlgorithmChoice;
+
+        bool deathPatchInstalled = false;
+        wchar_t cachedImagePacks2[MAX_PATH] = { 0 };
+        ::GetPrivateProfileString(L"Settings", L"ImagePacks2Path", L"", cachedImagePacks2, MAX_PATH, m_iniPath);
+        CString cachedPatchDir = cachedImagePacks2;
+        cachedPatchDir.Trim();
+        if (!cachedPatchDir.IsEmpty()) {
+            deathPatchInstalled = DnfFileExists(DnfJoinPath(cachedPatchDir, DEATH_X_PATCH_FILE_NAME));
+        }
+        j["data"]["deathPatchInstalled"] = deathPatchInstalled;
 
         // 🚨 【新增 2】：计算并同步授权时间文字
         j["data"]["isAuthValid"] = (m_bIsAuthValid == true);
@@ -6940,6 +7412,214 @@ bool CDNFGameCaptureDlg::IsBitmapBlank(HBITMAP hBmp, int w, int h) {
 
     // 只有这 40 个点全部是 100% 绝对的纯黑，才会被判定为捕获失败
     return isAllBlack;
+}
+
+
+static bool DnfFileExists(const CString& path)
+{
+    DWORD attr = ::GetFileAttributes(path);
+    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+static bool DnfDirExists(const CString& path)
+{
+    DWORD attr = ::GetFileAttributes(path);
+    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static CString DnfJoinPath(const CString& a, const CString& b)
+{
+    CString out = a;
+    out.TrimRight(L"\\/");
+    return out + L"\\" + b;
+}
+
+static CString DnfGetExeDir()
+{
+    wchar_t exePath[MAX_PATH] = { 0 };
+    ::GetModuleFileName(NULL, exePath, MAX_PATH);
+    CString dir = exePath;
+    int pos = dir.ReverseFind(L'\\');
+    if (pos >= 0) dir = dir.Left(pos);
+    return dir;
+}
+
+static bool DnfSearchImagePacks2Recursive(const CString& root, CString& outDir, int depth)
+{
+    if (depth < 0) return false;
+    if (!DnfDirExists(root)) return false;
+
+    CString direct = DnfJoinPath(root, L"ImagePacks2");
+    if (DnfDirExists(direct)) {
+        CString normalizedRoot = root;
+        normalizedRoot.MakeLower();
+        if (normalizedRoot.Find(L"地下城与勇士") >= 0 || normalizedRoot.Find(L"dnf") >= 0 || normalizedRoot.Find(L"neople") >= 0) {
+            outDir = direct;
+            return true;
+        }
+    }
+
+    if (depth == 0) return false;
+
+    CString pattern = DnfJoinPath(root, L"*");
+    WIN32_FIND_DATA fd = {};
+    HANDLE hFind = ::FindFirstFile(pattern, &fd);
+    if (hFind == INVALID_HANDLE_VALUE) return false;
+
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        CString name = fd.cFileName;
+        if (name == L"." || name == L"..") continue;
+
+        CString lower = name;
+        lower.MakeLower();
+        if (lower == L"windows" || lower == L"program files" || lower == L"program files (x86)" ||
+            lower == L"system volume information" || lower == L"$recycle.bin") {
+            continue;
+        }
+
+        CString child = DnfJoinPath(root, name);
+        if (DnfSearchImagePacks2Recursive(child, outDir, depth - 1)) {
+            ::FindClose(hFind);
+            return true;
+        }
+    } while (::FindNextFile(hFind, &fd));
+
+    ::FindClose(hFind);
+    return false;
+}
+
+bool CDNFGameCaptureDlg::FindDnfImagePacks2Folder(CString& outDir)
+{
+    outDir.Empty();
+
+    wchar_t cached[MAX_PATH] = { 0 };
+    ::GetPrivateProfileString(L"Settings", L"ImagePacks2Path", L"", cached, MAX_PATH, m_iniPath);
+    CString cachedDir = cached;
+    cachedDir.Trim();
+    if (!cachedDir.IsEmpty() && DnfDirExists(cachedDir)) {
+        outDir = cachedDir;
+        return true;
+    }
+
+    wchar_t drives[512] = { 0 };
+    DWORD n = ::GetLogicalDriveStrings(511, drives);
+    for (wchar_t* d = drives; d && *d; d += wcslen(d) + 1) {
+        CString drive = d;
+        drive.TrimRight(L"\\/");
+
+        CString candidates[] = {
+            DnfJoinPath(drive, L"地下城与勇士\\ImagePacks2"),
+            DnfJoinPath(drive, L"DNF\\ImagePacks2"),
+            DnfJoinPath(drive, L"Neople\\DNF\\ImagePacks2"),
+            DnfJoinPath(drive, L"WeGameApps\\rail_apps\\地下城与勇士\\ImagePacks2"),
+            DnfJoinPath(drive, L"Program Files\\腾讯游戏\\地下城与勇士\\ImagePacks2"),
+            DnfJoinPath(drive, L"Program Files (x86)\\腾讯游戏\\地下城与勇士\\ImagePacks2")
+        };
+        for (auto& c : candidates) {
+            if (DnfDirExists(c)) {
+                outDir = c;
+                ::WritePrivateProfileString(L"Settings", L"ImagePacks2Path", outDir, m_iniPath);
+                return true;
+            }
+        }
+    }
+
+    for (wchar_t* d = drives; d && *d; d += wcslen(d) + 1) {
+        CString drive = d;
+        drive.TrimRight(L"\\/");
+        if (DnfSearchImagePacks2Recursive(drive + L"\\", outDir, 5)) {
+            ::WritePrivateProfileString(L"Settings", L"ImagePacks2Path", outDir, m_iniPath);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void DnfSendWebToast(CWebScoreDlg* webDlg, const CString& action, const CString& message)
+{
+    if (!webDlg) return;
+    json reply;
+    reply["action"] = std::string(CW2A(action, CP_UTF8));
+    reply["success"] = false;
+    reply["message"] = std::string(CW2A(message, CP_UTF8));
+    CString jsonStr = CA2W(reply.dump().c_str(), CP_UTF8);
+    webDlg->SendStateToWeb(jsonStr);
+}
+
+bool CDNFGameCaptureDlg::EnsureDeathPatchInstalled()
+{
+    CString exeDir = DnfGetExeDir();
+    CString srcPatch = DnfJoinPath(exeDir, DEATH_X_PATCH_FILE_NAME);
+    if (!DnfFileExists(srcPatch)) {
+        CString msg;
+        msg.Format(L"选择了【打补丁红蓝判断】，但 EXE 同目录没有找到：\r\n%s\r\n\r\n请先把这个 NPK 放到软件 EXE 同目录，再开始监控。", DEATH_X_PATCH_FILE_NAME);
+        if (!IsWindowVisible() && m_pWebDlg) DnfSendWebToast(m_pWebDlg, L"patch_result", msg);
+        else ShowCenteredMsgBox(msg, L"缺少补丁文件", MB_ICONWARNING);
+        return false;
+    }
+
+    CString imagePacks2;
+    bool found = FindDnfImagePacks2Folder(imagePacks2);
+    if (!found) {
+        CString msg = L"选择了【打补丁红蓝判断】，但没有找到地下城与勇士\\ImagePacks2 文件夹。\r\n\r\n软件会自动搜索各磁盘并缓存路径；本次搜索失败。请确认 DNF 已安装，或把 ImagePacks2Path 写入 config.ini 的 [Settings]。";
+        if (!IsWindowVisible() && m_pWebDlg) DnfSendWebToast(m_pWebDlg, L"patch_result", msg);
+        else ShowCenteredMsgBox(msg, L"未找到DNF目录", MB_ICONWARNING);
+        return false;
+    }
+
+    CString dstPatch = DnfJoinPath(imagePacks2, DEATH_X_PATCH_FILE_NAME);
+    if (DnfFileExists(dstPatch)) {
+        AppLog(L"🧩 [补丁算法] 已检测到补丁：" + dstPatch, RGB(0, 255, 100));
+        return true;
+    }
+
+    CString notice;
+    notice.Format(L"选择了【打补丁红蓝判断】，当前还没有检测到补丁。\r\n\r\n第一次打补丁请先关闭游戏客户端；如果游戏正在运行，补丁复制后也需要重新上游戏才会生效。\r\n\r\n软件已自动找到游戏补丁目录：\r\n%s\r\n\r\n点击【确定】会把 EXE 同目录下的\r\n%s\r\n复制进去并继续开始监控；点击【取消】则不打补丁，也不会开始监控。", (LPCTSTR)imagePacks2, DEATH_X_PATCH_FILE_NAME);
+
+    // C++ 端点击开始监控：使用原生“确定/取消”对话框。
+    // Web 端点击开始监控：前端已经弹过确认框，这里直接执行复制，避免二次确认。
+    if (!IsWindowVisible() && m_pWebDlg) {
+        AppLog(L"🧩 [补丁算法] Web端已确认安装补丁，开始复制 NPK。", RGB(0, 255, 255));
+    }
+    else {
+        int ret = ShowCenteredMsgBox(notice, L"确认安装死亡X补丁", MB_OKCANCEL | MB_ICONINFORMATION | MB_TOPMOST | MB_SYSTEMMODAL);
+        if (ret != IDOK) {
+            AppLog(L"🧩 [补丁算法] 用户取消安装补丁，本次不会开始监控。", RGB(255, 165, 0));
+            return false;
+        }
+    }
+
+    if (!::CopyFile(srcPatch, dstPatch, FALSE)) {
+        DWORD err = ::GetLastError();
+        CString msg;
+        msg.Format(L"补丁复制失败。\r\n\r\n源文件：%s\r\n目标：%s\r\n错误码：%lu\r\n\r\n请尝试用管理员身份运行，或手动复制。", (LPCTSTR)srcPatch, (LPCTSTR)dstPatch, err);
+        if (!IsWindowVisible() && m_pWebDlg) DnfSendWebToast(m_pWebDlg, L"patch_result", msg);
+        else ShowCenteredMsgBox(msg, L"补丁安装失败", MB_ICONWARNING);
+        return false;
+    }
+
+    CString okMsg;
+    okMsg.Format(L"补丁安装成功！\r\n\r\n已复制到：\r\n%s\r\n\r\n如果游戏客户端正在运行，请重新上游戏后再使用【打补丁红蓝判断】。", (LPCTSTR)dstPatch);
+    AppLog(L"✅ [补丁算法] 已自动安装补丁：" + dstPatch, RGB(0, 255, 100));
+    if (!IsWindowVisible() && m_pWebDlg) DnfSendWebToast(m_pWebDlg, L"patch_result", okMsg);
+    else ShowCenteredMsgBox(okMsg, L"补丁安装成功", MB_ICONINFORMATION);
+    return true;
+}
+
+void CDNFGameCaptureDlg::OnCbnSelchangeDeathAlgorithm()
+{
+    m_nDeathAlgorithmChoice = m_cmbDeathAlgorithm.GetCurSel();
+    if (m_nDeathAlgorithmChoice < 0 || m_nDeathAlgorithmChoice > 1) m_nDeathAlgorithmChoice = 0;
+
+    CString val;
+    val.Format(L"%d", m_nDeathAlgorithmChoice);
+    ::WritePrivateProfileString(L"Settings", L"DeathXAlgorithm", val, m_iniPath);
+
+    CString algoNames[] = { L"大X颜色个数判断", L"打补丁红蓝判断" };
+    AppLog(L"⚙️ [设置] 死亡X算法已切换为: " + algoNames[m_nDeathAlgorithmChoice], RGB(0, 255, 255));
+    BroadcastStateToWeb();
 }
 
 // =====================================================================

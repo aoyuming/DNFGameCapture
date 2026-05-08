@@ -35,13 +35,24 @@
     </div>
 
     <div class="control-panel">
-        <button class="ctrl-btn btn-swap" id="btn-swap">🔄 翻转红蓝</button>
-        <button class="ctrl-btn btn-monitor-start" id="btn-monitor">▶ 运行</button>
-        <button class="ctrl-btn btn-auth" id="btn-auth">🔑 授权</button>
-        <button class="ctrl-btn btn-pro" id="btn-pro">👑 专业模式</button>
-        <button class="ctrl-btn btn-clear-red" id="btn-clear-red">🗑️ 清空红队</button>
-        <button class="ctrl-btn btn-clear-blue" id="btn-clear-blue">🗑️ 清空蓝队</button>
-        <button class="ctrl-btn btn-reset" id="btn-reset">✨ 重置战绩</button>
+        <div class="control-row control-row-main">
+            <button class="ctrl-btn btn-swap" id="btn-swap">🔄 翻转红蓝</button>
+            <button class="ctrl-btn btn-monitor-start" id="btn-monitor">▶ 运行</button>
+            <label class="algo-select-wrap" title="选择死亡X检测算法">
+                <span>死亡X</span>
+                <select id="death-algo-select" class="algo-select">
+                    <option value="0">大X颜色个数判断</option>
+                    <option value="1">打补丁红蓝判断</option>
+                </select>
+            </label>
+        </div>
+        <div class="control-row control-row-tools">
+            <button class="ctrl-btn btn-auth" id="btn-auth">🔑 授权</button>
+            <button class="ctrl-btn btn-pro" id="btn-pro">👑 专业模式</button>
+            <button class="ctrl-btn btn-clear-red" id="btn-clear-red">🗑️ 清空红队</button>
+            <button class="ctrl-btn btn-clear-blue" id="btn-clear-blue">🗑️ 清空蓝队</button>
+            <button class="ctrl-btn btn-reset" id="btn-reset">✨ 重置战绩</button>
+        </div>
         
         <div class="dir-bar" id="dir-display" title="点击可更改 TXT 输出目录">📁 战绩输出目录：获取中...</div>
     </div>

@@ -198,22 +198,107 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 
 /* ================= 底部控制区 ================= */
 .control-panel {
-    margin-top: 15px; display: flex; flex-wrap: wrap; justify-content: center; gap: 15px; 
-    background: rgba(255,255,255,0.05); padding: 18px 25px; border-radius: 12px;
-    width: 100%; max-width: 620px; box-sizing: border-box;
+    margin-top: 15px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    background: rgba(255,255,255,0.05); padding: 16px 18px; border-radius: 12px;
+    width: 100%; max-width: 780px; box-sizing: border-box;
     position: relative; z-index: 1; /* 🚨 降低底部控制区的层级，给上面的弹窗让路 */
 }
-.ctrl-btn { 
-    padding: 10px 20px !important; font-size: 14px !important; font-weight: bold; 
-    border: none; border-radius: 6px; cursor: pointer; transition: 0.2s; color: white; white-space: nowrap !important; 
+.control-row {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    flex-wrap: nowrap;
 }
+.control-row-main { max-width: 760px; }
+.control-row-tools { max-width: 840px; }
+.ctrl-btn { 
+    padding: 9px 15px !important; font-size: 13px !important; font-weight: bold; 
+    border: none; border-radius: 6px; cursor: pointer; transition: 0.2s; color: white; white-space: nowrap !important; 
+    display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+}
+.algo-select-wrap {
+    display: flex; align-items: center; gap: 6px;
+    padding: 8px 10px; border-radius: 6px;
+    background: rgba(0,0,0,0.22); border: 1px solid rgba(0,229,255,0.35);
+    color: #00e5ff; font-size: 13px; font-weight: bold;
+    white-space: nowrap;
+}
+.algo-select {
+    background: #151522; color: #fff; border: 1px solid rgba(0,229,255,0.45);
+    border-radius: 5px; padding: 4px 6px; outline: none;
+    font-family: 'Microsoft YaHei', sans-serif; font-weight: bold;
+}
+.algo-select:focus { border-color: #00e5ff; box-shadow: 0 0 8px rgba(0,229,255,0.35); }
 .ctrl-btn:hover { filter: brightness(1.2); }
-#btn-monitor { font-size: 15px !important; padding: 10px 30px !important; letter-spacing: 1px; }
+#btn-monitor { font-size: 15px !important; padding: 9px 28px !important; letter-spacing: 1px; }
 
 .btn-swap { background: #4a4a60; }
 .btn-monitor-start { background: #00e5ff; color: #000; box-shadow: 0 0 10px rgba(0, 229, 255, 0.4); }
 .btn-monitor-stop { background: #ff0055; box-shadow: 0 0 10px rgba(255, 0, 85, 0.4); }
-.btn-auth { background: transparent; border: 1px solid #ffaa00; color: #ffaa00; }
+.btn-auth {
+    background: transparent; border: 1px solid #ffaa00; color: #ffaa00;
+    width: 190px; max-width: 190px;
+    flex-shrink: 0;
+    position: relative;
+    overflow: visible;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+}
+.btn-auth .auth-short {
+    display: inline-block;
+    max-width: 105px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: bottom;
+    opacity: 0.95;
+}
+.btn-auth::after {
+    content: attr(data-auth-tooltip);
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 10px);
+    transform: translateX(-50%);
+    display: none;
+    width: max-content;
+    max-width: 360px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid rgba(0, 229, 255, 0.65);
+    background: rgba(10, 10, 18, 0.96);
+    color: #00e5ff;
+    font-size: 13px;
+    line-height: 1.4;
+    white-space: nowrap;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+    z-index: 99999;
+    pointer-events: none;
+}
+.btn-auth::before {
+    content: '';
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 4px);
+    transform: translateX(-50%);
+    display: none;
+    border-width: 6px 6px 0 6px;
+    border-style: solid;
+    border-color: rgba(0, 229, 255, 0.65) transparent transparent transparent;
+    z-index: 99999;
+    pointer-events: none;
+}
+.btn-auth:hover::after,
+.btn-auth:hover::before {
+    display: block;
+}
 .btn-clear-blue { background: #0b3d60; border: 1px solid var(--blue-team); }
 .btn-clear-red { background: #600b1d; border: 1px solid var(--red-team); }
 .btn-reset { background: #8a6508; border: 1px solid #ffd700; }
