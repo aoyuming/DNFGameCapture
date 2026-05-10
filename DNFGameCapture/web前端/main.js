@@ -9,6 +9,10 @@ let isMonitoring = false;
 let isProMode = false;
 let deathXAlgorithm = 0;
 let deathPatchInstalled = false;
+let recentEvents = [];
+let isReviewPanelOpen = false;
+let lastSentWebHeight = 0;
+let webResizeTimer = null;
 let draggedRow = null;
 let isDbInitialized = false;
 // Web 端编辑小号后，C++ 可能会立刻推回一次旧状态；这里短时间记录改名映射，避免旧小号被同步回来。
@@ -225,8 +229,8 @@ function applyStateFromServer(state) {
     btnMonitor.innerHTML = isMonitoring ? '🛑 停止' : '▶ 运行';
     btnMonitor.className = isMonitoring ? 'ctrl-btn btn-monitor-stop' : 'ctrl-btn btn-monitor-start';
 
-    const container = document.getElementById('main-container');
-    container.style.flexDirection = state.isFlipped ? 'row-reverse' : 'row';
+    const teamsWrap = document.getElementById('teams-wrap') || document.getElementById('main-container');
+    teamsWrap.style.flexDirection = state.isFlipped ? 'row-reverse' : 'row';
 
     deathXAlgorithm = Number(state.deathXAlgorithm || 0);
     deathPatchInstalled = !!state.deathPatchInstalled;
@@ -259,6 +263,9 @@ function applyStateFromServer(state) {
         document.getElementById('dir-display').innerText = `📁 输出目录: ${state.outputDir}`;
     }
 
+    recentEvents = Array.isArray(state.recentEvents) ? state.recentEvents : [];
+    renderReviewEvents();
+
     document.querySelector('#team-blue .team-score-input').value = state.blueScore;
     document.querySelector('#team-red .team-score-input').value = state.redScore;
 
@@ -280,6 +287,103 @@ const triggerSync = () => {
     updateStartButtonGuard();
     pushStateToServer();
 };
+
+function getWebContentHeight() {
+    const candidates = [
+        document.querySelector('.main-container'),
+        document.querySelector('.control-panel'),
+        document.getElementById('custom-modal')
+    ].filter(Boolean);
+
+    let bottom = 0;
+    candidates.forEach(el => {
+        const rect = el.getBoundingClientRect();
+        if (rect.height > 0) bottom = Math.max(bottom, rect.bottom);
+    });
+
+    const body = document.body;
+    const html = document.documentElement;
+    return Math.ceil(Math.max(
+        bottom + 32,
+        body.scrollHeight, body.offsetHeight,
+        html.scrollHeight, html.offsetHeight
+    ));
+}
+
+function requestWebWindowResize(force = false) {
+    // 外层 Windows 窗口改为固定高度；保留空函数兼容现有调用点。
+    return;
+}
+
+function getActivePlayerNames() {
+    return Array.from(document.querySelectorAll('.name-input'))
+        .map(input => input.value.trim())
+        .filter(Boolean);
+}
+
+function renderReviewEvents() {
+    const list = document.getElementById('review-list');
+    const count = document.getElementById('review-count');
+    const toggleCount = document.getElementById('review-toggle-count');
+    if (!list || !count) return;
+
+    count.textContent = String(recentEvents.length);
+    if (toggleCount) toggleCount.textContent = String(recentEvents.length);
+    if (recentEvents.length === 0) {
+        list.innerHTML = '<div class="review-empty">暂无识别记录</div>';
+        requestWebWindowResize(true);
+        return;
+    }
+
+    list.innerHTML = recentEvents.map(ev => {
+        const status = ev.status || (ev.statsApplied ? '已计入' : '未计入');
+        const cls = ev.undone ? 'is-undone' : (ev.statsApplied ? 'is-applied' : 'is-pending');
+        const killer = ev.killer || '待定';
+        const dead = ev.dead || '待定';
+        const matchText = `${killer}击杀${dead}`;
+        const detail = [
+            ev.algorithm ? `算法：${ev.algorithm}` : '',
+            ev.triggerSide ? `触发：${ev.triggerSide}` : '',
+            ev.snapshotPath ? `截图：${ev.snapshotPath}` : '',
+            ev.ocrSummary ? `OCR：${ev.ocrSummary}` : '',
+            ev.candidateSummary ? `候选：${ev.candidateSummary}` : ''
+        ].filter(Boolean).join('\n');
+
+        return `
+            <div class="review-item ${cls}" data-id="${ev.id}">
+                <div class="review-main">
+                    <span class="review-time">${escapeHtml(ev.time || '--:--:--')}</span>
+                    <span class="review-match" title="${escapeHtml(matchText)}"><span class="review-winner">${escapeHtml(killer)}</span><b>击杀</b><span class="review-loser">${escapeHtml(dead)}</span></span>
+                    <span class="review-status">${escapeHtml(status)}</span>
+                </div>
+                <div class="review-sub" title="${escapeHtml(detail)}">${escapeHtml(ev.triggerSide || '未知触发侧')}</div>
+                <div class="review-actions">
+                    <button class="review-btn btn-review-undo" data-id="${ev.id}" ${(!ev.undone && !ev.statsApplied) ? 'disabled' : ''}>${ev.undone ? '恢复' : '撤销'}</button>
+                </div>
+            </div>`;
+    }).join('');
+    requestWebWindowResize(true);
+}
+
+function sendReviewUndo(eventId) {
+    if (!window.chrome?.webview) return;
+    window.chrome.webview.postMessage({ action: 'cmd_undo_event', id: Number(eventId) });
+}
+
+function setReviewPanelOpen(open) {
+    isReviewPanelOpen = !!open;
+    const panel = document.getElementById('review-panel');
+    const backdrop = document.getElementById('review-backdrop');
+    const toggle = document.getElementById('btn-review-toggle');
+    panel?.classList.toggle('is-open', isReviewPanelOpen);
+    backdrop?.classList.toggle('is-open', isReviewPanelOpen);
+    panel?.setAttribute('aria-hidden', isReviewPanelOpen ? 'false' : 'true');
+    toggle?.setAttribute('aria-expanded', isReviewPanelOpen ? 'true' : 'false');
+}
+
+function toggleReviewPanel() {
+    setReviewPanelOpen(!isReviewPanelOpen);
+}
 
 // ==========================================
 // 2. 内置弹窗系统
@@ -1434,6 +1538,20 @@ document.getElementById('dir-display').addEventListener('click', () => {
     if (window.chrome?.webview) window.chrome.webview.postMessage({ action: "cmd_browse_dir" });
 });
 
+document.getElementById('review-list')?.addEventListener('click', (e) => {
+    const undoBtn = e.target.closest('.btn-review-undo');
+    if (undoBtn) {
+        const eventId = undoBtn.getAttribute('data-id');
+        const actionText = undoBtn.textContent.trim() === '恢复' ? '恢复' : '撤销';
+        showConfirm(`确定${actionText}这条自动识别战绩吗？`, (ok) => {
+            if (ok) sendReviewUndo(eventId);
+        });
+    }
+});
+document.getElementById('btn-review-toggle')?.addEventListener('click', toggleReviewPanel);
+document.getElementById('btn-review-close')?.addEventListener('click', () => setReviewPanelOpen(false));
+document.getElementById('review-backdrop')?.addEventListener('click', () => setReviewPanelOpen(false));
+
 function clearTeamData(teamId) {
     const panel = document.getElementById(teamId);
     panel.querySelectorAll('.name-input').forEach(input => { input.value = ''; input.classList.remove('input-error'); });
@@ -1449,7 +1567,13 @@ document.getElementById('btn-reset').addEventListener('click', () => {
             document.querySelectorAll('.stat-kill, .stat-death').forEach(i => i.value = '0');
             document.querySelectorAll('.stat-ak').forEach(i => i.value = '-');
             document.querySelectorAll('.team-score-input').forEach(i => i.value = '0');
-            triggerSync();
+            recentEvents = [];
+            renderReviewEvents();
+            if (window.chrome?.webview) {
+                window.chrome.webview.postMessage({ action: 'cmd_reset_stats' });
+            } else {
+                triggerSync();
+            }
         }
     });
 });
@@ -1481,6 +1605,11 @@ document.addEventListener('keydown', function (e) {
     else if (e.key === 'Escape') {
         // 对话框激活：由对话框自己的监听器处理（那边已经 stopImmediatePropagation）
         if (customModal.classList.contains('active')) return;
+        if (isReviewPanelOpen) {
+            e.preventDefault();
+            setReviewPanelOpen(false);
+            return;
+        }
 
         const focused = document.activeElement;
         // 当前有输入焦点 → 失焦（自动保存、关闭弹窗）
@@ -1535,3 +1664,11 @@ document.addEventListener('keyup', function (e) {
         ctrlSwapState.currentIndex = -1;
     }
 });
+
+if (window.ResizeObserver) {
+    const webSizeObserver = new ResizeObserver(() => requestWebWindowResize());
+    webSizeObserver.observe(document.body);
+}
+window.addEventListener('load', requestWebWindowResize);
+window.addEventListener('resize', requestWebWindowResize);
+setTimeout(requestWebWindowResize, 300);

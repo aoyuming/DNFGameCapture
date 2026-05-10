@@ -21,7 +21,7 @@
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"3.3.0"    //当前版本号
+#define CURRENT_VERSION L"3.4.1"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -81,9 +81,26 @@ struct PlayerData {
 };
 
 struct RecentEvent {
+    int id = 0;
     CString killer;
     CString dead;
     DWORD time;
+    CString timeText;
+    int triggerSide = -1;
+    int killerIdx = -1;
+    int deadIdx = -1;
+    int killerTeam = -1;
+    int deadTeam = -1;
+    int redScoreDelta = 0;
+    int blueScoreDelta = 0;
+    int akDelta = 0;
+    bool statsApplied = false;
+    bool undone = false;
+    CString status;
+    CString ocrSummary;
+    CString candidateSummary;
+    CString algorithmName;
+    CString snapshotPath;
 };
 
 struct OcrResultData {
@@ -198,6 +215,9 @@ private:
     TDnfPanelMatchResult MatchIdentityPanel(TDnfPanelSide side);
     void NotifyIdentityKillConfirmed(int deadTeam, const CString& deadName);
     void NotifyIdentityRoundReset(const CString& reason);
+    CString SaveReviewSnapshot(HBITMAP hBmp, int eventId);
+    void AddReviewEvent(const RecentEvent& ev);
+    bool ToggleReviewEvent(int eventId);
 
     void FilterLivePlatformPrefixes();
     void WriteScoreToFile();

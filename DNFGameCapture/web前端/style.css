@@ -12,7 +12,24 @@ body {
     color: var(--text-main);
     font-family: 'Microsoft YaHei', sans-serif;
     margin: 0;
-    padding: 15px; 
+    padding: 20px 18px 18px; 
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+.app-shell {
+    display: flex;
+    align-items: stretch;
+    justify-content: center;
+    gap: 15px;
+    width: fit-content;
+    margin-left: 0;
+}
+
+.left-stack {
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -20,12 +37,17 @@ body {
 
 /* 🚨 核心修复 1：强行拔高主体战绩区的层级，让它盖过底部的按钮区！ */
 .main-container {
+    display: block;
+    width: fit-content;
+    position: relative;
+    z-index: 10;
+}
+
+.teams-wrap {
     display: flex;
     gap: 15px; 
     width: fit-content;
     transition: all 0.5s ease; 
-    position: relative;
-    z-index: 10; 
 }
 
 .team-panel {
@@ -303,6 +325,25 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 .btn-clear-red { background: #600b1d; border: 1px solid var(--red-team); }
 .btn-reset { background: #8a6508; border: 1px solid #ffd700; }
 .btn-pro { background: #5a2a82; border: 1px solid #9d4edd; }
+.btn-review-toggle {
+    background: #123847;
+    border: 1px solid rgba(0, 229, 255, 0.75);
+    color: #00e5ff;
+    min-width: 108px;
+}
+.review-toggle-count {
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: rgba(0, 229, 255, 0.18);
+    color: #fff;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    line-height: 18px;
+}
 
 /* 🚨 新增：底部输出目录显示条 */
 .dir-bar {
@@ -313,6 +354,175 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 }
 .dir-bar:hover { background: rgba(0,0,0,0.5); color: #00e5ff; border-color: rgba(0,229,255,0.3); }
 
+.review-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.28);
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 0.16s ease, visibility 0.16s ease;
+    z-index: 7990;
+}
+.review-backdrop.is-open {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+}
+.review-panel {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    width: min(360px, calc(100vw - 36px));
+    max-height: calc(100vh - 36px);
+    border: 1px solid rgba(0, 229, 255, 0.28);
+    border-radius: 10px;
+    background: rgba(14, 14, 24, 0.98);
+    overflow: hidden;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 18px 45px rgba(0,0,0,0.62);
+    opacity: 0;
+    visibility: hidden;
+    transform: translateX(16px) scale(0.98);
+    pointer-events: none;
+    transition: opacity 0.16s ease, transform 0.16s ease, visibility 0.16s ease;
+    z-index: 8000;
+}
+.review-panel.is-open {
+    opacity: 1;
+    visibility: visible;
+    transform: translateX(0) scale(1);
+    pointer-events: auto;
+}
+.review-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 10px;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 900;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+.review-count {
+    min-width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: rgba(0,229,255,0.16);
+    color: #00e5ff;
+    font-size: 12px;
+    margin-left: auto;
+}
+.review-close {
+    width: 24px;
+    height: 24px;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 5px;
+    background: rgba(255,255,255,0.06);
+    color: #fff;
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 20px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.review-close:hover {
+    border-color: rgba(0,229,255,0.7);
+    color: #00e5ff;
+}
+.review-list {
+    --review-row-height: 64px;
+    flex: 0 1 auto;
+    min-height: 0;
+    max-height: calc(var(--review-row-height) * 7);
+    overflow-y: auto;
+}
+.review-empty {
+    padding: 12px;
+    color: var(--text-muted);
+    text-align: center;
+    font-size: 13px;
+}
+.review-item {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 4px 10px;
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    min-height: var(--review-row-height);
+    box-sizing: border-box;
+}
+.review-item:last-child { border-bottom: none; }
+.review-item.is-applied { box-shadow: inset 3px 0 0 rgba(0,229,255,0.85); }
+.review-item.is-pending { box-shadow: inset 3px 0 0 rgba(255,204,102,0.9); }
+.review-item.is-undone { opacity: 0.62; box-shadow: inset 3px 0 0 rgba(150,150,160,0.9); }
+.review-main {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+.review-time {
+    color: var(--text-muted);
+    font-size: 12px;
+    flex-shrink: 0;
+}
+.review-match {
+    color: #fff;
+    font-size: 13px;
+    font-weight: 800;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.review-match b { color: #ffcc66; margin: 0 4px; }
+.review-winner { color: #fff; }
+.review-loser { color: #ff4d7d; text-shadow: 0 0 8px rgba(255, 0, 85, 0.45); }
+.review-status {
+    color: #00e5ff;
+    font-size: 12px;
+    flex-shrink: 0;
+}
+.review-sub {
+    grid-column: 1;
+    color: var(--text-muted);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.review-actions {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.review-btn {
+    height: 26px;
+    padding: 0 8px;
+    border-radius: 5px;
+    border: 1px solid rgba(255,255,255,0.18);
+    background: rgba(255,255,255,0.08);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 800;
+    cursor: pointer;
+}
+.review-btn:hover { border-color: rgba(0,229,255,0.7); color: #00e5ff; }
+.review-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+    color: #aaa;
+    border-color: rgba(255,255,255,0.1);
+}
 /* ================= 自定义内置弹窗 ================= */
 .modal-overlay {
     position: fixed; top: 0; left: 0; width: 100%; height: 100%;

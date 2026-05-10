@@ -125,6 +125,15 @@ static CString DnfExtractAliasRealId(const CString& aliasRaw, bool& hasArea, boo
     return body;
 }
 
+static CString DnfFormatClockNow()
+{
+    time_t now_t = time(0);
+    tm t;
+    localtime_s(&t, &now_t);
+    CString s;
+    s.Format(L"%02d:%02d:%02d", t.tm_hour, t.tm_min, t.tm_sec);
+    return s;
+}
 
 struct TDnfSimpleAliasMeta
 {
@@ -2060,6 +2069,96 @@ OcrResultData CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaI
 //   - 只在需要 OCR 时才克隆当前帧，用完立即释放
 //   - 复用一对 DC，全程只创建/销毁一次
 // ============================================================================
+CString CDNFGameCaptureDlg::SaveReviewSnapshot(HBITMAP hBmp, int eventId)
+{
+    if (!hBmp) return L"";
+
+    CString baseDir = m_outputDir;
+    baseDir.Trim();
+    if (baseDir.IsEmpty()) {
+        wchar_t exePath[MAX_PATH] = { 0 };
+        ::GetModuleFileName(NULL, exePath, MAX_PATH);
+        baseDir = exePath;
+        int slash = baseDir.ReverseFind(L'\\');
+        if (slash >= 0) baseDir = baseDir.Left(slash);
+    }
+
+    CString reviewDir = DnfJoinPath(baseDir, L"击杀复盘截图");
+    ::CreateDirectory(reviewDir, NULL);
+
+    CString fileName;
+    fileName.Format(L"event_%d_%lu.png", eventId, GetTickCount());
+    CString path = DnfJoinPath(reviewDir, fileName);
+
+    CLSID pngClsid;
+    CLSIDFromString(L"{557CF406-1A04-11D3-9A73-0000F81EF32E}", &pngClsid);
+    Gdiplus::Bitmap bmp(hBmp, NULL);
+    if (bmp.Save(path, &pngClsid, NULL) != Ok) {
+        return L"";
+    }
+    return path;
+}
+
+void CDNFGameCaptureDlg::AddReviewEvent(const RecentEvent& ev)
+{
+    m_recentEvents.push_back(ev);
+    while (m_recentEvents.size() > 10) {
+        m_recentEvents.erase(m_recentEvents.begin());
+    }
+}
+
+bool CDNFGameCaptureDlg::ToggleReviewEvent(int eventId)
+{
+    std::lock_guard<std::mutex> lock(m_dataMutex);
+    for (auto& ev : m_recentEvents) {
+        if (ev.id != eventId) continue;
+
+        if (!ev.undone && ev.statsApplied) {
+            if (ev.killerIdx >= 0 && ev.killerIdx < 8 && m_players[ev.killerIdx].kills > 0) {
+                m_players[ev.killerIdx].kills--;
+                if (ev.akDelta > 0 && m_players[ev.killerIdx].akCount > 0) {
+                    m_players[ev.killerIdx].akCount--;
+                }
+            }
+            if (ev.deadIdx >= 0 && ev.deadIdx < 8 && m_players[ev.deadIdx].deaths > 0) {
+                m_players[ev.deadIdx].deaths--;
+            }
+            if (ev.redScoreDelta > 0 && m_totalScoreRed > 0) m_totalScoreRed--;
+            if (ev.blueScoreDelta > 0 && m_totalScoreBlue > 0) m_totalScoreBlue--;
+
+            ev.undone = true;
+            ev.statsApplied = false;
+            ev.status = L"已撤销";
+            AppLog(L"↩️ [复盘撤销] 已撤销事件：" + ev.killer + L" -> " + ev.dead, RGB(255, 210, 80));
+            return true;
+        }
+
+        if (ev.undone && !ev.statsApplied) {
+            if (ev.killerIdx >= 0 && ev.killerIdx < 8) {
+                m_players[ev.killerIdx].kills++;
+                if (ev.akDelta > 0) {
+                    m_players[ev.killerIdx].akCount++;
+                }
+                m_lastKillerTeam = m_players[ev.killerIdx].team;
+            }
+            if (ev.deadIdx >= 0 && ev.deadIdx < 8) {
+                m_players[ev.deadIdx].deaths++;
+            }
+            if (ev.redScoreDelta > 0) m_totalScoreRed++;
+            if (ev.blueScoreDelta > 0) m_totalScoreBlue++;
+
+            ev.undone = false;
+            ev.statsApplied = true;
+            ev.status = L"已计入";
+            AppLog(L"🔁 [复盘恢复] 已恢复事件：" + ev.killer + L" -> " + ev.dead, RGB(0, 255, 200));
+            return true;
+        }
+
+        return false;
+    }
+    return false;
+}
+
 void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
 {
     int killerArea = (triggerSide == 0) ? 1 : 0;
@@ -2084,6 +2183,11 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
     CString globalKillerName;
     int globalDeadBestScore = -1, globalDeadBestP = -1, globalDeadBestA = -1, globalDeadPassLine = 999;
     CString globalDeadName;
+    static std::atomic<int> s_reviewEventSeq{ 1 };
+    int reviewEventId = s_reviewEventSeq.fetch_add(1);
+    CString reviewSnapshotPath;
+    CString killerFusionSummary;
+    CString deadFusionSummary;
 
     struct FrameData { CString text; int frameIdx; };
     std::vector<FrameData> historyKTexts;
@@ -2161,6 +2265,12 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
 
         return hClone;
         };
+
+    if (!validSlots.empty()) {
+        HBITMAP hReviewBmp = CloneHistoryFrame(validSlots[0].ringIdx);
+        reviewSnapshotPath = SaveReviewSnapshot(hReviewBmp, reviewEventId);
+        if (hReviewBmp) ::DeleteObject(hReviewBmp);
+    }
 
     // 清空 OCR 下拉框历史
     {
@@ -2741,6 +2851,24 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
 
             CString tag = isKiller ? L"杀手" : L"死者";
             CString sideText = (side == TDnfPanelSide::LeftNameArea) ? L"左框" : L"右框";
+            CString fusionBrief;
+            fusionBrief.Format(L"%s/%s best=%s final=%d gap=%d cacheInsufficient=%s",
+                (LPCTSTR)sideText, (LPCTSTR)tag,
+                fusion.best.candidate.name.IsEmpty() ? L"无" : fusion.best.candidate.name.GetString(),
+                fusion.best.finalScore, fusion.best.gapToSecond,
+                fusion.cacheInsufficient ? L"是" : L"否");
+            int fusionTopN = (int)(fusion.topScores.size() < 3 ? fusion.topScores.size() : 3);
+            for (int ti = 0; ti < fusionTopN; ++ti) {
+                const auto& ts = fusion.topScores[ti];
+                CString one;
+                one.Format(L" | Top%d:%s final=%d id=%d area=%+d job=%+d",
+                    ti + 1,
+                    ts.candidate.name.IsEmpty() ? L"无" : ts.candidate.name.GetString(),
+                    ts.finalScore, ts.idScore, ts.areaCtxScore, ts.jobCtxScore);
+                fusionBrief += one;
+            }
+            if (isKiller) killerFusionSummary = fusionBrief;
+            else deadFusionSummary = fusionBrief;
 
             if (!fusion.ok) {
                 CString fLog;
@@ -2974,6 +3102,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
         // ⬇️ 【修改点】：双重精准冷却法则 (60秒)
         // ==========================================
         for (const auto& ev : m_recentEvents) {
+            if (!ev.statsApplied || ev.undone) continue;
             if (now - ev.time < DUP_KILL_LIMIT_TIME) {
 
                 // 规则 1：同一个 ID，短时间内绝对不能死两次！
@@ -3011,11 +3140,36 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
         }
 
         if (!isDup) {
-            m_recentEvents.push_back({ finalKillerName, finalDeadName, now });
-            m_recentEvents.erase(
-                std::remove_if(m_recentEvents.begin(), m_recentEvents.end(),
-                    [&](const RecentEvent& ev) { return now - ev.time > DUP_KILL_CLEAN_TIME; }), // 🚨 改用宏
-                m_recentEvents.end());
+            RecentEvent review;
+            review.id = reviewEventId;
+            review.killer = finalKillerName;
+            review.dead = finalDeadName;
+            review.time = now;
+            review.timeText = DnfFormatClockNow();
+            review.triggerSide = triggerSide;
+            review.killerIdx = killerBestP;
+            review.deadIdx = deadBestP;
+            review.killerTeam = lockedKillerTeam;
+            review.deadTeam = lockedDeadTeam;
+            review.statsApplied = true;
+            review.status = L"已计入";
+            review.algorithmName = (m_nDeathAlgorithmChoice == DEATH_X_ALGO_PATCH) ? L"打补丁红蓝判断" : L"大X颜色个数判断";
+            review.snapshotPath = reviewSnapshotPath;
+            review.ocrSummary = L"杀手OCR: ";
+            for (const auto& f : historyKTexts) {
+                CString one; one.Format(L"第%d帧=%s; ", f.frameIdx, (LPCTSTR)f.text);
+                review.ocrSummary += one;
+            }
+            review.ocrSummary += L" 死者OCR: ";
+            for (const auto& f : historyDTexts) {
+                CString one; one.Format(L"第%d帧=%s; ", f.frameIdx, (LPCTSTR)f.text);
+                review.ocrSummary += one;
+            }
+            review.candidateSummary.Format(L"旧算法最优：杀手=%s %d分/线%d；死者=%s %d分/线%d。融合：%s || %s",
+                globalKillerName.IsEmpty() ? L"无" : globalKillerName.GetString(), globalKillerBestScore, globalKillerPassLine,
+                globalDeadName.IsEmpty() ? L"无" : globalDeadName.GetString(), globalDeadBestScore, globalDeadPassLine,
+                killerFusionSummary.IsEmpty() ? L"无" : killerFusionSummary.GetString(),
+                deadFusionSummary.IsEmpty() ? L"无" : deadFusionSummary.GetString());
 
             if (killerResolved && killerBestP != -1) {
                 for (int p = 0; p < 8; p++)
@@ -3038,6 +3192,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 if (m_players[killerBestP].currentStreak == 4) {
                     m_players[killerBestP].akCount++;
                     m_players[killerBestP].currentStreak = 0;
+                    review.akDelta = 1;
                     PushVisualLog(L"🌟 [AK宣告] 恐怖如斯！玩家 [" + displayName + L"] 完成一次 AK！",
                         RGB(255, 215, 0));
                 }
@@ -3054,6 +3209,8 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 m_bPendingTeamScoreWin = false;
                 if (m_lastKillerTeam == 0)      m_totalScoreRed++;
                 else if (m_lastKillerTeam == 1)  m_totalScoreBlue++;
+                if (m_lastKillerTeam == 0) review.redScoreDelta = 1;
+                else if (m_lastKillerTeam == 1) review.blueScoreDelta = 1;
                 for (int p = 0; p < 8; p++)
                     m_players[p].currentStreak = 0;
 
@@ -3073,13 +3230,73 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 NotifyIdentityRoundReset(L"局间大比分变动/新一局开始");
             }
 
+            AddReviewEvent(review);
             PostMessage(WM_UPDATE_ALL_UI, 0, 0);
         }
         else {
             CString logMsg;
             logMsg.Format(L"⏳ [冷却拦截] 玩家 [%s] 在 %d 秒内已产生过战绩，本次忽略！", (LPCTSTR)conflictName, DUP_KILL_LIMIT_TIME / 1000);
             PushVisualLog(logMsg, RGB(255, 165, 0));
+
+            RecentEvent review;
+            review.id = reviewEventId;
+            review.killer = finalKillerName;
+            review.dead = finalDeadName;
+            review.time = now;
+            review.timeText = DnfFormatClockNow();
+            review.triggerSide = triggerSide;
+            review.killerIdx = killerBestP;
+            review.deadIdx = deadBestP;
+            review.killerTeam = lockedKillerTeam;
+            review.deadTeam = lockedDeadTeam;
+            review.statsApplied = false;
+            review.status = L"冷却拦截";
+            review.algorithmName = (m_nDeathAlgorithmChoice == DEATH_X_ALGO_PATCH) ? L"打补丁红蓝判断" : L"大X颜色个数判断";
+            review.snapshotPath = reviewSnapshotPath;
+            review.ocrSummary = L"杀手OCR: ";
+            for (const auto& f : historyKTexts) {
+                CString one; one.Format(L"第%d帧=%s; ", f.frameIdx, (LPCTSTR)f.text);
+                review.ocrSummary += one;
+            }
+            review.ocrSummary += L" 死者OCR: ";
+            for (const auto& f : historyDTexts) {
+                CString one; one.Format(L"第%d帧=%s; ", f.frameIdx, (LPCTSTR)f.text);
+                review.ocrSummary += one;
+            }
+            review.candidateSummary = conflictReason;
+            AddReviewEvent(review);
+            PostMessage(WM_UPDATE_ALL_UI, 0, 0);
         }
+    }
+    else {
+        RecentEvent review;
+        review.id = reviewEventId;
+        review.killer = L"待定";
+        review.dead = L"待定";
+        review.time = GetTickCount();
+        review.timeText = DnfFormatClockNow();
+        review.triggerSide = triggerSide;
+        review.statsApplied = false;
+        review.status = L"未判定";
+        review.algorithmName = (m_nDeathAlgorithmChoice == DEATH_X_ALGO_PATCH) ? L"打补丁红蓝判断" : L"大X颜色个数判断";
+        review.snapshotPath = reviewSnapshotPath;
+        review.ocrSummary = L"杀手OCR: ";
+        for (const auto& f : historyKTexts) {
+            CString one; one.Format(L"第%d帧=%s; ", f.frameIdx, (LPCTSTR)f.text);
+            review.ocrSummary += one;
+        }
+        review.ocrSummary += L" 死者OCR: ";
+        for (const auto& f : historyDTexts) {
+            CString one; one.Format(L"第%d帧=%s; ", f.frameIdx, (LPCTSTR)f.text);
+            review.ocrSummary += one;
+        }
+        review.candidateSummary.Format(L"旧算法最优：杀手=%s %d分/线%d；死者=%s %d分/线%d。融合：%s || %s",
+            globalKillerName.IsEmpty() ? L"无" : globalKillerName.GetString(), globalKillerBestScore, globalKillerPassLine,
+            globalDeadName.IsEmpty() ? L"无" : globalDeadName.GetString(), globalDeadBestScore, globalDeadPassLine,
+            killerFusionSummary.IsEmpty() ? L"无" : killerFusionSummary.GetString(),
+            deadFusionSummary.IsEmpty() ? L"无" : deadFusionSummary.GetString());
+        AddReviewEvent(review);
+        PostMessage(WM_UPDATE_ALL_UI, 0, 0);
     }
 
     // ★ 不再需要手动释放 historyClones，因为帧已在循环内逐个释放
@@ -4216,6 +4433,7 @@ void CDNFGameCaptureDlg::OnBnClickedReset() {
         std::lock_guard<std::mutex> dataLock(m_dataMutex);
         m_totalScoreRed = 0;
         m_totalScoreBlue = 0;
+        m_recentEvents.clear();
         for (int i = 0; i < 8; i++) {
             m_players[i].kills = 0; m_players[i].deaths = 0;
             m_players[i].currentStreak = 0; m_players[i].akCount = 0;
@@ -6283,6 +6501,9 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             AppLog(L"⚙️ [设置] 死亡X算法已切换为: " + names[m_nDeathAlgorithmChoice], RGB(0, 255, 255));
             BroadcastStateToWeb();
         }
+        else if (action == "cmd_resize_web") {
+            // 外层 Windows 窗口已改为固定高度，不再响应 Web 页面的动态高度上报，避免抖动。
+        }
         else if (action == "cmd_auth") {
             std::string codeStr = j["code"].get<std::string>();
             CString newAuthCode = CA2W(codeStr.c_str(), CP_UTF8);
@@ -6383,6 +6604,32 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 PostMessage(WM_UPDATE_ALL_UI, 0, 0);
             }
         }
+        else if (action == "cmd_undo_event") {
+            int eventId = j["id"].get<int>();
+            bool ok = ToggleReviewEvent(eventId);
+            if (!ok) {
+                AppLog(L"⚠️ [复盘操作] 事件不存在或当前状态不可操作。", RGB(255, 180, 0));
+            }
+            PostMessage(WM_UPDATE_ALL_UI, 0, 0);
+        }
+        else if (action == "cmd_reset_stats") {
+            {
+                std::lock_guard<std::mutex> dataLock(m_dataMutex);
+                m_totalScoreRed = 0;
+                m_totalScoreBlue = 0;
+                m_recentEvents.clear();
+                for (int i = 0; i < 8; i++) {
+                    m_players[i].kills = 0;
+                    m_players[i].deaths = 0;
+                    m_players[i].currentStreak = 0;
+                    m_players[i].akCount = 0;
+                }
+            }
+            if (m_editVisualLogs.m_hWnd) m_editVisualLogs.SetWindowText(L"");
+            NotifyIdentityRoundReset(L"Web端重置战绩/清空复盘事件");
+            m_status.SetWindowText(L"战绩已归零！");
+            PostMessage(WM_UPDATE_ALL_UI, 0, 0);
+        }
     }
     // 🚨 增加了显式报错：如果解析出错，直接弹窗告诉你到底哪里写错了！
     catch (json::exception& e) {
@@ -6476,6 +6723,28 @@ void CDNFGameCaptureDlg::BroadcastStateToWeb()
 
         j["data"]["players"] = playersArray;
 
+        json recentJson = json::array();
+        for (auto it = m_recentEvents.rbegin(); it != m_recentEvents.rend(); ++it) {
+            const RecentEvent& ev = *it;
+            json e;
+            e["id"] = ev.id;
+            e["time"] = std::string(CW2A(ev.timeText, CP_UTF8));
+            e["triggerSide"] = std::string(CW2A(ev.triggerSide == 0 ? L"左侧死亡" : (ev.triggerSide == 1 ? L"右侧死亡" : L"未知"), CP_UTF8));
+            e["killer"] = std::string(CW2A(ev.killer, CP_UTF8));
+            e["dead"] = std::string(CW2A(ev.dead, CP_UTF8));
+            e["killerTeam"] = ev.killerTeam;
+            e["deadTeam"] = ev.deadTeam;
+            e["status"] = std::string(CW2A(ev.status, CP_UTF8));
+            e["statsApplied"] = ev.statsApplied;
+            e["undone"] = ev.undone;
+            e["algorithm"] = std::string(CW2A(ev.algorithmName, CP_UTF8));
+            e["ocrSummary"] = std::string(CW2A(ev.ocrSummary, CP_UTF8));
+            e["candidateSummary"] = std::string(CW2A(ev.candidateSummary, CP_UTF8));
+            e["snapshotPath"] = std::string(CW2A(ev.snapshotPath, CP_UTF8));
+            recentJson.push_back(e);
+        }
+        j["data"]["recentEvents"] = recentJson;
+
         // --- 2. 打包整个小号库，供前端补全使用 ---
         json dbJson = json::object();
         for (auto const& [name, aliases] : m_aliasDB) {
@@ -6489,6 +6758,7 @@ void CDNFGameCaptureDlg::BroadcastStateToWeb()
 
         CString jsonStr = CA2W(j.dump().c_str(), CP_UTF8);
         m_pWebDlg->SendStateToWeb(jsonStr);
+        m_pWebDlg->ApplyFixedWindowHeight();
     }
     catch (...) {}
 }

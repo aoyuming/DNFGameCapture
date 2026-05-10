@@ -8,53 +8,73 @@
 </head>
 <body>
 
-    <div class="main-container" id="main-container">
-        <div class="team-panel team-red" id="team-red">
-            <div class="stats-header">
-                <div class="team-name">红队 <input type="text" class="team-score-input" value="0"></div>
-                <div class="stats-labels">
-                    <span>击杀</span>
-                    <span>死亡</span>
-                    <span>AK</span>
+    <div class="app-shell">
+        <div class="left-stack">
+            <div class="main-container" id="main-container">
+                <div class="teams-wrap" id="teams-wrap">
+                    <div class="team-panel team-red" id="team-red">
+                        <div class="stats-header">
+                            <div class="team-name">红队 <input type="text" class="team-score-input" value="0"></div>
+                            <div class="stats-labels">
+                                <span>击杀</span>
+                                <span>死亡</span>
+                                <span>AK</span>
+                            </div>
+                        </div>
+                        <div class="rows-container"></div>
+                    </div>
+
+                    <div class="team-panel team-blue" id="team-blue">
+                        <div class="stats-header">
+                            <div class="team-name">蓝队 <input type="text" class="team-score-input" value="0"></div>
+                            <div class="stats-labels">
+                                <span>击杀</span>
+                                <span>死亡</span>
+                                <span>AK</span>
+                            </div>
+                        </div>
+                        <div class="rows-container"></div>
+                    </div>
                 </div>
             </div>
-            <div class="rows-container"></div>
-        </div>
 
-        <div class="team-panel team-blue" id="team-blue">
-            <div class="stats-header">
-                <div class="team-name">蓝队 <input type="text" class="team-score-input" value="0"></div>
-                <div class="stats-labels">
-                    <span>击杀</span>
-                    <span>死亡</span>
-                    <span>AK</span>
+            <div class="control-panel">
+                <div class="control-row control-row-main">
+                    <button class="ctrl-btn btn-swap" id="btn-swap">🔄 翻转红蓝</button>
+                    <button class="ctrl-btn btn-monitor-start" id="btn-monitor">▶ 运行</button>
+                    <label class="algo-select-wrap" title="选择死亡X检测算法">
+                        <span>死亡X</span>
+                        <select id="death-algo-select" class="algo-select">
+                            <option value="0">大X颜色个数判断</option>
+                            <option value="1">打补丁红蓝判断</option>
+                        </select>
+                    </label>
+                    <button class="ctrl-btn btn-review-toggle" id="btn-review-toggle" aria-expanded="false">
+                        <span>&#26368;&#36817;&#35782;&#21035;</span>
+                        <span class="review-toggle-count" id="review-toggle-count">0</span>
+                    </button>
                 </div>
-            </div>
-            <div class="rows-container"></div>
-        </div>
-    </div>
+                <div class="control-row control-row-tools">
+                    <button class="ctrl-btn btn-auth" id="btn-auth">🔑 授权</button>
+                    <button class="ctrl-btn btn-pro" id="btn-pro">👑 专业模式</button>
+                    <button class="ctrl-btn btn-clear-red" id="btn-clear-red">🗑️ 清空红队</button>
+                    <button class="ctrl-btn btn-clear-blue" id="btn-clear-blue">🗑️ 清空蓝队</button>
+                    <button class="ctrl-btn btn-reset" id="btn-reset">✨ 重置战绩</button>
+                </div>
 
-    <div class="control-panel">
-        <div class="control-row control-row-main">
-            <button class="ctrl-btn btn-swap" id="btn-swap">🔄 翻转红蓝</button>
-            <button class="ctrl-btn btn-monitor-start" id="btn-monitor">▶ 运行</button>
-            <label class="algo-select-wrap" title="选择死亡X检测算法">
-                <span>死亡X</span>
-                <select id="death-algo-select" class="algo-select">
-                    <option value="0">大X颜色个数判断</option>
-                    <option value="1">打补丁红蓝判断</option>
-                </select>
-            </label>
+                <div class="dir-bar" id="dir-display" title="点击可更改 TXT 输出目录">📁 战绩输出目录：获取中...</div>
+            </div>
         </div>
-        <div class="control-row control-row-tools">
-            <button class="ctrl-btn btn-auth" id="btn-auth">🔑 授权</button>
-            <button class="ctrl-btn btn-pro" id="btn-pro">👑 专业模式</button>
-            <button class="ctrl-btn btn-clear-red" id="btn-clear-red">🗑️ 清空红队</button>
-            <button class="ctrl-btn btn-clear-blue" id="btn-clear-blue">🗑️ 清空蓝队</button>
-            <button class="ctrl-btn btn-reset" id="btn-reset">✨ 重置战绩</button>
+
+        <div class="review-backdrop" id="review-backdrop"></div>
+        <div class="review-panel" id="review-panel" role="dialog" aria-modal="false" aria-hidden="true" aria-labelledby="review-panel-title">
+            <div class="review-header">
+                <span id="review-panel-title">最近识别</span>
+                <span class="review-count" id="review-count">0</span>
+                <button class="review-close" id="btn-review-close" title="关闭">&times;</button>
+            </div>
+            <div class="review-list" id="review-list"></div>
         </div>
-        
-        <div class="dir-bar" id="dir-display" title="点击可更改 TXT 输出目录">📁 战绩输出目录：获取中...</div>
     </div>
 
     <div class="modal-overlay" id="custom-modal">

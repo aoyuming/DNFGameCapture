@@ -36,6 +36,7 @@ BOOL CWebScoreDlg::OnInitDialog()
     SetWindowText(title);
 
     InitWebView2();
+    ApplyFixedWindowHeight();
 
     return TRUE;
 }
@@ -136,4 +137,50 @@ void CWebScoreDlg::SendStateToWeb(const CString& jsonStr)
 	if (m_webview != nullptr) {
 		m_webview->PostWebMessageAsJson(jsonStr.GetString());
 	}
+}
+
+void CWebScoreDlg::ResizeWindowToSize(int targetWindowW, int targetWindowH)
+{
+    if (!m_hWnd || targetWindowW <= 0 || targetWindowH <= 0) return;
+
+    CRect windowRect;
+    GetWindowRect(&windowRect);
+
+    MONITORINFO mi = { sizeof(mi) };
+    HMONITOR monitor = ::MonitorFromWindow(m_hWnd, MONITOR_DEFAULTTONEAREST);
+    if (!::GetMonitorInfo(monitor, &mi)) return;
+
+    CRect work(mi.rcWork);
+    int maxWindowW = work.Width() - 24;
+    int maxWindowH = work.Height() - 24;
+    if (targetWindowW > maxWindowW) targetWindowW = maxWindowW;
+    if (targetWindowH > maxWindowH) targetWindowH = maxWindowH;
+    if (targetWindowW < 640) targetWindowW = 640;
+    if (targetWindowH < 420) targetWindowH = 420;
+
+    int newX = windowRect.left;
+    if (newX + targetWindowW > work.right) newX = work.right - targetWindowW;
+    if (newX < work.left) newX = work.left;
+
+    int newY = windowRect.top;
+    if (newY + targetWindowH > work.bottom) newY = work.bottom - targetWindowH;
+    if (newY < work.top) newY = work.top;
+
+    if (abs(windowRect.Width() - targetWindowW) < 2 && abs(windowRect.Height() - targetWindowH) < 2) return;
+    SetWindowPos(nullptr, newX, newY, targetWindowW, targetWindowH, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void CWebScoreDlg::ApplyFixedWindowHeight()
+{
+    CRect windowRect;
+    GetWindowRect(&windowRect);
+    if (m_baseWindowWidth <= 0 || m_baseWindowHeight <= 0) {
+        m_baseWindowWidth = windowRect.Width();
+        m_baseWindowHeight = windowRect.Height();
+    }
+
+    // 固定窗口：复盘改为 Web 内弹出二级面板，不再额外拉宽 Windows 窗口。
+    const int reviewColumnWidth = 0;
+    const int fixedWindowHeight = 675;
+    ResizeWindowToSize(m_baseWindowWidth + reviewColumnWidth, fixedWindowHeight);
 }
