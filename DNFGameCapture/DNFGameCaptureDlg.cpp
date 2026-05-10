@@ -58,6 +58,11 @@ static const wchar_t* DEATH_X_PATCH_FILE_NAME = L"sprite(击杀大XX).NPK";
 // 打补丁文件路径检查辅助函数在文件后部实现；这里提前声明，方便同步给 Web。
 static bool DnfFileExists(const CString& path);
 static CString DnfJoinPath(const CString& a, const CString& b);
+static void DnfSendWebToast(CWebScoreDlg* webDlg, const CString& action, const CString& message);
+static bool DnfPostCloudJson(const std::string& jsonUtf8, std::string& responseUtf8, CString& errorMsg, int timeoutMs = 8000);
+static CString DnfReadLocalLicenseKey();
+
+static const wchar_t* DNF_CLOUD_API_HOST = L"verifykey-thaovfpoib.cn-hangzhou.fcapp.run";
 
 struct ScorePointF { float x; float y; };
 
@@ -1394,7 +1399,7 @@ CString CDNFGameCaptureDlg::CheckCloudBinding(CString key, CString hwid, long lo
     if (hSession) {
         WinHttpSetTimeouts(hSession, 3000, 3000, 3000, 3000);
     }
-    HINTERNET hConnect = WinHttpConnect(hSession, L"verifykey-thaovfpoib.cn-hangzhou.fcapp.run", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    HINTERNET hConnect = WinHttpConnect(hSession, DNF_CLOUD_API_HOST, INTERNET_DEFAULT_HTTPS_PORT, 0);
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", L"/", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
 
     CString resultMsg = L"未知请求异常";
@@ -1430,6 +1435,359 @@ CString CDNFGameCaptureDlg::CheckCloudBinding(CString key, CString hwid, long lo
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
     return resultMsg;
+}
+
+static CString DnfReadLocalLicenseKey()
+{
+    wchar_t exePath[MAX_PATH] = { 0 };
+    GetModuleFileName(NULL, exePath, MAX_PATH);
+    CString path = exePath;
+    path = path.Left(path.ReverseFind(L'\\') + 1) + L"license.txt";
+
+    CFile file;
+    if (!file.Open(path, CFile::modeRead)) return L"";
+
+    int len = (int)file.GetLength();
+    if (len <= 0) {
+        file.Close();
+        return L"";
+    }
+
+    std::vector<char> buf(len + 1, 0);
+    file.Read(buf.data(), len);
+    file.Close();
+
+    char* start = buf.data();
+    if (len >= 3 && (unsigned char)buf[0] == 0xEF && (unsigned char)buf[1] == 0xBB && (unsigned char)buf[2] == 0xBF) {
+        start += 3;
+    }
+
+    CString key = CA2W(start, CP_UTF8);
+    key.Remove(L'\r');
+    key.Remove(L'\n');
+    key.Trim();
+    return key;
+}
+
+static bool DnfPostCloudJson(const std::string& jsonUtf8, std::string& responseUtf8, CString& errorMsg, int timeoutMs)
+{
+    responseUtf8.clear();
+    errorMsg.Empty();
+
+    HINTERNET hSession = WinHttpOpen(L"DNF Capture", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) {
+        errorMsg = L"无法创建 HTTP 会话";
+        return false;
+    }
+
+    WinHttpSetTimeouts(hSession, timeoutMs, timeoutMs, timeoutMs, timeoutMs);
+
+    HINTERNET hConnect = WinHttpConnect(hSession, DNF_CLOUD_API_HOST, INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!hConnect) {
+        WinHttpCloseHandle(hSession);
+        errorMsg = L"无法连接云函数";
+        return false;
+    }
+
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", L"/", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (!hRequest) {
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        errorMsg = L"无法创建云端请求";
+        return false;
+    }
+
+    std::wstring headers = L"Content-Type: application/json\r\n";
+    WinHttpAddRequestHeaders(hRequest, headers.c_str(), (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+
+    BOOL ok = WinHttpSendRequest(
+        hRequest,
+        NULL,
+        0,
+        (LPVOID)jsonUtf8.c_str(),
+        (DWORD)jsonUtf8.length(),
+        (DWORD)jsonUtf8.length(),
+        0
+    ) && WinHttpReceiveResponse(hRequest, NULL);
+
+    if (ok) {
+        DWORD sz = 0;
+        DWORD downloaded = 0;
+        while (WinHttpQueryDataAvailable(hRequest, &sz) && sz > 0) {
+            std::vector<char> buf(sz + 1, 0);
+            if (WinHttpReadData(hRequest, buf.data(), sz, &downloaded)) {
+                responseUtf8.append(buf.data(), downloaded);
+            }
+        }
+    }
+    else {
+        errorMsg = L"云端请求失败或超时";
+    }
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+    return ok;
+}
+
+CString CDNFGameCaptureDlg::SubmitAliasDbForReview(const std::string& aliasDbPayload, int mainCount, int pairCount)
+{
+    if (mainCount <= 0 || pairCount <= 0 || aliasDbPayload.empty()) {
+        return L"当前没有可上传的小号库。";
+    }
+
+    CString key = DnfReadLocalLicenseKey();
+    if (key.IsEmpty()) {
+        return L"请先输入并验证授权卡密，再上传共享小号库。";
+    }
+
+    CString hwid = GetMachineID();
+    if (hwid.IsEmpty()) {
+        return L"无法获取本机机器码，上传已取消。";
+    }
+
+    try {
+        json req;
+        req["action"] = "submit_alias_db";
+        req["key"] = std::string(CW2A(key, CP_UTF8));
+        req["hwid"] = std::string(CW2A(hwid, CP_UTF8));
+        req["clientVersion"] = std::string(CW2A(CURRENT_VERSION, CP_UTF8));
+        req["aliasDB"] = json::parse(aliasDbPayload);
+
+        std::string response;
+        CString err;
+        if (!DnfPostCloudJson(req.dump(), response, err, 8000)) {
+            return L"共享库投稿失败：" + err;
+        }
+
+        json reply = json::parse(response);
+        std::string status = reply.value("status", "error");
+        std::string msg = reply.value("msg", status == "ok" ? "上传成功" : "上传失败");
+        CString cmsg = CA2W(msg.c_str(), CP_UTF8);
+
+        if (status == "ok" && !reply.value("aliasSubmit", false)) {
+            return L"共享库投稿失败：云函数不是最新版，请先部署新版云函数。";
+        }
+
+        if (status == "ok") {
+            return L"共享库投稿成功：" + cmsg;
+        }
+        return L"共享库投稿失败：" + cmsg;
+    }
+    catch (const std::exception& e) {
+        CString msg;
+        msg.Format(L"共享库投稿失败：数据打包异常 (%S)", e.what());
+        return msg;
+    }
+}
+
+CString CDNFGameCaptureDlg::DirectSyncAliasDbToCloud(const std::string& aliasDbPayload, int mainCount, int pairCount)
+{
+    if (mainCount <= 0 || pairCount <= 0 || aliasDbPayload.empty()) {
+        return L"当前没有可直写的本地小号库。";
+    }
+
+    CString key = DnfReadLocalLicenseKey();
+    if (key.IsEmpty()) {
+        return L"请先输入并验证授权卡密，再使用管理员直写模式。";
+    }
+
+    CString hwid = GetMachineID();
+    if (hwid.IsEmpty()) {
+        return L"无法获取本机机器码，管理员直写已取消。";
+    }
+
+    try {
+        json req;
+        req["action"] = "direct_sync_alias_db";
+        req["key"] = std::string(CW2A(key, CP_UTF8));
+        req["hwid"] = std::string(CW2A(hwid, CP_UTF8));
+        req["clientVersion"] = std::string(CW2A(CURRENT_VERSION, CP_UTF8));
+        req["aliasDB"] = json::parse(aliasDbPayload);
+
+        std::string response;
+        CString err;
+        if (!DnfPostCloudJson(req.dump(), response, err, 8000)) {
+            return L"管理员直写失败：" + err;
+        }
+
+        json reply = json::parse(response);
+        std::string status = reply.value("status", "error");
+        std::string msg = reply.value("msg", status == "ok" ? "直写完成" : "直写失败");
+        CString cmsg = CA2W(msg.c_str(), CP_UTF8);
+
+        if (status == "ok" && !reply.value("directSync", false)) {
+            return L"管理员直写失败：云函数不是最新版，请先部署新版云函数。";
+        }
+
+        if (status == "ok") {
+            m_aliasDbCloudBaselinePayload = aliasDbPayload;
+            return L"管理员直写成功：" + cmsg;
+        }
+        return L"管理员直写失败：" + cmsg;
+    }
+    catch (const std::exception& e) {
+        CString msg;
+        msg.Format(L"管理员直写失败：数据打包异常 (%S)", e.what());
+        return msg;
+    }
+}
+
+CString CDNFGameCaptureDlg::SyncAliasDbFromCloud()
+{
+    CString key = DnfReadLocalLicenseKey();
+    if (key.IsEmpty()) {
+        return L"请先输入并验证授权卡密，再同步云端库。";
+    }
+
+    CString hwid = GetMachineID();
+    if (hwid.IsEmpty()) {
+        return L"无法获取本机机器码，云端同步已取消。";
+    }
+
+    try {
+        json req;
+        req["action"] = "get_public_alias_db";
+        req["key"] = std::string(CW2A(key, CP_UTF8));
+        req["hwid"] = std::string(CW2A(hwid, CP_UTF8));
+
+        std::string response;
+        CString err;
+        if (!DnfPostCloudJson(req.dump(), response, err, 8000)) {
+            return L"云端库同步失败：" + err;
+        }
+
+        json reply = json::parse(response);
+        std::string status = reply.value("status", "error");
+        std::string msg = reply.value("msg", status == "ok" ? "同步完成" : "同步失败");
+        if (status != "ok") {
+            CString cmsg = CA2W(msg.c_str(), CP_UTF8);
+            return L"云端库同步失败：" + cmsg;
+        }
+
+        if (!reply.contains("publicAliasDB") || !reply["publicAliasDB"].contains("players") || !reply["publicAliasDB"]["players"].is_object()) {
+            return L"云端库同步失败：公共库数据格式异常";
+        }
+
+        int addedAliasCount = 0;
+        int touchedMainCount = 0;
+        int beforeMainCount = 0;
+        int beforePairCount = 0;
+        bool wasDirtyBeforeSync = (BuildAliasDbJsonPayload(beforeMainCount, beforePairCount) != m_aliasDbCloudBaselinePayload);
+
+        {
+            std::lock_guard<std::mutex> lock(m_dataMutex);
+            auto& players = reply["publicAliasDB"]["players"];
+            for (auto it = players.begin(); it != players.end(); ++it) {
+                CString mainName = CA2W(it.key().c_str(), CP_UTF8);
+                mainName.Trim();
+                if (mainName.IsEmpty()) continue;
+
+                std::vector<CString> mergedAliases = DnfParseAliasListString(m_aliasDB[mainName]);
+                int beforeCount = (int)mergedAliases.size();
+
+                auto addAlias = [&](CString aliasName) {
+                    aliasName.Trim();
+                    if (aliasName.IsEmpty() || aliasName == mainName) return;
+                    if (std::find(mergedAliases.begin(), mergedAliases.end(), aliasName) == mergedAliases.end()) {
+                        mergedAliases.push_back(aliasName);
+                        addedAliasCount++;
+                    }
+                };
+
+                if (it.value().is_array()) {
+                    for (const auto& aliasValue : it.value()) {
+                        if (aliasValue.is_string()) {
+                            CString aliasText = CA2W(aliasValue.get<std::string>().c_str(), CP_UTF8);
+                            addAlias(aliasText);
+                        }
+                    }
+                }
+                else if (it.value().is_string()) {
+                    CString aliasListText = CA2W(it.value().get<std::string>().c_str(), CP_UTF8);
+                    for (const auto& aliasName : DnfParseAliasListString(aliasListText)) {
+                        addAlias(aliasName);
+                    }
+                }
+
+                if ((int)mergedAliases.size() != beforeCount) {
+                    m_aliasDB[mainName] = DnfFormatAliasListString(mergedAliases);
+                    touchedMainCount++;
+                }
+            }
+
+            for (int i = 0; i < 8; i++) {
+                CString mainName = m_players[i].name;
+                mainName.Trim();
+                if (mainName.IsEmpty() || m_aliasDB.find(mainName) == m_aliasDB.end()) continue;
+
+                std::vector<CString> dbAliases = DnfParseAliasListString(m_aliasDB[mainName]);
+                for (const auto& aliasName : dbAliases) {
+                    bool exists = false;
+                    for (const auto& liveAlias : m_players[i].aliases) {
+                        if (liveAlias.name == aliasName) {
+                            exists = true;
+                            break;
+                        }
+                    }
+                    if (!exists) {
+                        AliasData ad;
+                        ad.name = aliasName;
+                        m_players[i].aliases.push_back(ad);
+                    }
+                }
+            }
+        }
+
+        if (addedAliasCount > 0) {
+            SaveAliasDB();
+            SaveConfigToFile();
+            SyncDataToTree();
+            RefreshDisplay();
+        }
+
+        if (!wasDirtyBeforeSync) {
+            ResetAliasDbCloudBaseline();
+        }
+        BroadcastStateToWeb();
+
+        CString result;
+        result.Format(L"云端库同步完成：新增 %d 个主号关联、%d 个小号。", touchedMainCount, addedAliasCount);
+        if (addedAliasCount == 0) result = L"云端库同步完成：本地已经是最新。";
+        return result;
+    }
+    catch (const std::exception& e) {
+        CString msg;
+        msg.Format(L"云端库同步失败：数据解析异常 (%S)", e.what());
+        return msg;
+    }
+}
+
+void CDNFGameCaptureDlg::AutoSubmitAliasDbIfDirty()
+{
+    SaveAliasDB();
+
+    int mainCount = 0;
+    int pairCount = 0;
+    std::string payload = BuildAliasDbJsonPayload(mainCount, pairCount);
+    if (mainCount <= 0 || pairCount <= 0 || payload == m_aliasDbCloudBaselinePayload) {
+        return;
+    }
+
+    CString result;
+    if (m_bAliasDirectMode) {
+        AppLog(L"☁️ [共享库] 管理员直写模式：退出前直接同步公共库...", RGB(80, 220, 180));
+        result = DirectSyncAliasDbToCloud(payload, mainCount, pairCount);
+    }
+    else {
+        AppLog(L"☁️ [共享库] 检测到本地小号库有变动，退出前自动提交待审核...", RGB(80, 220, 180));
+        result = SubmitAliasDbForReview(payload, mainCount, pairCount);
+    }
+    COLORREF logColor = result.Find(L"成功") >= 0 ? RGB(0, 255, 120) : RGB(255, 120, 80);
+    AppLog(L"☁️ [共享库] " + result, logColor);
+    if (result.Find(L"成功") >= 0) {
+        m_aliasDbCloudBaselinePayload = payload;
+    }
 }
 
 // 授权检查函数：支持云端异步校验与环境隔离
@@ -4040,6 +4398,7 @@ LRESULT CDNFGameCaptureDlg::OnTrayMessage(WPARAM wParam, LPARAM lParam) {
 void CDNFGameCaptureDlg::DoRealExit() {
     m_bIsRunning = FALSE;
     KillTimer(1); KillTimer(2); KillTimer(3); KillTimer(4);
+    AutoSubmitAliasDbIfDirty();
 
     // ==========================================
     // 【新增】：主程序退出时，拉着 OCR 一起陪葬
@@ -6012,6 +6371,7 @@ void CDNFGameCaptureDlg::LoadAliasDB() {
 
     // 加载完后刷新左下角列表
     UpdateAndRefreshRecentList();
+    ResetAliasDbCloudBaseline();
 }
 
 void CDNFGameCaptureDlg::SaveAliasDB() {
@@ -6069,6 +6429,34 @@ void CDNFGameCaptureDlg::SaveAliasDB() {
 
     // 【新增】：保存数据库后，顺便刷新常用选手列表
     UpdateAndRefreshRecentList();
+}
+
+std::string CDNFGameCaptureDlg::BuildAliasDbJsonPayload(int& mainCount, int& pairCount) const
+{
+    json aliasDb = json::object();
+    mainCount = 0;
+    pairCount = 0;
+
+    for (auto const& [name, aliases] : m_aliasDB) {
+        CString mainName = name;
+        mainName.Trim();
+        CString normalizedAliases = DnfNormalizeAliasListString(aliases);
+        std::vector<CString> aliasList = DnfParseAliasListString(normalizedAliases);
+        if (mainName.IsEmpty() || aliasList.empty()) continue;
+
+        aliasDb[std::string(CW2A(mainName, CP_UTF8))] = std::string(CW2A(normalizedAliases, CP_UTF8));
+        mainCount++;
+        pairCount += (int)aliasList.size();
+    }
+
+    return aliasDb.dump();
+}
+
+void CDNFGameCaptureDlg::ResetAliasDbCloudBaseline()
+{
+    int mainCount = 0;
+    int pairCount = 0;
+    m_aliasDbCloudBaselinePayload = BuildAliasDbJsonPayload(mainCount, pairCount);
 }
 
 void CDNFGameCaptureDlg::OnChangeEditNamesInput() {
@@ -6492,6 +6880,44 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             reply["message"] = std::string(CW2A(L"🔄 已提交卡密，正在云端验证中，请稍候...", CP_UTF8));
             CString jsonStr = CA2W(reply.dump().c_str(), CP_UTF8);
             if (m_pWebDlg) m_pWebDlg->SendStateToWeb(jsonStr);
+        }
+        else if (action == "cmd_direct_sync_alias_db") {
+            m_bAliasDirectMode = true;
+            if (j.contains("data") && j["data"].contains("fullAliasDB") && j["data"]["fullAliasDB"].is_object()) {
+                std::lock_guard<std::mutex> lock(m_dataMutex);
+                m_aliasDB.clear();
+                for (auto it = j["data"]["fullAliasDB"].begin(); it != j["data"]["fullAliasDB"].end(); ++it) {
+                    CString mainName = CA2W(it.key().c_str(), CP_UTF8);
+                    CString aliases = CA2W(it.value().get<std::string>().c_str(), CP_UTF8);
+                    mainName.Trim();
+                    aliases.Trim();
+                    CString normalizedAliases = DnfNormalizeAliasListString(aliases);
+                    if (!mainName.IsEmpty() && !normalizedAliases.IsEmpty()) {
+                        m_aliasDB[mainName] = normalizedAliases;
+                    }
+                }
+            }
+
+            SaveAliasDB();
+            int mainCount = 0;
+            int pairCount = 0;
+            std::string payload = BuildAliasDbJsonPayload(mainCount, pairCount);
+            AppLog(L"☁️ [共享库] 管理员直写模式：正在同步本地小号库到公共库...", RGB(80, 220, 180));
+            CString result = DirectSyncAliasDbToCloud(payload, mainCount, pairCount);
+            COLORREF logColor = result.Find(L"成功") >= 0 ? RGB(0, 255, 120) : RGB(255, 120, 80);
+            AppLog(L"☁️ [共享库] " + result, logColor);
+            if (m_pWebDlg) DnfSendWebToast(m_pWebDlg, L"alias_direct_sync_result", result);
+        }
+        else if (action == "cmd_set_alias_direct_mode") {
+            m_bAliasDirectMode = j.value("enabled", false);
+            AppLog(m_bAliasDirectMode ? L"☁️ [共享库] 管理员直写模式已开启" : L"☁️ [共享库] 管理员直写模式已关闭", RGB(80, 220, 180));
+        }
+        else if (action == "cmd_sync_alias_db") {
+            AppLog(L"☁️ [共享库] 正在从云端公共库同步小号数据...", RGB(80, 220, 180));
+            CString result = SyncAliasDbFromCloud();
+            COLORREF logColor = result.Find(L"失败") >= 0 ? RGB(255, 120, 80) : RGB(0, 255, 120);
+            AppLog(L"☁️ [共享库] " + result, logColor);
+            if (m_pWebDlg) DnfSendWebToast(m_pWebDlg, L"alias_sync_result", result);
         }
         // 🚨【新增】：处理网页发来的“专业模式”隐藏/显示指令
         else if (action == "cmd_toggle_mfc") {

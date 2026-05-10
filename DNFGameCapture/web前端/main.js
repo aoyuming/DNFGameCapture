@@ -15,6 +15,11 @@ let lastSentWebHeight = 0;
 let webResizeTimer = null;
 let draggedRow = null;
 let isDbInitialized = false;
+let isCloudDirectMode = false;
+let cloudDirectToggleLock = false;
+let lastDirectAliasPayload = '';
+let directAliasSyncTimer = null;
+const cloudDirectPressedKeys = new Set();
 // Web 端编辑小号后，C++ 可能会立刻推回一次旧状态；这里短时间记录改名映射，避免旧小号被同步回来。
 let pendingAliasRenameRecords = [];
 // 新主号首次绑定小号时，弹窗会让输入框失焦；用这个标记避免 blur 提前同步空小号状态。
@@ -153,7 +158,11 @@ if (window.chrome && window.chrome.webview) {
                     }
                 }
             }
-            else if (msg.action === 'auth_result' || msg.action === 'start_guard' || msg.action === 'patch_result') { showAlert(msg.message); }
+            else if (msg.action === 'auth_result' || msg.action === 'start_guard' || msg.action === 'patch_result' || msg.action === 'alias_submit_result' || msg.action === 'alias_sync_result') { showAlert(msg.message); }
+            else if (msg.action === 'alias_direct_sync_result') {
+                if (String(msg.message || '').includes('失败')) showAlert(msg.message);
+                else console.info('[alias direct sync]', msg.message);
+            }
         } catch (e) { console.error('解析 C++ 消息失败', e); }
     });
 
@@ -161,6 +170,57 @@ if (window.chrome && window.chrome.webview) {
         if (!hasReceivedInitialData) window.chrome.webview.postMessage({ action: "page_ready" });
         else clearInterval(handshakeTimer);
     }, 500);
+}
+
+function buildFormattedAliasDB() {
+    let formattedDB = {};
+    normalizeAllAliasStores();
+    for (let key in savedDB) {
+        savedDB[key] = uniqueAliasArray(savedDB[key]);
+        if (savedDB[key] && savedDB[key].length > 0) {
+            formattedDB[key] = formatAliasArrayForCpp(savedDB[key]);
+        }
+    }
+    return formattedDB;
+}
+
+function stableAliasDbPayload(dbObj) {
+    const sorted = {};
+    Object.keys(dbObj || {}).sort().forEach(key => {
+        sorted[key] = dbObj[key];
+    });
+    return JSON.stringify(sorted);
+}
+
+function queueDirectAliasDbSync(formattedDB, force = false) {
+    if (!isCloudDirectMode || !window.chrome?.webview) return;
+
+    const payload = stableAliasDbPayload(formattedDB);
+    if (!force && payload === lastDirectAliasPayload) return;
+    lastDirectAliasPayload = payload;
+
+    clearTimeout(directAliasSyncTimer);
+    directAliasSyncTimer = setTimeout(() => {
+        window.chrome.webview.postMessage({
+            action: "cmd_direct_sync_alias_db",
+            data: { fullAliasDB: formattedDB }
+        });
+    }, force ? 50 : 800);
+}
+
+function toggleCloudDirectMode() {
+    isCloudDirectMode = !isCloudDirectMode;
+    const fullAliasDB = buildFormattedAliasDB();
+
+    if (isCloudDirectMode) {
+        showAlert('管理员直写模式已开启。<br>当前小号库会同步一次，之后你对小号库的修改会直接写入云端公共库。');
+        queueDirectAliasDbSync(fullAliasDB, true);
+    } else {
+        showAlert('管理员直写模式已关闭。');
+        if (window.chrome?.webview) {
+            window.chrome.webview.postMessage({ action: "cmd_set_alias_direct_mode", enabled: false });
+        }
+    }
 }
 
 
@@ -183,15 +243,8 @@ function pushStateToServer() {
     }
     // ==========================================
 
-    let formattedDB = {};
     // 🚨 注意：发给 C++ 的永远是不受“临时解绑”影响的永久库
-    normalizeAllAliasStores();
-    for (let key in savedDB) {
-        savedDB[key] = uniqueAliasArray(savedDB[key]);
-        if (savedDB[key] && savedDB[key].length > 0) {
-            formattedDB[key] = formatAliasArrayForCpp(savedDB[key]);
-        }
-    }
+    let formattedDB = buildFormattedAliasDB();
 
     let state = {
         blueScore: parseInt(document.querySelector('#team-blue .team-score-input').value) || 0,
@@ -203,6 +256,7 @@ function pushStateToServer() {
     document.querySelectorAll('#team-red .player-row').forEach(row => state.players.push(getRowData(row, 0)));
     document.querySelectorAll('#team-blue .player-row').forEach(row => state.players.push(getRowData(row, 1)));
     window.chrome.webview.postMessage({ action: "update_state", data: state });
+    if (isCloudDirectMode) queueDirectAliasDbSync(formattedDB);
 }
 
 function getRowData(row, teamId) {
@@ -772,6 +826,25 @@ function updateAliasForPlayer(playerName, oldAlias, newAlias) {
     return true;
 }
 
+function migrateMainNameInDb(oldName, newName) {
+    const oldClean = normalizeAliasTextForCompare(oldName);
+    const newClean = normalizeAliasTextForCompare(newName);
+    if (!oldClean || !newClean || oldClean === newClean) return false;
+    if (!savedDB[oldClean] && !playerDB[oldClean]) return false;
+
+    const oldSavedAliases = uniqueAliasArray(savedDB[oldClean] || []);
+    const oldPlayerAliases = uniqueAliasArray(playerDB[oldClean] || oldSavedAliases);
+    const newSavedAliases = uniqueAliasArray(savedDB[newClean] || []);
+    const newPlayerAliases = uniqueAliasArray(playerDB[newClean] || []);
+
+    savedDB[newClean] = uniqueAliasArray([...newSavedAliases, ...oldSavedAliases]);
+    playerDB[newClean] = uniqueAliasArray([...newPlayerAliases, ...oldPlayerAliases, ...savedDB[newClean]]);
+
+    delete savedDB[oldClean];
+    delete playerDB[oldClean];
+    return true;
+}
+
 function findAliasConflict(playerName, aliasName, selfInput = null) {
     const aliasClean = (aliasName || '').trim();
     if (!aliasClean) return null;
@@ -1069,6 +1142,7 @@ function createPlayerRow() {
 
     // 🌟 核心改动点：判断当前输入框有没有值
     nameInput.addEventListener('focus', function () {
+        this.dataset.previousMainName = this.value.trim();
         document.querySelectorAll('.popover').forEach(p => { if (p !== autoPopover && p !== aliasPopover) p.classList.remove('active'); });
         document.querySelectorAll('.player-row').forEach(r => r.classList.remove('active-row'));
         row.classList.add('active-row');
@@ -1100,6 +1174,12 @@ function createPlayerRow() {
         }
 
         const currentName = this.value.trim();
+        const previousName = (this.dataset.previousMainName || '').trim();
+        if (previousName && currentName && previousName !== currentName && !savedDB[currentName]) {
+            if (migrateMainNameInDb(previousName, currentName)) {
+                this.dataset.previousMainName = currentName;
+            }
+        }
 
         const inlinePair = parseInlineMainAliasInput(currentName);
         if (inlinePair) {
@@ -1463,6 +1543,7 @@ function renderAliasMenu(playerName, popElement) {
 
                     renderAliasMenu(playerName, popElement);
                     popElement.classList.add('active');
+                    if (isCloudDirectMode) queueDirectAliasDbSync(buildFormattedAliasDB(), true);
                 }
             });
         });
@@ -1531,7 +1612,49 @@ if (deathAlgoSelect) {
 }
 
 document.getElementById('btn-auth').addEventListener('click', () => { showPrompt("请输入授权卡密 (CDK):", (c) => { if (c) window.chrome.webview.postMessage({ action: "cmd_auth", code: c.trim() }); }); });
+document.getElementById('btn-sync-alias-db')?.addEventListener('click', () => {
+    showConfirm('确定从云端公共库同步小号数据吗？<br><br>只会合并审核通过的数据，不会删除你本地已有的小号。', (ok) => {
+        if (!ok || !window.chrome?.webview) return;
+        window.chrome.webview.postMessage({ action: "cmd_sync_alias_db" });
+    });
+});
 document.getElementById('btn-pro').addEventListener('click', () => window.chrome.webview.postMessage({ action: "cmd_toggle_mfc", show: !isProMode }));
+
+function normalizeFunctionKey(e) {
+    if (e.key === 'F1' || e.code === 'F1') return 'F1';
+    if (e.key === 'F12' || e.code === 'F12') return 'F12';
+    if (e.key === 'Control' || e.code === 'ControlLeft' || e.code === 'ControlRight') return 'Control';
+    return '';
+}
+
+document.addEventListener('keydown', (e) => {
+    const key = normalizeFunctionKey(e);
+    if (!key) return;
+    cloudDirectPressedKeys.add(key);
+
+    if (key === 'F1' || key === 'F12') {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+    }
+
+    if ((e.ctrlKey || cloudDirectPressedKeys.has('Control')) &&
+        cloudDirectPressedKeys.has('F1') &&
+        cloudDirectPressedKeys.has('F12') &&
+        !cloudDirectToggleLock) {
+        cloudDirectToggleLock = true;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        toggleCloudDirectMode();
+    }
+}, true);
+
+document.addEventListener('keyup', (e) => {
+    const key = normalizeFunctionKey(e);
+    if (key) cloudDirectPressedKeys.delete(key);
+    if (!cloudDirectPressedKeys.has('F1') || !cloudDirectPressedKeys.has('F12') || !e.ctrlKey) {
+        cloudDirectToggleLock = false;
+    }
+}, true);
 
 // 🚨 绑定新加的“更改目录”事件
 document.getElementById('dir-display').addEventListener('click', () => {

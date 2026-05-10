@@ -325,6 +325,7 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 .btn-clear-red { background: #600b1d; border: 1px solid var(--red-team); }
 .btn-reset { background: #8a6508; border: 1px solid #ffd700; }
 .btn-pro { background: #5a2a82; border: 1px solid #9d4edd; }
+.btn-sync-db { background: #173f34; border: 1px solid #45d49a; color: #b9ffe0; }
 .btn-review-toggle {
     background: #123847;
     border: 1px solid rgba(0, 229, 255, 0.75);

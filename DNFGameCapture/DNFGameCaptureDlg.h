@@ -6,6 +6,7 @@
 #include <thread>
 #include <atomic>
 #include <vector>
+#include <string>
 #include <mutex>
 #include <future>
 #include <winhttp.h>
@@ -306,6 +307,7 @@ private:
     std::map<CString, CString> m_aliasDB;        // 本地小号数据库
     void LoadAliasDB();                          // 加载数据库
     void SaveAliasDB();                          // 保存数据库
+    std::string BuildAliasDbJsonPayload(int& mainCount, int& pairCount) const;
     HBITMAP m_bmp;
     int m_w, m_h;
     BOOL m_bIsRunning;
@@ -390,9 +392,16 @@ private:
     // 把下面这两行覆盖原来的声明
     bool VerifyKey(CString inputKey, CString machineID);
     CString CheckCloudBinding(CString key, CString hwid, long long duration, long long& outExpTime);
+    CString SubmitAliasDbForReview(const std::string& aliasDbPayload, int mainCount, int pairCount);
+    CString DirectSyncAliasDbToCloud(const std::string& aliasDbPayload, int mainCount, int pairCount);
+    CString SyncAliasDbFromCloud();
+    void ResetAliasDbCloudBaseline();
+    void AutoSubmitAliasDbIfDirty();
     afx_msg LRESULT OnUpdateAuthTime(WPARAM wParam, LPARAM lParam); // 【新增消息】
 
     CString GetMachineID();
+    std::string m_aliasDbCloudBaselinePayload;
+    bool m_bAliasDirectMode = false;
 
     // 【新增】：仅在 Debug 模式下编译的调试输出函数
     void OutputDebugAuthInfo();

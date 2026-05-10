@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>DNF 共享库管理台</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header class="topbar">
+        <div>
+            <h1>DNF 共享库管理台</h1>
+            <div class="subline" id="status-text">正在连接 OSS...</div>
+        </div>
+        <div class="top-actions">
+            <button id="btn-refresh">刷新</button>
+            <button id="btn-clean-empty" class="quiet">清理空记录</button>
+        </div>
+    </header>
+
+    <section class="stats-grid">
+        <div class="stat-card">
+            <span>待审核</span>
+            <b id="stat-pending">0</b>
+        </div>
+        <div class="stat-card warn">
+            <span>冲突</span>
+            <b id="stat-conflict">0</b>
+        </div>
+        <div class="stat-card">
+            <span>待审小号</span>
+            <b id="stat-pending-alias">0</b>
+        </div>
+        <div class="stat-card">
+            <span>公共库</span>
+            <b id="stat-public">0 / 0</b>
+        </div>
+    </section>
+
+    <main class="workspace">
+        <section class="panel pending-panel">
+            <div class="panel-head">
+                <div>
+                    <h2>待审核投稿</h2>
+                    <span id="hidden-empty-text"></span>
+                </div>
+                <label class="checkbox-line">
+                    <input type="checkbox" id="check-all">
+                    全选
+                </label>
+            </div>
+            <div class="filters">
+                <input id="pending-search" placeholder="搜索主号 / 小号 / 提交者">
+                <select id="conflict-filter">
+                    <option value="all">全部</option>
+                    <option value="clean">无冲突</option>
+                    <option value="conflict">有冲突</option>
+                </select>
+            </div>
+            <div class="pending-list" id="pending-list"></div>
+        </section>
+
+        <section class="panel detail-panel">
+            <div class="panel-head">
+                <div>
+                    <h2>投稿详情</h2>
+                    <span id="detail-meta">选择一条记录查看</span>
+                </div>
+            </div>
+            <div id="detail-view" class="detail-empty">点击左侧记录，查看主号、小号与冲突。</div>
+        </section>
+
+        <section class="panel public-panel">
+            <div class="panel-head">
+                <div>
+                    <h2>公共库管理</h2>
+                    <span id="public-meta">读取中...</span>
+                </div>
+            </div>
+            <div class="filters">
+                <input id="public-search" placeholder="搜索公共库">
+                <button id="btn-public-search" class="quiet">搜索</button>
+            </div>
+            <div class="public-crud">
+                <label class="list-box">
+                    <span>主号列表</span>
+                    <select id="public-main-list" size="12"></select>
+                </label>
+                <label class="list-box">
+                    <span>小号列表</span>
+                    <select id="public-alias-list" size="12" multiple></select>
+                </label>
+            </div>
+            <div class="public-editor">
+                <label>
+                    <span>主号</span>
+                    <input id="public-main-name" placeholder="输入主号名称">
+                </label>
+                <label>
+                    <span>小号</span>
+                    <textarea id="public-aliases" rows="5" placeholder="小号列表"></textarea>
+                </label>
+                <div class="public-actions">
+                    <button id="btn-public-new" class="quiet">新建</button>
+                    <button id="btn-public-add" class="primary">新增</button>
+                    <button id="btn-public-save">保存修改</button>
+                    <button id="btn-public-delete" class="danger">删除</button>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <div class="batchbar">
+        <div>
+            已选 <b id="selected-count">0</b> 条
+            <span id="selected-info"></span>
+        </div>
+        <div class="batch-actions">
+            <button id="btn-approve" class="primary">通过选中</button>
+            <button id="btn-force" class="danger">强制通过冲突</button>
+            <button id="btn-reject" class="quiet">驳回选中</button>
+            <button id="btn-clear-selected" class="quiet">取消选择</button>
+        </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+    <script src="app.js"></script>
+</body>
+</html>
