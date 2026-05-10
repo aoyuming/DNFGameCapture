@@ -2069,36 +2069,6 @@ OcrResultData CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaI
 //   - 只在需要 OCR 时才克隆当前帧，用完立即释放
 //   - 复用一对 DC，全程只创建/销毁一次
 // ============================================================================
-CString CDNFGameCaptureDlg::SaveReviewSnapshot(HBITMAP hBmp, int eventId)
-{
-    if (!hBmp) return L"";
-
-    CString baseDir = m_outputDir;
-    baseDir.Trim();
-    if (baseDir.IsEmpty()) {
-        wchar_t exePath[MAX_PATH] = { 0 };
-        ::GetModuleFileName(NULL, exePath, MAX_PATH);
-        baseDir = exePath;
-        int slash = baseDir.ReverseFind(L'\\');
-        if (slash >= 0) baseDir = baseDir.Left(slash);
-    }
-
-    CString reviewDir = DnfJoinPath(baseDir, L"击杀复盘截图");
-    ::CreateDirectory(reviewDir, NULL);
-
-    CString fileName;
-    fileName.Format(L"event_%d_%lu.png", eventId, GetTickCount());
-    CString path = DnfJoinPath(reviewDir, fileName);
-
-    CLSID pngClsid;
-    CLSIDFromString(L"{557CF406-1A04-11D3-9A73-0000F81EF32E}", &pngClsid);
-    Gdiplus::Bitmap bmp(hBmp, NULL);
-    if (bmp.Save(path, &pngClsid, NULL) != Ok) {
-        return L"";
-    }
-    return path;
-}
-
 void CDNFGameCaptureDlg::AddReviewEvent(const RecentEvent& ev)
 {
     m_recentEvents.push_back(ev);
@@ -2185,7 +2155,6 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
     CString globalDeadName;
     static std::atomic<int> s_reviewEventSeq{ 1 };
     int reviewEventId = s_reviewEventSeq.fetch_add(1);
-    CString reviewSnapshotPath;
     CString killerFusionSummary;
     CString deadFusionSummary;
 
@@ -2265,12 +2234,6 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
 
         return hClone;
         };
-
-    if (!validSlots.empty()) {
-        HBITMAP hReviewBmp = CloneHistoryFrame(validSlots[0].ringIdx);
-        reviewSnapshotPath = SaveReviewSnapshot(hReviewBmp, reviewEventId);
-        if (hReviewBmp) ::DeleteObject(hReviewBmp);
-    }
 
     // 清空 OCR 下拉框历史
     {
@@ -3154,7 +3117,6 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             review.statsApplied = true;
             review.status = L"已计入";
             review.algorithmName = (m_nDeathAlgorithmChoice == DEATH_X_ALGO_PATCH) ? L"打补丁红蓝判断" : L"大X颜色个数判断";
-            review.snapshotPath = reviewSnapshotPath;
             review.ocrSummary = L"杀手OCR: ";
             for (const auto& f : historyKTexts) {
                 CString one; one.Format(L"第%d帧=%s; ", f.frameIdx, (LPCTSTR)f.text);
@@ -3252,7 +3214,6 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             review.statsApplied = false;
             review.status = L"冷却拦截";
             review.algorithmName = (m_nDeathAlgorithmChoice == DEATH_X_ALGO_PATCH) ? L"打补丁红蓝判断" : L"大X颜色个数判断";
-            review.snapshotPath = reviewSnapshotPath;
             review.ocrSummary = L"杀手OCR: ";
             for (const auto& f : historyKTexts) {
                 CString one; one.Format(L"第%d帧=%s; ", f.frameIdx, (LPCTSTR)f.text);
@@ -3279,7 +3240,6 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
         review.statsApplied = false;
         review.status = L"未判定";
         review.algorithmName = (m_nDeathAlgorithmChoice == DEATH_X_ALGO_PATCH) ? L"打补丁红蓝判断" : L"大X颜色个数判断";
-        review.snapshotPath = reviewSnapshotPath;
         review.ocrSummary = L"杀手OCR: ";
         for (const auto& f : historyKTexts) {
             CString one; one.Format(L"第%d帧=%s; ", f.frameIdx, (LPCTSTR)f.text);

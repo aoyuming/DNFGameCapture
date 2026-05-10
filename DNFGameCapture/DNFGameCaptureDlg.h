@@ -215,7 +215,6 @@ private:
     TDnfPanelMatchResult MatchIdentityPanel(TDnfPanelSide side);
     void NotifyIdentityKillConfirmed(int deadTeam, const CString& deadName);
     void NotifyIdentityRoundReset(const CString& reason);
-    CString SaveReviewSnapshot(HBITMAP hBmp, int eventId);
     void AddReviewEvent(const RecentEvent& ev);
     bool ToggleReviewEvent(int eventId);
 
