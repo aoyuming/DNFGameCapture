@@ -1,0 +1,7 @@
+{
+  "region": "oss-cn-beijing",
+  "bucket": "dnf-capture-update",
+  "accessKeyId": "填你的 AccessKey ID",
+  "accessKeySecret": "填你的 AccessKey Secret",
+  "stsToken": ""
+}

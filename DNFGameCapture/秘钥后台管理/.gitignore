@@ -1,0 +1,4 @@
+node_modules/
+admin.config.json
+admin-web.out.log
+admin-web.err.log
