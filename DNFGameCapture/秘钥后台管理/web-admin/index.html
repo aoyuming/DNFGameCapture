@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>DNF 共享库管理台</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=20260511-pending-listbox">
 </head>
 <body>
     <header class="topbar">
@@ -24,7 +24,7 @@
             <b id="stat-pending">0</b>
         </div>
         <div class="stat-card warn">
-            <span>冲突</span>
+            <span>重复提示</span>
             <b id="stat-conflict">0</b>
         </div>
         <div class="stat-card">
@@ -53,11 +53,14 @@
                 <input id="pending-search" placeholder="搜索主号 / 小号 / 提交者">
                 <select id="conflict-filter">
                     <option value="all">全部</option>
-                    <option value="clean">无冲突</option>
-                    <option value="conflict">有冲突</option>
+                    <option value="clean">无重复提示</option>
+                    <option value="conflict">有重复提示</option>
                 </select>
             </div>
-            <div class="pending-list" id="pending-list"></div>
+            <div class="pending-list-box list-box">
+                <span>待审核列表</span>
+                <div class="pending-list" id="pending-list"></div>
+            </div>
         </section>
 
         <section class="panel detail-panel">
@@ -67,7 +70,7 @@
                     <span id="detail-meta">选择一条记录查看</span>
                 </div>
             </div>
-            <div id="detail-view" class="detail-empty">点击左侧记录，查看主号、小号与冲突。</div>
+            <div id="detail-view" class="detail-empty">点击左侧记录，查看主号、小号与重复提示。</div>
         </section>
 
         <section class="panel public-panel">
@@ -84,7 +87,7 @@
             <div class="public-crud">
                 <label class="list-box">
                     <span>主号列表</span>
-                    <select id="public-main-list" size="12"></select>
+                    <select id="public-main-list" size="12" multiple></select>
                 </label>
                 <label class="list-box">
                     <span>小号列表</span>
@@ -106,6 +109,13 @@
                     <button id="btn-public-save">保存修改</button>
                     <button id="btn-public-delete" class="danger">删除</button>
                 </div>
+                <label>
+                    <span>一键导入</span>
+                    <textarea id="public-import-text" rows="4" placeholder="丁真=(抖音猪猪)(给母猪做绝育)(抖音街霸真猪)"></textarea>
+                </label>
+                <div class="public-actions import-actions">
+                    <button id="btn-public-import" class="primary">一键导入</button>
+                </div>
             </div>
         </section>
     </main>
@@ -116,14 +126,13 @@
             <span id="selected-info"></span>
         </div>
         <div class="batch-actions">
-            <button id="btn-approve" class="primary">通过选中</button>
-            <button id="btn-force" class="danger">强制通过冲突</button>
-            <button id="btn-reject" class="quiet">驳回选中</button>
+            <button id="btn-approve" class="primary">通过当前/选中</button>
+            <button id="btn-reject" class="quiet">驳回当前/选中</button>
             <button id="btn-clear-selected" class="quiet">取消选择</button>
         </div>
     </div>
 
     <div id="toast" class="toast"></div>
-    <script src="app.js"></script>
+    <script src="app.js?v=20260511-pending-listbox"></script>
 </body>
 </html>

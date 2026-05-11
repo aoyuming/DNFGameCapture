@@ -6,8 +6,21 @@ const crypto = require('crypto');
 
 let client = null;
 
+function getRuntimeDir() {
+    return process.pkg ? path.dirname(process.execPath) : __dirname;
+}
+
+function resolveAdminConfigPath() {
+    if (process.env.ADMIN_CONFIG_PATH) return process.env.ADMIN_CONFIG_PATH;
+
+    const runtimeConfigPath = path.join(getRuntimeDir(), 'admin.config.json');
+    if (fs.existsSync(runtimeConfigPath)) return runtimeConfigPath;
+
+    return path.join(__dirname, 'admin.config.json');
+}
+
 function loadOssConfig() {
-    const localConfigPath = path.join(__dirname, 'admin.config.json');
+    const localConfigPath = resolveAdminConfigPath();
     let localConfig = {};
 
     if (fs.existsSync(localConfigPath)) {
@@ -23,7 +36,7 @@ function loadOssConfig() {
     };
 
     if (!config.accessKeyId || !config.accessKeySecret) {
-        throw new Error('缺少 OSS 凭证。请设置环境变量 ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET，或创建 秘钥后台管理/admin.config.json。');
+        throw new Error(`缺少 OSS 凭证。请设置环境变量，或在程序目录创建 admin.config.json。当前查找路径: ${localConfigPath}`);
     }
 
     return config;
@@ -138,13 +151,13 @@ function getSubmissionEntries(submission) {
                 mainName: String(item.mainName || '').trim(),
                 aliases: normalizeAliasArray(item.aliases)
             }))
-            .filter(item => item.mainName && item.aliases.length > 0);
+            .filter(item => item.mainName);
     }
 
     if (submission?.mainName) {
         const mainName = String(submission.mainName || '').trim();
         const aliases = normalizeAliasArray(submission.aliases);
-        return mainName && aliases.length > 0 ? [{ mainName, aliases }] : [];
+        return mainName ? [{ mainName, aliases }] : [];
     }
 
     return [];
@@ -209,23 +222,6 @@ async function saveAdminKeyConfig(config) {
     });
 }
 
-function findAliasOwner(publicDb, aliasName, expectedMainName) {
-    for (const [mainName, aliases] of Object.entries(publicDb.players)) {
-        if (mainName !== expectedMainName && aliases.includes(aliasName)) {
-            return mainName;
-        }
-    }
-    return '';
-}
-
-function removeAliasFromOtherOwners(publicDb, aliasName, expectedMainName) {
-    for (const [mainName, aliases] of Object.entries(publicDb.players)) {
-        if (mainName === expectedMainName) continue;
-        publicDb.players[mainName] = aliases.filter(a => a !== aliasName);
-        if (publicDb.players[mainName].length === 0) delete publicDb.players[mainName];
-    }
-}
-
 async function listPendingAliasSubmissions() {
     const all = [];
     let marker = undefined;
@@ -259,7 +255,7 @@ async function loadPendingSubmissionList() {
 }
 
 function hasReviewableContent(row) {
-    return getSubmissionStats(row.data).pairCount > 0;
+    return getSubmissionEntries(row.data).length > 0;
 }
 
 async function cleanupEmptyPendingSubmissions() {
@@ -290,14 +286,14 @@ function printSubmissionSummary(row, index) {
     const entries = getSubmissionEntries(s);
     const stats = getSubmissionStats(s);
     const sample = entries.length > 0
-        ? `${entries[0].mainName} -> ${entries[0].aliases.slice(0, 3).join(', ')}`
+        ? `${entries[0].mainName} -> ${entries[0].aliases.length > 0 ? entries[0].aliases.slice(0, 3).join(', ') : '删除主号'}`
         : '无明细';
 
     console.log(`${index}. ${s.id || row.key}`);
     console.log(`   时间: ${formatUnixTime(s.updatedAt || s.createdAt)} | 主号: ${stats.mainCount} | 小号: ${stats.pairCount} | 投稿人数: ${s.sourceCount || s.submitterKeyHashes?.length || 1}`);
     console.log(`   提交者: ${(s.submitterKeyHash || s.submitterKeyHashes?.[0] || '').slice(0, 12)}... | 样例: ${sample}`);
-    if (Array.isArray(s.conflicts) && s.conflicts.length > 0) {
-        console.log(`   ⚠️ 冲突: ${s.conflicts.length} 条`);
+    if (Array.isArray(s.duplicateOwners) && s.duplicateOwners.length > 0) {
+        console.log(`   ⚠️ 重复提示: ${s.duplicateOwners.length} 条`);
     }
 }
 
@@ -314,63 +310,101 @@ function printSubmissionDetail(submission) {
 
     const entries = getSubmissionEntries(submission);
     entries.slice(0, 80).forEach((item, idx) => {
-        console.log(`${idx + 1}. ${item.mainName} = ${normalizeAliasArray(item.aliases).join(' / ')}`);
+        const aliases = normalizeAliasArray(item.aliases);
+        console.log(`${idx + 1}. ${item.mainName} = ${aliases.length > 0 ? aliases.join(' / ') : '删除主号'}`);
     });
 
     if (entries.length > 80) {
         console.log(`...还有 ${entries.length - 80} 条未显示`);
     }
 
-    if (Array.isArray(submission.conflicts) && submission.conflicts.length > 0) {
+    if (submission.diff && typeof submission.diff === 'object') {
+        const added = normalizeAliasArray(submission.diff.addedAliases);
+        const removed = normalizeAliasArray(submission.diff.removedAliases);
         console.log('------------------------------');
-        console.log('冲突项：');
-        submission.conflicts.slice(0, 30).forEach(c => {
-            console.log(` - ${c.aliasName}: 当前属于 ${c.currentOwner}, 投稿要求属于 ${c.requestedOwner}`);
+        console.log(`差异：新增 ${added.length} 个 / 删除 ${removed.length} 个`);
+        if (added.length > 0) console.log(` + ${added.slice(0, 30).join(' / ')}`);
+        if (removed.length > 0) console.log(` - ${removed.slice(0, 30).join(' / ')}`);
+    }
+
+    if (Array.isArray(submission.duplicateOwners) && submission.duplicateOwners.length > 0) {
+        console.log('------------------------------');
+        console.log('重复小号提示：');
+        submission.duplicateOwners.slice(0, 30).forEach(c => {
+            console.log(` - ${c.aliasName}: 公共库也属于 ${(c.owners || []).join(', ')}, 本次提交给 ${c.requestedOwner}`);
         });
     }
 }
 
-async function mergeSubmissionToPublicDb(submission, forceConflicts) {
+function diffAliasesForMerge(submission, item, oldAliases, targetAliases) {
+    const diff = submission?.diff && typeof submission.diff === 'object' ? submission.diff : {};
+    let addedAliases = normalizeAliasArray(diff.addedAliases);
+    let removedAliases = normalizeAliasArray(diff.removedAliases);
+
+    if (addedAliases.length === 0 && removedAliases.length === 0) {
+        addedAliases = targetAliases.filter(alias => !oldAliases.includes(alias));
+        removedAliases = oldAliases.filter(alias => !targetAliases.includes(alias));
+    }
+
+    const mainName = String(item.mainName || '').trim();
+    return {
+        addedAliases: addedAliases.filter(alias => alias !== mainName),
+        removedAliases: removedAliases.filter(alias => alias !== mainName)
+    };
+}
+
+function buildAliasesForReviewMode(mode, oldAliases, targetAliases, diff) {
+    if (mode === 'added') {
+        return normalizeAliasArray([...oldAliases, ...diff.addedAliases]);
+    }
+
+    if (mode === 'removed') {
+        const removed = new Set(diff.removedAliases);
+        return oldAliases.filter(alias => !removed.has(alias));
+    }
+
+    return targetAliases;
+}
+
+async function mergeSubmissionToPublicDb(submission, mode = 'full') {
     const publicDb = await loadPublicAliasDb();
     const result = {
-        added: 0,
-        duplicate: 0,
-        conflict: 0,
-        conflicts: []
+        mode,
+        replaced: 0,
+        deleted: 0,
+        unchanged: 0,
+        pairCount: 0
     };
 
     const entries = getSubmissionEntries(submission);
 
     for (const item of entries) {
         const mainName = String(item.mainName || '').trim();
-        const aliases = normalizeAliasArray(item.aliases);
-        if (!mainName || aliases.length === 0) continue;
+        const targetAliases = normalizeAliasArray(item.aliases);
+        if (!mainName) continue;
 
-        if (!publicDb.players[mainName]) publicDb.players[mainName] = [];
+        const oldAliases = normalizeAliasArray(publicDb.players[mainName]);
+        const diff = diffAliasesForMerge(submission, item, oldAliases, targetAliases);
+        const aliases = buildAliasesForReviewMode(mode, oldAliases, targetAliases, diff)
+            .filter(alias => alias !== mainName);
 
-        for (const aliasName of aliases) {
-            const owner = findAliasOwner(publicDb, aliasName, mainName);
-            if (owner && !forceConflicts) {
-                result.conflict++;
-                result.conflicts.push({ aliasName, currentOwner: owner, requestedOwner: mainName });
-                continue;
+        if (aliases.length === 0) {
+            if (publicDb.players[mainName]) {
+                delete publicDb.players[mainName];
+                result.deleted++;
+            } else {
+                result.unchanged++;
             }
-
-            if (owner && forceConflicts) {
-                removeAliasFromOtherOwners(publicDb, aliasName, mainName);
-            }
-
-            if (publicDb.players[mainName].includes(aliasName)) {
-                result.duplicate++;
-                continue;
-            }
-
-            publicDb.players[mainName].push(aliasName);
-            result.added++;
+            continue;
         }
 
-        publicDb.players[mainName] = normalizeAliasArray(publicDb.players[mainName]);
-        if (publicDb.players[mainName].length === 0) delete publicDb.players[mainName];
+        if (oldAliases.length === aliases.length && oldAliases.every((alias, idx) => alias === aliases[idx])) {
+            result.unchanged++;
+        } else {
+            publicDb.players[mainName] = aliases;
+            result.replaced++;
+        }
+        result.pairCount += aliases.length;
     }
 
     publicDb.version += 1;
@@ -378,10 +412,12 @@ async function mergeSubmissionToPublicDb(submission, forceConflicts) {
     publicDb.audit.push({
         submissionId: submission.id,
         reviewedAt: publicDb.updatedAt,
-        forceConflicts,
-        added: result.added,
-        duplicate: result.duplicate,
-        conflict: result.conflict
+        action: mode === 'added' ? 'review_added_aliases' : (mode === 'removed' ? 'review_removed_aliases' : 'review_replace_main'),
+        reviewMode: mode,
+        replaced: result.replaced,
+        deleted: result.deleted,
+        unchanged: result.unchanged,
+        pairCount: result.pairCount
     });
     publicDb.audit = publicDb.audit.slice(-200);
 
@@ -391,9 +427,10 @@ async function mergeSubmissionToPublicDb(submission, forceConflicts) {
 
 function addMergeTotals(totals, mergeResult) {
     totals.approved++;
-    totals.added += mergeResult.added;
-    totals.duplicate += mergeResult.duplicate;
-    totals.conflict += mergeResult.conflict;
+    totals.replaced += mergeResult.replaced;
+    totals.deleted += mergeResult.deleted;
+    totals.unchanged += mergeResult.unchanged;
+    totals.pairCount += mergeResult.pairCount;
 }
 
 async function archiveSubmission(row, status, extra = {}) {
@@ -410,12 +447,12 @@ async function archiveSubmission(row, status, extra = {}) {
 }
 
 function rowHasDeclaredConflicts(row) {
-    return Array.isArray(row.data?.conflicts) && row.data.conflicts.length > 0;
+    return Array.isArray(row.data?.duplicateOwners) && row.data.duplicateOwners.length > 0;
 }
 
-async function approveSubmissionRow(row, forceConflicts) {
-    const mergeResult = await mergeSubmissionToPublicDb(row.data, forceConflicts);
-    await archiveSubmission(row, 'approved', { mergeResult, batchReviewed: true });
+async function approveSubmissionRow(row, mode = 'full') {
+    const mergeResult = await mergeSubmissionToPublicDb(row.data, mode);
+    await archiveSubmission(row, 'approved', { mergeResult, reviewMode: mode, batchReviewed: true });
     return mergeResult;
 }
 
@@ -458,8 +495,9 @@ async function reviewAliasSubmission() {
     printSubmissionDetail(submission);
 
     console.log('\n操作：');
-    console.log(' a. 通过（冲突项跳过）');
-    console.log(' f. 强制通过（冲突小号会改绑到本投稿主号）');
+    console.log(' a. 通过（按投稿目标状态替换/删除主号）');
+    console.log(' n. 只通过新增小号');
+    console.log(' d. 只通过删除小号');
     console.log(' r. 驳回');
     console.log(' s. 跳过');
 
@@ -474,26 +512,20 @@ async function reviewAliasSubmission() {
         return;
     }
 
-    if (decision !== 'a' && decision !== 'f') {
+    if (!['a', 'n', 'd'].includes(decision)) {
         console.log('❌ 无效操作。');
         return;
     }
 
-    const forceConflicts = decision === 'f';
-    const mergeResult = await mergeSubmissionToPublicDb(submission, forceConflicts);
-    await archiveSubmission(row, 'approved', { mergeResult });
+    const reviewMode = decision === 'n' ? 'added' : (decision === 'd' ? 'removed' : 'full');
+    const mergeResult = await mergeSubmissionToPublicDb(submission, reviewMode);
+    await archiveSubmission(row, 'approved', { mergeResult, reviewMode });
 
     console.log('✅ 已审核通过并合并到公共小号库。');
-    console.log(` - 新增: ${mergeResult.added}`);
-    console.log(` - 已存在: ${mergeResult.duplicate}`);
-    console.log(` - 冲突跳过: ${mergeResult.conflict}`);
-
-    if (mergeResult.conflicts.length > 0) {
-        console.log('冲突样例：');
-        mergeResult.conflicts.slice(0, 20).forEach(c => {
-            console.log(` - ${c.aliasName}: 当前属于 ${c.currentOwner}, 投稿要求属于 ${c.requestedOwner}`);
-        });
-    }
+    console.log(` - 模式: ${reviewMode === 'added' ? '只通过新增' : (reviewMode === 'removed' ? '只通过删除' : '完整通过')}`);
+    console.log(` - 替换主号: ${mergeResult.replaced}`);
+    console.log(` - 删除主号: ${mergeResult.deleted}`);
+    console.log(` - 未变化: ${mergeResult.unchanged}`);
 }
 
 async function batchReviewAliasSubmissions() {
@@ -503,8 +535,8 @@ async function batchReviewAliasSubmissions() {
         return;
     }
 
-    const noConflictRows = rows.filter(row => !rowHasDeclaredConflicts(row));
-    const conflictRows = rows.filter(row => rowHasDeclaredConflicts(row));
+    const noHintRows = rows.filter(row => !rowHasDeclaredConflicts(row));
+    const hintRows = rows.filter(row => rowHasDeclaredConflicts(row));
     const allStats = rows.reduce((acc, row) => {
         const stats = getSubmissionStats(row.data);
         acc.main += stats.mainCount;
@@ -514,44 +546,37 @@ async function batchReviewAliasSubmissions() {
 
     console.log('\n========== 批量审核 ==========');
     console.log(`待审核记录: ${rows.length} 条`);
-    console.log(`无冲突记录: ${noConflictRows.length} 条`);
-    console.log(`有冲突记录: ${conflictRows.length} 条`);
+    console.log(`无重复提示记录: ${noHintRows.length} 条`);
+    console.log(`有重复提示记录: ${hintRows.length} 条`);
     console.log(`合计内容: ${allStats.main} 个主号 / ${allStats.alias} 个小号`);
     console.log('------------------------------');
-    console.log(' 1. 一键通过全部无冲突投稿（推荐）');
-    console.log(' 2. 通过前 N 条无冲突投稿');
-    console.log(' 3. 驳回前 N 条无冲突投稿');
-    console.log(' 4. 强制通过全部投稿（包含冲突，会改绑小号，谨慎）');
+    console.log(' 1. 一键通过全部无重复提示投稿（推荐）');
+    console.log(' 2. 通过前 N 条无重复提示投稿');
+    console.log(' 3. 驳回前 N 条无重复提示投稿');
+    console.log(' 4. 通过全部投稿（包含重复提示）');
     console.log(' 0. 返回');
 
     const choice = (await question('请选择批量操作: ')).trim();
     if (choice === '0') return;
 
     let targetRows = [];
-    let forceConflicts = false;
     let rejectMode = false;
 
     if (choice === '1') {
-        targetRows = noConflictRows;
+        targetRows = noHintRows;
     }
     else if (choice === '2' || choice === '3') {
-        const nText = await question(`请输入 N (1-${noConflictRows.length}): `);
+        const nText = await question(`请输入 N (1-${noHintRows.length}): `);
         const n = parseInt(nText, 10);
         if (!n || n < 1) {
             console.log('❌ 数量无效。');
             return;
         }
-        targetRows = noConflictRows.slice(0, n);
+        targetRows = noHintRows.slice(0, n);
         rejectMode = choice === '3';
     }
     else if (choice === '4') {
-        const confirm = await question('⚠️ 强制通过会处理冲突并改绑小号，输入 YES 确认: ');
-        if (confirm !== 'YES') {
-            console.log('已取消。');
-            return;
-        }
         targetRows = rows;
-        forceConflicts = true;
     }
     else {
         console.log('❌ 无效操作。');
@@ -563,24 +588,24 @@ async function batchReviewAliasSubmissions() {
         return;
     }
 
-    const actionText = rejectMode ? '驳回' : (forceConflicts ? '强制通过' : '通过');
+    const actionText = rejectMode ? '驳回' : '通过';
     const confirm = await question(`确认${actionText} ${targetRows.length} 条投稿？(y/n): `);
     if (confirm.toLowerCase() !== 'y') {
         console.log('已取消。');
         return;
     }
 
-    const totals = { approved: 0, rejected: 0, failed: 0, added: 0, duplicate: 0, conflict: 0 };
+    const totals = { approved: 0, rejected: 0, failed: 0, replaced: 0, deleted: 0, unchanged: 0, pairCount: 0 };
 
     for (let i = 0; i < targetRows.length; i++) {
         const row = targetRows[i];
         try {
             if (rejectMode) {
-                await archiveSubmission(row, 'rejected', { rejectReason: '批量驳回无冲突投稿', batchReviewed: true });
+                await archiveSubmission(row, 'rejected', { rejectReason: '批量驳回无重复提示投稿', batchReviewed: true });
                 totals.rejected++;
             }
             else {
-                const mergeResult = await approveSubmissionRow(row, forceConflicts);
+                const mergeResult = await approveSubmissionRow(row);
                 addMergeTotals(totals, mergeResult);
             }
             process.stdout.write(`\r进度: ${i + 1}/${targetRows.length}`);
@@ -594,12 +619,10 @@ async function batchReviewAliasSubmissions() {
     console.log(`通过: ${totals.approved}`);
     console.log(`驳回: ${totals.rejected}`);
     console.log(`失败: ${totals.failed}`);
-    console.log(`新增小号: ${totals.added}`);
-    console.log(`已存在跳过: ${totals.duplicate}`);
-    console.log(`冲突跳过: ${totals.conflict}`);
-    if (conflictRows.length > 0 && !forceConflicts) {
-        console.log(`仍保留 ${conflictRows.length} 条冲突投稿，请用单条审核查看。`);
-    }
+    console.log(`替换主号: ${totals.replaced}`);
+    console.log(`删除主号: ${totals.deleted}`);
+    console.log(`未变化: ${totals.unchanged}`);
+    console.log(`目标小号数: ${totals.pairCount}`);
 }
 
 async function showPublicAliasDbStats() {

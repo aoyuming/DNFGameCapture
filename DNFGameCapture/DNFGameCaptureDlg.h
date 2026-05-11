@@ -17,12 +17,13 @@
 #include "CameraCapture.h" // 【新增】
 #include <deque>
 #include "WebScoreDlg.h"
+#include "json.hpp"
 
 #include <urlmon.h>
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"3.4.1"    //当前版本号
+#define CURRENT_VERSION L"3.4.0"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -307,7 +308,12 @@ private:
     std::map<CString, CString> m_aliasDB;        // 本地小号数据库
     void LoadAliasDB();                          // 加载数据库
     void SaveAliasDB();                          // 保存数据库
+    void SaveAliasDB(bool mergeActivePlayers);
     std::string BuildAliasDbJsonPayload(int& mainCount, int& pairCount) const;
+    void LoadAliasCloudDeleteBaseline();
+    void SaveAliasCloudDeleteBaseline() const;
+    void SetAliasCloudDeleteBaselineFromPublicPlayers(const nlohmann::json& players);
+    nlohmann::json BuildAliasCloudDeleteScopeJson() const;
     HBITMAP m_bmp;
     int m_w, m_h;
     BOOL m_bIsRunning;
@@ -397,11 +403,15 @@ private:
     CString SyncAliasDbFromCloud();
     void ResetAliasDbCloudBaseline();
     void AutoSubmitAliasDbIfDirty();
+    CString SubmitAliasDbSnapshotIfDirty(bool saveBeforeBuild = true);
     afx_msg LRESULT OnUpdateAuthTime(WPARAM wParam, LPARAM lParam); // 【新增消息】
 
     CString GetMachineID();
     std::string m_aliasDbCloudBaselinePayload;
+    std::string m_aliasDbLastSubmittedPayload;
     bool m_bAliasDirectMode = false;
+    std::vector<CString> m_aliasDbPendingDeleteMains;
+    std::vector<CString> m_aliasCloudDeleteBaselineMains;
 
     // 【新增】：仅在 Debug 模式下编译的调试输出函数
     void OutputDebugAuthInfo();

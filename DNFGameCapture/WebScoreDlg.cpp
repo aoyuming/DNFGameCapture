@@ -181,6 +181,6 @@ void CWebScoreDlg::ApplyFixedWindowHeight()
 
     // 固定窗口：复盘改为 Web 内弹出二级面板，不再额外拉宽 Windows 窗口。
     const int reviewColumnWidth = 0;
-    const int fixedWindowHeight = 675;
+    const int fixedWindowHeight = 740;
     ResizeWindowToSize(m_baseWindowWidth + reviewColumnWidth, fixedWindowHeight);
 }

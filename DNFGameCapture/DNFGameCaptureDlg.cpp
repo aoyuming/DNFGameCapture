@@ -1532,7 +1532,7 @@ static bool DnfPostCloudJson(const std::string& jsonUtf8, std::string& responseU
 
 CString CDNFGameCaptureDlg::SubmitAliasDbForReview(const std::string& aliasDbPayload, int mainCount, int pairCount)
 {
-    if (mainCount <= 0 || pairCount <= 0 || aliasDbPayload.empty()) {
+    if (aliasDbPayload.empty()) {
         return L"当前没有可上传的小号库。";
     }
 
@@ -1552,6 +1552,8 @@ CString CDNFGameCaptureDlg::SubmitAliasDbForReview(const std::string& aliasDbPay
         req["key"] = std::string(CW2A(key, CP_UTF8));
         req["hwid"] = std::string(CW2A(hwid, CP_UTF8));
         req["clientVersion"] = std::string(CW2A(CURRENT_VERSION, CP_UTF8));
+        req["snapshotMode"] = "full";
+        req["deleteScopeMainNames"] = BuildAliasCloudDeleteScopeJson();
         req["aliasDB"] = json::parse(aliasDbPayload);
 
         std::string response;
@@ -1583,7 +1585,7 @@ CString CDNFGameCaptureDlg::SubmitAliasDbForReview(const std::string& aliasDbPay
 
 CString CDNFGameCaptureDlg::DirectSyncAliasDbToCloud(const std::string& aliasDbPayload, int mainCount, int pairCount)
 {
-    if (mainCount <= 0 || pairCount <= 0 || aliasDbPayload.empty()) {
+    if (mainCount <= 0 || aliasDbPayload.empty()) {
         return L"当前没有可直写的本地小号库。";
     }
 
@@ -1621,7 +1623,10 @@ CString CDNFGameCaptureDlg::DirectSyncAliasDbToCloud(const std::string& aliasDbP
         }
 
         if (status == "ok") {
-            m_aliasDbCloudBaselinePayload = aliasDbPayload;
+            m_aliasDbPendingDeleteMains.clear();
+            int cleanMainCount = 0;
+            int cleanPairCount = 0;
+            m_aliasDbCloudBaselinePayload = BuildAliasDbJsonPayload(cleanMainCount, cleanPairCount);
             return L"管理员直写成功：" + cmsg;
         }
         return L"管理员直写失败：" + cmsg;
@@ -1678,6 +1683,7 @@ CString CDNFGameCaptureDlg::SyncAliasDbFromCloud()
         {
             std::lock_guard<std::mutex> lock(m_dataMutex);
             auto& players = reply["publicAliasDB"]["players"];
+            SetAliasCloudDeleteBaselineFromPublicPlayers(players);
             for (auto it = players.begin(); it != players.end(); ++it) {
                 CString mainName = CA2W(it.key().c_str(), CP_UTF8);
                 mainName.Trim();
@@ -1770,7 +1776,7 @@ void CDNFGameCaptureDlg::AutoSubmitAliasDbIfDirty()
     int mainCount = 0;
     int pairCount = 0;
     std::string payload = BuildAliasDbJsonPayload(mainCount, pairCount);
-    if (mainCount <= 0 || pairCount <= 0 || payload == m_aliasDbCloudBaselinePayload) {
+    if (mainCount <= 0 || payload == m_aliasDbCloudBaselinePayload) {
         return;
     }
 
@@ -1786,8 +1792,37 @@ void CDNFGameCaptureDlg::AutoSubmitAliasDbIfDirty()
     COLORREF logColor = result.Find(L"成功") >= 0 ? RGB(0, 255, 120) : RGB(255, 120, 80);
     AppLog(L"☁️ [共享库] " + result, logColor);
     if (result.Find(L"成功") >= 0) {
-        m_aliasDbCloudBaselinePayload = payload;
+        m_aliasDbPendingDeleteMains.clear();
+        ResetAliasDbCloudBaseline();
     }
+}
+
+CString CDNFGameCaptureDlg::SubmitAliasDbSnapshotIfDirty(bool saveBeforeBuild)
+{
+    if (saveBeforeBuild) {
+        SaveAliasDB();
+    }
+    else {
+        SaveAliasDB(false);
+    }
+
+    int mainCount = 0;
+    int pairCount = 0;
+    std::string payload = BuildAliasDbJsonPayload(mainCount, pairCount);
+    if (!m_aliasDbLastSubmittedPayload.empty() && payload == m_aliasDbLastSubmittedPayload) {
+        return L"本地小号库没有变化，无需推送。";
+    }
+
+    AppLog(L"☁️ [共享库] 正在推送本地小号库快照，云端将生成差异等待审核...", RGB(80, 220, 180));
+    CString result = SubmitAliasDbForReview(payload, mainCount, pairCount);
+    COLORREF logColor = result.Find(L"成功") >= 0 ? RGB(0, 255, 120) : RGB(255, 120, 80);
+    AppLog(L"☁️ [共享库] " + result, logColor);
+    if (result.Find(L"成功") >= 0) {
+        m_aliasDbPendingDeleteMains.clear();
+        ResetAliasDbCloudBaseline();
+        m_aliasDbLastSubmittedPayload = m_aliasDbCloudBaselinePayload;
+    }
+    return result;
 }
 
 // 授权检查函数：支持云端异步校验与环境隔离
@@ -4398,7 +4433,6 @@ LRESULT CDNFGameCaptureDlg::OnTrayMessage(WPARAM wParam, LPARAM lParam) {
 void CDNFGameCaptureDlg::DoRealExit() {
     m_bIsRunning = FALSE;
     KillTimer(1); KillTimer(2); KillTimer(3); KillTimer(4);
-    AutoSubmitAliasDbIfDirty();
 
     // ==========================================
     // 【新增】：主程序退出时，拉着 OCR 一起陪葬
@@ -6371,28 +6405,36 @@ void CDNFGameCaptureDlg::LoadAliasDB() {
 
     // 加载完后刷新左下角列表
     UpdateAndRefreshRecentList();
+    LoadAliasCloudDeleteBaseline();
     ResetAliasDbCloudBaseline();
 }
 
-void CDNFGameCaptureDlg::SaveAliasDB() {
-    for (int i = 0; i < 8; i++) {
-        CString mName = m_players[i].name;
-        mName.Trim();
+void CDNFGameCaptureDlg::SaveAliasDB()
+{
+    SaveAliasDB(true);
+}
 
-        if (!mName.IsEmpty() && !m_players[i].aliases.empty()) {
-            std::vector<CString> mergedAliases = DnfParseAliasListString(m_aliasDB[mName]);
+void CDNFGameCaptureDlg::SaveAliasDB(bool mergeActivePlayers) {
+    if (mergeActivePlayers) {
+        for (int i = 0; i < 8; i++) {
+            CString mName = m_players[i].name;
+            mName.Trim();
 
-            for (const auto& a : m_players[i].aliases) {
-                CString aName = a.name;
-                aName.Trim();
-                if (!aName.IsEmpty() && std::find(mergedAliases.begin(), mergedAliases.end(), aName) == mergedAliases.end()) {
-                    mergedAliases.push_back(aName);
+            if (!mName.IsEmpty() && !m_players[i].aliases.empty()) {
+                std::vector<CString> mergedAliases = DnfParseAliasListString(m_aliasDB[mName]);
+
+                for (const auto& a : m_players[i].aliases) {
+                    CString aName = a.name;
+                    aName.Trim();
+                    if (!aName.IsEmpty() && std::find(mergedAliases.begin(), mergedAliases.end(), aName) == mergedAliases.end()) {
+                        mergedAliases.push_back(aName);
+                    }
                 }
-            }
 
-            CString normalizedAliases = DnfFormatAliasListString(mergedAliases);
-            if (!normalizedAliases.IsEmpty()) {
-                m_aliasDB[mName] = normalizedAliases;
+                CString normalizedAliases = DnfFormatAliasListString(mergedAliases);
+                if (!normalizedAliases.IsEmpty()) {
+                    m_aliasDB[mName] = normalizedAliases;
+                }
             }
         }
     }
@@ -6431,6 +6473,103 @@ void CDNFGameCaptureDlg::SaveAliasDB() {
     UpdateAndRefreshRecentList();
 }
 
+void CDNFGameCaptureDlg::LoadAliasCloudDeleteBaseline()
+{
+    m_aliasCloudDeleteBaselineMains.clear();
+
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileName(NULL, exePath, MAX_PATH);
+    CString path = exePath;
+    path = path.Left(path.ReverseFind(L'\\') + 1) + L"alias_cloud_baseline.json";
+
+    CFile file;
+    if (!file.Open(path, CFile::modeRead)) return;
+
+    int len = (int)file.GetLength();
+    if (len <= 0) {
+        file.Close();
+        return;
+    }
+
+    std::string content;
+    content.resize(len);
+    file.Read(content.data(), len);
+    file.Close();
+
+    try {
+        json root = json::parse(content);
+        json mains = root.is_array() ? root : root.value("mainNames", json::array());
+        if (!mains.is_array()) return;
+
+        for (const auto& value : mains) {
+            if (!value.is_string()) continue;
+            CString mainName = CA2W(value.get<std::string>().c_str(), CP_UTF8);
+            mainName.Trim();
+            if (mainName.IsEmpty()) continue;
+            if (std::find(m_aliasCloudDeleteBaselineMains.begin(), m_aliasCloudDeleteBaselineMains.end(), mainName) == m_aliasCloudDeleteBaselineMains.end()) {
+                m_aliasCloudDeleteBaselineMains.push_back(mainName);
+            }
+        }
+    }
+    catch (...) {
+        m_aliasCloudDeleteBaselineMains.clear();
+    }
+}
+
+void CDNFGameCaptureDlg::SaveAliasCloudDeleteBaseline() const
+{
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileName(NULL, exePath, MAX_PATH);
+    CString path = exePath;
+    path = path.Left(path.ReverseFind(L'\\') + 1) + L"alias_cloud_baseline.json";
+
+    json root;
+    root["version"] = 1;
+    root["mainNames"] = json::array();
+    for (auto mainName : m_aliasCloudDeleteBaselineMains) {
+        mainName.Trim();
+        if (mainName.IsEmpty()) continue;
+        root["mainNames"].push_back(std::string(CW2A(mainName, CP_UTF8)));
+    }
+
+    std::string content = root.dump(2);
+    CFile file;
+    if (file.Open(path, CFile::modeCreate | CFile::modeWrite)) {
+        file.Write(content.c_str(), (UINT)content.length());
+        file.Close();
+    }
+}
+
+void CDNFGameCaptureDlg::SetAliasCloudDeleteBaselineFromPublicPlayers(const nlohmann::json& players)
+{
+    m_aliasCloudDeleteBaselineMains.clear();
+    if (!players.is_object()) {
+        SaveAliasCloudDeleteBaseline();
+        return;
+    }
+
+    for (auto it = players.begin(); it != players.end(); ++it) {
+        CString mainName = CA2W(it.key().c_str(), CP_UTF8);
+        mainName.Trim();
+        if (mainName.IsEmpty()) continue;
+        if (std::find(m_aliasCloudDeleteBaselineMains.begin(), m_aliasCloudDeleteBaselineMains.end(), mainName) == m_aliasCloudDeleteBaselineMains.end()) {
+            m_aliasCloudDeleteBaselineMains.push_back(mainName);
+        }
+    }
+    SaveAliasCloudDeleteBaseline();
+}
+
+nlohmann::json CDNFGameCaptureDlg::BuildAliasCloudDeleteScopeJson() const
+{
+    json scope = json::array();
+    for (auto mainName : m_aliasCloudDeleteBaselineMains) {
+        mainName.Trim();
+        if (mainName.IsEmpty()) continue;
+        scope.push_back(std::string(CW2A(mainName, CP_UTF8)));
+    }
+    return scope;
+}
+
 std::string CDNFGameCaptureDlg::BuildAliasDbJsonPayload(int& mainCount, int& pairCount) const
 {
     json aliasDb = json::object();
@@ -6442,11 +6581,25 @@ std::string CDNFGameCaptureDlg::BuildAliasDbJsonPayload(int& mainCount, int& pai
         mainName.Trim();
         CString normalizedAliases = DnfNormalizeAliasListString(aliases);
         std::vector<CString> aliasList = DnfParseAliasListString(normalizedAliases);
-        if (mainName.IsEmpty() || aliasList.empty()) continue;
+        if (mainName.IsEmpty()) continue;
+        if (aliasList.empty()) {
+            if (std::find(m_aliasDbPendingDeleteMains.begin(), m_aliasDbPendingDeleteMains.end(), mainName) == m_aliasDbPendingDeleteMains.end()) continue;
+            aliasDb[std::string(CW2A(mainName, CP_UTF8))] = "";
+            mainCount++;
+            continue;
+        }
 
         aliasDb[std::string(CW2A(mainName, CP_UTF8))] = std::string(CW2A(normalizedAliases, CP_UTF8));
         mainCount++;
         pairCount += (int)aliasList.size();
+    }
+
+    for (auto mainName : m_aliasDbPendingDeleteMains) {
+        mainName.Trim();
+        if (mainName.IsEmpty()) continue;
+        if (m_aliasDB.find(mainName) != m_aliasDB.end()) continue;
+        aliasDb[std::string(CW2A(mainName, CP_UTF8))] = "";
+        mainCount++;
     }
 
     return aliasDb.dump();
@@ -6750,6 +6903,8 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             // Web 端会把永久小号库 fullAliasDB 一起传回来。
             // 这里必须同步到 C++ 的 m_aliasDB，否则 Web 里改完小号名后，下一次 C++ 广播会用旧库把它刷回去。
             if (data.contains("fullAliasDB") && data["fullAliasDB"].is_object()) {
+                std::vector<CString> oldMainNames;
+                for (const auto& pair : m_aliasDB) oldMainNames.push_back(pair.first);
                 m_aliasDB.clear();
                 for (auto it = data["fullAliasDB"].begin(); it != data["fullAliasDB"].end(); ++it) {
                     CString mainName = CA2W(it.key().c_str(), CP_UTF8);
@@ -6757,8 +6912,23 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                     mainName.Trim();
                     aliases.Trim();
                     CString normalizedAliases = DnfNormalizeAliasListString(aliases);
-                    if (!mainName.IsEmpty() && !normalizedAliases.IsEmpty()) {
-                        m_aliasDB[mainName] = normalizedAliases;
+                    if (!mainName.IsEmpty()) {
+                        if (!normalizedAliases.IsEmpty()) {
+                            m_aliasDB[mainName] = normalizedAliases;
+                            auto delIt = std::find(m_aliasDbPendingDeleteMains.begin(), m_aliasDbPendingDeleteMains.end(), mainName);
+                            if (delIt != m_aliasDbPendingDeleteMains.end()) m_aliasDbPendingDeleteMains.erase(delIt);
+                        }
+                        else if (std::find(m_aliasDbPendingDeleteMains.begin(), m_aliasDbPendingDeleteMains.end(), mainName) == m_aliasDbPendingDeleteMains.end()) {
+                            m_aliasDbPendingDeleteMains.push_back(mainName);
+                        }
+                    }
+                }
+
+                for (auto oldMainName : oldMainNames) {
+                    oldMainName.Trim();
+                    if (oldMainName.IsEmpty() || m_aliasDB.find(oldMainName) != m_aliasDB.end()) continue;
+                    if (std::find(m_aliasDbPendingDeleteMains.begin(), m_aliasDbPendingDeleteMains.end(), oldMainName) == m_aliasDbPendingDeleteMains.end()) {
+                        m_aliasDbPendingDeleteMains.push_back(oldMainName);
                     }
                 }
             }
@@ -6820,7 +6990,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 MessageBox(L"Web端发来的数据长度不对！", L"同步异常", MB_ICONWARNING);
             }
 
-            SaveAliasDB();
+            SaveAliasDB(false);
             SaveConfigToFile();
             WriteScoreToFile();
             PostMessage(WM_UPDATE_ALL_UI, 0, 0);
@@ -6886,14 +7056,16 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             if (j.contains("data") && j["data"].contains("fullAliasDB") && j["data"]["fullAliasDB"].is_object()) {
                 std::lock_guard<std::mutex> lock(m_dataMutex);
                 m_aliasDB.clear();
+                m_aliasDbPendingDeleteMains.clear();
                 for (auto it = j["data"]["fullAliasDB"].begin(); it != j["data"]["fullAliasDB"].end(); ++it) {
                     CString mainName = CA2W(it.key().c_str(), CP_UTF8);
                     CString aliases = CA2W(it.value().get<std::string>().c_str(), CP_UTF8);
                     mainName.Trim();
                     aliases.Trim();
                     CString normalizedAliases = DnfNormalizeAliasListString(aliases);
-                    if (!mainName.IsEmpty() && !normalizedAliases.IsEmpty()) {
-                        m_aliasDB[mainName] = normalizedAliases;
+                    if (!mainName.IsEmpty()) {
+                        if (!normalizedAliases.IsEmpty()) m_aliasDB[mainName] = normalizedAliases;
+                        else m_aliasDbPendingDeleteMains.push_back(mainName);
                     }
                 }
             }
@@ -6918,6 +7090,30 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             COLORREF logColor = result.Find(L"失败") >= 0 ? RGB(255, 120, 80) : RGB(0, 255, 120);
             AppLog(L"☁️ [共享库] " + result, logColor);
             if (m_pWebDlg) DnfSendWebToast(m_pWebDlg, L"alias_sync_result", result);
+        }
+        else if (action == "cmd_push_alias_db") {
+            if (j.contains("data") && j["data"].contains("fullAliasDB") && j["data"]["fullAliasDB"].is_object()) {
+                std::lock_guard<std::mutex> lock(m_dataMutex);
+                m_aliasDB.clear();
+                m_aliasDbPendingDeleteMains.clear();
+                for (auto it = j["data"]["fullAliasDB"].begin(); it != j["data"]["fullAliasDB"].end(); ++it) {
+                    CString mainName = CA2W(it.key().c_str(), CP_UTF8);
+                    CString aliases = CA2W(it.value().get<std::string>().c_str(), CP_UTF8);
+                    mainName.Trim();
+                    aliases.Trim();
+                    CString normalizedAliases = DnfNormalizeAliasListString(aliases);
+                    if (!mainName.IsEmpty()) {
+                        if (!normalizedAliases.IsEmpty()) {
+                            m_aliasDB[mainName] = normalizedAliases;
+                        }
+                        else if (std::find(m_aliasDbPendingDeleteMains.begin(), m_aliasDbPendingDeleteMains.end(), mainName) == m_aliasDbPendingDeleteMains.end()) {
+                            m_aliasDbPendingDeleteMains.push_back(mainName);
+                        }
+                    }
+                }
+            }
+            CString result = SubmitAliasDbSnapshotIfDirty(false);
+            if (m_pWebDlg) DnfSendWebToast(m_pWebDlg, L"alias_submit_result", result);
         }
         // 🚨【新增】：处理网页发来的“专业模式”隐藏/显示指令
         else if (action == "cmd_toggle_mfc") {
@@ -6944,50 +7140,46 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
 
             std::lock_guard<std::mutex> lock(m_dataMutex);
 
-            bool blockedDelete = false;
             bool legacyShortAlias = DnfIsLegacyShortAliasWithoutMeta(aliasName);
-            // 主号不参与名称匹配，场上选手必须至少保留 1 个小号。
-            // 例外：旧库中已经存在的短 ID 小号可以直接删除，避免脏数据卡住用户。
-            for (int i = 0; i < 8; i++) {
-                if (m_players[i].name == mainName && m_players[i].aliases.size() <= 1 && !legacyShortAlias) {
-                    AppLog(L"❌ [删除小号失败] [" + mainName + L"] 至少要保留一个小号。", RGB(255, 120, 80));
-                    blockedDelete = true;
-                    break;
-                }
+            if (legacyShortAlias) {
+                AppLog(L"⚠️ [旧库短ID清理] [" + mainName + L"] " + DnfLegacyShortAliasDeleteReason(aliasName), RGB(255, 180, 0));
             }
 
-            if (!blockedDelete) {
-                if (legacyShortAlias) {
-                    AppLog(L"⚠️ [旧库短ID清理] [" + mainName + L"] " + DnfLegacyShortAliasDeleteReason(aliasName), RGB(255, 180, 0));
-                }
-
-                // 1. 从场上活跃选手 (m_players) 中剥离
-                for (int i = 0; i < 8; i++) {
-                    if (m_players[i].name == mainName) {
-                        for (auto it = m_players[i].aliases.begin(); it != m_players[i].aliases.end(); ) {
-                            if (it->name == aliasName) {
-                                it = m_players[i].aliases.erase(it);
-                            }
-                            else {
-                                ++it;
-                            }
+            // 1. 从场上活跃选手 (m_players) 中剥离
+            for (int i = 0; i < 8; i++) {
+                if (m_players[i].name == mainName) {
+                    for (auto it = m_players[i].aliases.begin(); it != m_players[i].aliases.end(); ) {
+                        if (it->name == aliasName) {
+                            it = m_players[i].aliases.erase(it);
+                        }
+                        else {
+                            ++it;
                         }
                     }
                 }
+            }
 
-                // 2. 从底层数据库 (m_aliasDB) 中连根拔起
-                if (m_aliasDB.find(mainName) != m_aliasDB.end()) {
-                    CString& dbAliases = m_aliasDB[mainName];
-                    dbAliases = DnfRemoveAliasFromAliasListString(dbAliases, aliasName);
-                    if (dbAliases.IsEmpty()) {
-                        m_aliasDB.erase(mainName);
+            // 2. 从底层数据库 (m_aliasDB) 中连根拔起
+            if (m_aliasDB.find(mainName) != m_aliasDB.end()) {
+                CString& dbAliases = m_aliasDB[mainName];
+                dbAliases = DnfRemoveAliasFromAliasListString(dbAliases, aliasName);
+                if (dbAliases.IsEmpty()) {
+                    m_aliasDB.erase(mainName);
+                    if (std::find(m_aliasDbPendingDeleteMains.begin(), m_aliasDbPendingDeleteMains.end(), mainName) == m_aliasDbPendingDeleteMains.end()) {
+                        m_aliasDbPendingDeleteMains.push_back(mainName);
                     }
                 }
+            }
 
-                // 3. 落地保存并刷新所有界面（这会触发 BroadcastStateToWeb 告诉网页更新成功）
-                SaveAliasDB();
-                SaveConfigToFile();
-                PostMessage(WM_UPDATE_ALL_UI, 0, 0);
+            // 3. 落地保存并刷新所有界面（这会触发 BroadcastStateToWeb 告诉网页更新成功）
+            SaveAliasDB();
+            SaveConfigToFile();
+            PostMessage(WM_UPDATE_ALL_UI, 0, 0);
+            if (m_bAliasDirectMode) {
+                int mainCount = 0;
+                int pairCount = 0;
+                std::string payload = BuildAliasDbJsonPayload(mainCount, pairCount);
+                DirectSyncAliasDbToCloud(payload, mainCount, pairCount);
             }
         }
         else if (action == "cmd_undo_event") {
@@ -7440,11 +7632,6 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
                 CString subName = m_players[pIdx].aliases[aIdx].name;
 
                 bool legacyShortAlias = DnfIsLegacyShortAliasWithoutMeta(subName);
-                if (m_players[pIdx].aliases.size() <= 1 && !legacyShortAlias) {
-                    AppLog(L"❌ [删除小号失败] [" + mainName + L"] 至少要保留一个小号。", RGB(255, 120, 80));
-                    *pResult = 0;
-                    return;
-                }
                 if (legacyShortAlias) {
                     AppLog(L"⚠️ [旧库短ID清理] [" + mainName + L"] " + DnfLegacyShortAliasDeleteReason(subName), RGB(255, 180, 0));
                 }
@@ -7454,6 +7641,9 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
                     dbAliases = DnfRemoveAliasFromAliasListString(dbAliases, subName);
                     if (dbAliases.IsEmpty()) {
                         m_aliasDB.erase(mainName);
+                        if (std::find(m_aliasDbPendingDeleteMains.begin(), m_aliasDbPendingDeleteMains.end(), mainName) == m_aliasDbPendingDeleteMains.end()) {
+                            m_aliasDbPendingDeleteMains.push_back(mainName);
+                        }
                     }
                 }
 

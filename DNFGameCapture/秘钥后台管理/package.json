@@ -5,7 +5,17 @@
   "type": "commonjs",
   "scripts": {
     "start": "node admin.js",
-    "web": "node admin-web.js"
+    "web": "node admin-web.js",
+    "build:exe": "npx --yes @yao-pkg/pkg . --targets node22-win-x64 --output dist/dnf-capture-admin.exe",
+    "build:web-exe": "npx --yes @yao-pkg/pkg . --targets node22-win-x64 --output dist/dnf-capture-admin-web.exe",
+    "build:cli-exe": "npx --yes @yao-pkg/pkg admin.js --targets node22-win-x64 --output dist/dnf-capture-admin-cli.exe",
+    "build:all-exe": "npm.cmd run build:web-exe && npm.cmd run build:cli-exe"
+  },
+  "bin": "admin-web.js",
+  "pkg": {
+    "assets": [
+      "web-admin/**/*"
+    ]
   },
   "dependencies": {
     "ali-oss": "^6.22.0",

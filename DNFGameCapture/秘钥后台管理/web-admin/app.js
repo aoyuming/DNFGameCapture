@@ -36,8 +36,8 @@ function matchesPending(row) {
     const q = el('pending-search').value.trim();
     const mode = el('conflict-filter').value;
 
-    if (mode === 'clean' && row.conflictCount > 0) return false;
-    if (mode === 'conflict' && row.conflictCount === 0) return false;
+    if (mode === 'clean' && (row.duplicateHintCount || 0) > 0) return false;
+    if (mode === 'conflict' && (row.duplicateHintCount || 0) === 0) return false;
     if (!q) return true;
 
     const text = [
@@ -55,9 +55,14 @@ function selectedRows() {
     return Array.from(state.selected).map(key => map.get(key)).filter(Boolean);
 }
 
+function reviewTargetKeys() {
+    if (state.selected.size > 0) return Array.from(state.selected);
+    return state.activeKey ? [state.activeKey] : [];
+}
+
 function renderStats(stats, emptyCount) {
     el('stat-pending').textContent = String(stats.pendingCount || 0);
-    el('stat-conflict').textContent = String(stats.conflictCount || 0);
+    el('stat-conflict').textContent = String(stats.duplicateHintCount || stats.conflictCount || 0);
     el('stat-pending-alias').textContent = String(stats.pendingAliasCount || 0);
     el('stat-public').textContent = `${stats.publicMainCount || 0} / ${stats.publicAliasCount || 0}`;
     el('hidden-empty-text').textContent = emptyCount > 0 ? `已隐藏 ${emptyCount} 条空记录` : '';
@@ -77,7 +82,7 @@ function renderPendingList() {
 
     state.filtered.forEach(row => {
         const item = document.createElement('div');
-        item.className = `pending-item ${row.conflictCount > 0 ? 'conflict' : ''} ${row.key === state.activeKey ? 'active' : ''}`;
+        item.className = `pending-item ${(row.duplicateHintCount || 0) > 0 ? 'conflict' : ''} ${row.key === state.activeKey ? 'active' : ''}`;
         item.dataset.key = row.key;
         item.innerHTML = `
             <input type="checkbox" ${state.selected.has(row.key) ? 'checked' : ''}>
@@ -88,7 +93,7 @@ function renderPendingList() {
             <div class="pending-badges">
                 <span class="badge ok">${row.mainCount} 主号</span>
                 <span class="badge">${row.pairCount} 小号</span>
-                ${row.conflictCount > 0 ? `<span class="badge warn">${row.conflictCount} 冲突</span>` : ''}
+                ${(row.duplicateHintCount || 0) > 0 ? `<span class="badge warn">${row.duplicateHintCount} 重复提示</span>` : ''}
             </div>
         `;
 
@@ -113,10 +118,12 @@ function renderPendingList() {
 
 function renderSelection() {
     const rows = selectedRows();
-    const conflictCount = rows.filter(row => row.conflictCount > 0).length;
+    const hintCount = rows.filter(row => (row.duplicateHintCount || 0) > 0).length;
     const aliasCount = rows.reduce((sum, row) => sum + row.pairCount, 0);
     el('selected-count').textContent = String(rows.length);
-    el('selected-info').textContent = rows.length > 0 ? `包含 ${aliasCount} 个小号，${conflictCount} 条冲突记录` : '';
+    el('selected-info').textContent = rows.length > 0
+        ? `包含 ${aliasCount} 个小号，${hintCount} 条重复提示记录`
+        : (state.activeKey ? '未勾选时将处理当前详情记录' : '');
     el('check-all').checked = state.filtered.length > 0 && state.filtered.every(row => state.selected.has(row.key));
 }
 
@@ -124,32 +131,60 @@ function renderDetail(row) {
     const detail = el('detail-view');
     if (!row) {
         detail.className = 'detail-empty';
-        detail.textContent = '点击左侧记录，查看主号、小号与冲突。';
+        detail.textContent = '点击左侧记录，查看主号、小号与重复提示。';
         el('detail-meta').textContent = '选择一条记录查看';
         return;
     }
 
     detail.className = 'detail-content';
-    el('detail-meta').textContent = `${row.mainCount} 个主号 / ${row.pairCount} 个小号 / ${row.conflictCount} 条冲突`;
+    el('detail-meta').textContent = `${row.mainCount} 个主号 / ${row.pairCount} 个小号 / ${row.duplicateHintCount || 0} 条重复提示`;
 
-    const conflictHtml = row.conflicts.length > 0
-        ? `<div class="section-title">冲突</div>${row.conflicts.map(c => `
-            <div class="conflict-row">${escapeHtml(c.aliasName)}：当前属于 ${escapeHtml(c.currentOwner)}，投稿要求属于 ${escapeHtml(c.requestedOwner)}</div>
+    const duplicateHints = row.duplicateHints || row.conflicts || [];
+    const conflictHtml = duplicateHints.length > 0
+        ? `<div class="section-title">重复小号提示</div>${duplicateHints.map(c => `
+            <div class="conflict-row">${escapeHtml(c.aliasName)}：公共库里也属于 ${escapeHtml((c.owners || [c.currentOwner]).filter(Boolean).join(' / '))}，本次提交给 ${escapeHtml(c.requestedOwner)}</div>
         `).join('')}`
-        : '<div class="section-title">冲突</div><div class="detail-empty">没有冲突，可以直接通过。</div>';
+        : '<div class="section-title">重复小号提示</div><div class="detail-empty">没有跨主号重复提示，可以直接通过。</div>';
+    const diff = row.diff || {};
+    const addedAliases = diff.addedAliases || [];
+    const removedAliases = diff.removedAliases || [];
+    const diffHtml = addedAliases.length > 0 || removedAliases.length > 0
+        ? `<div class="section-title">差异</div>
+            <div class="diff-actions">
+                <button class="primary" data-review-action="approve_added" ${addedAliases.length === 0 ? 'disabled' : ''}>只通过新增</button>
+                <button class="danger" data-review-action="approve_removed" ${removedAliases.length === 0 ? 'disabled' : ''}>只通过删除</button>
+            </div>
+            <div class="alias-row">
+                <b>新增小号</b>
+                <div class="alias-tags">
+                    ${addedAliases.length > 0 ? addedAliases.map(alias => `<span class="alias-tag">${escapeHtml(alias)}</span>`).join('') : '<span class="alias-tag">无</span>'}
+                </div>
+            </div>
+            <div class="alias-row">
+                <b>删除小号</b>
+                <div class="alias-tags">
+                    ${removedAliases.length > 0 ? removedAliases.map(alias => `<span class="alias-tag">${escapeHtml(alias)}</span>`).join('') : '<span class="alias-tag">无</span>'}
+                </div>
+            </div>`
+        : '';
 
     detail.innerHTML = `
         ${conflictHtml}
+        ${diffHtml}
         <div class="section-title">内容</div>
         ${row.entries.map(item => `
             <div class="alias-row">
                 <b>${escapeHtml(item.mainName)}</b>
                 <div class="alias-tags">
-                    ${item.aliases.map(alias => `<span class="alias-tag">${escapeHtml(alias)}</span>`).join('')}
+                    ${item.aliases.length > 0 ? item.aliases.map(alias => `<span class="alias-tag">${escapeHtml(alias)}</span>`).join('') : '<span class="alias-tag">审核通过后删除该主号</span>'}
                 </div>
             </div>
         `).join('')}
     `;
+
+    detail.querySelectorAll('[data-review-action]').forEach(button => {
+        button.addEventListener('click', () => reviewCurrent(button.dataset.reviewAction).catch(err => toast(err.message)));
+    });
 }
 
 function renderPublic(data) {
@@ -232,8 +267,7 @@ function clearPublicForm() {
 }
 
 function publicToast(data) {
-    const movedText = data.movedAliasCount > 0 ? `，改绑 ${data.movedAliasCount} 个重复小号` : '';
-    toast(`${data.message}${movedText}`);
+    toast(data.message);
 }
 
 function escapeHtml(value) {
@@ -296,33 +330,58 @@ async function savePublicEntry() {
 }
 
 async function deletePublicEntry() {
-    const mainName = state.activePublicMain;
-    if (!mainName) {
+    const selectedNames = Array.from(el('public-main-list').selectedOptions).map(option => option.value).filter(Boolean);
+    if (selectedNames.length === 0) {
         toast('请先在主号列表中选择要删除的记录。');
         return;
     }
 
-    if (!confirm(`确认删除公共库记录「${mainName}」？`)) return;
+    const preview = selectedNames.slice(0, 6).join('、');
+    const suffix = selectedNames.length > 6 ? ` 等 ${selectedNames.length} 个` : '';
+    if (!confirm(`确认删除公共库记录「${preview}${suffix}」？`)) return;
 
-    const data = await api(`/api/public/${encodeURIComponent(mainName)}`, {
-        method: 'DELETE'
+    const data = await api('/api/public/batch-delete', {
+        method: 'POST',
+        body: JSON.stringify({ mainNames: selectedNames })
     });
 
     state.activePublicMain = '';
     el('public-search').value = '';
-    toast(`${data.message}：${data.deletedMainName}`);
+    toast(`${data.message}，共 ${data.deletedAliasCount} 个小号`);
     await loadDashboard();
 }
 
-async function review(action) {
-    const keys = Array.from(state.selected);
-    if (keys.length === 0) {
-        toast('请先选择记录。');
+async function importPublicEntries() {
+    const text = el('public-import-text').value.trim();
+    if (!text) {
+        toast('请先粘贴要导入的主号小号文本。');
         return;
     }
 
-    if (action === 'forceApprove') {
-        if (!confirm('强制通过会把冲突小号改绑到投稿主号，确认继续？')) return;
+    const data = await api('/api/public/import', {
+        method: 'POST',
+        body: JSON.stringify({ text })
+    });
+
+    el('public-import-text').value = '';
+    toast(data.errors?.length ? `${data.message}，${data.errors.length} 行未导入` : data.message);
+    await loadDashboard();
+}
+
+function reviewActionLabel(action) {
+    return {
+        approve: '完整通过',
+        approve_added: '只通过新增',
+        approve_removed: '只通过删除',
+        reject: '驳回'
+    }[action] || '处理';
+}
+
+async function review(action, explicitKeys = null) {
+    const keys = explicitKeys || reviewTargetKeys();
+    if (keys.length === 0) {
+        toast('请先勾选记录，或点击一条记录查看详情。');
+        return;
     }
 
     let reason = '';
@@ -335,11 +394,20 @@ async function review(action) {
         body: JSON.stringify({ keys, action, reason })
     });
 
-    toast(`处理完成：通过 ${data.approved}，驳回 ${data.rejected}，新增 ${data.added}，失败 ${data.failed}`);
+    const firstFailure = data.failures?.[0]?.error ? `：${data.failures[0].error}` : '';
+    toast(`${reviewActionLabel(action)}完成：通过 ${data.approved}，驳回 ${data.rejected}，替换 ${data.replaced}，删除 ${data.deleted}，未变化 ${data.unchanged}，失败 ${data.failed}${firstFailure}`);
     state.selected.clear();
     state.activeKey = '';
     renderDetail(null);
     await loadDashboard();
+}
+
+async function reviewCurrent(action) {
+    if (!state.activeKey) {
+        toast('请先点击一条待审核记录查看详情。');
+        return;
+    }
+    await review(action, [state.activeKey]);
 }
 
 async function cleanupEmpty() {
@@ -356,13 +424,14 @@ el('conflict-filter').addEventListener('change', renderPendingList);
 el('public-search').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadPublic().catch(err => toast(err.message)); });
 el('btn-public-search').addEventListener('click', () => loadPublic().catch(err => toast(err.message)));
 el('public-main-list').addEventListener('change', (e) => {
-    state.activePublicMain = e.target.value;
+    state.activePublicMain = Array.from(e.target.selectedOptions)[0]?.value || '';
     renderPublicEntry(findPublicEntry(state.activePublicMain));
 });
 el('btn-public-new').addEventListener('click', clearPublicForm);
 el('btn-public-add').addEventListener('click', () => addPublicEntry().catch(err => toast(err.message)));
 el('btn-public-save').addEventListener('click', () => savePublicEntry().catch(err => toast(err.message)));
 el('btn-public-delete').addEventListener('click', () => deletePublicEntry().catch(err => toast(err.message)));
+el('btn-public-import').addEventListener('click', () => importPublicEntries().catch(err => toast(err.message)));
 el('check-all').addEventListener('change', (e) => {
     state.filtered.forEach(row => {
         if (e.target.checked) state.selected.add(row.key);
@@ -371,7 +440,6 @@ el('check-all').addEventListener('change', (e) => {
     renderPendingList();
 });
 el('btn-approve').addEventListener('click', () => review('approve').catch(err => toast(err.message)));
-el('btn-force').addEventListener('click', () => review('forceApprove').catch(err => toast(err.message)));
 el('btn-reject').addEventListener('click', () => review('reject').catch(err => toast(err.message)));
 el('btn-clear-selected').addEventListener('click', () => {
     state.selected.clear();

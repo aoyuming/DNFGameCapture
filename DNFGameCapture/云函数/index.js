@@ -116,11 +116,25 @@ function normalizeStringArray(value) {
     return out;
 }
 
-function normalizeAliasSubmission(rawAliasDb, maxMains = MAX_ALIAS_SUBMISSION_MAINS, maxAliasesPerMain = MAX_ALIASES_PER_MAIN) {
+function normalizeMainNameArray(value, maxMains = MAX_PUBLIC_ALIAS_MAINS) {
+    const out = [];
+    const seen = new Set();
+    for (const raw of Array.isArray(value) ? value : []) {
+        if (out.length >= maxMains) break;
+        const mainName = cleanName(raw);
+        if (!mainName || seen.has(mainName)) continue;
+        seen.add(mainName);
+        out.push(mainName);
+    }
+    return out;
+}
+
+function normalizeAliasSubmission(rawAliasDb, maxMains = MAX_ALIAS_SUBMISSION_MAINS, maxAliasesPerMain = MAX_ALIASES_PER_MAIN, options = {}) {
     if (!rawAliasDb || typeof rawAliasDb !== 'object' || Array.isArray(rawAliasDb)) {
         return [];
     }
 
+    const allowEmpty = !!options.allowEmpty;
     const entries = [];
     const seenMain = new Set();
 
@@ -135,7 +149,7 @@ function normalizeAliasSubmission(rawAliasDb, maxMains = MAX_ALIAS_SUBMISSION_MA
             .filter(aliasName => aliasName !== mainName)
             .slice(0, maxAliasesPerMain);
 
-        if (aliases.length > 0) {
+        if (aliases.length > 0 || allowEmpty) {
             entries.push({ mainName, aliases });
         }
     }
@@ -264,13 +278,29 @@ async function loadPublicAliasDb(client) {
     }));
 }
 
-function findPublicAliasOwner(publicDb, aliasName, expectedMainName) {
-    for (const [mainName, aliases] of Object.entries(publicDb.players || {})) {
-        if (mainName !== expectedMainName && aliases.includes(aliasName)) {
-            return mainName;
+function findDuplicateAliasOwners(publicDb, aliases, expectedMainName) {
+    const warnings = [];
+    for (const aliasName of normalizeAliasArray(aliases)) {
+        const owners = [];
+        for (const [mainName, publicAliases] of Object.entries(publicDb.players || {})) {
+            if (mainName !== expectedMainName && normalizeAliasArray(publicAliases).includes(aliasName)) {
+                owners.push(mainName);
+            }
         }
+        if (owners.length > 0) warnings.push({ aliasName, owners, requestedOwner: expectedMainName });
     }
-    return '';
+    return warnings;
+}
+
+function diffAliasArrays(beforeAliases, afterAliases) {
+    const before = normalizeAliasArray(beforeAliases);
+    const after = normalizeAliasArray(afterAliases);
+    return {
+        beforeAliases: before,
+        afterAliases: after,
+        addedAliases: after.filter(aliasName => !before.includes(aliasName)),
+        removedAliases: before.filter(aliasName => !after.includes(aliasName))
+    };
 }
 
 function normalizeAdminKeyHashes(value) {
@@ -300,7 +330,15 @@ function createPendingAggregate(mainName, now) {
         status: 'pending',
         mainName,
         aliases: [],
+        operation: 'replace',
+        diff: {
+            beforeAliases: [],
+            afterAliases: [],
+            addedAliases: [],
+            removedAliases: []
+        },
         conflicts: [],
+        duplicateOwners: [],
         submitterKeyHashes: [],
         hwidHashes: [],
         sourceCount: 0,
@@ -317,7 +355,14 @@ function normalizePendingAggregate(raw, mainName, now) {
         : createPendingAggregate(mainName, now);
 
     aggregate.aliases = normalizeAliasArray(aggregate.aliases).filter(aliasName => aliasName !== mainName);
+    aggregate.diff = aggregate.diff && typeof aggregate.diff === 'object' ? aggregate.diff : {};
+    aggregate.diff.beforeAliases = normalizeAliasArray(aggregate.diff.beforeAliases);
+    aggregate.diff.afterAliases = normalizeAliasArray(aggregate.diff.afterAliases);
+    aggregate.diff.addedAliases = normalizeAliasArray(aggregate.diff.addedAliases);
+    aggregate.diff.removedAliases = normalizeAliasArray(aggregate.diff.removedAliases);
     aggregate.conflicts = Array.isArray(aggregate.conflicts) ? aggregate.conflicts : [];
+    aggregate.duplicateOwners = Array.isArray(aggregate.duplicateOwners) ? aggregate.duplicateOwners : [];
+    aggregate.operation = aggregate.aliases.length === 0 ? 'delete' : String(aggregate.operation || 'replace');
     aggregate.submitterKeyHashes = normalizeStringArray(aggregate.submitterKeyHashes);
     aggregate.hwidHashes = normalizeStringArray(aggregate.hwidHashes);
     aggregate.sourceCount = Number(aggregate.sourceCount || 0);
@@ -389,14 +434,15 @@ async function handleGetPublicAliasDb(client, data, res) {
     });
 }
 
-function entriesToPublicPlayers(entries) {
+function entriesToPublicPlayers(entries, options = {}) {
+    const allowEmpty = !!options.allowEmpty;
     const players = {};
     for (const entry of entries) {
         const mainName = cleanName(entry.mainName);
         const aliases = normalizeAliasArray(entry.aliases)
             .filter(aliasName => aliasName && aliasName !== mainName)
             .slice(0, MAX_ALIASES_PER_MAIN);
-        if (mainName && aliases.length > 0) players[mainName] = aliases;
+        if (mainName && (aliases.length > 0 || allowEmpty)) players[mainName] = aliases;
     }
     return players;
 }
@@ -421,7 +467,7 @@ async function handleDirectSyncAliasDb(client, data, res) {
         return res.json({ status: 'error', msg: '当前卡密不在管理员直写白名单中' });
     }
 
-    const entries = normalizeAliasSubmission(data.aliasDB || data.fullAliasDB, MAX_PUBLIC_ALIAS_MAINS, MAX_PUBLIC_ALIASES_PER_MAIN);
+    const entries = normalizeAliasSubmission(data.aliasDB || data.fullAliasDB, MAX_PUBLIC_ALIAS_MAINS, MAX_PUBLIC_ALIASES_PER_MAIN, { allowEmpty: true });
     if (entries.length === 0) {
         return res.json({ status: 'error', msg: '没有可直写的公共库数据' });
     }
@@ -475,21 +521,35 @@ async function handleSubmitAliasDb(client, data, res) {
     const valid = validateBoundLicense(record, hwid);
     if (!valid.ok) return res.json({ status: 'error', msg: valid.msg });
 
-    const entries = normalizeAliasSubmission(data.aliasDB || data.fullAliasDB);
+    const submittedEntries = normalizeAliasSubmission(data.aliasDB || data.fullAliasDB, MAX_PUBLIC_ALIAS_MAINS, MAX_PUBLIC_ALIASES_PER_MAIN, { allowEmpty: true });
+    const publicDb = await loadPublicAliasDb(client);
+    const submittedMap = new Map(submittedEntries.map(entry => [entry.mainName, entry.aliases]));
+    const deleteScopeMainNames = normalizeMainNameArray(data.deleteScopeMainNames, MAX_PUBLIC_ALIAS_MAINS);
+    const candidateMainNames = new Set(submittedMap.keys());
+    for (const mainName of deleteScopeMainNames) {
+        if (!submittedMap.has(mainName) && publicDb.players[mainName]) {
+            candidateMainNames.add(mainName);
+        }
+    }
+    const entries = Array.from(candidateMainNames).slice(0, MAX_PUBLIC_ALIAS_MAINS).map(mainName => ({
+        mainName,
+        aliases: submittedMap.get(mainName) || []
+    }));
+
     if (entries.length === 0) {
         return res.json({ status: 'error', msg: '没有可上传的小号数据' });
     }
 
-    const publicDb = await loadPublicAliasDb(client);
     const createdAt = nowSec();
     const submitterKeyHash = sha256(licenseKey);
     const hwidHash = sha256(hwid);
     const clientVersion = cleanName(data.clientVersion || '');
 
     let touchedMainCount = 0;
-    let addedPairCount = 0;
-    let skippedDuplicateCount = 0;
-    let conflictCount = 0;
+    let targetPairCount = 0;
+    let unchangedMainCount = 0;
+    let deleteMainCount = 0;
+    let duplicateHintCount = 0;
 
     for (const entry of entries) {
         const mainName = entry.mainName;
@@ -497,35 +557,26 @@ async function handleSubmitAliasDb(client, data, res) {
         const key = getPendingMainKey(mainName);
         const existing = await getJsonObject(client, key, null);
         const aggregate = normalizePendingAggregate(existing, mainName, createdAt);
-        let changed = false;
-        let entryAddedPairCount = 0;
 
-        for (const aliasName of entry.aliases) {
-            if (publicAliases.includes(aliasName) || aggregate.aliases.includes(aliasName)) {
-                skippedDuplicateCount++;
-                continue;
-            }
-
-            aggregate.aliases.push(aliasName);
-            addedPairCount++;
-            entryAddedPairCount++;
-            changed = true;
-
-            const conflictOwner = findPublicAliasOwner(publicDb, aliasName, mainName);
-            if (conflictOwner && !aggregate.conflicts.some(c => c.aliasName === aliasName && c.currentOwner === conflictOwner)) {
-                aggregate.conflicts.push({ aliasName, currentOwner: conflictOwner, requestedOwner: mainName });
-                conflictCount++;
-            }
+        const targetAliases = normalizeAliasArray(entry.aliases).filter(aliasName => aliasName !== mainName);
+        if (publicAliases.length === 0 && targetAliases.length === 0 && !existing) {
+            unchangedMainCount++;
+            continue;
+        }
+        if (sameAliasList(publicAliases, targetAliases) && !existing) {
+            unchangedMainCount++;
+            continue;
         }
 
-        const oldSubmitterCount = aggregate.submitterKeyHashes.length;
-        if (entryAddedPairCount > 0) {
-            if (!aggregate.submitterKeyHashes.includes(submitterKeyHash)) aggregate.submitterKeyHashes.push(submitterKeyHash);
-            if (!aggregate.hwidHashes.includes(hwidHash)) aggregate.hwidHashes.push(hwidHash);
-            if (aggregate.submitterKeyHashes.length !== oldSubmitterCount) changed = true;
-        }
+        aggregate.aliases = targetAliases;
+        aggregate.operation = targetAliases.length === 0 ? 'delete' : 'replace';
+        aggregate.diff = diffAliasArrays(publicAliases, targetAliases);
+        aggregate.conflicts = [];
+        aggregate.duplicateOwners = findDuplicateAliasOwners(publicDb, targetAliases, mainName);
+        duplicateHintCount += aggregate.duplicateOwners.length;
 
-        if (!changed) continue;
+        if (!aggregate.submitterKeyHashes.includes(submitterKeyHash)) aggregate.submitterKeyHashes.push(submitterKeyHash);
+        if (!aggregate.hwidHashes.includes(hwidHash)) aggregate.hwidHashes.push(hwidHash);
 
         aggregate.sourceCount = aggregate.submitterKeyHashes.length;
         aggregate.clientVersions = normalizeStringArray([...(aggregate.clientVersions || []), clientVersion].filter(Boolean));
@@ -538,17 +589,19 @@ async function handleSubmitAliasDb(client, data, res) {
             { headers: { 'Content-Type': 'application/json; charset=utf-8' } }
         );
         touchedMainCount++;
+        targetPairCount += targetAliases.length;
+        if (targetAliases.length === 0) deleteMainCount++;
     }
 
-    if (touchedMainCount === 0 || addedPairCount === 0) {
+    if (touchedMainCount === 0) {
         return res.json({
             status: 'ok',
             action: 'submit_alias_db',
             aliasSubmit: true,
-            msg: `没有发现新的小号内容，已自动去重。跳过重复 ${skippedDuplicateCount} 条`,
+            msg: `没有发现需要审核的共享库变更。未变化主号 ${unchangedMainCount} 个`,
             entryCount: 0,
             pairCount: 0,
-            duplicateCount: skippedDuplicateCount
+            unchangedMainCount
         });
     }
 
@@ -556,11 +609,11 @@ async function handleSubmitAliasDb(client, data, res) {
         status: 'ok',
         action: 'submit_alias_db',
         aliasSubmit: true,
-        msg: `已合并到待审核区：${touchedMainCount} 个主号、新增 ${addedPairCount} 个小号，重复 ${skippedDuplicateCount} 条已自动跳过`,
+        msg: `已提交到待审核区：${touchedMainCount} 个主号、目标小号 ${targetPairCount} 个、删除主号 ${deleteMainCount} 个`,
         entryCount: touchedMainCount,
-        pairCount: addedPairCount,
-        duplicateCount: skippedDuplicateCount,
-        conflictCount
+        pairCount: targetPairCount,
+        deleteMainCount,
+        duplicateHintCount
     });
 }
 

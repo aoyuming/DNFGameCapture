@@ -226,23 +226,28 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     align-items: center;
     gap: 10px;
     background: rgba(255,255,255,0.05); padding: 16px 18px; border-radius: 12px;
-    width: 100%; max-width: 780px; box-sizing: border-box;
+    width: 100%; max-width: min(900px, calc(100vw - 36px)); box-sizing: border-box;
     position: relative; z-index: 1; /* 🚨 降低底部控制区的层级，给上面的弹窗让路 */
 }
 .control-row {
     display: flex;
     justify-content: center;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     width: 100%;
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
 }
-.control-row-main { max-width: 760px; }
-.control-row-tools { max-width: 840px; }
+.control-row-main { max-width: 860px; }
+.control-row-tools { max-width: 860px; }
 .ctrl-btn { 
-    padding: 9px 15px !important; font-size: 13px !important; font-weight: bold; 
-    border: none; border-radius: 6px; cursor: pointer; transition: 0.2s; color: white; white-space: nowrap !important; 
+    min-width: 0;
+    max-width: 170px;
+    padding: 9px 12px !important; font-size: 13px !important; font-weight: bold;
+    border: none; border-radius: 6px; cursor: pointer; transition: 0.2s; color: white; white-space: nowrap !important;
     display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+    flex: 1 1 118px;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 .algo-select-wrap {
     display: flex; align-items: center; gap: 6px;
@@ -258,9 +263,11 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 }
 .algo-select:focus { border-color: #00e5ff; box-shadow: 0 0 8px rgba(0,229,255,0.35); }
 .ctrl-btn:hover { filter: brightness(1.2); }
-#btn-monitor { font-size: 15px !important; padding: 9px 28px !important; letter-spacing: 1px; }
+#btn-monitor { font-size: 15px !important; padding: 9px 18px !important; letter-spacing: 1px; }
 
 .btn-swap { background: #4a4a60; }
+.btn-sync-db { background: #235b74; }
+.btn-push-db { background: #126047; }
 .btn-monitor-start { background: #00e5ff; color: #000; box-shadow: 0 0 10px rgba(0, 229, 255, 0.4); }
 .btn-monitor-stop { background: #ff0055; box-shadow: 0 0 10px rgba(255, 0, 85, 0.4); }
 .btn-auth {

@@ -12,8 +12,21 @@ const REJECTED_ALIAS_PREFIX = 'alias-submissions/rejected/';
 const MAX_NAME_LENGTH = 60;
 const MAX_PUBLIC_LIST_LIMIT = 5000;
 
+function getRuntimeDir() {
+    return process.pkg ? path.dirname(process.execPath) : __dirname;
+}
+
+function resolveAdminConfigPath() {
+    if (process.env.ADMIN_CONFIG_PATH) return process.env.ADMIN_CONFIG_PATH;
+
+    const runtimeConfigPath = path.join(getRuntimeDir(), 'admin.config.json');
+    if (fs.existsSync(runtimeConfigPath)) return runtimeConfigPath;
+
+    return path.join(__dirname, 'admin.config.json');
+}
+
 function loadOssConfig() {
-    const localConfigPath = path.join(__dirname, 'admin.config.json');
+    const localConfigPath = resolveAdminConfigPath();
     let localConfig = {};
 
     if (fs.existsSync(localConfigPath)) {
@@ -74,13 +87,13 @@ function getSubmissionEntries(submission) {
                 mainName: String(item.mainName || '').trim(),
                 aliases: normalizeAliasArray(item.aliases)
             }))
-            .filter(item => item.mainName && item.aliases.length > 0);
+            .filter(item => item.mainName);
     }
 
     if (submission?.mainName) {
         const mainName = String(submission.mainName || '').trim();
         const aliases = normalizeAliasArray(submission.aliases);
-        return mainName && aliases.length > 0 ? [{ mainName, aliases }] : [];
+        return mainName ? [{ mainName, aliases }] : [];
     }
 
     return [];
@@ -180,27 +193,6 @@ function normalizePublicEntryPayload(body) {
     return { mainName, aliases };
 }
 
-function removeAliasesFromOtherPublicOwners(publicDb, aliases, expectedMainName) {
-    const aliasSet = new Set(aliases);
-    const affectedMains = [];
-    let removed = 0;
-
-    for (const [mainName, currentAliases] of Object.entries(publicDb.players)) {
-        if (mainName === expectedMainName) continue;
-
-        const nextAliases = currentAliases.filter(alias => !aliasSet.has(alias));
-        if (nextAliases.length === currentAliases.length) continue;
-
-        removed += currentAliases.length - nextAliases.length;
-        affectedMains.push(mainName);
-
-        if (nextAliases.length > 0) publicDb.players[mainName] = nextAliases;
-        else delete publicDb.players[mainName];
-    }
-
-    return { removed, affectedMains };
-}
-
 async function savePublicAliasDb(publicDb, auditEntry) {
     const cleanDb = normalizePublicDb(publicDb);
     const changedAt = nowSec();
@@ -261,57 +253,89 @@ async function loadPendingRows() {
 }
 
 function hasReviewableContent(row) {
-    return getSubmissionStats(row.data).pairCount > 0;
+    return getSubmissionEntries(row.data).length > 0;
 }
 
-function findAliasOwner(publicDb, aliasName, expectedMainName) {
-    for (const [mainName, aliases] of Object.entries(publicDb.players)) {
-        if (mainName !== expectedMainName && aliases.includes(aliasName)) return mainName;
+function findDuplicateAliasOwners(publicDb, aliases, expectedMainName) {
+    const hints = [];
+    for (const aliasName of normalizeAliasArray(aliases)) {
+        const owners = [];
+        for (const [mainName, publicAliases] of Object.entries(publicDb.players || {})) {
+            if (mainName !== expectedMainName && normalizeAliasArray(publicAliases).includes(aliasName)) {
+                owners.push(mainName);
+            }
+        }
+        if (owners.length > 0) hints.push({ aliasName, owners, requestedOwner: expectedMainName });
     }
-    return '';
+    return hints;
 }
 
-function removeAliasFromOtherOwners(publicDb, aliasName, expectedMainName) {
-    for (const [mainName, aliases] of Object.entries(publicDb.players)) {
-        if (mainName === expectedMainName) continue;
-        publicDb.players[mainName] = aliases.filter(a => a !== aliasName);
-        if (publicDb.players[mainName].length === 0) delete publicDb.players[mainName];
+function diffAliasesForMerge(submission, item, oldAliases, targetAliases) {
+    const diff = submission?.diff && typeof submission.diff === 'object' ? submission.diff : {};
+    let addedAliases = normalizeAliasArray(diff.addedAliases);
+    let removedAliases = normalizeAliasArray(diff.removedAliases);
+
+    if (addedAliases.length === 0 && removedAliases.length === 0) {
+        addedAliases = targetAliases.filter(alias => !oldAliases.includes(alias));
+        removedAliases = oldAliases.filter(alias => !targetAliases.includes(alias));
     }
+
+    const mainName = String(item.mainName || '').trim();
+    return {
+        addedAliases: addedAliases.filter(alias => alias !== mainName),
+        removedAliases: removedAliases.filter(alias => alias !== mainName)
+    };
 }
 
-async function mergeSubmissionToPublicDb(submission, forceConflicts) {
+function buildAliasesForReviewMode(mode, oldAliases, targetAliases, diff) {
+    if (mode === 'added') {
+        return normalizeAliasArray([...oldAliases, ...diff.addedAliases]);
+    }
+
+    if (mode === 'removed') {
+        const removed = new Set(diff.removedAliases);
+        return oldAliases.filter(alias => !removed.has(alias));
+    }
+
+    return targetAliases;
+}
+
+async function mergeSubmissionToPublicDb(submission, mode = 'full') {
     const publicDb = await loadPublicAliasDb();
-    const result = { added: 0, duplicate: 0, conflict: 0, conflicts: [] };
+    const result = { mode, replaced: 0, deleted: 0, unchanged: 0, pairCount: 0, duplicateHint: 0, duplicateHints: [] };
     const entries = getSubmissionEntries(submission);
 
     for (const item of entries) {
         const mainName = String(item.mainName || '').trim();
-        const aliases = normalizeAliasArray(item.aliases);
-        if (!mainName || aliases.length === 0) continue;
+        const targetAliases = normalizeAliasArray(item.aliases);
+        if (!mainName) continue;
 
-        if (!publicDb.players[mainName]) publicDb.players[mainName] = [];
+        const oldAliases = normalizeAliasArray(publicDb.players[mainName]);
+        const diff = diffAliasesForMerge(submission, item, oldAliases, targetAliases);
+        const aliases = buildAliasesForReviewMode(mode, oldAliases, targetAliases, diff)
+            .filter(alias => alias !== mainName);
+        const duplicateCheckAliases = mode === 'removed' ? [] : (mode === 'added' ? diff.addedAliases : aliases);
+        const hints = findDuplicateAliasOwners(publicDb, duplicateCheckAliases, mainName);
+        result.duplicateHint += hints.length;
+        result.duplicateHints.push(...hints);
 
-        for (const aliasName of aliases) {
-            const owner = findAliasOwner(publicDb, aliasName, mainName);
-            if (owner && !forceConflicts) {
-                result.conflict++;
-                result.conflicts.push({ aliasName, currentOwner: owner, requestedOwner: mainName });
-                continue;
+        if (aliases.length === 0) {
+            if (publicDb.players[mainName]) {
+                delete publicDb.players[mainName];
+                result.deleted++;
+            } else {
+                result.unchanged++;
             }
-
-            if (owner && forceConflicts) removeAliasFromOtherOwners(publicDb, aliasName, mainName);
-
-            if (publicDb.players[mainName].includes(aliasName)) {
-                result.duplicate++;
-                continue;
-            }
-
-            publicDb.players[mainName].push(aliasName);
-            result.added++;
+            continue;
         }
 
-        publicDb.players[mainName] = normalizeAliasArray(publicDb.players[mainName]);
-        if (publicDb.players[mainName].length === 0) delete publicDb.players[mainName];
+        if (oldAliases.length === aliases.length && oldAliases.every((alias, idx) => alias === aliases[idx])) {
+            result.unchanged++;
+        } else {
+            publicDb.players[mainName] = aliases;
+            result.replaced++;
+        }
+        result.pairCount += aliases.length;
     }
 
     publicDb.version += 1;
@@ -319,10 +343,13 @@ async function mergeSubmissionToPublicDb(submission, forceConflicts) {
     publicDb.audit.push({
         submissionId: submission.id,
         reviewedAt: publicDb.updatedAt,
-        forceConflicts,
-        added: result.added,
-        duplicate: result.duplicate,
-        conflict: result.conflict
+        action: mode === 'added' ? 'review_added_aliases' : (mode === 'removed' ? 'review_removed_aliases' : 'review_replace_main'),
+        reviewMode: mode,
+        replaced: result.replaced,
+        deleted: result.deleted,
+        unchanged: result.unchanged,
+        pairCount: result.pairCount,
+        duplicateHint: result.duplicateHint
     });
     publicDb.audit = publicDb.audit.slice(-200);
 
@@ -346,24 +373,42 @@ async function archiveSubmission(row, status, extra = {}) {
 function buildPendingView(row) {
     const entries = getSubmissionEntries(row.data);
     const stats = getSubmissionStats(row.data);
-    const conflicts = Array.isArray(row.data?.conflicts) ? row.data.conflicts : [];
+    const duplicateHints = Array.isArray(row.data?.duplicateOwners)
+        ? row.data.duplicateOwners
+        : (Array.isArray(row.data?.conflicts) ? row.data.conflicts.map(c => ({
+            aliasName: c.aliasName,
+            owners: [c.currentOwner].filter(Boolean),
+            requestedOwner: c.requestedOwner
+        })) : []);
     const firstEntry = entries[0];
+    const diff = row.data?.diff && typeof row.data.diff === 'object' ? {
+        beforeAliases: normalizeAliasArray(row.data.diff.beforeAliases),
+        afterAliases: normalizeAliasArray(row.data.diff.afterAliases),
+        addedAliases: normalizeAliasArray(row.data.diff.addedAliases),
+        removedAliases: normalizeAliasArray(row.data.diff.removedAliases)
+    } : null;
+    const sampleText = firstEntry
+        ? `${firstEntry.mainName} -> ${firstEntry.aliases.length > 0 ? firstEntry.aliases.slice(0, 4).join(' / ') : '删除主号'}`
+        : '无明细';
 
     return {
         key: row.key,
         id: row.data?.id || row.key,
         type: row.data?.type || 'legacy',
+        operation: row.data?.operation || (stats.pairCount === 0 ? 'delete' : 'replace'),
         mainCount: stats.mainCount,
         pairCount: stats.pairCount,
         sourceCount: row.data?.sourceCount || row.data?.submitterKeyHashes?.length || 1,
         createdAt: row.data?.createdAt || 0,
         updatedAt: row.data?.updatedAt || row.data?.createdAt || 0,
         submitter: row.data?.submitterKeyHash || row.data?.submitterKeyHashes?.[0] || '',
-        sample: firstEntry ? `${firstEntry.mainName} -> ${firstEntry.aliases.slice(0, 4).join(' / ')}` : '无明细',
+        sample: sampleText,
         entries,
-        conflicts,
-        conflictCount: conflicts.length,
-        isEmpty: stats.pairCount === 0
+        diff,
+        duplicateHints,
+        duplicateHintCount: duplicateHints.length,
+        conflictCount: duplicateHints.length,
+        isEmpty: entries.length === 0
     };
 }
 
@@ -379,7 +424,7 @@ async function getDashboardData() {
         emptyCount: pendingViews.length - visiblePending.length,
         stats: {
             pendingCount: visiblePending.length,
-            conflictCount: visiblePending.filter(row => row.conflictCount > 0).length,
+            duplicateHintCount: visiblePending.filter(row => row.duplicateHintCount > 0).length,
             pendingAliasCount: visiblePending.reduce((sum, row) => sum + row.pairCount, 0),
             publicMainCount,
             publicAliasCount,
@@ -394,7 +439,9 @@ function asyncRoute(fn) {
 }
 
 const app = express();
-const webDir = path.join(__dirname, 'web-admin');
+const externalWebDir = path.join(getRuntimeDir(), 'web-admin');
+const bundledWebDir = path.join(__dirname, 'web-admin');
+const webDir = fs.existsSync(externalWebDir) ? externalWebDir : bundledWebDir;
 const host = process.env.ADMIN_WEB_HOST || '127.0.0.1';
 const port = Number(process.env.ADMIN_WEB_PORT || 8899);
 
@@ -440,20 +487,15 @@ app.post('/api/public', asyncRoute(async (req, res) => {
         return res.status(409).json({ error: '该主号已存在，请使用保存修改' });
     }
 
-    const moved = removeAliasesFromOtherPublicOwners(publicDb, entry.aliases, entry.mainName);
     publicDb.players[entry.mainName] = entry.aliases;
 
     const savedDb = await savePublicAliasDb(publicDb, {
         action: 'admin_public_create',
         mainName: entry.mainName,
-        aliasCount: entry.aliases.length,
-        movedAliasCount: moved.removed,
-        affectedMains: moved.affectedMains
+        aliasCount: entry.aliases.length
     });
 
-    res.json(buildPublicCrudResponse(savedDb, entry.mainName, '已新增公共库记录', {
-        movedAliasCount: moved.removed
-    }));
+    res.json(buildPublicCrudResponse(savedDb, entry.mainName, '已新增公共库记录'));
 }));
 
 app.put('/api/public/:mainName', asyncRoute(async (req, res) => {
@@ -470,22 +512,131 @@ app.put('/api/public/:mainName', asyncRoute(async (req, res) => {
     }
 
     delete publicDb.players[oldMainName];
-    const moved = removeAliasesFromOtherPublicOwners(publicDb, entry.aliases, entry.mainName);
     publicDb.players[entry.mainName] = entry.aliases;
 
     const savedDb = await savePublicAliasDb(publicDb, {
         action: 'admin_public_update',
         oldMainName,
         mainName: entry.mainName,
-        aliasCount: entry.aliases.length,
-        movedAliasCount: moved.removed,
-        affectedMains: moved.affectedMains
+        aliasCount: entry.aliases.length
     });
 
     res.json(buildPublicCrudResponse(savedDb, entry.mainName, '已保存公共库记录', {
-        oldMainName,
-        movedAliasCount: moved.removed
+        oldMainName
     }));
+}));
+
+app.post('/api/public/batch-delete', asyncRoute(async (req, res) => {
+    const requestedNames = Array.isArray(req.body?.mainNames) ? req.body.mainNames : [];
+    const mainNames = [...new Set(requestedNames.map(cleanName).filter(Boolean))];
+    if (mainNames.length === 0) return res.status(400).json({ error: '没有选择要删除的主号' });
+
+    const publicDb = await loadPublicAliasDb();
+    const deleted = [];
+    const missing = [];
+    let deletedAliasCount = 0;
+
+    for (const mainName of mainNames) {
+        const aliases = publicDb.players[mainName];
+        if (!aliases) {
+            missing.push(mainName);
+            continue;
+        }
+        deletedAliasCount += normalizeAliasArray(aliases).length;
+        delete publicDb.players[mainName];
+        deleted.push(mainName);
+    }
+
+    if (deleted.length === 0) return res.status(404).json({ error: '所选主号都不存在或已删除' });
+
+    const savedDb = await savePublicAliasDb(publicDb, {
+        action: 'admin_public_batch_delete',
+        mainNames: deleted,
+        mainCount: deleted.length,
+        aliasCount: deletedAliasCount,
+        missing
+    });
+
+    res.json(buildPublicCrudResponse(savedDb, '', `已删除 ${deleted.length} 个公共库主号`, {
+        deletedMainNames: deleted,
+        deletedAliasCount,
+        missing
+    }));
+}));
+
+function parseImportText(text) {
+    const entries = [];
+    const errors = [];
+    const seen = new Map();
+    const lines = String(text || '').split(/\r?\n/);
+
+    lines.forEach((rawLine, idx) => {
+        const line = rawLine.trim();
+        if (!line) return;
+
+        const eq = line.indexOf('=');
+        const fullEq = line.indexOf('＝');
+        const eqPos = eq >= 0 && fullEq >= 0 ? Math.min(eq, fullEq) : Math.max(eq, fullEq);
+        if (eqPos < 0) {
+            errors.push({ line: idx + 1, text: line, error: '缺少等号' });
+            return;
+        }
+
+        const mainName = cleanName(line.slice(0, eqPos));
+        const aliases = normalizeAliasArray(line.slice(eqPos + 1)).filter(alias => alias !== mainName);
+        if (!mainName) {
+            errors.push({ line: idx + 1, text: line, error: '主号为空' });
+            return;
+        }
+        if (aliases.length === 0) {
+            errors.push({ line: idx + 1, text: line, error: '没有解析到小号' });
+            return;
+        }
+
+        const current = seen.get(mainName) || [];
+        seen.set(mainName, normalizeAliasArray([...current, ...aliases]));
+    });
+
+    for (const [mainName, aliases] of seen.entries()) entries.push({ mainName, aliases });
+    return { entries, errors };
+}
+
+app.post('/api/public/import', asyncRoute(async (req, res) => {
+    const { entries, errors } = parseImportText(req.body?.text);
+    if (entries.length === 0) return res.status(400).json({ error: '没有可导入的有效记录', errors });
+
+    const publicDb = await loadPublicAliasDb();
+    let created = 0;
+    let updated = 0;
+    let addedAliasCount = 0;
+
+    for (const entry of entries) {
+        const before = normalizeAliasArray(publicDb.players[entry.mainName]);
+        const merged = normalizeAliasArray([...before, ...entry.aliases]);
+        if (before.length === 0) created++;
+        else if (merged.length !== before.length) updated++;
+        addedAliasCount += Math.max(0, merged.length - before.length);
+        publicDb.players[entry.mainName] = merged;
+    }
+
+    const savedDb = await savePublicAliasDb(publicDb, {
+        action: 'admin_public_import',
+        entryCount: entries.length,
+        created,
+        updated,
+        addedAliasCount,
+        errorCount: errors.length
+    });
+
+    res.json({
+        ...getPublicSummary(savedDb),
+        message: `导入完成：新增 ${created} 个主号，更新 ${updated} 个主号，新增小号 ${addedAliasCount} 个`,
+        imported: entries.length,
+        created,
+        updated,
+        addedAliasCount,
+        errors
+    });
 }));
 
 app.delete('/api/public/:mainName', asyncRoute(async (req, res) => {
@@ -515,13 +666,14 @@ app.post('/api/review', asyncRoute(async (req, res) => {
     const keys = Array.isArray(req.body.keys) ? req.body.keys : [];
     const action = String(req.body.action || '');
     const reason = String(req.body.reason || '');
+    const reviewMode = action === 'approve_added' ? 'added' : (action === 'approve_removed' ? 'removed' : 'full');
 
     if (keys.length === 0) return res.status(400).json({ error: '没有选择待审核记录' });
-    if (!['approve', 'forceApprove', 'reject'].includes(action)) return res.status(400).json({ error: '未知审核操作' });
+    if (!['approve', 'approve_added', 'approve_removed', 'reject'].includes(action)) return res.status(400).json({ error: '未知审核操作' });
 
     const rows = await loadPendingRows();
     const rowMap = new Map(rows.map(row => [row.key, row]));
-    const result = { approved: 0, rejected: 0, failed: 0, added: 0, duplicate: 0, conflict: 0, failures: [] };
+    const result = { action, reviewMode, approved: 0, rejected: 0, failed: 0, replaced: 0, deleted: 0, unchanged: 0, pairCount: 0, duplicateHint: 0, failures: [] };
 
     for (const key of keys) {
         const row = rowMap.get(key);
@@ -536,12 +688,14 @@ app.post('/api/review', asyncRoute(async (req, res) => {
                 await archiveSubmission(row, 'rejected', { rejectReason: reason || '网页批量驳回', batchReviewed: true });
                 result.rejected++;
             } else {
-                const mergeResult = await mergeSubmissionToPublicDb(row.data, action === 'forceApprove');
-                await archiveSubmission(row, 'approved', { mergeResult, batchReviewed: true });
+                const mergeResult = await mergeSubmissionToPublicDb(row.data, reviewMode);
+                await archiveSubmission(row, 'approved', { mergeResult, reviewMode, batchReviewed: true });
                 result.approved++;
-                result.added += mergeResult.added;
-                result.duplicate += mergeResult.duplicate;
-                result.conflict += mergeResult.conflict;
+                result.replaced += mergeResult.replaced;
+                result.deleted += mergeResult.deleted;
+                result.unchanged += mergeResult.unchanged;
+                result.pairCount += mergeResult.pairCount;
+                result.duplicateHint += mergeResult.duplicateHint;
             }
         } catch (err) {
             result.failed++;
@@ -570,6 +724,15 @@ app.use((err, req, res, next) => {
     res.status(err.statusCode || 500).json({ error: err.message || '服务器异常' });
 });
 
-app.listen(port, host, () => {
+const server = app.listen(port, host, () => {
     console.log(`DNF 共享库管理台已启动: http://${host}:${port}`);
+});
+
+server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+        console.error(`端口已被占用: http://${host}:${port}`);
+        console.error('请先关闭旧的管理台 node 进程，或用 ADMIN_WEB_PORT 指定另一个端口启动。');
+        process.exit(1);
+    }
+    throw err;
 });

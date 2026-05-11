@@ -147,6 +147,21 @@ h2 { font-size: 15px; }
     min-height: 0;
 }
 
+.pending-list-box {
+    flex: 1;
+    min-height: 0;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+}
+
+.pending-list-box .pending-list {
+    flex: 1;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: #0d1118;
+}
+
 .pending-item {
     display: grid;
     grid-template-columns: 24px 1fr auto;
@@ -257,6 +272,10 @@ h2 { font-size: 15px; }
     gap: 8px;
 }
 
+.public-actions.import-actions {
+    grid-template-columns: 1fr;
+}
+
 .batchbar {
     position: fixed;
     left: 0;
@@ -275,6 +294,13 @@ h2 { font-size: 15px; }
 
 .batch-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 #selected-info { color: var(--muted); margin-left: 8px; }
+
+.diff-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 8px 0 10px;
+}
 
 .toast {
     position: fixed;

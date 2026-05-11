@@ -177,9 +177,7 @@ function buildFormattedAliasDB() {
     normalizeAllAliasStores();
     for (let key in savedDB) {
         savedDB[key] = uniqueAliasArray(savedDB[key]);
-        if (savedDB[key] && savedDB[key].length > 0) {
-            formattedDB[key] = formatAliasArrayForCpp(savedDB[key]);
-        }
+        if (key && key.trim()) formattedDB[key] = formatAliasArrayForCpp(savedDB[key]);
     }
     return formattedDB;
 }
@@ -1543,6 +1541,7 @@ function renderAliasMenu(playerName, popElement) {
 
                     renderAliasMenu(playerName, popElement);
                     popElement.classList.add('active');
+                    pushStateToServer();
                     if (isCloudDirectMode) queueDirectAliasDbSync(buildFormattedAliasDB(), true);
                 }
             });
@@ -1616,6 +1615,16 @@ document.getElementById('btn-sync-alias-db')?.addEventListener('click', () => {
     showConfirm('确定从云端公共库同步小号数据吗？<br><br>只会合并审核通过的数据，不会删除你本地已有的小号。', (ok) => {
         if (!ok || !window.chrome?.webview) return;
         window.chrome.webview.postMessage({ action: "cmd_sync_alias_db" });
+    });
+});
+document.getElementById('btn-push-alias-db')?.addEventListener('click', () => {
+    showConfirm('确定把本地小号库推送到云端待审核吗？<br><br>云端会对比共享库生成新增/删除差异，只有本地库发生变化时才会真正提交。', (ok) => {
+        if (!ok || !window.chrome?.webview) return;
+        const fullAliasDB = buildFormattedAliasDB();
+        window.chrome.webview.postMessage({
+            action: "cmd_push_alias_db",
+            data: { fullAliasDB }
+        });
     });
 });
 document.getElementById('btn-pro').addEventListener('click', () => window.chrome.webview.postMessage({ action: "cmd_toggle_mfc", show: !isProMode }));
