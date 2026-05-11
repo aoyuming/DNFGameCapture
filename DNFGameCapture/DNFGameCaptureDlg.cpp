@@ -108,6 +108,14 @@ static CString DnfStripDeclaredArea(CString body, bool& hasArea)
     return body;
 }
 
+static int DnfFindAliasSharp(const CString& aliasRaw)
+{
+    int halfSharp = aliasRaw.Find(L'#');
+    int fullSharp = aliasRaw.Find(L'＃');
+    if (halfSharp >= 0 && fullSharp >= 0) return halfSharp < fullSharp ? halfSharp : fullSharp;
+    return halfSharp >= 0 ? halfSharp : fullSharp;
+}
+
 static CString DnfExtractAliasRealId(const CString& aliasRaw, bool& hasArea, bool& hasJob)
 {
     hasArea = false;
@@ -116,7 +124,7 @@ static CString DnfExtractAliasRealId(const CString& aliasRaw, bool& hasArea, boo
     CString body = aliasRaw;
     body.Trim();
 
-    int sharp = body.Find(L'#');
+    int sharp = DnfFindAliasSharp(body);
     if (sharp >= 0) {
         CString job = body.Mid(sharp + 1);
         job.Trim();
@@ -136,12 +144,7 @@ static CString DnfAliasDuplicateKey(const CString& aliasRaw)
     key.Trim();
     if (key.IsEmpty()) return key;
 
-    int halfSharp = key.Find(L'#');
-    int fullSharp = key.Find(L'＃');
-    int sharp = -1;
-    if (halfSharp >= 0 && fullSharp >= 0) sharp = min(halfSharp, fullSharp);
-    else sharp = halfSharp >= 0 ? halfSharp : fullSharp;
-
+    int sharp = DnfFindAliasSharp(key);
     if (sharp >= 0) key = key.Left(sharp);
     key.Trim();
     return key;
@@ -152,6 +155,140 @@ static bool DnfAliasSameDuplicateId(const CString& a, const CString& b)
     CString ka = DnfAliasDuplicateKey(a);
     CString kb = DnfAliasDuplicateKey(b);
     return !ka.IsEmpty() && !kb.IsEmpty() && ka == kb;
+}
+
+static CString DnfAliasJobKey(const CString& aliasRaw)
+{
+    CString alias = aliasRaw;
+    alias.Trim();
+    int sharp = DnfFindAliasSharp(alias);
+    if (sharp < 0) return L"";
+
+    CString job = alias.Mid(sharp + 1);
+    job.Trim();
+    return job;
+}
+
+static bool DnfAliasHasDeclaredJob(const CString& aliasRaw)
+{
+    return !DnfAliasJobKey(aliasRaw).IsEmpty();
+}
+
+static bool DnfAliasSameStorageEntry(const CString& a, const CString& b)
+{
+    CString aa = a;
+    CString bb = b;
+    aa.Trim();
+    bb.Trim();
+    if (aa.IsEmpty() || bb.IsEmpty()) return false;
+    if (aa == bb) return true;
+    if (!DnfAliasSameDuplicateId(aa, bb)) return false;
+
+    CString aj = DnfAliasJobKey(aa);
+    CString bj = DnfAliasJobKey(bb);
+    bool ah = !aj.IsEmpty();
+    bool bh = !bj.IsEmpty();
+    if (ah || bh) return ah && bh && aj == bj;
+    return true;
+}
+
+enum DnfAliasMergeResult
+{
+    DnfAliasMergeNone = 0,
+    DnfAliasMergeAdded = 1,
+    DnfAliasMergeUpgraded = 2
+};
+
+static DnfAliasMergeResult DnfMergeAliasIntoList(std::vector<CString>& aliases, const CString& aliasRaw)
+{
+    CString alias = aliasRaw;
+    alias.Trim();
+    if (alias.IsEmpty()) return DnfAliasMergeNone;
+
+    bool aliasHasJob = DnfAliasHasDeclaredJob(alias);
+    for (auto& oldAlias : aliases) {
+        oldAlias.Trim();
+        if (oldAlias.IsEmpty()) continue;
+
+        bool oldHasJob = DnfAliasHasDeclaredJob(oldAlias);
+        if (DnfAliasSameStorageEntry(oldAlias, alias)) {
+            if (!oldHasJob && aliasHasJob) {
+                oldAlias = alias;
+                return DnfAliasMergeUpgraded;
+            }
+            return DnfAliasMergeNone;
+        }
+
+        if (DnfAliasSameDuplicateId(oldAlias, alias)) {
+            if (!oldHasJob && aliasHasJob) {
+                oldAlias = alias;
+                return DnfAliasMergeUpgraded;
+            }
+            if (oldHasJob && !aliasHasJob) {
+                return DnfAliasMergeNone;
+            }
+        }
+    }
+
+    aliases.push_back(alias);
+    return DnfAliasMergeAdded;
+}
+
+static DnfAliasMergeResult DnfMergeAliasIntoAliasDataList(std::vector<AliasData>& aliases, const CString& aliasRaw)
+{
+    CString alias = aliasRaw;
+    alias.Trim();
+    if (alias.IsEmpty()) return DnfAliasMergeNone;
+
+    bool aliasHasJob = DnfAliasHasDeclaredJob(alias);
+    for (auto& oldAlias : aliases) {
+        oldAlias.name.Trim();
+        if (oldAlias.name.IsEmpty()) continue;
+
+        bool oldHasJob = DnfAliasHasDeclaredJob(oldAlias.name);
+        if (DnfAliasSameStorageEntry(oldAlias.name, alias)) {
+            if (!oldHasJob && aliasHasJob) {
+                oldAlias.name = alias;
+                return DnfAliasMergeUpgraded;
+            }
+            return DnfAliasMergeNone;
+        }
+
+        if (DnfAliasSameDuplicateId(oldAlias.name, alias)) {
+            if (!oldHasJob && aliasHasJob) {
+                oldAlias.name = alias;
+                return DnfAliasMergeUpgraded;
+            }
+            if (oldHasJob && !aliasHasJob) {
+                return DnfAliasMergeNone;
+            }
+        }
+    }
+
+    AliasData ad;
+    ad.name = alias;
+    aliases.push_back(ad);
+    return DnfAliasMergeAdded;
+}
+
+static void DnfNormalizeAliasDataList(std::vector<AliasData>& aliases)
+{
+    std::vector<AliasData> normalized;
+    for (const auto& alias : aliases) {
+        DnfMergeAliasIntoAliasDataList(normalized, alias.name);
+    }
+    aliases.swap(normalized);
+}
+
+static CString DnfSerializeAliasDataListRaw(const std::vector<AliasData>& aliases)
+{
+    CString out;
+    for (const auto& alias : aliases) {
+        CString name = alias.name;
+        name.Trim();
+        if (!name.IsEmpty()) out += L"(" + name + L")";
+    }
+    return out;
 }
 
 static CString DnfFormatClockNow()
@@ -540,17 +677,7 @@ static std::vector<CString> DnfParseAliasListString(const CString& aliasesRaw)
     int curPos = 0;
     CString token = text.Tokenize(L"()（） \t\r\n", curPos);
     while (token != L"") {
-        token.Trim();
-        if (!token.IsEmpty()) {
-            bool exists = false;
-            for (const auto& alias : aliases) {
-                if (DnfAliasSameDuplicateId(alias, token)) {
-                    exists = true;
-                    break;
-                }
-            }
-            if (!exists) aliases.push_back(token);
-        }
+        DnfMergeAliasIntoList(aliases, token);
         token = text.Tokenize(L"()（） \t\r\n", curPos);
     }
     return aliases;
@@ -560,18 +687,10 @@ static CString DnfFormatAliasListString(const std::vector<CString>& aliases)
 {
     CString out;
     std::vector<CString> uniqueAliases;
-    for (auto alias : aliases) {
-        alias.Trim();
-        if (alias.IsEmpty()) continue;
-        bool exists = false;
-        for (const auto& oldAlias : uniqueAliases) {
-            if (DnfAliasSameDuplicateId(oldAlias, alias)) {
-                exists = true;
-                break;
-            }
-        }
-        if (exists) continue;
-        uniqueAliases.push_back(alias);
+    for (const auto& alias : aliases) {
+        DnfMergeAliasIntoList(uniqueAliases, alias);
+    }
+    for (const auto& alias : uniqueAliases) {
         out += L"(" + alias + L")";
     }
     return out;
@@ -589,8 +708,8 @@ static CString DnfRemoveAliasFromAliasListString(const CString& aliasesRaw, cons
     std::vector<CString> kept;
     for (auto alias : DnfParseAliasListString(aliasesRaw)) {
         alias.Trim();
-        if (!target.IsEmpty() && (alias == target || DnfAliasSameDuplicateId(alias, target))) continue;
-        kept.push_back(alias);
+        if (!target.IsEmpty() && DnfAliasSameStorageEntry(alias, target)) continue;
+        DnfMergeAliasIntoList(kept, alias);
     }
     return DnfFormatAliasListString(kept);
 }
@@ -606,22 +725,15 @@ static CString DnfRenameAliasInAliasListString(const CString& aliasesRaw, const 
     std::vector<CString> out;
     for (auto alias : DnfParseAliasListString(aliasesRaw)) {
         alias.Trim();
-        if (!oldClean.IsEmpty() && (alias == oldClean || DnfAliasSameDuplicateId(alias, oldClean))) {
+        if (!oldClean.IsEmpty() && DnfAliasSameStorageEntry(alias, oldClean)) {
             renamed = true;
-            bool newExists = false;
-            for (const auto& oldAlias : out) {
-                if (DnfAliasSameDuplicateId(oldAlias, newClean)) {
-                    newExists = true;
-                    break;
-                }
-            }
-            if (!newClean.IsEmpty() && !newExists) out.push_back(newClean);
+            DnfMergeAliasIntoList(out, newClean);
         }
         else {
-            out.push_back(alias);
+            DnfMergeAliasIntoList(out, alias);
         }
     }
-    if (!renamed && !newClean.IsEmpty()) out.push_back(newClean);
+    if (!renamed && !newClean.IsEmpty()) DnfMergeAliasIntoList(out, newClean);
     return DnfFormatAliasListString(out);
 }
 
@@ -1720,7 +1832,9 @@ CString CDNFGameCaptureDlg::SyncAliasDbFromCloud()
         }
 
         int addedAliasCount = 0;
+        int upgradedAliasCount = 0;
         int touchedMainCount = 0;
+        int touchedLiveAliasCount = 0;
         int beforeMainCount = 0;
         int beforePairCount = 0;
         bool wasDirtyBeforeSync = (BuildAliasDbJsonPayload(beforeMainCount, beforePairCount) != m_aliasDbCloudBaselinePayload);
@@ -1735,21 +1849,17 @@ CString CDNFGameCaptureDlg::SyncAliasDbFromCloud()
                 if (mainName.IsEmpty()) continue;
 
                 std::vector<CString> mergedAliases = DnfParseAliasListString(m_aliasDB[mainName]);
-                int beforeCount = (int)mergedAliases.size();
+                CString beforeAliasesText = DnfFormatAliasListString(mergedAliases);
 
                 auto addAlias = [&](CString aliasName) {
                     aliasName.Trim();
                     if (aliasName.IsEmpty() || aliasName == mainName) return;
-                    bool exists = false;
-                    for (const auto& oldAlias : mergedAliases) {
-                        if (DnfAliasSameDuplicateId(oldAlias, aliasName)) {
-                            exists = true;
-                            break;
-                        }
-                    }
-                    if (!exists) {
-                        mergedAliases.push_back(aliasName);
+                    DnfAliasMergeResult mergeResult = DnfMergeAliasIntoList(mergedAliases, aliasName);
+                    if (mergeResult == DnfAliasMergeAdded) {
                         addedAliasCount++;
+                    }
+                    else if (mergeResult == DnfAliasMergeUpgraded) {
+                        upgradedAliasCount++;
                     }
                 };
 
@@ -1768,8 +1878,9 @@ CString CDNFGameCaptureDlg::SyncAliasDbFromCloud()
                     }
                 }
 
-                if ((int)mergedAliases.size() != beforeCount) {
-                    m_aliasDB[mainName] = DnfFormatAliasListString(mergedAliases);
+                CString afterAliasesText = DnfFormatAliasListString(mergedAliases);
+                if (afterAliasesText != beforeAliasesText) {
+                    m_aliasDB[mainName] = afterAliasesText;
                     touchedMainCount++;
                 }
             }
@@ -1779,25 +1890,22 @@ CString CDNFGameCaptureDlg::SyncAliasDbFromCloud()
                 mainName.Trim();
                 if (mainName.IsEmpty() || m_aliasDB.find(mainName) == m_aliasDB.end()) continue;
 
+                CString beforeLiveAliasesText = DnfSerializeAliasDataListRaw(m_players[i].aliases);
+
                 std::vector<CString> dbAliases = DnfParseAliasListString(m_aliasDB[mainName]);
                 for (const auto& aliasName : dbAliases) {
-                    bool exists = false;
-                    for (const auto& liveAlias : m_players[i].aliases) {
-                        if (DnfAliasSameDuplicateId(liveAlias.name, aliasName)) {
-                            exists = true;
-                            break;
-                        }
-                    }
-                    if (!exists) {
-                        AliasData ad;
-                        ad.name = aliasName;
-                        m_players[i].aliases.push_back(ad);
-                    }
+                    DnfMergeAliasIntoAliasDataList(m_players[i].aliases, aliasName);
+                }
+                DnfNormalizeAliasDataList(m_players[i].aliases);
+
+                CString afterLiveAliasesText = DnfSerializeAliasDataListRaw(m_players[i].aliases);
+                if (afterLiveAliasesText != beforeLiveAliasesText) {
+                    touchedLiveAliasCount++;
                 }
             }
         }
 
-        if (addedAliasCount > 0) {
+        if (touchedMainCount > 0 || touchedLiveAliasCount > 0) {
             SaveAliasDB();
             SaveConfigToFile();
             SyncDataToTree();
@@ -1810,8 +1918,8 @@ CString CDNFGameCaptureDlg::SyncAliasDbFromCloud()
         BroadcastStateToWeb();
 
         CString result;
-        result.Format(L"云端库同步完成：新增 %d 个主号关联、%d 个小号。", touchedMainCount, addedAliasCount);
-        if (addedAliasCount == 0) result = L"云端库同步完成：本地已经是最新。";
+        result.Format(L"云端库同步完成：更新 %d 个主号关联、新增 %d 个小号、补全职业信息 %d 个、回填当前选手 %d 个。", touchedMainCount, addedAliasCount, upgradedAliasCount, touchedLiveAliasCount);
+        if (addedAliasCount == 0 && upgradedAliasCount == 0 && touchedLiveAliasCount == 0) result = L"云端库同步完成：本地已经是最新。";
         return result;
     }
     catch (const std::exception& e) {
@@ -6478,16 +6586,7 @@ void CDNFGameCaptureDlg::SaveAliasDB(bool mergeActivePlayers) {
                 for (const auto& a : m_players[i].aliases) {
                     CString aName = a.name;
                     aName.Trim();
-                    bool exists = false;
-                    for (const auto& oldAlias : mergedAliases) {
-                        if (DnfAliasSameDuplicateId(oldAlias, aName)) {
-                            exists = true;
-                            break;
-                        }
-                    }
-                    if (!aName.IsEmpty() && !exists) {
-                        mergedAliases.push_back(aName);
-                    }
+                    DnfMergeAliasIntoList(mergedAliases, aName);
                 }
 
                 CString normalizedAliases = DnfFormatAliasListString(mergedAliases);
@@ -6785,7 +6884,7 @@ void CDNFGameCaptureDlg::OnChangeEditNamesInput() {
         aN.Trim();
         bool exists = false;
         for (const auto& ea : existAliases) {
-            if (DnfAliasSameDuplicateId(ea, aN)) { exists = true; break; }
+            if (DnfAliasSameStorageEntry(ea, aN)) { exists = true; break; }
         }
 
         if (!exists && !aN.IsEmpty()) aliasesToInsert += L"(" + aN + L")";
@@ -6908,12 +7007,11 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd()
                 }
 
                 for (const auto& aN : parsedAliases) {
-                    bool exist = false;
-                    for (const auto& oa : m_players[targetIdx].aliases) { if (DnfAliasSameDuplicateId(oa.name, aN)) { exist = true; break; } }
-                    if (!exist) {
-                        m_players[targetIdx].aliases.push_back({ aN });
+                    DnfAliasMergeResult mergeResult = DnfMergeAliasIntoAliasDataList(m_players[targetIdx].aliases, aN);
+                    if (mergeResult != DnfAliasMergeNone) {
                         addAliasCount++;
-                        AppLog(L" ├ ➕追加小号: [" + aN + L"]", RGB(100, 255, 100));
+                        CString logPrefix = mergeResult == DnfAliasMergeUpgraded ? L" ├ 🧩补全小号: [" : L" ├ ➕追加小号: [";
+                        AppLog(logPrefix + aN + L"]", RGB(100, 255, 100));
                     }
                 }
             }
@@ -7012,7 +7110,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                         ad.name = CA2W(a.get<std::string>().c_str(), CP_UTF8);
                         ad.name.Trim();
                         if (!ad.name.IsEmpty()) {
-                            m_players[mfcIdx].aliases.push_back(ad);
+                            DnfMergeAliasIntoAliasDataList(m_players[mfcIdx].aliases, ad.name);
                         }
                     }
                     if (!m_players[mfcIdx].name.IsEmpty() && m_players[mfcIdx].aliases.empty()) {
@@ -7037,7 +7135,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                         ad.name = CA2W(a.get<std::string>().c_str(), CP_UTF8);
                         ad.name.Trim();
                         if (!ad.name.IsEmpty()) {
-                            m_players[mfcIdx].aliases.push_back(ad);
+                            DnfMergeAliasIntoAliasDataList(m_players[mfcIdx].aliases, ad.name);
                         }
                     }
                     if (!m_players[mfcIdx].name.IsEmpty() && m_players[mfcIdx].aliases.empty()) {
@@ -7208,7 +7306,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             for (int i = 0; i < 8; i++) {
                 if (m_players[i].name == mainName) {
                     for (auto it = m_players[i].aliases.begin(); it != m_players[i].aliases.end(); ) {
-                        if (it->name == aliasName || DnfAliasSameDuplicateId(it->name, aliasName)) {
+                        if (DnfAliasSameStorageEntry(it->name, aliasName)) {
                             it = m_players[i].aliases.erase(it);
                         }
                         else {
@@ -7887,9 +7985,14 @@ void CDNFGameCaptureDlg::LoadConfigFromFile() {
                 bool aDup = false;
                 for (int k = 0; k < 8; k++) {
                     if (m_players[k].name == aName && k != targetIdx) { aDup = true; break; }
-                    for (auto& ea : m_players[k].aliases) { if (DnfAliasSameDuplicateId(ea.name, aName)) { aDup = true; break; } }
+                    for (auto& ea : m_players[k].aliases) {
+                        bool aliasClash = k == targetIdx
+                            ? DnfAliasSameStorageEntry(ea.name, aName)
+                            : DnfAliasSameDuplicateId(ea.name, aName);
+                        if (aliasClash) { aDup = true; break; }
+                    }
                 }
-                if (!aDup && !aName.IsEmpty()) m_players[targetIdx].aliases.push_back({ aName });
+                if (!aDup && !aName.IsEmpty()) DnfMergeAliasIntoAliasDataList(m_players[targetIdx].aliases, aName);
             }
         }
         else if (line.Find(L"=") != -1 || line.Find(L"＝") != -1) {
@@ -7958,10 +8061,13 @@ void CDNFGameCaptureDlg::LoadConfigFromFile() {
                 for (int k = 0; k < 8; k++) {
                     if (m_players[k].name == aN && k != targetIdx) { aDup = true; break; }
                     for (auto& ea : m_players[k].aliases) {
-                        if (DnfAliasSameDuplicateId(ea.name, aN)) { aDup = true; break; }
+                        bool aliasClash = k == targetIdx
+                            ? DnfAliasSameStorageEntry(ea.name, aN)
+                            : DnfAliasSameDuplicateId(ea.name, aN);
+                        if (aliasClash) { aDup = true; break; }
                     }
                 }
-                if (!aDup && !aN.IsEmpty()) m_players[targetIdx].aliases.push_back({ aN });
+                if (!aDup && !aN.IsEmpty()) DnfMergeAliasIntoAliasDataList(m_players[targetIdx].aliases, aN);
             }
         }
     }
@@ -8067,10 +8173,10 @@ void CDNFGameCaptureDlg::OnEndLabelEdit(NMHDR* pNMHDR, LRESULT* pResult) {
         }
         else {
             // 同一名选手内部允许：主号名称 == 自己的小号名称。
-            // 但仍然禁止同一名选手的小号之间互相重名。
+            // 但仍然禁止同一名选手的小号之间出现同 ID 同职业的重复项。
             if (curAIdx != -1) {
                 for (int j = 0; j < (int)m_players[i].aliases.size(); j++) {
-                    if (j != curAIdx && DnfAliasSameDuplicateId(m_players[i].aliases[j].name, newNameOnly)) { isDup = true; break; }
+                    if (j != curAIdx && DnfAliasSameStorageEntry(m_players[i].aliases[j].name, newNameOnly)) { isDup = true; break; }
                 }
             }
         }
