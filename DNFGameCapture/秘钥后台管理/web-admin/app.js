@@ -4,7 +4,8 @@ const state = {
     selected: new Set(),
     activeKey: '',
     publicEntries: [],
-    activePublicMain: ''
+    activePublicMain: '',
+    preferredPublicMain: ''
 };
 
 const el = (id) => document.getElementById(id);
@@ -102,6 +103,7 @@ function renderPendingList() {
             state.activeKey = row.key;
             renderPendingList();
             renderDetail(row);
+            focusPublicMainFromPending(row).catch(err => toast(err.message));
         });
 
         item.querySelector('input').addEventListener('change', (e) => {
@@ -142,7 +144,7 @@ function renderDetail(row) {
     const duplicateHints = row.duplicateHints || row.conflicts || [];
     const conflictHtml = duplicateHints.length > 0
         ? `<div class="section-title">重复小号提示</div>${duplicateHints.map(c => `
-            <div class="conflict-row">${escapeHtml(c.aliasName)}：公共库里也属于 ${escapeHtml((c.owners || [c.currentOwner]).filter(Boolean).join(' / '))}，本次提交给 ${escapeHtml(c.requestedOwner)}</div>
+            <div class="conflict-row">${escapeHtml(c.aliasName)}${c.aliasId ? `（ID: ${escapeHtml(c.aliasId)}）` : ''}：公共库里也属于 ${escapeHtml((c.owners || [c.currentOwner]).filter(Boolean).join(' / '))}${Array.isArray(c.matchedAliases) && c.matchedAliases.length ? `，命中 ${escapeHtml(c.matchedAliases.join(' / '))}` : ''}，本次提交给 ${escapeHtml(c.requestedOwner)}</div>
         `).join('')}`
         : '<div class="section-title">重复小号提示</div><div class="detail-empty">没有跨主号重复提示，可以直接通过。</div>';
     const diff = row.diff || {};
@@ -151,8 +153,10 @@ function renderDetail(row) {
     const diffHtml = addedAliases.length > 0 || removedAliases.length > 0
         ? `<div class="section-title">差异</div>
             <div class="diff-actions">
+                <button class="primary" data-review-action="approve">通过</button>
                 <button class="primary" data-review-action="approve_added" ${addedAliases.length === 0 ? 'disabled' : ''}>只通过新增</button>
                 <button class="danger" data-review-action="approve_removed" ${removedAliases.length === 0 ? 'disabled' : ''}>只通过删除</button>
+                <button class="quiet" data-review-action="reject">驳回</button>
             </div>
             <div class="alias-row">
                 <b>新增小号</b>
@@ -194,11 +198,15 @@ function renderPublic(data) {
     const mainList = el('public-main-list');
     mainList.innerHTML = '';
 
-    if (state.activePublicMain && !state.publicEntries.some(item => item.mainName === state.activePublicMain)) {
+    if (state.preferredPublicMain) {
+        state.activePublicMain = state.publicEntries.some(item => item.mainName === state.preferredPublicMain)
+            ? state.preferredPublicMain
+            : '';
+    } else if (state.activePublicMain && !state.publicEntries.some(item => item.mainName === state.activePublicMain)) {
         state.activePublicMain = '';
     }
 
-    if (!state.activePublicMain && state.publicEntries.length > 0) {
+    if (!state.preferredPublicMain && !state.activePublicMain && state.publicEntries.length > 0) {
         state.activePublicMain = state.publicEntries[0].mainName;
     }
 
@@ -297,6 +305,20 @@ async function loadPublic() {
     renderPublic(data);
 }
 
+async function focusPublicMainFromPending(row) {
+    const mainName = row?.entries?.[0]?.mainName || '';
+    if (!mainName) return;
+
+    state.preferredPublicMain = mainName;
+    state.activePublicMain = mainName;
+    el('public-search').value = mainName;
+    await loadPublic();
+
+    if (!findPublicEntry(mainName)) {
+        toast(`公共库未找到主号：${mainName}`);
+    }
+}
+
 async function addPublicEntry() {
     const payload = getPublicPayload();
     const data = await api('/api/public', {
@@ -305,6 +327,7 @@ async function addPublicEntry() {
     });
 
     state.activePublicMain = data.entry?.mainName || payload.mainName;
+    state.preferredPublicMain = '';
     el('public-search').value = '';
     publicToast(data);
     await loadDashboard();
@@ -324,6 +347,7 @@ async function savePublicEntry() {
     });
 
     state.activePublicMain = data.entry?.mainName || payload.mainName;
+    state.preferredPublicMain = '';
     el('public-search').value = '';
     publicToast(data);
     await loadDashboard();
@@ -346,6 +370,7 @@ async function deletePublicEntry() {
     });
 
     state.activePublicMain = '';
+    state.preferredPublicMain = '';
     el('public-search').value = '';
     toast(`${data.message}，共 ${data.deletedAliasCount} 个小号`);
     await loadDashboard();
@@ -364,6 +389,7 @@ async function importPublicEntries() {
     });
 
     el('public-import-text').value = '';
+    state.preferredPublicMain = '';
     toast(data.errors?.length ? `${data.message}，${data.errors.length} 行未导入` : data.message);
     await loadDashboard();
 }
@@ -422,8 +448,15 @@ el('btn-clean-empty').addEventListener('click', () => cleanupEmpty().catch(err =
 el('pending-search').addEventListener('input', renderPendingList);
 el('conflict-filter').addEventListener('change', renderPendingList);
 el('public-search').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadPublic().catch(err => toast(err.message)); });
-el('btn-public-search').addEventListener('click', () => loadPublic().catch(err => toast(err.message)));
+el('public-search').addEventListener('input', () => {
+    state.preferredPublicMain = '';
+});
+el('btn-public-search').addEventListener('click', () => {
+    state.preferredPublicMain = '';
+    loadPublic().catch(err => toast(err.message));
+});
 el('public-main-list').addEventListener('change', (e) => {
+    state.preferredPublicMain = '';
     state.activePublicMain = Array.from(e.target.selectedOptions)[0]?.value || '';
     renderPublicEntry(findPublicEntry(state.activePublicMain));
 });
@@ -440,6 +473,8 @@ el('check-all').addEventListener('change', (e) => {
     renderPendingList();
 });
 el('btn-approve').addEventListener('click', () => review('approve').catch(err => toast(err.message)));
+el('btn-approve-added').addEventListener('click', () => review('approve_added').catch(err => toast(err.message)));
+el('btn-approve-removed').addEventListener('click', () => review('approve_removed').catch(err => toast(err.message)));
 el('btn-reject').addEventListener('click', () => review('reject').catch(err => toast(err.message)));
 el('btn-clear-selected').addEventListener('click', () => {
     state.selected.clear();

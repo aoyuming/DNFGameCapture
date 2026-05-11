@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>DNF 共享库管理台</title>
-    <link rel="stylesheet" href="style.css?v=20260511-pending-listbox">
+    <link rel="stylesheet" href="style.css?v=20260512-review-actions-2">
 </head>
 <body>
     <header class="topbar">
@@ -127,12 +127,14 @@
         </div>
         <div class="batch-actions">
             <button id="btn-approve" class="primary">通过当前/选中</button>
+            <button id="btn-approve-added" class="primary">一键通过新增</button>
+            <button id="btn-approve-removed" class="danger">一键通过删除</button>
             <button id="btn-reject" class="quiet">驳回当前/选中</button>
             <button id="btn-clear-selected" class="quiet">取消选择</button>
         </div>
     </div>
 
     <div id="toast" class="toast"></div>
-    <script src="app.js?v=20260511-pending-listbox"></script>
+    <script src="app.js?v=20260512-public-link"></script>
 </body>
 </html>

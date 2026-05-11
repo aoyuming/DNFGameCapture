@@ -100,7 +100,8 @@ h2 { font-size: 15px; }
     grid-template-columns: minmax(360px, 0.95fr) minmax(420px, 1.15fr) minmax(320px, 0.9fr);
     gap: 12px;
     padding: 0 22px 18px;
-    min-height: calc(100vh - 236px);
+    height: calc(100vh - 236px);
+    min-height: 420px;
 }
 
 .panel {
@@ -147,6 +148,10 @@ h2 { font-size: 15px; }
     min-height: 0;
 }
 
+#detail-view {
+    flex: 1;
+}
+
 .pending-list-box {
     flex: 1;
     min-height: 0;
@@ -157,6 +162,7 @@ h2 { font-size: 15px; }
 
 .pending-list-box .pending-list {
     flex: 1;
+    min-height: 0;
     border: 1px solid var(--line);
     border-radius: 6px;
     background: #0d1118;
@@ -293,6 +299,7 @@ h2 { font-size: 15px; }
 }
 
 .batch-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.batch-actions button { white-space: nowrap; }
 #selected-info { color: var(--muted); margin-left: 8px; }
 
 .diff-actions {

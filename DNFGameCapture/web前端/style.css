@@ -185,6 +185,19 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 }
 .popover-item:hover { background: rgba(255,255,255,0.1); }
 .popover-item.keyboard-focus { background: rgba(0, 229, 255, 0.3); }
+.suggestion-name { overflow: hidden; text-overflow: ellipsis; }
+.suggestion-conflict { color: #ffcc66; background: rgba(255, 170, 0, 0.06); }
+.suggestion-conflict:hover,
+.suggestion-conflict.keyboard-focus { background: rgba(255, 170, 0, 0.18); }
+.suggestion-conflict-badge {
+    flex-shrink: 0;
+    padding: 1px 6px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 204, 102, 0.55);
+    color: #ffcc66;
+    font-size: 11px;
+    line-height: 1.4;
+}
 .add-alias-btn { color: #00e5ff; font-weight: bold; text-align: center; justify-content: center; }
 /* ================= 小号菜单按钮 ================= */
 .alias-actions {

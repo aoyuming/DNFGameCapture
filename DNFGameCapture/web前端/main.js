@@ -25,6 +25,10 @@ let pendingAliasRenameRecords = [];
 // 新主号首次绑定小号时，弹窗会让输入框失焦；用这个标记避免 blur 提前同步空小号状态。
 let pendingAliasPromptActive = false;
 let pendingAliasPromptName = '';
+let keepAliasPopoverOpenUntil = 0;
+let pendingAliasPopoverName = '';
+let pendingAliasPopoverInput = null;
+let ignoreNextDocumentClickUntil = 0;
 
 // Ctrl 选择互换模式状态（与所在行无关，模块级即可，但放在 createPlayerRow 外更好）
 // 建议放在文件顶部全局区域，或至少在 createPlayerRow 外定义
@@ -39,13 +43,40 @@ function normalizeAliasTextForCompare(s) {
     return (s || '').trim();
 }
 
+function getAliasDuplicateId(aliasName) {
+    const clean = normalizeAliasTextForCompare(aliasName);
+    if (!clean) return '';
+    const halfSharp = clean.indexOf('#');
+    const fullSharp = clean.indexOf('＃');
+    let sharp = -1;
+    if (halfSharp >= 0 && fullSharp >= 0) sharp = Math.min(halfSharp, fullSharp);
+    else sharp = halfSharp >= 0 ? halfSharp : fullSharp;
+    return (sharp >= 0 ? clean.slice(0, sharp) : clean).trim();
+}
+
+function sameAliasId(a, b) {
+    const aa = getAliasDuplicateId(a);
+    const bb = getAliasDuplicateId(b);
+    return !!aa && !!bb && aa === bb;
+}
+
+function findAliasByDuplicateId(arr, aliasName) {
+    const targetId = getAliasDuplicateId(aliasName);
+    if (!targetId) return '';
+    return uniqueAliasArray(arr || []).find(alias => getAliasDuplicateId(alias) === targetId) || '';
+}
+
+function aliasArrayHasDuplicateId(arr, aliasName) {
+    return !!findAliasByDuplicateId(arr, aliasName);
+}
+
 function uniqueAliasArray(arr) {
     const out = [];
     const seen = new Set();
     (arr || []).forEach(item => {
         const clean = normalizeAliasTextForCompare(item);
         if (!clean) return;
-        const key = clean;
+        const key = getAliasDuplicateId(clean) || clean;
         if (seen.has(key)) return;
         seen.add(key);
         out.push(clean);
@@ -68,7 +99,12 @@ function normalizeAllAliasStores() {
 
 function removeAliasFromArray(arr, aliasName) {
     const target = normalizeAliasTextForCompare(aliasName);
-    return uniqueAliasArray((arr || []).filter(a => normalizeAliasTextForCompare(a) !== target));
+    const targetId = getAliasDuplicateId(target);
+    return uniqueAliasArray((arr || []).filter(a => {
+        const clean = normalizeAliasTextForCompare(a);
+        if (clean === target) return false;
+        return !targetId || getAliasDuplicateId(clean) !== targetId;
+    }));
 }
 
 function applyPendingAliasRenamesToDb(dbObj) {
@@ -79,9 +115,42 @@ function applyPendingAliasRenamesToDb(dbObj) {
         dbObj[r.playerName] = removeAliasFromArray(dbObj[r.playerName], r.oldAlias);
         const newAlias = normalizeAliasTextForCompare(r.newAlias);
         dbObj[r.playerName] = uniqueAliasArray(dbObj[r.playerName]);
-        if (newAlias && !dbObj[r.playerName].includes(newAlias)) dbObj[r.playerName].push(newAlias);
+        if (newAlias && !aliasArrayHasDuplicateId(dbObj[r.playerName], newAlias)) dbObj[r.playerName].push(newAlias);
         dbObj[r.playerName] = uniqueAliasArray(dbObj[r.playerName]);
     }
+}
+
+function restorePendingAliasPopover() {
+    if (Date.now() >= keepAliasPopoverOpenUntil || !pendingAliasPopoverName) return false;
+
+    let inputElem = pendingAliasPopoverInput;
+    if (!inputElem || !document.contains(inputElem)) {
+        inputElem = document.querySelector('.player-row.active-row .name-input');
+    }
+    if (!inputElem) return false;
+
+    const row = inputElem.closest('.player-row');
+    if (!row) return false;
+
+    inputElem.value = pendingAliasPopoverName;
+    inputElem.classList.remove('input-error');
+    inputElem.removeAttribute('data-error-msg');
+    row.classList.add('active-row');
+
+    const autoPopover = row.querySelector('.autocomplete-popover');
+    const aliasPopover = row.querySelector('.alias-popover');
+    if (autoPopover) autoPopover.classList.remove('active');
+    if (aliasPopover) {
+        renderAliasMenu(pendingAliasPopoverName, aliasPopover);
+        aliasPopover.classList.add('active');
+    }
+    return true;
+}
+
+function clearPendingAliasPopoverLock() {
+    keepAliasPopoverOpenUntil = 0;
+    pendingAliasPopoverName = '';
+    pendingAliasPopoverInput = null;
 }
 
 if (window.chrome && window.chrome.webview) {
@@ -106,8 +175,11 @@ if (window.chrome && window.chrome.webview) {
                             let deletedFromMFC = oldSaved.filter(a => !arr.includes(a));
 
                             let updatedPlayerDB = uniqueAliasArray(playerDB[key]);
-                            newFromMFC.forEach(a => { if (!updatedPlayerDB.includes(a)) updatedPlayerDB.push(a); });
-                            updatedPlayerDB = updatedPlayerDB.filter(a => !deletedFromMFC.includes(a));
+                            deletedFromMFC.forEach(a => { updatedPlayerDB = removeAliasFromArray(updatedPlayerDB, a); });
+                            newFromMFC.forEach(a => {
+                                updatedPlayerDB = removeAliasFromArray(updatedPlayerDB, a);
+                                updatedPlayerDB.push(a);
+                            });
 
                             playerDB[key] = uniqueAliasArray(updatedPlayerDB);
                         }
@@ -148,13 +220,15 @@ if (window.chrome && window.chrome.webview) {
                 normalizeAllAliasStores();
                 applyStateFromServer(msg.data);
 
-                let activeRowInput = document.querySelector('.player-row.active-row .name-input');
-                let aliasPopover = document.querySelector('.alias-popover.active');
-                if (activeRowInput && aliasPopover) {
-                    let activeName = activeRowInput.value.trim();
-                    if (activeName && playerDB[activeName]) {
-                        renderAliasMenu(activeName, aliasPopover);
-                        aliasPopover.classList.add('active');
+                if (!restorePendingAliasPopover()) {
+                    let activeRowInput = document.querySelector('.player-row.active-row .name-input');
+                    let aliasPopover = document.querySelector('.alias-popover.active');
+                    if (activeRowInput && aliasPopover) {
+                        let activeName = activeRowInput.value.trim();
+                        if (activeName && playerDB[activeName]) {
+                            renderAliasMenu(activeName, aliasPopover);
+                            aliasPopover.classList.add('active');
+                        }
                     }
                 }
             }
@@ -788,8 +862,8 @@ function bindAliasToPlayer(playerName, aliasName) {
     if (!savedDB[playerName]) savedDB[playerName] = [];
     playerDB[playerName] = uniqueAliasArray(playerDB[playerName]);
     savedDB[playerName] = uniqueAliasArray(savedDB[playerName]);
-    if (!playerDB[playerName].includes(aliasClean)) playerDB[playerName].push(aliasClean);
-    if (!savedDB[playerName].includes(aliasClean)) savedDB[playerName].push(aliasClean);
+    if (!aliasArrayHasDuplicateId(playerDB[playerName], aliasClean)) playerDB[playerName].push(aliasClean);
+    if (!aliasArrayHasDuplicateId(savedDB[playerName], aliasClean)) savedDB[playerName].push(aliasClean);
     playerDB[playerName] = uniqueAliasArray(playerDB[playerName]);
     savedDB[playerName] = uniqueAliasArray(savedDB[playerName]);
     return true;
@@ -808,8 +882,8 @@ function updateAliasForPlayer(playerName, oldAlias, newAlias) {
     playerDB[playerName] = removeAliasFromArray(playerDB[playerName], oldClean);
     savedDB[playerName] = removeAliasFromArray(savedDB[playerName], oldClean);
 
-    if (!playerDB[playerName].includes(newClean)) playerDB[playerName].push(newClean);
-    if (!savedDB[playerName].includes(newClean)) savedDB[playerName].push(newClean);
+    if (!aliasArrayHasDuplicateId(playerDB[playerName], newClean)) playerDB[playerName].push(newClean);
+    if (!aliasArrayHasDuplicateId(savedDB[playerName], newClean)) savedDB[playerName].push(newClean);
 
     playerDB[playerName] = uniqueAliasArray(playerDB[playerName]);
     savedDB[playerName] = uniqueAliasArray(savedDB[playerName]);
@@ -851,7 +925,7 @@ function findAliasConflict(playerName, aliasName, selfInput = null) {
         let otherMain = inp.value.trim();
         if (!otherMain || otherMain === playerName) continue;
         if (otherMain === aliasClean) return otherMain;
-        if (playerDB[otherMain] && playerDB[otherMain].includes(aliasClean)) return otherMain;
+        if (playerDB[otherMain] && aliasArrayHasDuplicateId(playerDB[otherMain], aliasClean)) return otherMain;
     }
     return null;
 }
@@ -869,9 +943,14 @@ function getFieldConflict(newMainName, excludeInput) {
         if (!otherMain) continue;
         let otherAliases = playerDB[otherMain] || [];
         if (otherMain === newMainName) return { owner: otherMain, reason: '主号已被占用' };
-        if (otherAliases.includes(newMainName)) return { owner: otherMain, reason: `名字是[${otherMain}]的小号` };
-        if (newAliases.includes(otherMain)) return { owner: otherMain, reason: `携带的小号包含了[${otherMain}]` };
-        for (let a of newAliases) { if (otherAliases.includes(a)) return { owner: otherMain, reason: `小号[${a}]与对方冲突` }; }
+        if (otherAliases.some(alias => normalizeAliasTextForCompare(alias) === newMainName)) return { owner: otherMain, reason: `名字是[${otherMain}]的小号` };
+        if (newAliases.some(alias => normalizeAliasTextForCompare(alias) === otherMain)) return { owner: otherMain, reason: `携带的小号包含了[${otherMain}]` };
+        for (let a of newAliases) {
+            const matchedAlias = findAliasByDuplicateId(otherAliases, a);
+            if (matchedAlias) {
+                return { owner: otherMain, reason: `小号ID[${getAliasDuplicateId(a)}]与对方小号[${matchedAlias}]冲突` };
+            }
+        }
     }
     return null;
 }
@@ -1073,8 +1152,9 @@ function createPlayerRow() {
                             }, 100);
                             return;
                         }
-                        if (getCleanAliases(name).includes(aliasClean)) {
-                            showAlert(`小号【${aliasClean}】已经存在，不会重复添加。`);
+                        const existingAlias = findAliasByDuplicateId(getCleanAliases(name), aliasClean);
+                        if (existingAlias) {
+                            showAlert(`小号【${aliasClean}】的ID【${getAliasDuplicateId(aliasClean)}】已存在于【${existingAlias}】，不会重复添加。`);
                             renderAliasMenu(name, aliasPopover);
                             aliasPopover.classList.add('active');
                             return;
@@ -1140,6 +1220,9 @@ function createPlayerRow() {
 
     // 🌟 核心改动点：判断当前输入框有没有值
     nameInput.addEventListener('focus', function () {
+        if (pendingAliasPopoverInput && pendingAliasPopoverInput !== this) {
+            clearPendingAliasPopoverLock();
+        }
         this.dataset.previousMainName = this.value.trim();
         document.querySelectorAll('.popover').forEach(p => { if (p !== autoPopover && p !== aliasPopover) p.classList.remove('active'); });
         document.querySelectorAll('.player-row').forEach(r => r.classList.remove('active-row'));
@@ -1219,6 +1302,7 @@ function createPlayerRow() {
         // 延迟隐藏两个弹窗（保持和原来一样的时间）
         setTimeout(() => {
             if (autoPopover) autoPopover.classList.remove('active');
+            if (Date.now() < keepAliasPopoverOpenUntil) return;
             if (aliasPopover) aliasPopover.classList.remove('active');
         }, 150);
         triggerSync();
@@ -1266,20 +1350,28 @@ function createPlayerRow() {
         if (val && conflict) {
             inputElem.classList.add('input-error');
             inputElem.setAttribute('data-error-msg', `❌ 无法上场！已被【${conflict.owner}】占用。\n原因：${conflict.reason}`);
-            autoPopover.classList.remove('active');
             aliasPopover.classList.remove('active'); // 🚨 修复：有冲突时强制关掉小号列表
-            return;
+        } else {
+            inputElem.classList.remove('input-error');
+            inputElem.removeAttribute('data-error-msg');
         }
-        inputElem.classList.remove('input-error');
 
-        let availableMains = Object.keys(playerDB).filter(name => getFieldConflict(name, inputElem) === null);
+        let activeMainSet = new Set(activeNames);
+        let availableMains = Object.keys(playerDB).filter(name => !activeMainSet.has(name));
         let matches = !val ? (forceShowAll ? availableMains : []) : availableMains.filter(n => n.includes(val));
 
         currentFocusIndex = -1;
 
         if (matches.length > 0) {
             matches.sort((a, b) => a.localeCompare(b, 'zh-Hans-CN', { sensitivity: 'accent' }));
-            autoPopover.innerHTML = matches.map(n => `<div class="popover-item suggestion-item">${n}</div>`).join('');
+            autoPopover.innerHTML = matches.map(n => {
+                const itemConflict = getFieldConflict(n, inputElem);
+                const conflictText = itemConflict ? `已被【${itemConflict.owner}】占用：${itemConflict.reason}` : '';
+                const itemClass = `popover-item suggestion-item${itemConflict ? ' suggestion-conflict' : ''}`;
+                const conflictAttrs = itemConflict ? ` title="${escapeHtml(conflictText)}" data-conflict-reason="${escapeHtml(conflictText)}"` : '';
+                const conflictBadge = itemConflict ? '<span class="suggestion-conflict-badge">冲突</span>' : '';
+                return `<div class="${itemClass}" data-name="${escapeHtml(n)}"${conflictAttrs}><span class="suggestion-name">${escapeHtml(n)}</span>${conflictBadge}</div>`;
+            }).join('');
             autoPopover.classList.add('active');
 
             autoPopover.querySelectorAll('.suggestion-item').forEach(item => {
@@ -1289,18 +1381,26 @@ function createPlayerRow() {
                     e.preventDefault();
                     e.stopPropagation();
 
-                    inputElem.value = item.innerText;
+                    inputElem.value = item.dataset.name || item.innerText;
 
                     // 赋值后再跑一遍查重逻辑确保万无一失
                     processInputLogic(inputElem, false);
 
                     // 如果选中的人没冲突，就无缝切出他的小号列表
                     if (!inputElem.classList.contains('input-error')) {
+                        keepAliasPopoverOpenUntil = Date.now() + 2000;
+                        ignoreNextDocumentClickUntil = Date.now() + 350;
+                        pendingAliasPopoverName = inputElem.value.trim();
+                        pendingAliasPopoverInput = inputElem;
                         autoPopover.classList.remove('active');
                         renderAliasMenu(inputElem.value, aliasPopover);
                         aliasPopover.classList.add('active');
+                        setTimeout(() => {
+                            if (pendingAliasPopoverInput === inputElem && pendingAliasPopoverName === inputElem.value.trim()) {
+                                triggerSync();
+                            }
+                        }, 80);
                     }
-                    triggerSync();
                 });
             });
         } else {
@@ -1425,8 +1525,9 @@ function renderAliasMenu(playerName, popElement) {
                     return;
                 }
 
-                if (getCleanAliases(playerName).includes(aliasTrimmed)) {
-                    showAlert(`小号【${aliasTrimmed}】已经存在，不会重复添加。`);
+                const existingAlias = findAliasByDuplicateId(getCleanAliases(playerName), aliasTrimmed);
+                if (existingAlias) {
+                    showAlert(`小号【${aliasTrimmed}】的ID【${getAliasDuplicateId(aliasTrimmed)}】已存在于【${existingAlias}】，不会重复添加。`);
                     renderAliasMenu(playerName, popElement);
                     popElement.classList.add('active');
                     return;
@@ -1468,8 +1569,9 @@ function renderAliasMenu(playerName, popElement) {
                 }
 
                 const samePlayerAliases = (playerDB[playerName] || []).filter((_, i) => i !== idx);
-                if (samePlayerAliases.includes(aliasTrimmed)) {
-                    showAlert(`❌ 修改失败！该选手已经有小号【${aliasTrimmed}】。`);
+                const samePlayerAlias = findAliasByDuplicateId(samePlayerAliases, aliasTrimmed);
+                if (samePlayerAlias) {
+                    showAlert(`❌ 修改失败！该选手已有相同ID【${getAliasDuplicateId(aliasTrimmed)}】的小号【${samePlayerAlias}】。`);
                     return;
                 }
 
@@ -1563,7 +1665,18 @@ document.querySelectorAll('.team-score-input').forEach(input => { input.type = '
 updateStartButtonGuard();
 
 document.addEventListener('click', (e) => {
-    if (e.target.closest('#custom-modal') || e.target.classList.contains('name-input') || e.target.classList.contains('gear-btn')) return;
+    if (Date.now() < ignoreNextDocumentClickUntil) return;
+    if (Date.now() < keepAliasPopoverOpenUntil) {
+        const pendingRow = pendingAliasPopoverInput?.closest('.player-row');
+        if (pendingRow && pendingRow.contains(e.target)) return;
+        clearPendingAliasPopoverLock();
+    }
+    if (
+        e.target.closest('#custom-modal') ||
+        e.target.closest('.popover') ||
+        e.target.classList.contains('name-input') ||
+        e.target.classList.contains('gear-btn')
+    ) return;
     document.querySelectorAll('.popover').forEach(p => p.classList.remove('active'));
     // 点击任意空白处，撤销所有选手的置顶层级
     document.querySelectorAll('.player-row').forEach(r => r.classList.remove('active-row'));

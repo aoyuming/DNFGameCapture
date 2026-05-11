@@ -9,8 +9,10 @@ const OSS_REGION = 'oss-cn-beijing';
 const OSS_BUCKET = 'dnf-capture-update';
 const LICENSE_PREFIX = 'licenses/';
 const PENDING_ALIAS_PREFIX = 'alias-submissions/pending/';
+const REJECTED_BLOCK_PREFIX = 'alias-submissions/rejected-blocks/';
 const PUBLIC_ALIAS_DB_KEY = 'shared-alias/public_alias_db.json';
 const ADMIN_KEY_HASHES_KEY = 'shared-alias/admin_key_hashes.json';
+const REJECTED_BLOCK_TTL_SEC = 14 * 24 * 60 * 60;
 const MAX_ALIAS_SUBMISSION_MAINS = 300;
 const MAX_ALIASES_PER_MAIN = 20;
 const MAX_PUBLIC_ALIAS_MAINS = 5000;
@@ -83,6 +85,23 @@ function cleanName(value) {
         .slice(0, MAX_NAME_LENGTH);
 }
 
+function getAliasDuplicateId(value) {
+    const clean = cleanName(value);
+    if (!clean) return '';
+    const halfSharp = clean.indexOf('#');
+    const fullSharp = clean.indexOf('＃');
+    let sharp = -1;
+    if (halfSharp >= 0 && fullSharp >= 0) sharp = Math.min(halfSharp, fullSharp);
+    else sharp = halfSharp >= 0 ? halfSharp : fullSharp;
+    return (sharp >= 0 ? clean.slice(0, sharp) : clean).trim();
+}
+
+function sameAliasId(a, b) {
+    const aa = getAliasDuplicateId(a);
+    const bb = getAliasDuplicateId(b);
+    return !!aa && !!bb && aa === bb;
+}
+
 function parseAliasValue(value) {
     if (Array.isArray(value)) return value;
     if (typeof value === 'string') {
@@ -97,8 +116,10 @@ function normalizeAliasArray(value) {
     const seen = new Set();
     for (const raw of Array.isArray(value) ? value : parseAliasValue(value)) {
         const aliasName = cleanName(raw);
-        if (!aliasName || seen.has(aliasName)) continue;
-        seen.add(aliasName);
+        const aliasId = getAliasDuplicateId(aliasName);
+        const key = aliasId || aliasName;
+        if (!aliasName || seen.has(key)) continue;
+        seen.add(key);
         out.push(aliasName);
     }
     return out;
@@ -281,13 +302,18 @@ async function loadPublicAliasDb(client) {
 function findDuplicateAliasOwners(publicDb, aliases, expectedMainName) {
     const warnings = [];
     for (const aliasName of normalizeAliasArray(aliases)) {
+        const aliasId = getAliasDuplicateId(aliasName);
         const owners = [];
+        const matchedAliases = [];
         for (const [mainName, publicAliases] of Object.entries(publicDb.players || {})) {
-            if (mainName !== expectedMainName && normalizeAliasArray(publicAliases).includes(aliasName)) {
+            if (mainName === expectedMainName) continue;
+            const matchedAlias = normalizeAliasArray(publicAliases).find(publicAlias => sameAliasId(publicAlias, aliasName));
+            if (matchedAlias) {
                 owners.push(mainName);
+                matchedAliases.push(matchedAlias);
             }
         }
-        if (owners.length > 0) warnings.push({ aliasName, owners, requestedOwner: expectedMainName });
+        if (owners.length > 0) warnings.push({ aliasName, aliasId, matchedAliases, owners, requestedOwner: expectedMainName });
     }
     return warnings;
 }
@@ -301,6 +327,23 @@ function diffAliasArrays(beforeAliases, afterAliases) {
         addedAliases: after.filter(aliasName => !before.includes(aliasName)),
         removedAliases: before.filter(aliasName => !after.includes(aliasName))
     };
+}
+
+function buildAliasReviewFingerprintPayload(mainName, aliases, operation, diff) {
+    const cleanMain = cleanName(mainName);
+    const normalizedDiff = diff && typeof diff === 'object' ? diff : {};
+    return {
+        schemaVersion: 1,
+        mainName: cleanMain,
+        operation: String(operation || (normalizeAliasArray(aliases).length === 0 ? 'delete' : 'replace')),
+        aliases: normalizeAliasArray(aliases).filter(aliasName => aliasName !== cleanMain),
+        addedAliases: normalizeAliasArray(normalizedDiff.addedAliases),
+        removedAliases: normalizeAliasArray(normalizedDiff.removedAliases)
+    };
+}
+
+function getAliasReviewFingerprint(mainName, aliases, operation, diff) {
+    return sha256(JSON.stringify(buildAliasReviewFingerprintPayload(mainName, aliases, operation, diff)));
 }
 
 function normalizeAdminKeyHashes(value) {
@@ -321,6 +364,19 @@ async function validateAdminLicense(client, licenseKey) {
 
 function getPendingMainKey(mainName) {
     return `${PENDING_ALIAS_PREFIX}main-${sha256(mainName).slice(0, 16)}.json`;
+}
+
+function getRejectedBlockKey(mainName, fingerprint) {
+    return `${REJECTED_BLOCK_PREFIX}main-${sha256(mainName).slice(0, 16)}/${fingerprint}.json`;
+}
+
+async function getActiveRejectedBlock(client, mainName, fingerprint, now) {
+    const marker = await getJsonObject(client, getRejectedBlockKey(mainName, fingerprint), null);
+    if (!marker || typeof marker !== 'object') return null;
+    const expireAt = Number(marker.expireAt || 0);
+    const rejectedAt = Number(marker.rejectedAt || 0);
+    const maxExpireAt = rejectedAt > 0 ? rejectedAt + REJECTED_BLOCK_TTL_SEC : expireAt;
+    return expireAt > now && maxExpireAt > now ? marker : null;
 }
 
 function createPendingAggregate(mainName, now) {
@@ -550,6 +606,7 @@ async function handleSubmitAliasDb(client, data, res) {
     let unchangedMainCount = 0;
     let deleteMainCount = 0;
     let duplicateHintCount = 0;
+    let rejectedDuplicateCount = 0;
 
     for (const entry of entries) {
         const mainName = entry.mainName;
@@ -568,9 +625,18 @@ async function handleSubmitAliasDb(client, data, res) {
             continue;
         }
 
+        const operation = targetAliases.length === 0 ? 'delete' : 'replace';
+        const diff = diffAliasArrays(publicAliases, targetAliases);
+        const fingerprint = getAliasReviewFingerprint(mainName, targetAliases, operation, diff);
+        const rejectedBlock = await getActiveRejectedBlock(client, mainName, fingerprint, createdAt);
+        if (rejectedBlock) {
+            rejectedDuplicateCount++;
+            continue;
+        }
+
         aggregate.aliases = targetAliases;
-        aggregate.operation = targetAliases.length === 0 ? 'delete' : 'replace';
-        aggregate.diff = diffAliasArrays(publicAliases, targetAliases);
+        aggregate.operation = operation;
+        aggregate.diff = diff;
         aggregate.conflicts = [];
         aggregate.duplicateOwners = findDuplicateAliasOwners(publicDb, targetAliases, mainName);
         duplicateHintCount += aggregate.duplicateOwners.length;
@@ -594,26 +660,37 @@ async function handleSubmitAliasDb(client, data, res) {
     }
 
     if (touchedMainCount === 0) {
+        const msgParts = [];
+        if (rejectedDuplicateCount > 0) {
+            msgParts.push(`14 天内已驳回过相同投稿 ${rejectedDuplicateCount} 个，已自动过滤`);
+        }
+        if (unchangedMainCount > 0) {
+            msgParts.push(`未变化主号 ${unchangedMainCount} 个`);
+        }
+
         return res.json({
             status: 'ok',
             action: 'submit_alias_db',
             aliasSubmit: true,
-            msg: `没有发现需要审核的共享库变更。未变化主号 ${unchangedMainCount} 个`,
+            msg: msgParts.length > 0 ? msgParts.join('；') : '没有发现需要审核的共享库变更',
             entryCount: 0,
             pairCount: 0,
-            unchangedMainCount
+            unchangedMainCount,
+            rejectedDuplicateCount
         });
     }
 
+    const rejectedDuplicateMsg = rejectedDuplicateCount > 0 ? `、过滤重复驳回 ${rejectedDuplicateCount} 个` : '';
     return res.json({
         status: 'ok',
         action: 'submit_alias_db',
         aliasSubmit: true,
-        msg: `已提交到待审核区：${touchedMainCount} 个主号、目标小号 ${targetPairCount} 个、删除主号 ${deleteMainCount} 个`,
+        msg: `已提交到待审核区：${touchedMainCount} 个主号、目标小号 ${targetPairCount} 个、删除主号 ${deleteMainCount} 个${rejectedDuplicateMsg}`,
         entryCount: touchedMainCount,
         pairCount: targetPairCount,
         deleteMainCount,
-        duplicateHintCount
+        duplicateHintCount,
+        rejectedDuplicateCount
     });
 }
 

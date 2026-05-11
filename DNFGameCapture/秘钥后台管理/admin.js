@@ -52,6 +52,9 @@ const ADMIN_KEY_HASHES_KEY = 'shared-alias/admin_key_hashes.json';
 const PENDING_ALIAS_PREFIX = 'alias-submissions/pending/';
 const APPROVED_ALIAS_PREFIX = 'alias-submissions/approved/';
 const REJECTED_ALIAS_PREFIX = 'alias-submissions/rejected/';
+const REJECTED_BLOCK_PREFIX = 'alias-submissions/rejected-blocks/';
+const REJECTED_BLOCK_TTL_SEC = 14 * 24 * 60 * 60;
+const MAX_NAME_LENGTH = 60;
 
 const rl = readline.createInterface({
     input: process.stdin,
@@ -75,6 +78,31 @@ function formatUnixTime(sec) {
 
 function sha256(value) {
     return crypto.createHash('sha256').update(String(value || '')).digest('hex');
+}
+
+function cleanName(value) {
+    return String(value || '')
+        .replace(/[\r\n\t]/g, ' ')
+        .replace(/[=|]/g, '')
+        .trim()
+        .slice(0, MAX_NAME_LENGTH);
+}
+
+function getAliasDuplicateId(value) {
+    const clean = cleanName(value);
+    if (!clean) return '';
+    const halfSharp = clean.indexOf('#');
+    const fullSharp = clean.indexOf('＃');
+    let sharp = -1;
+    if (halfSharp >= 0 && fullSharp >= 0) sharp = Math.min(halfSharp, fullSharp);
+    else sharp = halfSharp >= 0 ? halfSharp : fullSharp;
+    return (sharp >= 0 ? clean.slice(0, sharp) : clean).trim();
+}
+
+function sameAliasId(a, b) {
+    const aa = getAliasDuplicateId(a);
+    const bb = getAliasDuplicateId(b);
+    return !!aa && !!bb && aa === bb;
 }
 
 async function getLicense(key) {
@@ -123,9 +151,11 @@ function normalizeAliasArray(value) {
     const out = [];
     const seen = new Set();
     for (const item of arr) {
-        const alias = String(item || '').trim();
-        if (!alias || seen.has(alias)) continue;
-        seen.add(alias);
+        const alias = cleanName(item);
+        const aliasId = getAliasDuplicateId(alias);
+        const key = aliasId || alias;
+        if (!alias || seen.has(key)) continue;
+        seen.add(key);
         out.push(alias);
     }
     return out;
@@ -169,6 +199,77 @@ function getSubmissionStats(submission) {
         mainCount: entries.length,
         pairCount: entries.reduce((sum, item) => sum + item.aliases.length, 0)
     };
+}
+
+function normalizeReviewAliasArray(value) {
+    const out = [];
+    const seen = new Set();
+    for (const raw of normalizeAliasArray(value)) {
+        const alias = cleanName(raw);
+        if (!alias || seen.has(alias)) continue;
+        seen.add(alias);
+        out.push(alias);
+    }
+    return out;
+}
+
+function normalizeReviewDiff(diff) {
+    const raw = diff && typeof diff === 'object' ? diff : {};
+    return {
+        addedAliases: normalizeReviewAliasArray(raw.addedAliases),
+        removedAliases: normalizeReviewAliasArray(raw.removedAliases)
+    };
+}
+
+function buildAliasReviewFingerprintPayload(mainName, aliases, operation, diff) {
+    const cleanMain = cleanName(mainName);
+    const normalizedAliases = normalizeReviewAliasArray(aliases).filter(alias => alias !== cleanMain);
+    const normalizedDiff = normalizeReviewDiff(diff);
+    return {
+        schemaVersion: 1,
+        mainName: cleanMain,
+        operation: String(operation || (normalizedAliases.length === 0 ? 'delete' : 'replace')),
+        aliases: normalizedAliases,
+        addedAliases: normalizedDiff.addedAliases,
+        removedAliases: normalizedDiff.removedAliases
+    };
+}
+
+function getAliasReviewFingerprint(mainName, aliases, operation, diff) {
+    return sha256(JSON.stringify(buildAliasReviewFingerprintPayload(mainName, aliases, operation, diff)));
+}
+
+function getRejectedBlockKey(mainName, fingerprint) {
+    return `${REJECTED_BLOCK_PREFIX}main-${sha256(mainName).slice(0, 16)}/${fingerprint}.json`;
+}
+
+async function putRejectedBlockMarkers(submission, rejectedAt, rejectReason) {
+    const entries = getSubmissionEntries(submission);
+    const reason = String(rejectReason || '');
+
+    for (const item of entries) {
+        const mainName = cleanName(item.mainName);
+        if (!mainName) continue;
+
+        const aliases = normalizeReviewAliasArray(item.aliases).filter(alias => alias !== mainName);
+        const operation = aliases.length === 0 ? 'delete' : 'replace';
+        const diff = normalizeReviewDiff(submission.diff);
+        const fingerprint = getAliasReviewFingerprint(mainName, aliases, operation, diff);
+
+        await putJsonObject(getRejectedBlockKey(mainName, fingerprint), {
+            type: 'alias-rejected-block',
+            schemaVersion: 1,
+            mainName,
+            fingerprint,
+            rejectedAt,
+            expireAt: rejectedAt + REJECTED_BLOCK_TTL_SEC,
+            rejectReason: reason,
+            submissionId: String(submission.id || ''),
+            operation,
+            aliases,
+            diff
+        });
+    }
 }
 
 function normalizePublicDb(db) {
@@ -355,12 +456,16 @@ function diffAliasesForMerge(submission, item, oldAliases, targetAliases) {
 
 function buildAliasesForReviewMode(mode, oldAliases, targetAliases, diff) {
     if (mode === 'added') {
-        return normalizeAliasArray([...oldAliases, ...diff.addedAliases]);
+        const addedAliases = normalizeAliasArray(diff.addedAliases);
+        const keptAliases = normalizeAliasArray(oldAliases)
+            .filter(oldAlias => !addedAliases.some(addedAlias => sameAliasId(oldAlias, addedAlias)));
+        return normalizeAliasArray([...keptAliases, ...addedAliases]);
     }
 
     if (mode === 'removed') {
-        const removed = new Set(diff.removedAliases);
-        return oldAliases.filter(alias => !removed.has(alias));
+        const removedAliases = normalizeAliasArray(diff.removedAliases);
+        return normalizeAliasArray(oldAliases)
+            .filter(oldAlias => !removedAliases.some(removedAlias => sameAliasId(oldAlias, removedAlias)));
     }
 
     return targetAliases;
@@ -443,6 +548,9 @@ async function archiveSubmission(row, status, extra = {}) {
     const prefix = status === 'approved' ? APPROVED_ALIAS_PREFIX : REJECTED_ALIAS_PREFIX;
     const archiveKey = `${prefix}${submission.id || Date.now()}.json`;
     await putJsonObject(archiveKey, submission);
+    if (status === 'rejected') {
+        await putRejectedBlockMarkers(submission, submission.reviewedAt, submission.rejectReason || '');
+    }
     await getClient().delete(row.key);
 }
 
