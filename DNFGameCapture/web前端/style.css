@@ -169,9 +169,15 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     overflow-y: auto;  /* 超出内容自动显示滚动条 */
 }
 .alias-popover { 
-    top: -8px; left: 80px; width: max-content; min-width: 190px; 
+    top: -8px; left: 80px;
+    width: max-content;
+    min-width: 190px;
+    max-width: min(320px, calc(100vw - 16px));
     max-height: 240px; 
     overflow-y: auto; 
+    overflow-x: hidden;
+    white-space: nowrap;
+    box-sizing: border-box;
 }
 /* 🚨 顺手给这个弹出菜单加个好看的暗黑电竞风滚动条 */
 .popover::-webkit-scrollbar { width: 6px; }
@@ -181,7 +187,8 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 
 .popover-item { 
     padding: 8px 10px; cursor: pointer; border-bottom: 1px solid rgba(255,255,255,0.05); 
-    font-size: 13px; transition: 0.1s; color: white; display: flex; justify-content: space-between; align-items: center; gap: 15px;
+    font-size: 13px; transition: 0.1s; color: white; display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    box-sizing: border-box;
 }
 .popover-item:hover { background: rgba(255,255,255,0.1); }
 .popover-item.keyboard-focus { background: rgba(0, 229, 255, 0.3); }
@@ -199,14 +206,33 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     line-height: 1.4;
 }
 .add-alias-btn { color: #00e5ff; font-weight: bold; text-align: center; justify-content: center; }
+.alias-row {
+    align-items: center;
+    min-height: 32px;
+    cursor: default;
+    width: 100%;
+    max-width: 100%;
+}
 /* ================= 小号菜单按钮 ================= */
 .alias-actions {
     display: flex;
-    gap: 6px;
+    gap: 4px;
     flex-shrink: 0; /* 关键：告诉 Flexbox 这个容器绝对不许缩小！ */
 }
 
 /* 🚨 为小号名字添加超长截断样式 */
+.alias-row .alias-actions {
+    position: static;
+    display: flex;
+    gap: 4px;
+    padding: 0;
+    background: transparent;
+    box-shadow: none;
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+}
+
 .alias-name {
     flex: 1; /* 关键：占满剩余的所有空间 */
     white-space: nowrap; /* 不允许换行 */
@@ -215,6 +241,21 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     margin-right: 10px; /* 和右边按钮保持一点距离 */
 }
 /* 配合图标化调整按钮样式 */
+.alias-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-right: 6px;
+    line-height: 1.35;
+}
+.alias-row .alias-name {
+    width: auto;
+    overflow: hidden;
+}
+
 .btn-edit-alias, .btn-temp-unbind, .btn-perm-unbind { 
     display: flex; justify-content: center; align-items: center;
     width: 24px; height: 24px; /* 固定正方形 */
@@ -787,4 +828,100 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     box-shadow: none !important;
     cursor: not-allowed !important;
     filter: grayscale(1) brightness(0.75) !important;
+}
+
+/* 小号菜单恢复为横向常驻按钮布局：名称按剩余空间自动省略 */
+.alias-popover {
+    top: -8px;
+    left: 80px;
+    width: max-content;
+    min-width: 190px;
+    max-width: min(320px, calc(100vw - 16px));
+    white-space: nowrap;
+}
+.alias-row {
+    align-items: center;
+    min-height: 32px;
+    padding-bottom: 8px;
+}
+.alias-row:hover,
+.alias-row:focus-within {
+    padding-bottom: 8px;
+}
+.alias-row .alias-actions {
+    position: static;
+    display: flex;
+    gap: 4px;
+    padding: 0;
+    background: transparent;
+    box-shadow: none;
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+}
+.alias-row .alias-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: auto;
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-right: 6px;
+}
+.alias-popover.alias-fit-sm .popover-item {
+    font-size: 12px;
+}
+.alias-popover.alias-fit-sm .btn-edit-alias,
+.alias-popover.alias-fit-sm .btn-temp-unbind,
+.alias-popover.alias-fit-sm .btn-perm-unbind {
+    width: 17px;
+    height: 17px;
+    font-size: 11px;
+}
+.alias-popover.alias-fit-xs .popover-item {
+    font-size: 11px;
+}
+.alias-popover.alias-fit-xs .btn-edit-alias,
+.alias-popover.alias-fit-xs .btn-temp-unbind,
+.alias-popover.alias-fit-xs .btn-perm-unbind {
+    width: 16px;
+    height: 16px;
+    font-size: 10px;
+}
+.btn-edit-alias,
+.btn-temp-unbind,
+.btn-perm-unbind {
+    width: 16px;
+    height: 16px;
+    font-size: 10px;
+}
+
+/* 小号菜单微调：按钮更靠右，文字再紧一点 */
+.alias-popover .popover-item {
+    padding: 7px 4px 7px 9px;
+    font-size: 12px;
+}
+.alias-popover.alias-fit-sm .popover-item {
+    font-size: 11px;
+}
+.alias-popover.alias-fit-sm .btn-edit-alias,
+.alias-popover.alias-fit-sm .btn-temp-unbind,
+.alias-popover.alias-fit-sm .btn-perm-unbind {
+    width: 15px;
+    height: 15px;
+    font-size: 9px;
+}
+.alias-popover.alias-fit-xs .popover-item {
+    font-size: 10px;
+}
+.alias-popover.alias-fit-xs .btn-edit-alias,
+.alias-popover.alias-fit-xs .btn-temp-unbind,
+.alias-popover.alias-fit-xs .btn-perm-unbind {
+    width: 14px;
+    height: 14px;
+    font-size: 8px;
+}
+.alias-row .alias-name {
+    margin-right: 4px;
 }

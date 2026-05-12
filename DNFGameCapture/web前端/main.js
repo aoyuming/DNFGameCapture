@@ -27,9 +27,9 @@ let pendingAliasRenameRecords = [];
 // 新主号首次绑定小号时，弹窗会让输入框失焦；用这个标记避免 blur 提前同步空小号状态。
 let pendingAliasPromptActive = false;
 let pendingAliasPromptName = '';
-let keepAliasPopoverOpenUntil = 0;
 let pendingAliasPopoverName = '';
 let pendingAliasPopoverInput = null;
+let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
 
 // Ctrl 选择互换模式状态（与所在行无关，模块级即可，但放在 createPlayerRow 外更好）
@@ -194,7 +194,7 @@ function applyPendingAliasRenamesToDb(dbObj) {
 }
 
 function restorePendingAliasPopover() {
-    if (Date.now() >= keepAliasPopoverOpenUntil || !pendingAliasPopoverName) return false;
+    if (!pendingAliasPopoverName) return false;
 
     let inputElem = pendingAliasPopoverInput;
     if (!inputElem || !document.contains(inputElem)) {
@@ -202,28 +202,134 @@ function restorePendingAliasPopover() {
     }
     if (!inputElem) return false;
 
-    const row = inputElem.closest('.player-row');
-    if (!row) return false;
-
     inputElem.value = pendingAliasPopoverName;
     inputElem.classList.remove('input-error');
     inputElem.removeAttribute('data-error-msg');
-    row.classList.add('active-row');
-
-    const autoPopover = row.querySelector('.autocomplete-popover');
-    const aliasPopover = row.querySelector('.alias-popover');
-    if (autoPopover) autoPopover.classList.remove('active');
-    if (aliasPopover) {
-        renderAliasMenu(pendingAliasPopoverName, aliasPopover);
-        aliasPopover.classList.add('active');
-    }
-    return true;
+    return !!openAliasPopover(inputElem, pendingAliasPopoverName);
 }
 
 function clearPendingAliasPopoverLock() {
-    keepAliasPopoverOpenUntil = 0;
     pendingAliasPopoverName = '';
     pendingAliasPopoverInput = null;
+    activeAliasPopoverInput = null;
+}
+
+function closeAliasPopovers() {
+    document.querySelectorAll('.alias-popover').forEach(popElement => popElement.classList.remove('active'));
+    clearPendingAliasPopoverLock();
+}
+
+function closeAliasPopoverForInput(inputElem) {
+    const row = inputElem?.closest('.player-row');
+    const aliasPopover = row?.querySelector('.alias-popover');
+    if (aliasPopover) aliasPopover.classList.remove('active');
+    if (!activeAliasPopoverInput || activeAliasPopoverInput === inputElem) clearPendingAliasPopoverLock();
+}
+
+function openAliasPopover(inputElem, playerName) {
+    const cleanName = String(playerName || '').trim();
+    const row = inputElem?.closest('.player-row');
+    if (!row || !cleanName) return null;
+
+    const autoPopover = row.querySelector('.autocomplete-popover');
+    const aliasPopover = row.querySelector('.alias-popover');
+    if (!aliasPopover) return null;
+
+    document.querySelectorAll('.alias-popover').forEach(popElement => {
+        if (popElement !== aliasPopover) popElement.classList.remove('active');
+    });
+    document.querySelectorAll('.player-row').forEach(item => {
+        if (item !== row) item.classList.remove('active-row');
+    });
+
+    if (autoPopover) autoPopover.classList.remove('active');
+    row.classList.add('active-row');
+    renderAliasMenu(cleanName, aliasPopover);
+    aliasPopover.classList.add('active');
+
+    activeAliasPopoverInput = inputElem;
+    pendingAliasPopoverInput = inputElem;
+    pendingAliasPopoverName = cleanName;
+
+    scheduleAliasPopoverLayout(aliasPopover);
+    return aliasPopover;
+}
+
+function clampAliasPopoverToViewport(popElement) {
+    if (!popElement || !popElement.classList.contains('active')) return;
+
+    const margin = 8;
+    const viewportWidth = document.documentElement.clientWidth || window.innerWidth || 0;
+    const viewportHeight = document.documentElement.clientHeight || window.innerHeight || 0;
+
+    popElement.classList.remove('alias-fit-sm', 'alias-fit-xs');
+    popElement.style.left = '';
+    popElement.style.width = '';
+    popElement.style.maxHeight = '';
+
+    let rect = popElement.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+
+    const normalLeft = popElement.offsetLeft;
+    const rightEdge = viewportWidth ? viewportWidth - margin : 0;
+    const preferredMaxWidth = Math.min(320, Math.max(190, (viewportWidth || 336) - margin * 2));
+    const minWidth = Math.min(190, preferredMaxWidth);
+    const rightSpaceWidth = viewportWidth ? rightEdge - rect.left : rect.width;
+
+    if (viewportWidth && rightSpaceWidth < preferredMaxWidth && rightSpaceWidth >= minWidth) {
+        popElement.style.width = `${Math.floor(rightSpaceWidth)}px`;
+        rect = popElement.getBoundingClientRect();
+    }
+
+    const applyFontFit = () => {
+        const aliases = Array.from(popElement.querySelectorAll('.alias-name'));
+        const overflowed = aliases.some(item => item.scrollWidth > item.clientWidth + 1);
+        if (!overflowed) return false;
+
+        popElement.classList.add('alias-fit-sm');
+        const smOverflowed = aliases.some(item => item.scrollWidth > item.clientWidth + 1);
+        if (!smOverflowed) return false;
+
+        popElement.classList.add('alias-fit-xs');
+        return aliases.some(item => item.scrollWidth > item.clientWidth + 1);
+    };
+
+    const stillOverflowed = applyFontFit();
+    rect = popElement.getBoundingClientRect();
+
+    if (viewportWidth && rect.right > rightEdge && stillOverflowed) {
+        let left = normalLeft - (rect.right - rightEdge);
+        popElement.style.left = `${Math.round(left)}px`;
+        rect = popElement.getBoundingClientRect();
+    }
+
+    if (viewportWidth && rect.left < margin) {
+        let left = popElement.offsetLeft;
+        left += margin - rect.left;
+        popElement.style.left = `${Math.round(left)}px`;
+        rect = popElement.getBoundingClientRect();
+    }
+
+    if (viewportHeight) {
+        const availableHeight = viewportHeight - margin - Math.max(margin, rect.top);
+        popElement.style.maxHeight = `${Math.min(240, Math.max(64, Math.floor(availableHeight)))}px`;
+    }
+}
+
+function scheduleAliasPopoverLayout(popElement) {
+    if (!popElement) return;
+    const run = () => clampAliasPopoverToViewport(popElement);
+    if (window.requestAnimationFrame) {
+        window.requestAnimationFrame(run);
+    } else {
+        setTimeout(run, 0);
+    }
+}
+
+function layoutActiveAliasPopovers() {
+    document.querySelectorAll('.alias-popover.active').forEach(popElement => {
+        scheduleAliasPopoverLayout(popElement);
+    });
 }
 
 if (window.chrome && window.chrome.webview) {
@@ -299,8 +405,7 @@ if (window.chrome && window.chrome.webview) {
                     if (activeRowInput && aliasPopover) {
                         let activeName = activeRowInput.value.trim();
                         if (activeName && playerDB[activeName]) {
-                            renderAliasMenu(activeName, aliasPopover);
-                            aliasPopover.classList.add('active');
+                            openAliasPopover(activeRowInput, activeName);
                         }
                     }
                 }
@@ -1127,6 +1232,7 @@ function createPlayerRow() {
 
     row.addEventListener('dragstart', function (e) {
         document.querySelectorAll('.popover').forEach(p => p.classList.remove('active'));
+        clearPendingAliasPopoverLock();
         draggedRow = this;
         e.dataTransfer.effectAllowed = 'move';
         e.dataTransfer.setData('text/plain', '');
@@ -1240,8 +1346,7 @@ function createPlayerRow() {
                 this.value = inlinePair.mainName;
                 bindAliasToPlayer(inlinePair.mainName, inlinePair.aliasName);
                 autoPopover.classList.remove('active');
-                renderAliasMenu(inlinePair.mainName, aliasPopover);
-                aliasPopover.classList.add('active');
+                openAliasPopover(this, inlinePair.mainName);
                 triggerSync();
                 return;
             }
@@ -1286,14 +1391,12 @@ function createPlayerRow() {
                         const existingAlias = findSamePlayerAliasBlock(getCleanAliases(name), aliasClean);
                         if (existingAlias) {
                             showAlert(`小号【${aliasClean}】已存在或被包含于【${existingAlias}】，不会重复添加。`);
-                            renderAliasMenu(name, aliasPopover);
-                            aliasPopover.classList.add('active');
+                            openAliasPopover(self, name);
                             return;
                         }
                         bindAliasToPlayer(name, aliasClean);
                         triggerSync();
-                        renderAliasMenu(name, aliasPopover);
-                        aliasPopover.classList.add('active');
+                        openAliasPopover(self, name);
                     }
                     self.focus();
                 });
@@ -1361,8 +1464,7 @@ function createPlayerRow() {
 
         if (this.value.trim() !== '') {
             // 【有名字】：弹小号设置
-            renderAliasMenu(this.value.trim(), aliasPopover);
-            aliasPopover.classList.add('active');
+            openAliasPopover(this, this.value.trim());
         } else {
             // 【没名字】：弹所有的补全列表！
             processInputLogic(this, true);
@@ -1411,8 +1513,7 @@ function createPlayerRow() {
             }
             this.value = inlinePair.mainName;
             bindAliasToPlayer(inlinePair.mainName, inlinePair.aliasName);
-            renderAliasMenu(inlinePair.mainName, aliasPopover);
-            if (aliasPopover) aliasPopover.classList.add('active');
+            openAliasPopover(this, inlinePair.mainName);
             triggerSync();
             return;
         }
@@ -1425,17 +1526,10 @@ function createPlayerRow() {
 
         if (currentName && !hasAtLeastOneAlias(currentName)) {
             // 允许只输入主号留在选手框中；用红色高亮和运行按钮拦截提醒，不再清空输入框。
-            renderAliasMenu(currentName, aliasPopover);
-            if (aliasPopover) aliasPopover.classList.add('active');
+            openAliasPopover(this, currentName);
             triggerSync();
             return;
         }
-        // 延迟隐藏两个弹窗（保持和原来一样的时间）
-        setTimeout(() => {
-            if (autoPopover) autoPopover.classList.remove('active');
-            if (Date.now() < keepAliasPopoverOpenUntil) return;
-            if (aliasPopover) aliasPopover.classList.remove('active');
-        }, 150);
         triggerSync();
     });
 
@@ -1452,10 +1546,9 @@ function createPlayerRow() {
 
             // 如果名字有效且无冲突，则显示小号面板（即使库中没有该选手）
             if (val !== '' && !this.classList.contains('input-error')) {
-                renderAliasMenu(val, aliasPopover);
-                aliasPopover.classList.add('active');
+                openAliasPopover(this, val);
             } else {
-                aliasPopover.classList.remove('active');
+                closeAliasPopoverForInput(this);
             }
         }
     });
@@ -1481,7 +1574,7 @@ function createPlayerRow() {
         if (val && conflict) {
             inputElem.classList.add('input-error');
             inputElem.setAttribute('data-error-msg', `❌ 无法上场！已被【${conflict.owner}】占用。\n原因：${conflict.reason}`);
-            aliasPopover.classList.remove('active'); // 🚨 修复：有冲突时强制关掉小号列表
+            closeAliasPopoverForInput(inputElem); // 有冲突时强制关掉小号列表
         } else {
             inputElem.classList.remove('input-error');
             inputElem.removeAttribute('data-error-msg');
@@ -1519,13 +1612,9 @@ function createPlayerRow() {
 
                     // 如果选中的人没冲突，就无缝切出他的小号列表
                     if (!inputElem.classList.contains('input-error')) {
-                        keepAliasPopoverOpenUntil = Date.now() + 2000;
                         ignoreNextDocumentClickUntil = Date.now() + 350;
-                        pendingAliasPopoverName = inputElem.value.trim();
-                        pendingAliasPopoverInput = inputElem;
                         autoPopover.classList.remove('active');
-                        renderAliasMenu(inputElem.value, aliasPopover);
-                        aliasPopover.classList.add('active');
+                        openAliasPopover(inputElem, inputElem.value);
                         setTimeout(() => {
                             if (pendingAliasPopoverInput === inputElem && pendingAliasPopoverName === inputElem.value.trim()) {
                                 triggerSync();
@@ -1614,19 +1703,29 @@ function bindProNumberControls(inputElem, isAK = false) {
     });
 }
 
+function reopenAliasPopoverFromMenu(popElement, playerName) {
+    const row = popElement?.closest('.player-row');
+    const inputElem = row?.querySelector('.name-input');
+    if (inputElem) {
+        openAliasPopover(inputElem, playerName);
+        return;
+    }
+    renderAliasMenu(playerName, popElement);
+    popElement.classList.add('active');
+    scheduleAliasPopoverLayout(popElement);
+}
+
 function renderAliasMenu(playerName, popElement) {
     playerDB[playerName] = uniqueAliasArray(playerDB[playerName]);
     savedDB[playerName] = uniqueAliasArray(savedDB[playerName]);
     let html = getCleanAliases(playerName).map((a, i) => {
-        // 🚨 核心改动：判断名字长度，超过 6 个字符就截断并拼上 "..."
-        let displayName = a.length > 6 ? a.substring(0, 6) + '...' : a;
         const legacyShort = isLegacyShortAliasWithoutMeta(a);
-        const itemClass = legacyShort ? 'popover-item alias-legacy-short' : 'popover-item';
+        const itemClass = legacyShort ? 'popover-item alias-row alias-legacy-short' : 'popover-item alias-row';
         const aliasTitle = legacyShort ? getLegacyShortAliasDeleteReason(a) : a;
 
         return `
         <div class="${itemClass}">
-            <span class="alias-name" title="${escapeHtml(aliasTitle)}">${legacyShort ? '⚠️' : '🎮'} ${escapeHtml(displayName)}</span>
+            <span class="alias-name" title="${escapeHtml(aliasTitle)}">${legacyShort ? '⚠️' : '🎮'} ${escapeHtml(a)}</span>
             <div class="alias-actions">
                 <span class="btn-edit-alias" data-idx="${i}" title="修改小号名称，并同步修改永久小号库">✎</span>
                 <span class="btn-temp-unbind" data-idx="${i}" title="临时解绑 (本次添加隐藏此ID不参与名称匹配，删除主号后重新添加即可恢复)">X</span>
@@ -1636,6 +1735,7 @@ function renderAliasMenu(playerName, popElement) {
     }).join('');
     html += `<div class="popover-item add-alias-btn">+ 绑定新小号</div>`;
     popElement.innerHTML = html;
+    scheduleAliasPopoverLayout(popElement);
 
     // ==========================================
     // 1. 绑定新小号逻辑
@@ -1659,14 +1759,12 @@ function renderAliasMenu(playerName, popElement) {
                 const existingAlias = findSamePlayerAliasBlock(getCleanAliases(playerName), aliasTrimmed);
                 if (existingAlias) {
                     showAlert(`小号【${aliasTrimmed}】已存在或被包含于【${existingAlias}】，不会重复添加。`);
-                    renderAliasMenu(playerName, popElement);
-                    popElement.classList.add('active');
+                    reopenAliasPopoverFromMenu(popElement, playerName);
                     return;
                 }
                 bindAliasToPlayer(playerName, aliasTrimmed);
 
-                renderAliasMenu(playerName, popElement);
-                popElement.classList.add('active');
+                reopenAliasPopoverFromMenu(popElement, playerName);
                 triggerSync();
             }
         });
@@ -1694,8 +1792,7 @@ function renderAliasMenu(playerName, popElement) {
                 }
 
                 if (aliasTrimmed === oldAlias) {
-                    renderAliasMenu(playerName, popElement);
-                    popElement.classList.add('active');
+                    reopenAliasPopoverFromMenu(popElement, playerName);
                     return;
                 }
 
@@ -1713,8 +1810,7 @@ function renderAliasMenu(playerName, popElement) {
                 }
 
                 updateAliasForPlayer(playerName, oldAlias, aliasTrimmed);
-                renderAliasMenu(playerName, popElement);
-                popElement.classList.add('active');
+                reopenAliasPopoverFromMenu(popElement, playerName);
                 triggerSync();
             }, `修改【${playerName}】的小号名称：`, oldAlias);
         });
@@ -1733,8 +1829,7 @@ function renderAliasMenu(playerName, popElement) {
             // 从当前活跃库中移除
             playerDB[playerName].splice(idx, 1);
 
-            renderAliasMenu(playerName, popElement);
-            popElement.classList.add('active');
+            reopenAliasPopoverFromMenu(popElement, playerName);
 
             // 触发同步（这会告诉 C++ 场上目前没这个小号了，但不会从底层库里抹除它）
             triggerSync();
@@ -1772,8 +1867,7 @@ function renderAliasMenu(playerName, popElement) {
                         if (sIdx > -1) savedDB[playerName].splice(sIdx, 1);
                     }
 
-                    renderAliasMenu(playerName, popElement);
-                    popElement.classList.add('active');
+                    reopenAliasPopoverFromMenu(popElement, playerName);
                     pushStateToServer();
                     if (isCloudDirectMode) queueDirectAliasDbSync(buildFormattedAliasDB(), true);
                 }
@@ -1797,11 +1891,6 @@ updateStartButtonGuard();
 
 document.addEventListener('click', (e) => {
     if (Date.now() < ignoreNextDocumentClickUntil) return;
-    if (Date.now() < keepAliasPopoverOpenUntil) {
-        const pendingRow = pendingAliasPopoverInput?.closest('.player-row');
-        if (pendingRow && pendingRow.contains(e.target)) return;
-        clearPendingAliasPopoverLock();
-    }
     if (
         e.target.closest('#custom-modal') ||
         e.target.closest('.popover') ||
@@ -1809,6 +1898,7 @@ document.addEventListener('click', (e) => {
         e.target.classList.contains('gear-btn')
     ) return;
     document.querySelectorAll('.popover').forEach(p => p.classList.remove('active'));
+    clearPendingAliasPopoverLock();
     // 点击任意空白处，撤销所有选手的置顶层级
     document.querySelectorAll('.player-row').forEach(r => r.classList.remove('active-row'));
 });
@@ -1997,6 +2087,12 @@ document.addEventListener('keydown', function (e) {
             setConsolePanelOpen(false);
             return;
         }
+        if (document.querySelector('.alias-popover.active')) {
+            e.preventDefault();
+            closeAliasPopovers();
+            document.querySelectorAll('.player-row').forEach(r => r.classList.remove('active-row'));
+            return;
+        }
 
         const focused = document.activeElement;
         // 当前有输入焦点 → 失焦（自动保存、关闭弹窗）
@@ -2058,4 +2154,5 @@ if (window.ResizeObserver) {
 }
 window.addEventListener('load', requestWebWindowResize);
 window.addEventListener('resize', requestWebWindowResize);
+window.addEventListener('resize', layoutActiveAliasPopovers);
 setTimeout(requestWebWindowResize, 300);
