@@ -19,6 +19,7 @@ public:
 	// 暴露给主窗口的方法：主窗口调用它，把数据发给网页
 	void SendStateToWeb(const CString& jsonStr);
 	void ApplyFixedWindowHeight();
+	void ResizeWindowToSize(int targetWindowW, int targetWindowH);
 
 	// 对话框数据
 #ifdef AFX_DESIGN_TIME
@@ -43,7 +44,7 @@ private:
 	Microsoft::WRL::ComPtr<ICoreWebView2> m_webview;
 	int m_baseWindowWidth = 0;
 	int m_baseWindowHeight = 0;
+	bool m_initialWindowSizeApplied = false;
 
 	void InitWebView2();
-	void ResizeWindowToSize(int targetWindowW, int targetWindowH);
 };

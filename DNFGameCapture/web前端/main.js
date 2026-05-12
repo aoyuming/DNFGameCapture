@@ -226,7 +226,7 @@ function closeAliasPopoverForInput(inputElem) {
     if (!activeAliasPopoverInput || activeAliasPopoverInput === inputElem) clearPendingAliasPopoverLock();
 }
 
-function openAliasPopover(inputElem, playerName) {
+function openAliasPopover(inputElem, playerName, options = {}) {
     const cleanName = String(playerName || '').trim();
     const row = inputElem?.closest('.player-row');
     if (!row || !cleanName) return null;
@@ -242,7 +242,7 @@ function openAliasPopover(inputElem, playerName) {
         if (item !== row) item.classList.remove('active-row');
     });
 
-    if (autoPopover) autoPopover.classList.remove('active');
+    if (autoPopover && !options.keepAutoPopover) autoPopover.classList.remove('active');
     row.classList.add('active-row');
     renderAliasMenu(cleanName, aliasPopover);
     aliasPopover.classList.add('active');
@@ -596,30 +596,51 @@ const triggerSync = () => {
 };
 
 function getWebContentHeight() {
-    const candidates = [
-        document.querySelector('.main-container'),
-        document.querySelector('.control-panel'),
-        document.getElementById('custom-modal')
-    ].filter(Boolean);
-
+    const scrollTop = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
     let bottom = 0;
-    candidates.forEach(el => {
+
+    document.querySelectorAll('body *').forEach(el => {
+        if (el.closest('.popover')) return;
+        if (el.id === 'custom-modal' && !el.classList.contains('active')) return;
+        if (el.closest('#custom-modal') && !document.getElementById('custom-modal')?.classList.contains('active')) return;
+
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.position === 'fixed') return;
+
         const rect = el.getBoundingClientRect();
-        if (rect.height > 0) bottom = Math.max(bottom, rect.bottom);
+        if (rect.width > 0 && rect.height > 0) bottom = Math.max(bottom, rect.bottom + scrollTop);
     });
 
     const body = document.body;
     const html = document.documentElement;
     return Math.ceil(Math.max(
-        bottom + 32,
+        bottom + 36,
         body.scrollHeight, body.offsetHeight,
-        html.scrollHeight, html.offsetHeight
+        html.scrollHeight, html.offsetHeight,
+        700
     ));
 }
 
 function requestWebWindowResize(force = false) {
-    // 外层 Windows 窗口改为固定高度；保留空函数兼容现有调用点。
-    return;
+    if (!window.chrome?.webview) return;
+    clearTimeout(webResizeTimer);
+    webResizeTimer = setTimeout(() => {
+        const height = getWebContentHeight();
+        const width = Math.ceil(Math.max(
+            document.body.scrollWidth,
+            document.body.offsetWidth,
+            document.documentElement.scrollWidth,
+            document.documentElement.offsetWidth
+        ));
+
+        if (!force && Math.abs(height - lastSentWebHeight) < 8) return;
+        lastSentWebHeight = height;
+        window.chrome.webview.postMessage({
+            action: 'cmd_resize_web',
+            width,
+            height
+        });
+    }, force ? 40 : 120);
 }
 
 function getActivePlayerNames() {
@@ -1535,23 +1556,34 @@ function createPlayerRow() {
 
     let isComposing = false;
     nameInput.addEventListener('compositionstart', () => isComposing = true);
-    nameInput.addEventListener('compositionend', function () { isComposing = false; processInputLogic(this, false); });
+    nameInput.addEventListener('compositionend', function () { isComposing = false; updateNameInputPopovers(this); });
 
     nameInput.addEventListener('input', function () {
         if (!isComposing) {
-            let val = this.value.trim();
-
-            // 先执行查重和补全逻辑
-            processInputLogic(this, val === '');
-
-            // 如果名字有效且无冲突，则显示小号面板（即使库中没有该选手）
-            if (val !== '' && !this.classList.contains('input-error')) {
-                openAliasPopover(this, val);
-            } else {
-                closeAliasPopoverForInput(this);
-            }
+            updateNameInputPopovers(this);
         }
     });
+
+    function updateNameInputPopovers(inputElem) {
+        const val = inputElem.value.trim();
+        processInputLogic(inputElem, val === '');
+        const hasExactMain = Object.prototype.hasOwnProperty.call(playerDB, val) ||
+            Object.prototype.hasOwnProperty.call(savedDB, val);
+        const autoPopover = inputElem.closest('.player-row')?.querySelector('.autocomplete-popover');
+        const hasSuggestions = !!(autoPopover?.classList.contains('active') &&
+            autoPopover.querySelector('.suggestion-item'));
+
+        if (val === '' || inputElem.classList.contains('input-error')) {
+            closeAliasPopoverForInput(inputElem);
+        } else if (hasExactMain) {
+            if (!playerDB[val] && savedDB[val]) playerDB[val] = uniqueAliasArray(savedDB[val]);
+            openAliasPopover(inputElem, val, { keepAutoPopover: true });
+        } else if (!hasSuggestions) {
+            openAliasPopover(inputElem, val);
+        } else {
+            closeAliasPopoverForInput(inputElem);
+        }
+    }
 
     function processInputLogic(inputElem, forceShowAll) {
         // ========================================================

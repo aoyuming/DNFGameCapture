@@ -179,8 +179,10 @@ void CWebScoreDlg::ApplyFixedWindowHeight()
         m_baseWindowHeight = windowRect.Height();
     }
 
-    // 固定窗口：复盘改为 Web 内弹出二级面板，不再额外拉宽 Windows 窗口。
-    const int reviewColumnWidth = 0;
-    const int fixedWindowHeight = 740;
-    ResizeWindowToSize(m_baseWindowWidth + reviewColumnWidth, fixedWindowHeight);
+    if (m_initialWindowSizeApplied) return;
+    m_initialWindowSizeApplied = true;
+
+    // 初始只给一个安全默认高度，后续高度由 Web 前端按真实内容上报。
+    const int defaultWindowHeight = max(m_baseWindowHeight, 740);
+    ResizeWindowToSize(m_baseWindowWidth, defaultWindowHeight);
 }

@@ -7668,7 +7668,21 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             BroadcastStateToWeb();
         }
         else if (action == "cmd_resize_web") {
-            // 外层 Windows 窗口已改为固定高度，不再响应 Web 页面的动态高度上报，避免抖动。
+            if (m_pWebDlg && ::IsWindow(m_pWebDlg->GetSafeHwnd())) {
+                int contentW = j.value("width", 0);
+                int contentH = j.value("height", 0);
+                if (contentH > 0) {
+                    CRect windowRect, clientRect;
+                    m_pWebDlg->GetWindowRect(&windowRect);
+                    m_pWebDlg->GetClientRect(&clientRect);
+
+                    const int frameW = max(0, windowRect.Width() - clientRect.Width());
+                    const int frameH = max(0, windowRect.Height() - clientRect.Height());
+                    const int targetW = max(windowRect.Width(), contentW + frameW + 8);
+                    const int targetH = max(contentH + frameH + 8, 740);
+                    m_pWebDlg->ResizeWindowToSize(targetW, targetH);
+                }
+            }
         }
         else if (action == "cmd_auth") {
             std::string codeStr = j["code"].get<std::string>();
