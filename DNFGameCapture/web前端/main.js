@@ -11,6 +11,8 @@ let deathXAlgorithm = 0;
 let deathPatchInstalled = false;
 let recentEvents = [];
 let isReviewPanelOpen = false;
+let cxxConsoleLogs = [];
+let isConsolePanelOpen = false;
 let lastSentWebHeight = 0;
 let webResizeTimer = null;
 let draggedRow = null;
@@ -60,6 +62,75 @@ function sameAliasId(a, b) {
     return !!aa && !!bb && aa === bb;
 }
 
+function getAliasJobKey(aliasName) {
+    const clean = normalizeAliasTextForCompare(aliasName);
+    if (!clean) return '';
+    const halfSharp = clean.indexOf('#');
+    const fullSharp = clean.indexOf('＃');
+    let sharp = -1;
+    if (halfSharp >= 0 && fullSharp >= 0) sharp = Math.min(halfSharp, fullSharp);
+    else sharp = halfSharp >= 0 ? halfSharp : fullSharp;
+    return sharp >= 0 ? clean.slice(sharp + 1).trim() : '';
+}
+
+function aliasHasDeclaredJob(aliasName) {
+    return !!getAliasJobKey(aliasName);
+}
+
+function sameAliasStorageEntry(a, b) {
+    const aa = normalizeAliasTextForCompare(a);
+    const bb = normalizeAliasTextForCompare(b);
+    if (!aa || !bb) return false;
+    if (aa === bb) return true;
+    if (!sameAliasId(aa, bb)) return false;
+    const aj = getAliasJobKey(aa);
+    const bj = getAliasJobKey(bb);
+    if (aj || bj) return !!aj && !!bj && aj === bj;
+    return true;
+}
+
+function aliasBlocksSamePlayerAlias(existingAlias, candidateAlias) {
+    const existing = normalizeAliasTextForCompare(existingAlias);
+    const candidate = normalizeAliasTextForCompare(candidateAlias);
+    if (!existing || !candidate) return false;
+    if (sameAliasStorageEntry(existing, candidate)) return true;
+    if (!aliasHasDeclaredJob(candidate)) {
+        if (aliasHasDeclaredJob(existing) && sameAliasId(existing, candidate)) return true;
+        if (existing !== candidate && existing.includes(candidate)) return true;
+    }
+    return false;
+}
+
+function mergeAliasIntoArray(out, rawAlias) {
+    const alias = normalizeAliasTextForCompare(rawAlias);
+    if (!alias) return 'none';
+    const aliasHasJob = aliasHasDeclaredJob(alias);
+    for (let i = 0; i < out.length; i++) {
+        const existing = normalizeAliasTextForCompare(out[i]);
+        if (!existing) continue;
+        const existingHasJob = aliasHasDeclaredJob(existing);
+        if (sameAliasStorageEntry(existing, alias)) {
+            if (!existingHasJob && aliasHasJob) {
+                out[i] = alias;
+                return 'upgraded';
+            }
+            return 'none';
+        }
+        if (sameAliasId(existing, alias)) {
+            if (!existingHasJob && aliasHasJob) {
+                out[i] = alias;
+                return 'upgraded';
+            }
+            if (existingHasJob && !aliasHasJob) return 'none';
+        }
+        if (!aliasHasJob && existing !== alias && existing.includes(alias)) {
+            return 'none';
+        }
+    }
+    out.push(alias);
+    return 'added';
+}
+
 function findAliasByDuplicateId(arr, aliasName) {
     const targetId = getAliasDuplicateId(aliasName);
     if (!targetId) return '';
@@ -70,16 +141,20 @@ function aliasArrayHasDuplicateId(arr, aliasName) {
     return !!findAliasByDuplicateId(arr, aliasName);
 }
 
+function findSamePlayerAliasBlock(arr, aliasName) {
+    const clean = normalizeAliasTextForCompare(aliasName);
+    if (!clean) return '';
+    return uniqueAliasArray(arr || []).find(alias => aliasBlocksSamePlayerAlias(alias, clean)) || '';
+}
+
+function aliasArrayHasSamePlayerBlock(arr, aliasName) {
+    return !!findSamePlayerAliasBlock(arr, aliasName);
+}
+
 function uniqueAliasArray(arr) {
     const out = [];
-    const seen = new Set();
     (arr || []).forEach(item => {
-        const clean = normalizeAliasTextForCompare(item);
-        if (!clean) return;
-        const key = getAliasDuplicateId(clean) || clean;
-        if (seen.has(key)) return;
-        seen.add(key);
-        out.push(clean);
+        mergeAliasIntoArray(out, item);
     });
     return out;
 }
@@ -99,11 +174,9 @@ function normalizeAllAliasStores() {
 
 function removeAliasFromArray(arr, aliasName) {
     const target = normalizeAliasTextForCompare(aliasName);
-    const targetId = getAliasDuplicateId(target);
     return uniqueAliasArray((arr || []).filter(a => {
         const clean = normalizeAliasTextForCompare(a);
-        if (clean === target) return false;
-        return !targetId || getAliasDuplicateId(clean) !== targetId;
+        return !target || !sameAliasStorageEntry(clean, target);
     }));
 }
 
@@ -115,7 +188,7 @@ function applyPendingAliasRenamesToDb(dbObj) {
         dbObj[r.playerName] = removeAliasFromArray(dbObj[r.playerName], r.oldAlias);
         const newAlias = normalizeAliasTextForCompare(r.newAlias);
         dbObj[r.playerName] = uniqueAliasArray(dbObj[r.playerName]);
-        if (newAlias && !aliasArrayHasDuplicateId(dbObj[r.playerName], newAlias)) dbObj[r.playerName].push(newAlias);
+        if (newAlias) mergeAliasIntoArray(dbObj[r.playerName], newAlias);
         dbObj[r.playerName] = uniqueAliasArray(dbObj[r.playerName]);
     }
 }
@@ -231,6 +304,9 @@ if (window.chrome && window.chrome.webview) {
                         }
                     }
                 }
+            }
+            else if (msg.action === 'console_logs') {
+                appendConsoleLogs(msg.logs || []);
             }
             else if (msg.action === 'auth_result' || msg.action === 'start_guard' || msg.action === 'patch_result' || msg.action === 'alias_submit_result' || msg.action === 'alias_sync_result') { showAlert(msg.message); }
             else if (msg.action === 'alias_direct_sync_result') {
@@ -505,6 +581,7 @@ function setReviewPanelOpen(open) {
     backdrop?.classList.toggle('is-open', isReviewPanelOpen);
     panel?.setAttribute('aria-hidden', isReviewPanelOpen ? 'false' : 'true');
     toggle?.setAttribute('aria-expanded', isReviewPanelOpen ? 'true' : 'false');
+    if (isReviewPanelOpen) setConsolePanelOpen(false);
 }
 
 function toggleReviewPanel() {
@@ -514,6 +591,60 @@ function toggleReviewPanel() {
 // ==========================================
 // 2. 内置弹窗系统
 // ==========================================
+function sanitizeConsoleColor(value) {
+    const text = String(value || '').trim();
+    return /^#[0-9a-fA-F]{6}$/.test(text) ? text : '#d7dde8';
+}
+
+function renderConsoleLogs() {
+    const list = document.getElementById('console-list');
+    const count = document.getElementById('console-count');
+    const toggleCount = document.getElementById('console-toggle-count');
+    if (!list || !count) return;
+
+    count.textContent = String(cxxConsoleLogs.length);
+    if (toggleCount) toggleCount.textContent = String(cxxConsoleLogs.length);
+    if (cxxConsoleLogs.length === 0) {
+        list.innerHTML = '<div class="console-empty">暂无日志</div>';
+        return;
+    }
+
+    list.innerHTML = cxxConsoleLogs.map(log => {
+        const color = sanitizeConsoleColor(log.color);
+        return `<div class="console-line" style="color:${color}">${escapeHtml(log.text || '')}</div>`;
+    }).join('');
+    list.scrollTop = list.scrollHeight;
+}
+
+function appendConsoleLogs(logs) {
+    if (!Array.isArray(logs) || logs.length === 0) return;
+    for (const log of logs) {
+        cxxConsoleLogs.push({
+            text: String(log?.text || ''),
+            color: sanitizeConsoleColor(log?.color)
+        });
+    }
+    if (cxxConsoleLogs.length > 400) cxxConsoleLogs = cxxConsoleLogs.slice(-400);
+    renderConsoleLogs();
+}
+
+function setConsolePanelOpen(open) {
+    isConsolePanelOpen = !!open;
+    const panel = document.getElementById('console-panel');
+    const toggle = document.getElementById('btn-console-toggle');
+    panel?.classList.toggle('is-open', isConsolePanelOpen);
+    panel?.setAttribute('aria-hidden', isConsolePanelOpen ? 'false' : 'true');
+    toggle?.setAttribute('aria-expanded', isConsolePanelOpen ? 'true' : 'false');
+    if (isConsolePanelOpen) {
+        renderConsoleLogs();
+        setReviewPanelOpen(false);
+    }
+}
+
+function toggleConsolePanel() {
+    setConsolePanelOpen(!isConsolePanelOpen);
+}
+
 const customModal = document.getElementById('custom-modal');
 const modalMsg = document.getElementById('modal-msg');
 const modalInput = document.getElementById('modal-input');
@@ -862,8 +993,8 @@ function bindAliasToPlayer(playerName, aliasName) {
     if (!savedDB[playerName]) savedDB[playerName] = [];
     playerDB[playerName] = uniqueAliasArray(playerDB[playerName]);
     savedDB[playerName] = uniqueAliasArray(savedDB[playerName]);
-    if (!aliasArrayHasDuplicateId(playerDB[playerName], aliasClean)) playerDB[playerName].push(aliasClean);
-    if (!aliasArrayHasDuplicateId(savedDB[playerName], aliasClean)) savedDB[playerName].push(aliasClean);
+    mergeAliasIntoArray(playerDB[playerName], aliasClean);
+    mergeAliasIntoArray(savedDB[playerName], aliasClean);
     playerDB[playerName] = uniqueAliasArray(playerDB[playerName]);
     savedDB[playerName] = uniqueAliasArray(savedDB[playerName]);
     return true;
@@ -882,8 +1013,8 @@ function updateAliasForPlayer(playerName, oldAlias, newAlias) {
     playerDB[playerName] = removeAliasFromArray(playerDB[playerName], oldClean);
     savedDB[playerName] = removeAliasFromArray(savedDB[playerName], oldClean);
 
-    if (!aliasArrayHasDuplicateId(playerDB[playerName], newClean)) playerDB[playerName].push(newClean);
-    if (!aliasArrayHasDuplicateId(savedDB[playerName], newClean)) savedDB[playerName].push(newClean);
+    mergeAliasIntoArray(playerDB[playerName], newClean);
+    mergeAliasIntoArray(savedDB[playerName], newClean);
 
     playerDB[playerName] = uniqueAliasArray(playerDB[playerName]);
     savedDB[playerName] = uniqueAliasArray(savedDB[playerName]);
@@ -1152,9 +1283,9 @@ function createPlayerRow() {
                             }, 100);
                             return;
                         }
-                        const existingAlias = findAliasByDuplicateId(getCleanAliases(name), aliasClean);
+                        const existingAlias = findSamePlayerAliasBlock(getCleanAliases(name), aliasClean);
                         if (existingAlias) {
-                            showAlert(`小号【${aliasClean}】的ID【${getAliasDuplicateId(aliasClean)}】已存在于【${existingAlias}】，不会重复添加。`);
+                            showAlert(`小号【${aliasClean}】已存在或被包含于【${existingAlias}】，不会重复添加。`);
                             renderAliasMenu(name, aliasPopover);
                             aliasPopover.classList.add('active');
                             return;
@@ -1525,9 +1656,9 @@ function renderAliasMenu(playerName, popElement) {
                     return;
                 }
 
-                const existingAlias = findAliasByDuplicateId(getCleanAliases(playerName), aliasTrimmed);
+                const existingAlias = findSamePlayerAliasBlock(getCleanAliases(playerName), aliasTrimmed);
                 if (existingAlias) {
-                    showAlert(`小号【${aliasTrimmed}】的ID【${getAliasDuplicateId(aliasTrimmed)}】已存在于【${existingAlias}】，不会重复添加。`);
+                    showAlert(`小号【${aliasTrimmed}】已存在或被包含于【${existingAlias}】，不会重复添加。`);
                     renderAliasMenu(playerName, popElement);
                     popElement.classList.add('active');
                     return;
@@ -1569,9 +1700,9 @@ function renderAliasMenu(playerName, popElement) {
                 }
 
                 const samePlayerAliases = (playerDB[playerName] || []).filter((_, i) => i !== idx);
-                const samePlayerAlias = findAliasByDuplicateId(samePlayerAliases, aliasTrimmed);
+                const samePlayerAlias = findSamePlayerAliasBlock(samePlayerAliases, aliasTrimmed);
                 if (samePlayerAlias) {
-                    showAlert(`❌ 修改失败！该选手已有相同ID【${getAliasDuplicateId(aliasTrimmed)}】的小号【${samePlayerAlias}】。`);
+                    showAlert(`❌ 修改失败！该选手已有或包含小号【${samePlayerAlias}】。`);
                     return;
                 }
 
@@ -1796,6 +1927,12 @@ document.getElementById('review-list')?.addEventListener('click', (e) => {
 document.getElementById('btn-review-toggle')?.addEventListener('click', toggleReviewPanel);
 document.getElementById('btn-review-close')?.addEventListener('click', () => setReviewPanelOpen(false));
 document.getElementById('review-backdrop')?.addEventListener('click', () => setReviewPanelOpen(false));
+document.getElementById('btn-console-toggle')?.addEventListener('click', toggleConsolePanel);
+document.getElementById('btn-console-close')?.addEventListener('click', () => setConsolePanelOpen(false));
+document.getElementById('btn-console-clear')?.addEventListener('click', () => {
+    cxxConsoleLogs = [];
+    renderConsoleLogs();
+});
 
 function clearTeamData(teamId) {
     const panel = document.getElementById(teamId);
@@ -1853,6 +1990,11 @@ document.addEventListener('keydown', function (e) {
         if (isReviewPanelOpen) {
             e.preventDefault();
             setReviewPanelOpen(false);
+            return;
+        }
+        if (isConsolePanelOpen) {
+            e.preventDefault();
+            setConsolePanelOpen(false);
             return;
         }
 

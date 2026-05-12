@@ -102,6 +102,75 @@ function sameAliasId(a, b) {
     return !!aa && !!bb && aa === bb;
 }
 
+function getAliasJobKey(value) {
+    const clean = cleanName(value);
+    if (!clean) return '';
+    const halfSharp = clean.indexOf('#');
+    const fullSharp = clean.indexOf('＃');
+    let sharp = -1;
+    if (halfSharp >= 0 && fullSharp >= 0) sharp = Math.min(halfSharp, fullSharp);
+    else sharp = halfSharp >= 0 ? halfSharp : fullSharp;
+    return sharp >= 0 ? clean.slice(sharp + 1).trim() : '';
+}
+
+function aliasHasDeclaredJob(value) {
+    return !!getAliasJobKey(value);
+}
+
+function sameAliasStorageEntry(a, b) {
+    const aa = cleanName(a);
+    const bb = cleanName(b);
+    if (!aa || !bb) return false;
+    if (aa === bb) return true;
+    if (!sameAliasId(aa, bb)) return false;
+
+    const aj = getAliasJobKey(aa);
+    const bj = getAliasJobKey(bb);
+    if (aj || bj) return !!aj && !!bj && aj === bj;
+    return true;
+}
+
+function mergeAliasIntoArray(out, rawAlias) {
+    const aliasName = cleanName(rawAlias);
+    if (!aliasName) return 'none';
+
+    const aliasHasJob = aliasHasDeclaredJob(aliasName);
+    for (let i = 0; i < out.length; i++) {
+        const existing = cleanName(out[i]);
+        if (!existing) continue;
+        const existingHasJob = aliasHasDeclaredJob(existing);
+
+        if (sameAliasStorageEntry(existing, aliasName)) {
+            if (!existingHasJob && aliasHasJob) {
+                out[i] = aliasName;
+                return 'upgraded';
+            }
+            return 'none';
+        }
+
+        if (sameAliasId(existing, aliasName)) {
+            if (!existingHasJob && aliasHasJob) {
+                out[i] = aliasName;
+                return 'upgraded';
+            }
+            if (existingHasJob && !aliasHasJob) {
+                return 'none';
+            }
+        }
+    }
+
+    out.push(aliasName);
+    return 'added';
+}
+
+function cloudAliasContainsNakedAlias(cloudAlias, localAlias) {
+    const cloud = cleanName(cloudAlias);
+    const local = cleanName(localAlias);
+    if (!cloud || !local || aliasHasDeclaredJob(local)) return false;
+    if (aliasHasDeclaredJob(cloud) && sameAliasStorageEntry(cloud, local)) return true;
+    return cloud !== local && cloud.includes(local);
+}
+
 function parseAliasValue(value) {
     if (Array.isArray(value)) return value;
     if (typeof value === 'string') {
@@ -113,14 +182,8 @@ function parseAliasValue(value) {
 
 function normalizeAliasArray(value) {
     const out = [];
-    const seen = new Set();
     for (const raw of Array.isArray(value) ? value : parseAliasValue(value)) {
-        const aliasName = cleanName(raw);
-        const aliasId = getAliasDuplicateId(aliasName);
-        const key = aliasId || aliasName;
-        if (!aliasName || seen.has(key)) continue;
-        seen.add(key);
-        out.push(aliasName);
+        mergeAliasIntoArray(out, raw);
     }
     return out;
 }
@@ -215,6 +278,13 @@ function sameAliasList(a, b) {
     return aa.every((item, idx) => item === bb[idx]);
 }
 
+function sameAliasSet(a, b) {
+    const aa = normalizeAliasArray(a).slice().sort();
+    const bb = normalizeAliasArray(b).slice().sort();
+    if (aa.length !== bb.length) return false;
+    return aa.every((item, idx) => item === bb[idx]);
+}
+
 function diffPublicPlayers(basePlayers, proposedPlayers) {
     const base = basePlayers || {};
     const proposed = proposedPlayers || {};
@@ -272,6 +342,16 @@ async function putJsonObject(client, key, value) {
     );
 }
 
+async function deleteObjectIfExists(client, key) {
+    try {
+        await client.delete(key);
+        return true;
+    } catch (e) {
+        if (e.name === 'NoSuchKeyError') return false;
+        throw e;
+    }
+}
+
 function normalizePublicDb(db) {
     const normalized = {
         version: Number(db?.version || 0),
@@ -327,6 +407,29 @@ function diffAliasArrays(beforeAliases, afterAliases) {
         addedAliases: after.filter(aliasName => !before.includes(aliasName)),
         removedAliases: before.filter(aliasName => !after.includes(aliasName))
     };
+}
+
+function filterContainedNakedAliases(publicAliases, targetAliases, mainName) {
+    const publicList = normalizeAliasArray(publicAliases);
+    const targetList = normalizeAliasArray(targetAliases).filter(aliasName => aliasName !== mainName);
+    const kept = [];
+    let containedNakedAliasCount = 0;
+
+    for (const aliasName of targetList) {
+        if (!aliasHasDeclaredJob(aliasName)) {
+            const matchedPublicAliases = publicList.filter(publicAlias => cloudAliasContainsNakedAlias(publicAlias, aliasName));
+            if (matchedPublicAliases.length > 0) {
+                containedNakedAliasCount++;
+                for (const publicAlias of matchedPublicAliases) {
+                    mergeAliasIntoArray(kept, publicAlias);
+                }
+                continue;
+            }
+        }
+        mergeAliasIntoArray(kept, aliasName);
+    }
+
+    return { aliases: kept, containedNakedAliasCount };
 }
 
 function buildAliasReviewFingerprintPayload(mainName, aliases, operation, diff) {
@@ -607,6 +710,8 @@ async function handleSubmitAliasDb(client, data, res) {
     let deleteMainCount = 0;
     let duplicateHintCount = 0;
     let rejectedDuplicateCount = 0;
+    let containedNakedAliasCount = 0;
+    let stalePendingClearedCount = 0;
 
     for (const entry of entries) {
         const mainName = entry.mainName;
@@ -615,13 +720,14 @@ async function handleSubmitAliasDb(client, data, res) {
         const existing = await getJsonObject(client, key, null);
         const aggregate = normalizePendingAggregate(existing, mainName, createdAt);
 
-        const targetAliases = normalizeAliasArray(entry.aliases).filter(aliasName => aliasName !== mainName);
-        if (publicAliases.length === 0 && targetAliases.length === 0 && !existing) {
+        const filterResult = filterContainedNakedAliases(publicAliases, entry.aliases, mainName);
+        const targetAliases = filterResult.aliases;
+        containedNakedAliasCount += filterResult.containedNakedAliasCount;
+        if ((publicAliases.length === 0 && targetAliases.length === 0) || sameAliasSet(publicAliases, targetAliases)) {
             unchangedMainCount++;
-            continue;
-        }
-        if (sameAliasList(publicAliases, targetAliases) && !existing) {
-            unchangedMainCount++;
+            if (existing) {
+                if (await deleteObjectIfExists(client, key)) stalePendingClearedCount++;
+            }
             continue;
         }
 
@@ -664,6 +770,9 @@ async function handleSubmitAliasDb(client, data, res) {
         if (rejectedDuplicateCount > 0) {
             msgParts.push(`14 天内已驳回过相同投稿 ${rejectedDuplicateCount} 个，已自动过滤`);
         }
+        if (containedNakedAliasCount > 0) {
+            msgParts.push(`云端已有包含该裸 ID 的小号 ${containedNakedAliasCount} 个，已自动过滤`);
+        }
         if (unchangedMainCount > 0) {
             msgParts.push(`未变化主号 ${unchangedMainCount} 个`);
         }
@@ -676,21 +785,26 @@ async function handleSubmitAliasDb(client, data, res) {
             entryCount: 0,
             pairCount: 0,
             unchangedMainCount,
-            rejectedDuplicateCount
+            rejectedDuplicateCount,
+            containedNakedAliasCount,
+            stalePendingClearedCount
         });
     }
 
     const rejectedDuplicateMsg = rejectedDuplicateCount > 0 ? `、过滤重复驳回 ${rejectedDuplicateCount} 个` : '';
+    const containedNakedAliasMsg = containedNakedAliasCount > 0 ? `、过滤裸ID ${containedNakedAliasCount} 个` : '';
     return res.json({
         status: 'ok',
         action: 'submit_alias_db',
         aliasSubmit: true,
-        msg: `已提交到待审核区：${touchedMainCount} 个主号、目标小号 ${targetPairCount} 个、删除主号 ${deleteMainCount} 个${rejectedDuplicateMsg}`,
+        msg: `已提交到待审核区：${touchedMainCount} 个主号、目标小号 ${targetPairCount} 个、删除主号 ${deleteMainCount} 个${rejectedDuplicateMsg}${containedNakedAliasMsg}`,
         entryCount: touchedMainCount,
         pairCount: targetPairCount,
         deleteMainCount,
         duplicateHintCount,
-        rejectedDuplicateCount
+        rejectedDuplicateCount,
+        containedNakedAliasCount,
+        stalePendingClearedCount
     });
 }
 

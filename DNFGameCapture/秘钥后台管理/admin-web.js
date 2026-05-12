@@ -89,19 +89,62 @@ function sameAliasId(a, b) {
     return !!aa && !!bb && aa === bb;
 }
 
+function getAliasJobKey(value) {
+    const clean = cleanName(value);
+    if (!clean) return '';
+    const halfSharp = clean.indexOf('#');
+    const fullSharp = clean.indexOf('＃');
+    let sharp = -1;
+    if (halfSharp >= 0 && fullSharp >= 0) sharp = Math.min(halfSharp, fullSharp);
+    else sharp = halfSharp >= 0 ? halfSharp : fullSharp;
+    return sharp >= 0 ? clean.slice(sharp + 1).trim() : '';
+}
+
+function aliasHasDeclaredJob(value) {
+    return !!getAliasJobKey(value);
+}
+
+function sameAliasStorageEntry(a, b) {
+    const aa = cleanName(a);
+    const bb = cleanName(b);
+    if (!aa || !bb) return false;
+    if (aa === bb) return true;
+    if (!sameAliasId(aa, bb)) return false;
+    const aj = getAliasJobKey(aa);
+    const bj = getAliasJobKey(bb);
+    if (aj || bj) return !!aj && !!bj && aj === bj;
+    return true;
+}
+
+function mergeAliasIntoArray(out, rawAlias) {
+    const alias = cleanName(rawAlias);
+    if (!alias) return;
+    const aliasHasJob = aliasHasDeclaredJob(alias);
+    for (let i = 0; i < out.length; i++) {
+        const existing = cleanName(out[i]);
+        const existingHasJob = aliasHasDeclaredJob(existing);
+        if (sameAliasStorageEntry(existing, alias)) {
+            if (!existingHasJob && aliasHasJob) out[i] = alias;
+            return;
+        }
+        if (sameAliasId(existing, alias)) {
+            if (!existingHasJob && aliasHasJob) {
+                out[i] = alias;
+                return;
+            }
+            if (existingHasJob && !aliasHasJob) return;
+        }
+    }
+    out.push(alias);
+}
+
 function normalizeAliasArray(value) {
     const arr = Array.isArray(value)
         ? value
         : (typeof value === 'string' ? value.split(/[()（）、,，;；]/) : []);
     const out = [];
-    const seen = new Set();
     for (const item of arr) {
-        const alias = cleanName(item);
-        const aliasId = getAliasDuplicateId(alias);
-        const key = aliasId || alias;
-        if (!alias || seen.has(key)) continue;
-        seen.add(key);
-        out.push(alias);
+        mergeAliasIntoArray(out, item);
     }
     return out;
 }
@@ -131,6 +174,24 @@ function getSubmissionStats(submission) {
         mainCount: entries.length,
         pairCount: entries.reduce((sum, item) => sum + item.aliases.length, 0)
     };
+}
+
+function sameAliasSet(a, b) {
+    const aa = normalizeAliasArray(a).slice().sort();
+    const bb = normalizeAliasArray(b).slice().sort();
+    if (aa.length !== bb.length) return false;
+    return aa.every((item, idx) => item === bb[idx]);
+}
+
+function isSubmissionUnchangedAgainstPublic(row, publicDb) {
+    const entries = getSubmissionEntries(row.data);
+    if (entries.length === 0) return false;
+
+    return entries.every(item => {
+        const mainName = cleanName(item.mainName);
+        if (!mainName) return true;
+        return sameAliasSet(publicDb.players[mainName] || [], item.aliases);
+    });
 }
 
 function normalizeReviewDiff(diff) {
@@ -250,10 +311,28 @@ function getPublicSummary(publicDb) {
     };
 }
 
+function getPublicSearchScore(mainName, aliases, search) {
+    if (!search) return 0;
+    if (mainName === search) return 500;
+    if (mainName.startsWith(search)) return 420;
+    if (mainName.includes(search)) return 360;
+
+    let best = 0;
+    for (const alias of normalizeAliasArray(aliases)) {
+        if (alias === search) best = Math.max(best, 320);
+        else if (alias.startsWith(search)) best = Math.max(best, 260);
+        else if (alias.includes(search)) best = Math.max(best, 220);
+    }
+    return best;
+}
+
 function getPublicEntries(publicDb, search, limit) {
     return Object.entries(publicDb.players)
-        .filter(([mainName, aliases]) => !search || mainName.includes(search) || aliases.some(alias => alias.includes(search)))
-        .sort(([a], [b]) => a.localeCompare(b, 'zh-CN'))
+        .sort(([a, aAliases], [b, bAliases]) => {
+            const scoreDiff = getPublicSearchScore(b, bAliases, search) - getPublicSearchScore(a, aAliases, search);
+            if (scoreDiff !== 0) return scoreDiff;
+            return a.localeCompare(b, 'zh-CN');
+        })
         .slice(0, limit)
         .map(([mainName, aliases]) => ({ mainName, aliases }));
 }
@@ -379,15 +458,13 @@ function diffAliasesForMerge(submission, item, oldAliases, targetAliases) {
 function buildAliasesForReviewMode(mode, oldAliases, targetAliases, diff) {
     if (mode === 'added') {
         const addedAliases = normalizeAliasArray(diff.addedAliases);
-        const keptAliases = normalizeAliasArray(oldAliases)
-            .filter(oldAlias => !addedAliases.some(addedAlias => sameAliasId(oldAlias, addedAlias)));
-        return normalizeAliasArray([...keptAliases, ...addedAliases]);
+        return normalizeAliasArray([...normalizeAliasArray(oldAliases), ...addedAliases]);
     }
 
     if (mode === 'removed') {
         const removedAliases = normalizeAliasArray(diff.removedAliases);
         return normalizeAliasArray(oldAliases)
-            .filter(oldAlias => !removedAliases.some(removedAlias => sameAliasId(oldAlias, removedAlias)));
+            .filter(oldAlias => !removedAliases.some(removedAlias => sameAliasStorageEntry(oldAlias, removedAlias)));
     }
 
     return targetAliases;
@@ -510,8 +587,12 @@ function buildPendingView(row) {
 
 async function getDashboardData() {
     const [rows, publicDb] = await Promise.all([loadPendingRows(), loadPublicAliasDb()]);
-    const pendingViews = rows.map(buildPendingView);
-    const visiblePending = pendingViews.filter(row => !row.isEmpty);
+    const pendingViews = rows.map(row => {
+        const view = buildPendingView(row);
+        view.isUnchangedWithPublic = isSubmissionUnchangedAgainstPublic(row, publicDb);
+        return view;
+    });
+    const visiblePending = pendingViews.filter(row => !row.isEmpty && !row.isUnchangedWithPublic);
     const publicMainCount = Object.keys(publicDb.players).length;
     const publicAliasCount = Object.values(publicDb.players).reduce((sum, aliases) => sum + aliases.length, 0);
 
@@ -803,8 +884,8 @@ app.post('/api/review', asyncRoute(async (req, res) => {
 }));
 
 app.post('/api/cleanup-empty', asyncRoute(async (req, res) => {
-    const rows = await loadPendingRows();
-    const emptyRows = rows.filter(row => !hasReviewableContent(row));
+    const [rows, publicDb] = await Promise.all([loadPendingRows(), loadPublicAliasDb()]);
+    const emptyRows = rows.filter(row => !hasReviewableContent(row) || isSubmissionUnchangedAgainstPublic(row, publicDb));
     let cleaned = 0;
 
     for (const row of emptyRows) {

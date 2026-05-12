@@ -55,6 +55,10 @@
                     </button>
                     <button class="ctrl-btn btn-sync-db" id="btn-sync-alias-db">☁ 同步云端库</button>
                     <button class="ctrl-btn btn-push-db" id="btn-push-alias-db">⬆ 推送本地库</button>
+                    <button class="ctrl-btn btn-console-toggle" id="btn-console-toggle" aria-expanded="false">
+                        <span>C++日志</span>
+                        <span class="console-toggle-count" id="console-toggle-count">0</span>
+                    </button>
                 </div>
                 <div class="control-row control-row-tools">
                     <button class="ctrl-btn btn-auth" id="btn-auth">🔑 授权</button>
@@ -76,6 +80,15 @@
                 <button class="review-close" id="btn-review-close" title="关闭">&times;</button>
             </div>
             <div class="review-list" id="review-list"></div>
+        </div>
+        <div class="console-panel" id="console-panel" role="dialog" aria-modal="false" aria-hidden="true" aria-labelledby="console-panel-title">
+            <div class="console-header">
+                <span id="console-panel-title">C++ 控制台</span>
+                <span class="console-count" id="console-count">0</span>
+                <button class="console-clear" id="btn-console-clear" title="清空">清空</button>
+                <button class="console-close" id="btn-console-close" title="关闭">&times;</button>
+            </div>
+            <div class="console-list" id="console-list"></div>
         </div>
     </div>
 

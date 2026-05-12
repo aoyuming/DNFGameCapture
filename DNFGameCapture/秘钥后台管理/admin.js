@@ -105,6 +105,55 @@ function sameAliasId(a, b) {
     return !!aa && !!bb && aa === bb;
 }
 
+function getAliasJobKey(value) {
+    const clean = cleanName(value);
+    if (!clean) return '';
+    const halfSharp = clean.indexOf('#');
+    const fullSharp = clean.indexOf('＃');
+    let sharp = -1;
+    if (halfSharp >= 0 && fullSharp >= 0) sharp = Math.min(halfSharp, fullSharp);
+    else sharp = halfSharp >= 0 ? halfSharp : fullSharp;
+    return sharp >= 0 ? clean.slice(sharp + 1).trim() : '';
+}
+
+function aliasHasDeclaredJob(value) {
+    return !!getAliasJobKey(value);
+}
+
+function sameAliasStorageEntry(a, b) {
+    const aa = cleanName(a);
+    const bb = cleanName(b);
+    if (!aa || !bb) return false;
+    if (aa === bb) return true;
+    if (!sameAliasId(aa, bb)) return false;
+    const aj = getAliasJobKey(aa);
+    const bj = getAliasJobKey(bb);
+    if (aj || bj) return !!aj && !!bj && aj === bj;
+    return true;
+}
+
+function mergeAliasIntoArray(out, rawAlias) {
+    const alias = cleanName(rawAlias);
+    if (!alias) return;
+    const aliasHasJob = aliasHasDeclaredJob(alias);
+    for (let i = 0; i < out.length; i++) {
+        const existing = cleanName(out[i]);
+        const existingHasJob = aliasHasDeclaredJob(existing);
+        if (sameAliasStorageEntry(existing, alias)) {
+            if (!existingHasJob && aliasHasJob) out[i] = alias;
+            return;
+        }
+        if (sameAliasId(existing, alias)) {
+            if (!existingHasJob && aliasHasJob) {
+                out[i] = alias;
+                return;
+            }
+            if (existingHasJob && !aliasHasJob) return;
+        }
+    }
+    out.push(alias);
+}
+
 async function getLicense(key) {
     try {
         const result = await getClient().get(`licenses/${key}.txt`);
@@ -149,14 +198,8 @@ function normalizeAliasArray(value) {
         ? value
         : (typeof value === 'string' ? value.split(/[()（）、,，;；]/) : []);
     const out = [];
-    const seen = new Set();
     for (const item of arr) {
-        const alias = cleanName(item);
-        const aliasId = getAliasDuplicateId(alias);
-        const key = aliasId || alias;
-        if (!alias || seen.has(key)) continue;
-        seen.add(key);
-        out.push(alias);
+        mergeAliasIntoArray(out, item);
     }
     return out;
 }
@@ -199,6 +242,24 @@ function getSubmissionStats(submission) {
         mainCount: entries.length,
         pairCount: entries.reduce((sum, item) => sum + item.aliases.length, 0)
     };
+}
+
+function sameAliasSet(a, b) {
+    const aa = normalizeAliasArray(a).slice().sort();
+    const bb = normalizeAliasArray(b).slice().sort();
+    if (aa.length !== bb.length) return false;
+    return aa.every((item, idx) => item === bb[idx]);
+}
+
+function isSubmissionUnchangedAgainstPublic(row, publicDb) {
+    const entries = getSubmissionEntries(row.data);
+    if (entries.length === 0) return false;
+
+    return entries.every(item => {
+        const mainName = cleanName(item.mainName);
+        if (!mainName) return true;
+        return sameAliasSet(publicDb.players[mainName] || [], item.aliases);
+    });
 }
 
 function normalizeReviewAliasArray(value) {
@@ -355,13 +416,19 @@ async function loadPendingSubmissionList() {
     return rows;
 }
 
+async function loadReviewablePendingSubmissionList() {
+    const [rows, publicDb] = await Promise.all([loadPendingSubmissionList(), loadPublicAliasDb()]);
+    const visibleRows = rows.filter(row => hasReviewableContent(row) && !isSubmissionUnchangedAgainstPublic(row, publicDb));
+    return { rows, publicDb, visibleRows, hiddenCount: rows.length - visibleRows.length };
+}
+
 function hasReviewableContent(row) {
     return getSubmissionEntries(row.data).length > 0;
 }
 
 async function cleanupEmptyPendingSubmissions() {
-    const rows = await loadPendingSubmissionList();
-    const emptyRows = rows.filter(row => !hasReviewableContent(row));
+    const { rows, publicDb } = await loadReviewablePendingSubmissionList();
+    const emptyRows = rows.filter(row => !hasReviewableContent(row) || isSubmissionUnchangedAgainstPublic(row, publicDb));
 
     if (emptyRows.length === 0) {
         console.log('✅ 没有空的待审核记录。');
@@ -457,15 +524,13 @@ function diffAliasesForMerge(submission, item, oldAliases, targetAliases) {
 function buildAliasesForReviewMode(mode, oldAliases, targetAliases, diff) {
     if (mode === 'added') {
         const addedAliases = normalizeAliasArray(diff.addedAliases);
-        const keptAliases = normalizeAliasArray(oldAliases)
-            .filter(oldAlias => !addedAliases.some(addedAlias => sameAliasId(oldAlias, addedAlias)));
-        return normalizeAliasArray([...keptAliases, ...addedAliases]);
+        return normalizeAliasArray([...normalizeAliasArray(oldAliases), ...addedAliases]);
     }
 
     if (mode === 'removed') {
         const removedAliases = normalizeAliasArray(diff.removedAliases);
         return normalizeAliasArray(oldAliases)
-            .filter(oldAlias => !removedAliases.some(removedAlias => sameAliasId(oldAlias, removedAlias)));
+            .filter(oldAlias => !removedAliases.some(removedAlias => sameAliasStorageEntry(oldAlias, removedAlias)));
     }
 
     return targetAliases;
@@ -566,15 +631,14 @@ async function approveSubmissionRow(row, mode = 'full') {
 
 async function showPendingAliasSubmissions() {
     console.log('⏳ 正在读取待审核投稿...');
-    const rows = await loadPendingSubmissionList();
+    const { rows, visibleRows, hiddenCount } = await loadReviewablePendingSubmissionList();
     if (rows.length === 0) {
         console.log('✅ 当前没有待审核小号投稿。');
         return;
     }
 
     console.log(`\n待审核投稿共 ${rows.length} 条（最多显示前 50 条）：`);
-    const visibleRows = rows.filter(hasReviewableContent);
-    const emptyCount = rows.length - visibleRows.length;
+    const emptyCount = hiddenCount;
     if (emptyCount > 0) {
         console.log(`已隐藏 ${emptyCount} 条空记录，可用菜单 11 清理。`);
     }
@@ -582,7 +646,7 @@ async function showPendingAliasSubmissions() {
 }
 
 async function reviewAliasSubmission() {
-    const rows = (await loadPendingSubmissionList()).filter(hasReviewableContent);
+    const { visibleRows: rows } = await loadReviewablePendingSubmissionList();
     if (rows.length === 0) {
         console.log('✅ 当前没有待审核小号投稿。');
         return;
@@ -637,7 +701,7 @@ async function reviewAliasSubmission() {
 }
 
 async function batchReviewAliasSubmissions() {
-    const rows = (await loadPendingSubmissionList()).filter(hasReviewableContent);
+    const { visibleRows: rows } = await loadReviewablePendingSubmissionList();
     if (rows.length === 0) {
         console.log('✅ 当前没有待审核小号投稿。');
         return;

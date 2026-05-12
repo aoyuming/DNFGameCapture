@@ -5,10 +5,12 @@ const state = {
     activeKey: '',
     publicEntries: [],
     activePublicMain: '',
-    preferredPublicMain: ''
+    preferredPublicMain: '',
+    publicLoadSeq: 0
 };
 
 const el = (id) => document.getElementById(id);
+let publicSearchTimer = null;
 
 function formatTime(sec) {
     if (!sec) return '未知';
@@ -206,7 +208,7 @@ function renderPublic(data) {
         state.activePublicMain = '';
     }
 
-    if (!state.preferredPublicMain && !state.activePublicMain && state.publicEntries.length > 0) {
+    if (!state.preferredPublicMain && !state.activePublicMain && state.publicEntries.length > 0 && !el('public-search').value.trim()) {
         state.activePublicMain = state.publicEntries[0].mainName;
     }
 
@@ -217,6 +219,9 @@ function renderPublic(data) {
         option.selected = item.mainName === state.activePublicMain;
         mainList.appendChild(option);
     });
+
+    const selectedOption = mainList.querySelector('option:checked');
+    if (selectedOption) selectedOption.scrollIntoView({ block: 'nearest' });
 
     renderPublicEntry(findPublicEntry(state.activePublicMain));
 }
@@ -244,6 +249,41 @@ function renderPublicEntry(entry) {
         option.textContent = alias;
         aliasList.appendChild(option);
     });
+}
+
+function getPublicSearchScore(entry, search) {
+    const q = String(search || '').trim();
+    if (!entry || !q) return 0;
+
+    let best = 0;
+    const mainName = String(entry.mainName || '');
+    if (mainName === q) best = Math.max(best, 500);
+    else if (mainName.startsWith(q)) best = Math.max(best, 420);
+    else if (mainName.includes(q)) best = Math.max(best, 360);
+
+    for (const alias of entry.aliases || []) {
+        const text = String(alias || '');
+        if (text === q) best = Math.max(best, 320);
+        else if (text.startsWith(q)) best = Math.max(best, 260);
+        else if (text.includes(q)) best = Math.max(best, 220);
+    }
+
+    return best;
+}
+
+function findBestPublicSearchEntry(entries, search) {
+    let bestEntry = null;
+    let bestScore = 0;
+
+    for (const entry of entries || []) {
+        const score = getPublicSearchScore(entry, search);
+        if (score > bestScore) {
+            bestScore = score;
+            bestEntry = entry;
+        }
+    }
+
+    return bestScore > 0 ? bestEntry : null;
 }
 
 function parseAliasText(value) {
@@ -299,10 +339,26 @@ async function loadDashboard() {
     await loadPublic();
 }
 
-async function loadPublic() {
-    const q = encodeURIComponent(el('public-search').value.trim());
+async function loadPublic(options = {}) {
+    const loadSeq = ++state.publicLoadSeq;
+    const searchText = el('public-search').value.trim();
+    const q = encodeURIComponent(searchText);
     const data = await api(`/api/public?limit=5000&search=${q}`);
+    if (loadSeq !== state.publicLoadSeq) return;
+    if (options.selectBestMatch) {
+        const bestEntry = findBestPublicSearchEntry(data.entries || [], searchText);
+        state.preferredPublicMain = bestEntry?.mainName || '';
+        state.activePublicMain = bestEntry?.mainName || '';
+    }
     renderPublic(data);
+}
+
+function queuePublicSearch() {
+    clearTimeout(publicSearchTimer);
+    publicSearchTimer = setTimeout(() => {
+        state.preferredPublicMain = '';
+        loadPublic({ selectBestMatch: true }).catch(err => toast(err.message));
+    }, 120);
 }
 
 async function focusPublicMainFromPending(row) {
@@ -447,13 +503,21 @@ el('btn-refresh').addEventListener('click', () => loadDashboard().catch(err => t
 el('btn-clean-empty').addEventListener('click', () => cleanupEmpty().catch(err => toast(err.message)));
 el('pending-search').addEventListener('input', renderPendingList);
 el('conflict-filter').addEventListener('change', renderPendingList);
-el('public-search').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadPublic().catch(err => toast(err.message)); });
+el('public-search').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+        clearTimeout(publicSearchTimer);
+        state.preferredPublicMain = '';
+        loadPublic({ selectBestMatch: true }).catch(err => toast(err.message));
+    }
+});
 el('public-search').addEventListener('input', () => {
     state.preferredPublicMain = '';
+    queuePublicSearch();
 });
 el('btn-public-search').addEventListener('click', () => {
+    clearTimeout(publicSearchTimer);
     state.preferredPublicMain = '';
-    loadPublic().catch(err => toast(err.message));
+    loadPublic({ selectBestMatch: true }).catch(err => toast(err.message));
 });
 el('public-main-list').addEventListener('change', (e) => {
     state.preferredPublicMain = '';

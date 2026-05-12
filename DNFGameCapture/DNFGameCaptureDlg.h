@@ -23,7 +23,7 @@
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"3.5.0"    //当前版本号
+#define CURRENT_VERSION L"3.5.1"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -401,6 +401,7 @@ private:
     CString SubmitAliasDbForReview(const std::string& aliasDbPayload, int mainCount, int pairCount);
     CString DirectSyncAliasDbToCloud(const std::string& aliasDbPayload, int mainCount, int pairCount);
     CString SyncAliasDbFromCloud();
+    std::string FilterAliasDbPayloadForReview(const std::string& aliasDbPayload, int& mainCount, int& pairCount, int& containedNakedAliasCount) const;
     void ResetAliasDbCloudBaseline();
     void AutoSubmitAliasDbIfDirty();
     CString SubmitAliasDbSnapshotIfDirty(bool saveBeforeBuild = true);
@@ -412,6 +413,7 @@ private:
     bool m_bAliasDirectMode = false;
     std::vector<CString> m_aliasDbPendingDeleteMains;
     std::vector<CString> m_aliasCloudDeleteBaselineMains;
+    std::map<CString, CString> m_aliasCloudBaselinePlayers;
 
     // 【新增】：仅在 Debug 模式下编译的调试输出函数
     void OutputDebugAuthInfo();

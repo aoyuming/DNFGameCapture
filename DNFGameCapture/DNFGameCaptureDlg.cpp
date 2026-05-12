@@ -61,6 +61,7 @@ static CString DnfJoinPath(const CString& a, const CString& b);
 static void DnfSendWebToast(CWebScoreDlg* webDlg, const CString& action, const CString& message);
 static bool DnfPostCloudJson(const std::string& jsonUtf8, std::string& responseUtf8, CString& errorMsg, int timeoutMs = 8000);
 static CString DnfReadLocalLicenseKey();
+void AppLog(const CString& msg, COLORREF color);
 
 static const wchar_t* DNF_CLOUD_API_HOST = L"verifykey-thaovfpoib.cn-hangzhou.fcapp.run";
 
@@ -192,6 +193,33 @@ static bool DnfAliasSameStorageEntry(const CString& a, const CString& b)
     return true;
 }
 
+static bool DnfAliasCloudContainsNakedAlias(const CString& cloudAliasRaw, const CString& localAliasRaw)
+{
+    CString localAlias = localAliasRaw;
+    CString cloudAlias = cloudAliasRaw;
+    localAlias.Trim();
+    cloudAlias.Trim();
+    if (localAlias.IsEmpty() || cloudAlias.IsEmpty()) return false;
+    if (DnfAliasHasDeclaredJob(localAlias)) return false;
+    if (DnfAliasHasDeclaredJob(cloudAlias) && DnfAliasSameStorageEntry(cloudAlias, localAlias)) return true;
+    return cloudAlias.Find(localAlias) >= 0 && cloudAlias != localAlias;
+}
+
+static bool DnfAliasBlocksSamePlayerAlias(const CString& existingAliasRaw, const CString& candidateAliasRaw)
+{
+    CString existingAlias = existingAliasRaw;
+    CString candidateAlias = candidateAliasRaw;
+    existingAlias.Trim();
+    candidateAlias.Trim();
+    if (existingAlias.IsEmpty() || candidateAlias.IsEmpty()) return false;
+    if (DnfAliasSameStorageEntry(existingAlias, candidateAlias)) return true;
+    if (!DnfAliasHasDeclaredJob(candidateAlias)) {
+        if (DnfAliasHasDeclaredJob(existingAlias) && DnfAliasSameDuplicateId(existingAlias, candidateAlias)) return true;
+        if (existingAlias != candidateAlias && existingAlias.Find(candidateAlias) >= 0) return true;
+    }
+    return false;
+}
+
 enum DnfAliasMergeResult
 {
     DnfAliasMergeNone = 0,
@@ -228,6 +256,9 @@ static DnfAliasMergeResult DnfMergeAliasIntoList(std::vector<CString>& aliases, 
                 return DnfAliasMergeNone;
             }
         }
+        if (!aliasHasJob && oldAlias != alias && oldAlias.Find(alias) >= 0) {
+            return DnfAliasMergeNone;
+        }
     }
 
     aliases.push_back(alias);
@@ -262,6 +293,9 @@ static DnfAliasMergeResult DnfMergeAliasIntoAliasDataList(std::vector<AliasData>
             if (oldHasJob && !aliasHasJob) {
                 return DnfAliasMergeNone;
             }
+        }
+        if (!aliasHasJob && oldAlias.name != alias && oldAlias.name.Find(alias) >= 0) {
+            return DnfAliasMergeNone;
         }
     }
 
@@ -694,6 +728,237 @@ static CString DnfFormatAliasListString(const std::vector<CString>& aliases)
         out += L"(" + alias + L")";
     }
     return out;
+}
+
+static bool DnfAliasListContainsExact(const std::vector<CString>& aliases, const CString& targetRaw)
+{
+    CString target = targetRaw;
+    target.Trim();
+    if (target.IsEmpty()) return false;
+    for (auto alias : aliases) {
+        alias.Trim();
+        if (alias == target) return true;
+    }
+    return false;
+}
+
+static CString DnfJoinAliasNames(const std::vector<CString>& aliases, int maxItems = 12)
+{
+    CString out;
+    int count = 0;
+    for (auto alias : aliases) {
+        alias.Trim();
+        if (alias.IsEmpty()) continue;
+        if (!out.IsEmpty()) out += L" / ";
+        out += alias;
+        count++;
+        if (count >= maxItems) break;
+    }
+    if ((int)aliases.size() > maxItems) {
+        CString more;
+        more.Format(L" / ...等%d个", (int)aliases.size());
+        out += more;
+    }
+    return out;
+}
+
+static bool DnfAliasListSameSet(const std::vector<CString>& a, const std::vector<CString>& b)
+{
+    if (a.size() != b.size()) return false;
+    for (const auto& alias : a) {
+        if (!DnfAliasListContainsExact(b, alias)) return false;
+    }
+    return true;
+}
+
+static std::vector<CString> DnfAliasListSubtractExact(const std::vector<CString>& left, const std::vector<CString>& right)
+{
+    std::vector<CString> out;
+    for (const auto& alias : left) {
+        if (!DnfAliasListContainsExact(right, alias)) out.push_back(alias);
+    }
+    return out;
+}
+
+static std::vector<CString> DnfAliasesFromJsonValue(const json& value)
+{
+    std::vector<CString> aliases;
+    if (value.is_string()) {
+        CString aliasListText = CA2W(value.get<std::string>().c_str(), CP_UTF8);
+        aliases = DnfParseAliasListString(aliasListText);
+    }
+    else if (value.is_array()) {
+        for (const auto& item : value) {
+            if (!item.is_string()) continue;
+            CString aliasText = CA2W(item.get<std::string>().c_str(), CP_UTF8);
+            DnfMergeAliasIntoList(aliases, aliasText);
+        }
+    }
+    return aliases;
+}
+
+static std::map<CString, std::vector<CString>> DnfBuildAliasSnapshotFromPayload(const std::string& aliasDbPayload)
+{
+    std::map<CString, std::vector<CString>> out;
+    if (aliasDbPayload.empty()) return out;
+
+    json root = json::parse(aliasDbPayload);
+    if (!root.is_object()) return out;
+
+    for (auto it = root.begin(); it != root.end(); ++it) {
+        CString mainName = CA2W(it.key().c_str(), CP_UTF8);
+        mainName.Trim();
+        if (mainName.IsEmpty()) continue;
+
+        std::vector<CString> aliases = DnfAliasesFromJsonValue(it.value());
+        if (!aliases.empty()) out[mainName] = aliases;
+    }
+    return out;
+}
+
+static std::map<CString, std::vector<CString>> DnfBuildAliasSnapshotFromBaseline(const std::map<CString, CString>& baselinePlayers)
+{
+    std::map<CString, std::vector<CString>> out;
+    for (const auto& pair : baselinePlayers) {
+        CString mainName = pair.first;
+        mainName.Trim();
+        if (mainName.IsEmpty()) continue;
+
+        std::vector<CString> aliases = DnfParseAliasListString(pair.second);
+        if (!aliases.empty()) out[mainName] = aliases;
+    }
+    return out;
+}
+
+static CString DnfFormatMaybeEmptyAliasList(const std::vector<CString>& aliases)
+{
+    CString text = DnfJoinAliasNames(aliases);
+    return text.IsEmpty() ? L"无小号" : text;
+}
+
+static void DnfLogAliasPushDiff(const std::map<CString, CString>& baselinePlayers, const std::string& filteredAliasDbPayload, int containedNakedAliasCount)
+{
+    std::map<CString, std::vector<CString>> before = DnfBuildAliasSnapshotFromBaseline(baselinePlayers);
+    std::map<CString, std::vector<CString>> after = DnfBuildAliasSnapshotFromPayload(filteredAliasDbPayload);
+
+    std::vector<CString> addedMains;
+    std::vector<CString> removedMains;
+    std::vector<CString> changedMains;
+
+    for (const auto& pair : after) {
+        if (before.find(pair.first) == before.end()) {
+            addedMains.push_back(pair.first);
+        }
+        else if (!DnfAliasListSameSet(before[pair.first], pair.second)) {
+            changedMains.push_back(pair.first);
+        }
+    }
+
+    for (const auto& pair : before) {
+        if (after.find(pair.first) == after.end()) removedMains.push_back(pair.first);
+    }
+
+    CString renamedMainOld;
+    CString renamedMainNew;
+    bool hasMainRename = false;
+    if (addedMains.size() == 1 && removedMains.size() == 1 && DnfAliasListSameSet(before[removedMains[0]], after[addedMains[0]])) {
+        hasMainRename = true;
+        renamedMainOld = removedMains[0];
+        renamedMainNew = addedMains[0];
+    }
+
+    int addedAliasCount = 0;
+    int removedAliasCount = 0;
+    int renameCount = hasMainRename ? 1 : 0;
+    int changedMainCount = 0;
+
+    struct AliasChangeLog {
+        CString mainName;
+        std::vector<CString> added;
+        std::vector<CString> removed;
+        CString renameOld;
+        CString renameNew;
+    };
+    std::vector<AliasChangeLog> aliasLogs;
+
+    for (const CString& mainName : changedMains) {
+        std::vector<CString> addedAliases = DnfAliasListSubtractExact(after[mainName], before[mainName]);
+        std::vector<CString> removedAliases = DnfAliasListSubtractExact(before[mainName], after[mainName]);
+        if (addedAliases.empty() && removedAliases.empty()) continue;
+
+        AliasChangeLog log;
+        log.mainName = mainName;
+        if (addedAliases.size() == 1 && removedAliases.size() == 1) {
+            log.renameOld = removedAliases[0];
+            log.renameNew = addedAliases[0];
+            renameCount++;
+        }
+        else {
+            log.added = addedAliases;
+            log.removed = removedAliases;
+            addedAliasCount += (int)addedAliases.size();
+            removedAliasCount += (int)removedAliases.size();
+        }
+        aliasLogs.push_back(log);
+        changedMainCount++;
+    }
+
+    int visibleAddedMainCount = (int)addedMains.size() - (hasMainRename ? 1 : 0);
+    int visibleRemovedMainCount = (int)removedMains.size() - (hasMainRename ? 1 : 0);
+    for (const CString& mainName : addedMains) {
+        if (hasMainRename && mainName == renamedMainNew) continue;
+        addedAliasCount += (int)after[mainName].size();
+    }
+    for (const CString& mainName : removedMains) {
+        if (hasMainRename && mainName == renamedMainOld) continue;
+        removedAliasCount += (int)before[mainName].size();
+    }
+
+    CString summary;
+    summary.Format(L"☁️ [推送明细] 本次推送：新增主号 %d、删除主号 %d、修改主号 %d、新增小号 %d、删除小号 %d、改名 %d",
+        visibleAddedMainCount,
+        visibleRemovedMainCount,
+        changedMainCount,
+        addedAliasCount,
+        removedAliasCount,
+        renameCount);
+    AppLog(summary, RGB(80, 220, 180));
+
+    if (containedNakedAliasCount > 0) {
+        CString filtered;
+        filtered.Format(L"☁️ [推送预过滤] 本地预过滤裸ID %d 个，未作为待审差异提交。", containedNakedAliasCount);
+        AppLog(filtered, RGB(255, 200, 90));
+    }
+
+    if (hasMainRename) {
+        AppLog(L"☁️ [推送主号改名] " + renamedMainOld + L" => " + renamedMainNew + L" -> " + DnfFormatMaybeEmptyAliasList(after[renamedMainNew]), RGB(255, 220, 120));
+    }
+
+    for (const CString& mainName : addedMains) {
+        if (hasMainRename && mainName == renamedMainNew) continue;
+        AppLog(L"☁️ [推送新增主号] " + mainName + L" -> " + DnfFormatMaybeEmptyAliasList(after[mainName]), RGB(100, 255, 140));
+    }
+
+    for (const CString& mainName : removedMains) {
+        if (hasMainRename && mainName == renamedMainOld) continue;
+        AppLog(L"☁️ [推送删除主号] " + mainName + L" -> " + DnfFormatMaybeEmptyAliasList(before[mainName]), RGB(255, 120, 100));
+    }
+
+    for (const auto& log : aliasLogs) {
+        if (!log.renameOld.IsEmpty() || !log.renameNew.IsEmpty()) {
+            AppLog(L"☁️ [推送小号改名] " + log.mainName + L" -> " + log.renameOld + L" => " + log.renameNew, RGB(255, 220, 120));
+        }
+        if (!log.added.empty()) {
+            AppLog(L"☁️ [推送新增小号] " + log.mainName + L" -> " + DnfJoinAliasNames(log.added), RGB(100, 255, 140));
+        }
+        if (!log.removed.empty()) {
+            AppLog(L"☁️ [推送删除小号] " + log.mainName + L" -> " + DnfJoinAliasNames(log.removed), RGB(255, 190, 90));
+        }
+    }
+
+    if (visibleAddedMainCount == 0 && visibleRemovedMainCount == 0 && changedMainCount == 0 && !hasMainRename) {
+        AppLog(L"☁️ [推送明细] 本次没有发现需要提交审核的具体差异。", RGB(160, 170, 180));
+    }
 }
 
 static CString DnfNormalizeAliasListString(const CString& aliasesRaw)
@@ -1704,6 +1969,25 @@ CString CDNFGameCaptureDlg::SubmitAliasDbForReview(const std::string& aliasDbPay
     }
 
     try {
+        int filteredMainCount = mainCount;
+        int filteredPairCount = pairCount;
+        int containedNakedAliasCount = 0;
+        std::string filteredAliasDbPayload = FilterAliasDbPayloadForReview(aliasDbPayload, filteredMainCount, filteredPairCount, containedNakedAliasCount);
+        if (filteredMainCount <= 0 || filteredAliasDbPayload.empty()) {
+            if (containedNakedAliasCount > 0) {
+                CString detail;
+                detail.Format(L"☁️ [推送预过滤] 本地预过滤裸ID %d 个，本次无可提交变化。", containedNakedAliasCount);
+                AppLog(detail, RGB(255, 200, 90));
+                CString msg;
+                msg.Format(L"共享库投稿成功：云端已有包含这些裸ID的小号，已本地预过滤 %d 个。", containedNakedAliasCount);
+                return msg;
+            }
+            AppLog(L"☁️ [推送明细] 本次无可提交变化。", RGB(160, 170, 180));
+            return L"当前没有可上传的小号库。";
+        }
+
+        DnfLogAliasPushDiff(m_aliasCloudBaselinePlayers, filteredAliasDbPayload, containedNakedAliasCount);
+
         json req;
         req["action"] = "submit_alias_db";
         req["key"] = std::string(CW2A(key, CP_UTF8));
@@ -1711,7 +1995,7 @@ CString CDNFGameCaptureDlg::SubmitAliasDbForReview(const std::string& aliasDbPay
         req["clientVersion"] = std::string(CW2A(CURRENT_VERSION, CP_UTF8));
         req["snapshotMode"] = "full";
         req["deleteScopeMainNames"] = BuildAliasCloudDeleteScopeJson();
-        req["aliasDB"] = json::parse(aliasDbPayload);
+        req["aliasDB"] = json::parse(filteredAliasDbPayload);
 
         std::string response;
         CString err;
@@ -1729,6 +2013,11 @@ CString CDNFGameCaptureDlg::SubmitAliasDbForReview(const std::string& aliasDbPay
         }
 
         if (status == "ok") {
+            if (containedNakedAliasCount > 0) {
+                CString suffix;
+                suffix.Format(L"；本地预过滤裸ID %d 个", containedNakedAliasCount);
+                return L"共享库投稿成功：" + cmsg + suffix;
+            }
             return L"共享库投稿成功：" + cmsg;
         }
         return L"共享库投稿失败：" + cmsg;
@@ -1781,6 +2070,19 @@ CString CDNFGameCaptureDlg::DirectSyncAliasDbToCloud(const std::string& aliasDbP
 
         if (status == "ok") {
             m_aliasDbPendingDeleteMains.clear();
+            m_aliasCloudDeleteBaselineMains.clear();
+            m_aliasCloudBaselinePlayers.clear();
+            for (auto const& [mainNameRaw, aliasesRaw] : m_aliasDB) {
+                CString mainName = mainNameRaw;
+                mainName.Trim();
+                if (mainName.IsEmpty()) continue;
+                CString normalizedAliases = DnfNormalizeAliasListString(aliasesRaw);
+                if (!normalizedAliases.IsEmpty()) {
+                    m_aliasCloudDeleteBaselineMains.push_back(mainName);
+                    m_aliasCloudBaselinePlayers[mainName] = normalizedAliases;
+                }
+            }
+            SaveAliasCloudDeleteBaseline();
             int cleanMainCount = 0;
             int cleanPairCount = 0;
             m_aliasDbCloudBaselinePayload = BuildAliasDbJsonPayload(cleanMainCount, cleanPairCount);
@@ -1849,6 +2151,7 @@ CString CDNFGameCaptureDlg::SyncAliasDbFromCloud()
                 if (mainName.IsEmpty()) continue;
 
                 std::vector<CString> mergedAliases = DnfParseAliasListString(m_aliasDB[mainName]);
+                std::vector<CString> beforeAliases = mergedAliases;
                 CString beforeAliasesText = DnfFormatAliasListString(mergedAliases);
 
                 auto addAlias = [&](CString aliasName) {
@@ -1882,6 +2185,21 @@ CString CDNFGameCaptureDlg::SyncAliasDbFromCloud()
                 if (afterAliasesText != beforeAliasesText) {
                     m_aliasDB[mainName] = afterAliasesText;
                     touchedMainCount++;
+
+                    std::vector<CString> addedAliases;
+                    std::vector<CString> removedAliases;
+                    for (const auto& alias : mergedAliases) {
+                        if (!DnfAliasListContainsExact(beforeAliases, alias)) addedAliases.push_back(alias);
+                    }
+                    for (const auto& alias : beforeAliases) {
+                        if (!DnfAliasListContainsExact(mergedAliases, alias)) removedAliases.push_back(alias);
+                    }
+                    if (!addedAliases.empty()) {
+                        AppLog(L"☁️ [云端融合新增] [" + mainName + L"] " + DnfJoinAliasNames(addedAliases), RGB(100, 255, 140));
+                    }
+                    if (!removedAliases.empty()) {
+                        AppLog(L"☁️ [云端融合删除旧写法] [" + mainName + L"] " + DnfJoinAliasNames(removedAliases), RGB(255, 190, 90));
+                    }
                 }
             }
 
@@ -6191,8 +6509,14 @@ void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
         }
     }
     else if (nID == 5) {
-        std::lock_guard<std::mutex> lkLog(g_visualLogMutex);
-        if (!g_visualLogs.empty() && m_editVisualLogs.m_hWnd) {
+        std::deque<VisualLogMsg> pendingLogs;
+        {
+            std::lock_guard<std::mutex> lkLog(g_visualLogMutex);
+            pendingLogs = g_visualLogs;
+            g_visualLogs.clear();
+        }
+
+        if (!pendingLogs.empty() && m_editVisualLogs.m_hWnd) {
             // ★ 超过 300 行时砍掉前半，防止再次撞上限
             int lineCount = m_editVisualLogs.GetLineCount();
             if (lineCount > 300) {
@@ -6201,7 +6525,7 @@ void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
                 m_editVisualLogs.ReplaceSel(L"");
             }
 
-            for (const auto& log : g_visualLogs) {
+            for (const auto& log : pendingLogs) {
                 int len = m_editVisualLogs.GetWindowTextLength();
                 m_editVisualLogs.SetSel(len, len);
                 CHARFORMAT cf;
@@ -6213,7 +6537,25 @@ void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
                 m_editVisualLogs.ReplaceSel(log.text + L"\r\n");
             }
             m_editVisualLogs.SendMessage(WM_VSCROLL, SB_BOTTOM, 0);
-            g_visualLogs.clear();
+        }
+
+        if (!pendingLogs.empty() && m_pWebDlg) {
+            try {
+                json msg;
+                msg["action"] = "console_logs";
+                msg["logs"] = json::array();
+                for (const auto& log : pendingLogs) {
+                    CString colorText;
+                    colorText.Format(L"#%02X%02X%02X", GetRValue(log.color), GetGValue(log.color), GetBValue(log.color));
+                    json item;
+                    item["text"] = std::string(CW2A(log.text, CP_UTF8));
+                    item["color"] = std::string(CW2A(colorText, CP_UTF8));
+                    msg["logs"].push_back(item);
+                }
+                CString jsonStr = CA2W(msg.dump().c_str(), CP_UTF8);
+                m_pWebDlg->SendStateToWeb(jsonStr);
+            }
+            catch (...) {}
         }
     }
     // ==========================================
@@ -6634,6 +6976,7 @@ void CDNFGameCaptureDlg::SaveAliasDB(bool mergeActivePlayers) {
 void CDNFGameCaptureDlg::LoadAliasCloudDeleteBaseline()
 {
     m_aliasCloudDeleteBaselineMains.clear();
+    m_aliasCloudBaselinePlayers.clear();
 
     wchar_t exePath[MAX_PATH];
     GetModuleFileName(NULL, exePath, MAX_PATH);
@@ -6657,20 +7000,50 @@ void CDNFGameCaptureDlg::LoadAliasCloudDeleteBaseline()
     try {
         json root = json::parse(content);
         json mains = root.is_array() ? root : root.value("mainNames", json::array());
-        if (!mains.is_array()) return;
+        if (mains.is_array()) {
+            for (const auto& value : mains) {
+                if (!value.is_string()) continue;
+                CString mainName = CA2W(value.get<std::string>().c_str(), CP_UTF8);
+                mainName.Trim();
+                if (mainName.IsEmpty()) continue;
+                if (std::find(m_aliasCloudDeleteBaselineMains.begin(), m_aliasCloudDeleteBaselineMains.end(), mainName) == m_aliasCloudDeleteBaselineMains.end()) {
+                    m_aliasCloudDeleteBaselineMains.push_back(mainName);
+                }
+            }
+        }
 
-        for (const auto& value : mains) {
-            if (!value.is_string()) continue;
-            CString mainName = CA2W(value.get<std::string>().c_str(), CP_UTF8);
-            mainName.Trim();
-            if (mainName.IsEmpty()) continue;
-            if (std::find(m_aliasCloudDeleteBaselineMains.begin(), m_aliasCloudDeleteBaselineMains.end(), mainName) == m_aliasCloudDeleteBaselineMains.end()) {
-                m_aliasCloudDeleteBaselineMains.push_back(mainName);
+        json players = root.is_object() ? root.value("players", json::object()) : json::object();
+        if (players.is_object()) {
+            for (auto it = players.begin(); it != players.end(); ++it) {
+                CString mainName = CA2W(it.key().c_str(), CP_UTF8);
+                mainName.Trim();
+                if (mainName.IsEmpty()) continue;
+
+                std::vector<CString> aliases;
+                if (it.value().is_array()) {
+                    for (const auto& item : it.value()) {
+                        if (!item.is_string()) continue;
+                        CString aliasText = CA2W(item.get<std::string>().c_str(), CP_UTF8);
+                        DnfMergeAliasIntoList(aliases, aliasText);
+                    }
+                }
+                else if (it.value().is_string()) {
+                    CString aliasList = CA2W(it.value().get<std::string>().c_str(), CP_UTF8);
+                    for (const auto& alias : DnfParseAliasListString(aliasList)) {
+                        DnfMergeAliasIntoList(aliases, alias);
+                    }
+                }
+
+                CString normalizedAliases = DnfFormatAliasListString(aliases);
+                if (!normalizedAliases.IsEmpty()) {
+                    m_aliasCloudBaselinePlayers[mainName] = normalizedAliases;
+                }
             }
         }
     }
     catch (...) {
         m_aliasCloudDeleteBaselineMains.clear();
+        m_aliasCloudBaselinePlayers.clear();
     }
 }
 
@@ -6689,6 +7062,23 @@ void CDNFGameCaptureDlg::SaveAliasCloudDeleteBaseline() const
         if (mainName.IsEmpty()) continue;
         root["mainNames"].push_back(std::string(CW2A(mainName, CP_UTF8)));
     }
+    root["players"] = json::object();
+    for (auto const& [mainNameRaw, aliasesRaw] : m_aliasCloudBaselinePlayers) {
+        CString mainName = mainNameRaw;
+        mainName.Trim();
+        if (mainName.IsEmpty()) continue;
+        std::vector<CString> aliases = DnfParseAliasListString(aliasesRaw);
+        if (aliases.empty()) continue;
+
+        json aliasArray = json::array();
+        for (auto alias : aliases) {
+            alias.Trim();
+            if (!alias.IsEmpty()) aliasArray.push_back(std::string(CW2A(alias, CP_UTF8)));
+        }
+        if (!aliasArray.empty()) {
+            root["players"][std::string(CW2A(mainName, CP_UTF8))] = aliasArray;
+        }
+    }
 
     std::string content = root.dump(2);
     CFile file;
@@ -6701,6 +7091,7 @@ void CDNFGameCaptureDlg::SaveAliasCloudDeleteBaseline() const
 void CDNFGameCaptureDlg::SetAliasCloudDeleteBaselineFromPublicPlayers(const nlohmann::json& players)
 {
     m_aliasCloudDeleteBaselineMains.clear();
+    m_aliasCloudBaselinePlayers.clear();
     if (!players.is_object()) {
         SaveAliasCloudDeleteBaseline();
         return;
@@ -6712,6 +7103,25 @@ void CDNFGameCaptureDlg::SetAliasCloudDeleteBaselineFromPublicPlayers(const nloh
         if (mainName.IsEmpty()) continue;
         if (std::find(m_aliasCloudDeleteBaselineMains.begin(), m_aliasCloudDeleteBaselineMains.end(), mainName) == m_aliasCloudDeleteBaselineMains.end()) {
             m_aliasCloudDeleteBaselineMains.push_back(mainName);
+        }
+
+        std::vector<CString> aliases;
+        if (it.value().is_array()) {
+            for (const auto& item : it.value()) {
+                if (!item.is_string()) continue;
+                CString aliasText = CA2W(item.get<std::string>().c_str(), CP_UTF8);
+                DnfMergeAliasIntoList(aliases, aliasText);
+            }
+        }
+        else if (it.value().is_string()) {
+            CString aliasList = CA2W(it.value().get<std::string>().c_str(), CP_UTF8);
+            for (const auto& alias : DnfParseAliasListString(aliasList)) {
+                DnfMergeAliasIntoList(aliases, alias);
+            }
+        }
+        CString normalizedAliases = DnfFormatAliasListString(aliases);
+        if (!normalizedAliases.IsEmpty()) {
+            m_aliasCloudBaselinePlayers[mainName] = normalizedAliases;
         }
     }
     SaveAliasCloudDeleteBaseline();
@@ -6726,6 +7136,87 @@ nlohmann::json CDNFGameCaptureDlg::BuildAliasCloudDeleteScopeJson() const
         scope.push_back(std::string(CW2A(mainName, CP_UTF8)));
     }
     return scope;
+}
+
+std::string CDNFGameCaptureDlg::FilterAliasDbPayloadForReview(const std::string& aliasDbPayload, int& mainCount, int& pairCount, int& containedNakedAliasCount) const
+{
+    mainCount = 0;
+    pairCount = 0;
+    containedNakedAliasCount = 0;
+    if (aliasDbPayload.empty()) return "";
+
+    json input = json::parse(aliasDbPayload);
+    if (!input.is_object()) return "";
+
+    json output = json::object();
+    for (auto it = input.begin(); it != input.end(); ++it) {
+        CString mainName = CA2W(it.key().c_str(), CP_UTF8);
+        mainName.Trim();
+        if (mainName.IsEmpty()) continue;
+
+        std::vector<CString> localAliases;
+        if (it.value().is_string()) {
+            CString aliasList = CA2W(it.value().get<std::string>().c_str(), CP_UTF8);
+            localAliases = DnfParseAliasListString(aliasList);
+        }
+        else if (it.value().is_array()) {
+            for (const auto& item : it.value()) {
+                if (!item.is_string()) continue;
+                CString aliasText = CA2W(item.get<std::string>().c_str(), CP_UTF8);
+                DnfMergeAliasIntoList(localAliases, aliasText);
+            }
+        }
+
+        auto cloudIt = m_aliasCloudBaselinePlayers.find(mainName);
+        std::vector<CString> cloudAliases = cloudIt == m_aliasCloudBaselinePlayers.end()
+            ? std::vector<CString>()
+            : DnfParseAliasListString(cloudIt->second);
+
+        std::vector<CString> keptAliases;
+        for (auto aliasName : localAliases) {
+            aliasName.Trim();
+            if (aliasName.IsEmpty() || aliasName == mainName) continue;
+
+            bool shouldFilter = false;
+            if (!DnfAliasHasDeclaredJob(aliasName)) {
+                for (const auto& cloudAlias : cloudAliases) {
+                    if (DnfAliasCloudContainsNakedAlias(cloudAlias, aliasName)) {
+                        shouldFilter = true;
+                        DnfMergeAliasIntoList(keptAliases, cloudAlias);
+                        break;
+                    }
+                }
+            }
+
+            if (shouldFilter) {
+                containedNakedAliasCount++;
+                continue;
+            }
+            DnfMergeAliasIntoList(keptAliases, aliasName);
+        }
+
+        if (!keptAliases.empty()) {
+            CString normalizedAliases = DnfFormatAliasListString(keptAliases);
+            output[std::string(CW2A(mainName, CP_UTF8))] = std::string(CW2A(normalizedAliases, CP_UTF8));
+            mainCount++;
+            pairCount += (int)keptAliases.size();
+        }
+        else if (std::find(m_aliasDbPendingDeleteMains.begin(), m_aliasDbPendingDeleteMains.end(), mainName) != m_aliasDbPendingDeleteMains.end()) {
+            output[std::string(CW2A(mainName, CP_UTF8))] = "";
+            mainCount++;
+        }
+    }
+
+    for (auto mainName : m_aliasDbPendingDeleteMains) {
+        mainName.Trim();
+        if (mainName.IsEmpty()) continue;
+        std::string utf8Main = std::string(CW2A(mainName, CP_UTF8));
+        if (output.contains(utf8Main)) continue;
+        output[utf8Main] = "";
+        mainCount++;
+    }
+
+    return output.dump();
 }
 
 std::string CDNFGameCaptureDlg::BuildAliasDbJsonPayload(int& mainCount, int& pairCount) const
@@ -8176,7 +8667,7 @@ void CDNFGameCaptureDlg::OnEndLabelEdit(NMHDR* pNMHDR, LRESULT* pResult) {
             // 但仍然禁止同一名选手的小号之间出现同 ID 同职业的重复项。
             if (curAIdx != -1) {
                 for (int j = 0; j < (int)m_players[i].aliases.size(); j++) {
-                    if (j != curAIdx && DnfAliasSameStorageEntry(m_players[i].aliases[j].name, newNameOnly)) { isDup = true; break; }
+                    if (j != curAIdx && DnfAliasBlocksSamePlayerAlias(m_players[i].aliases[j].name, newNameOnly)) { isDup = true; break; }
                 }
             }
         }
