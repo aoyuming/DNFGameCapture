@@ -182,7 +182,8 @@ void CWebScoreDlg::ApplyFixedWindowHeight()
     if (m_initialWindowSizeApplied) return;
     m_initialWindowSizeApplied = true;
 
-    // 初始只给一个安全默认高度，后续高度由 Web 前端按真实内容上报。
-    const int defaultWindowHeight = max(m_baseWindowHeight, 740);
-    ResizeWindowToSize(m_baseWindowWidth, defaultWindowHeight);
+    // 使用固定窗口尺寸，避免 Web 内容变化时反复调整窗口大小。
+    const int fixedWindowWidth = max(m_baseWindowWidth, 960);
+    const int fixedWindowHeight = max(m_baseWindowHeight, 740);
+    ResizeWindowToSize(fixedWindowWidth, fixedWindowHeight);
 }

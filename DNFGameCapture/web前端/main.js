@@ -622,25 +622,8 @@ function getWebContentHeight() {
 }
 
 function requestWebWindowResize(force = false) {
-    if (!window.chrome?.webview) return;
-    clearTimeout(webResizeTimer);
-    webResizeTimer = setTimeout(() => {
-        const height = getWebContentHeight();
-        const width = Math.ceil(Math.max(
-            document.body.scrollWidth,
-            document.body.offsetWidth,
-            document.documentElement.scrollWidth,
-            document.documentElement.offsetWidth
-        ));
-
-        if (!force && Math.abs(height - lastSentWebHeight) < 8) return;
-        lastSentWebHeight = height;
-        window.chrome.webview.postMessage({
-            action: 'cmd_resize_web',
-            width,
-            height
-        });
-    }, force ? 40 : 120);
+    // WebView 窗口现在由 C++ 使用固定尺寸控制。保留这个函数给现有调用点，
+    // 但不再把内容高度回推给 C++，避免页面渲染/弹层变化导致窗口反复跳动。
 }
 
 function getActivePlayerNames() {

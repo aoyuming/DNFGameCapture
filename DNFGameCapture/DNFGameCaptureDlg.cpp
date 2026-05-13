@@ -3007,7 +3007,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
     bool killerIsLeft = (killerArea == 0);
 
     CString triggerDiag;
-    triggerDiag.Format(L"[击杀触发诊断] 进入OCR匹配：当前是否翻转红蓝=%s；物理死亡侧=%s；物理杀手侧=%s；说明=翻转红蓝只影响显示和输出，不改变物理左/右识别区域。",
+    triggerDiag.Format(L"[击杀触发诊断] 进入OCR匹配：当前是否翻转红蓝=%s；物理死亡侧=%s；物理杀手侧=%s；说明=翻转红蓝不改变OCR区域和X检测位置；简化兜底会按翻转后的物理左/右队伍映射选择候选。",
         m_bFlipSides ? L"是" : L"否",
         triggerSide == 0 ? L"左边" : L"右边",
         killerArea == 0 ? L"左边" : L"右边");
@@ -3348,7 +3348,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
     // 【简化兜底】只处理旧算法不稳定的两类：
     //   1. 两字短 ID：需要 ID 有相似 + 职业/大区任一辅助 + 当前物理侧唯一。
     //   2. 纯符号 ID：不看 ID 分，只看 #职业 + 当前物理侧唯一；大区只做弱辅助。
-    // 普通长 ID 不走这里，继续由旧算法负责。
+    //   3. 普通小号：当 OCR 只给出职业帧时，允许 #职业 在当前物理侧唯一的成员兜底命中。
     // ============================================================
     auto trySimpleMetaFallback = [&](bool isKiller, int areaIndex, const std::vector<FrameData>& frames,
         bool& resolved, CString& finalName, int& outBestP, int& outBestA, int& lockedTeam) -> bool
@@ -3358,8 +3358,12 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             CString roleText = isKiller ? L"杀手" : L"死者";
             CString sideText = areaIndex == 0 ? L"左框" : L"右框";
             TDnfPanelSide panelSide = (areaIndex == 0) ? TDnfPanelSide::LeftNameArea : TDnfPanelSide::RightAreaName;
-            int beginP = (areaIndex == 0) ? 0 : 4;
+            int sideTeam = (areaIndex == 0)
+                ? (m_bFlipSides ? 1 : 0)
+                : (m_bFlipSides ? 0 : 1);
+            int beginP = (sideTeam == 0) ? 0 : 4;
             int endP = beginP + 4;
+            CString sideTeamText = (sideTeam == 0) ? L"红队" : L"蓝队";
 
             struct Evidence {
                 CString topJob;
@@ -3492,8 +3496,9 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             }
 
             CString head;
-            head.Format(L"[简化兜底][%s-%s] 开始：OCR原文={%s}；职业证据=%s(%d帧)；大区证据=%s；弱大区=%s；ID文本数量=%d。",
+            head.Format(L"[简化兜底][%s-%s] 开始：候选队伍=%s；翻转红蓝=%s；OCR原文={%s}；职业证据=%s(%d帧)；大区证据=%s；弱大区=%s；ID文本数量=%d。",
                 (LPCTSTR)sideText, (LPCTSTR)roleText,
+                (LPCTSTR)sideTeamText, m_bFlipSides ? L"是" : L"否",
                 ev.rawList.IsEmpty() ? L"空" : ev.rawList.GetString(),
                 ev.topJob.IsEmpty() ? L"无" : ev.topJob.GetString(), ev.topJobCount,
                 ev.topArea.IsEmpty() ? L"无" : ev.topArea.GetString(),
@@ -3532,8 +3537,8 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                         bool isSymbol = DnfIsSymbolLikeRealId(realId);
                         bool isShort = (nReal.GetLength() > 0 && nReal.GetLength() < 3) || isSymbol;
 
-                        // 通常只有短ID/纯符号ID进入这里；但如果当前队伍没有任何 #职业 命中，
-                        // 二轮允许把职业文本弱匹配到正常小号（例如小号名里就带“柔道”）。
+                        // 通常只有短ID/纯符号ID进入这里；但 OCR 只给出职业帧时，
+                        // 普通小号也需要用 #职业 + 当前物理侧唯一做安全兜底。
                         bool allowNormalIdJobFallback = (!ev.topJob.IsEmpty() && !isShort);
                         if (!isShort && !allowNormalIdJobFallback) continue;
 
@@ -3559,7 +3564,8 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                             if (s > c.idScore) c.idScore = s;
                         }
 
-                        // 如果没有抽出ID片段，且没有人声明 #职业，才允许职业文本弱匹配正常小号。
+                        // 如果没有抽出ID片段，先记录职业词和正常小号ID的相似度；
+                        // 是否允许命中由后面的 #职业 唯一性规则决定。
                         if (allowNormalIdJobFallback && ev.idTexts.empty()) {
                             c.idScore = max(c.idScore, DnfFuzzyTextScore(realId, ev.topJob));
                         }
@@ -3617,8 +3623,20 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                     }
                 }
                 else if (c.normalIdJobFallback) {
-                    c.qualified = (declaredJobMatchCount == 0 && c.idScore >= 60);
-                    c.reason = c.qualified ? L"没有 #职业 成员：职业文本弱匹配正常小号通过" : L"没有 #职业 成员：职业文本弱匹配分不足";
+                    if (c.jobMatch && declaredJobMatchCount == 1) {
+                        c.qualified = true;
+                        c.finalScore = max(c.finalScore, 88 + c.idScore + (c.areaMatch ? 10 : 0));
+                        c.reason = L"正常ID：职业模糊一致，且当前物理侧只有这一个 #职业 成员";
+                    }
+                    else if (c.jobMatch && declaredJobMatchCount > 1) {
+                        c.qualified = (c.idScore >= 45 || c.areaMatch);
+                        c.finalScore = c.idScore + 45 + (c.areaMatch ? 10 : 0);
+                        c.reason = c.qualified ? L"正常ID：同职业多人，使用OCR名称片段/大区辅助后通过" : L"正常ID：同职业多人，但ID/大区证据不足，拒绝强判";
+                    }
+                    else {
+                        c.qualified = (declaredJobMatchCount == 0 && c.idScore >= 60);
+                        c.reason = c.qualified ? L"没有 #职业 成员：职业文本弱匹配正常小号通过" : L"正常ID：职业未命中，且职业文本弱匹配分不足";
+                    }
                 }
             }
 
@@ -3653,7 +3671,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 ok.Format(L"[最终采用结果][%s-%s] 通过简化兜底：主号=%s；命中小号=%s；模式=%s；采用原因=%s；说明=只在当前物理侧4人中唯一符合，所以允许锁定。",
                     (LPCTSTR)sideText, (LPCTSTR)roleText,
                     (LPCTSTR)c.owner, (LPCTSTR)c.alias,
-                    c.normalIdJobFallback ? L"职业文本弱匹配正常ID" : (c.isSymbol ? L"纯符号ID职业唯一兜底" : L"短ID安全兜底"),
+                    c.normalIdJobFallback ? L"普通小号#职业兜底" : (c.isSymbol ? L"纯符号ID职业唯一兜底" : L"短ID安全兜底"),
                     (LPCTSTR)c.reason);
                 WriteMatchLog(ok);
                 COLORREF teamColor = (lockedTeam == 0) ? RGB(255, 80, 80) : RGB(80, 180, 255);
@@ -3851,10 +3869,9 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
     }
 
     // ============================================================
-    // 【简化兜底】首轮 OCR 扫描结束后，只对短ID/纯符号ID做一次安全兜底。
-    // 普通长ID不进入复杂融合，继续按旧算法结果。
+    // 【简化兜底】首轮 OCR 扫描结束后，对短ID/纯符号ID，以及纯职业帧下的普通小号做一次安全兜底。
     // ============================================================
-    WriteMatchLog(L"[简化兜底] 首轮OCR结束：普通长ID已由旧算法处理；现在只检查短ID/纯符号ID是否满足职业/大区/同侧唯一。" );
+    WriteMatchLog(L"[简化兜底] 首轮OCR结束：检查短ID/纯符号ID，以及普通小号是否满足 #职业/大区/同侧唯一兜底。" );
     trySimpleMetaFallback(true, killerArea, historyKTexts, killerResolved, finalKillerName, killerBestP, killerBestA, lockedKillerTeam);
     trySimpleMetaFallback(false, deadArea, historyDTexts, deadResolved, finalDeadName, deadBestP, deadBestA, lockedDeadTeam);
 
@@ -3882,7 +3899,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
 
     // 二轮后再尝试一次简化兜底。
     if (!killerResolved || !deadResolved) {
-        WriteMatchLog(L"[简化兜底] 二轮OCR结束：再次检查短ID/纯符号ID是否满足安全兜底。" );
+        WriteMatchLog(L"[简化兜底] 二轮OCR结束：再次检查短ID/纯符号ID/普通小号是否满足安全兜底。" );
         trySimpleMetaFallback(true, killerArea, historyKTexts, killerResolved, finalKillerName, killerBestP, killerBestA, lockedKillerTeam);
         trySimpleMetaFallback(false, deadArea, historyDTexts, deadResolved, finalDeadName, deadBestP, deadBestA, lockedDeadTeam);
     }
@@ -4725,7 +4742,7 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
 
     auto fireActiveXTrigger = [&](int deadSide, const CString& sourceReason) {
         CString line;
-        line.Format(L"[X触发诊断] %s侧大X进入OCR匹配：来源=%s；当前是否翻转红蓝=%s；物理死亡侧=%s；物理杀手侧=%s；说明=翻转红蓝只影响显示和输出，不改变物理左/右识别区域。",
+        line.Format(L"[X触发诊断] %s侧大X进入OCR匹配：来源=%s；当前是否翻转红蓝=%s；物理死亡侧=%s；物理杀手侧=%s；说明=翻转红蓝不改变OCR区域和X检测位置；简化兜底会按翻转后的物理左/右队伍映射选择候选。",
             deadSide == 0 ? L"左" : L"右", sourceReason.GetString(), m_bFlipSides ? L"是" : L"否",
             deadSide == 0 ? L"左边" : L"右边", deadSide == 0 ? L"右边" : L"左边");
         WriteMatchLog(line);
@@ -5227,7 +5244,7 @@ void CDNFGameCaptureDlg::OnBnClickedApply() {
 void CDNFGameCaptureDlg::OnBnClickedFlip() {
     m_bFlipSides = (m_chkFlip.GetCheck() == BST_CHECKED);
     CString flipLog;
-    flipLog.Format(L"[红蓝翻转] 用户点击翻转红蓝：翻转后状态=%s；说明=只影响软件界面、网页和OBS输出显示，不改变游戏物理左/右框，不清空身份缓存，不改变OCR区域，不改变X检测位置。",
+    flipLog.Format(L"[红蓝翻转] 用户点击翻转红蓝：翻转后状态=%s；说明=影响软件界面、网页、OBS输出显示和简化兜底候选队伍映射；不改变游戏物理左/右框，不清空身份缓存，不改变OCR区域，不改变X检测位置。",
         m_bFlipSides ? L"开启" : L"关闭");
     WriteMatchLog(flipLog);
     WriteScoreToFile();
@@ -7668,21 +7685,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             BroadcastStateToWeb();
         }
         else if (action == "cmd_resize_web") {
-            if (m_pWebDlg && ::IsWindow(m_pWebDlg->GetSafeHwnd())) {
-                int contentW = j.value("width", 0);
-                int contentH = j.value("height", 0);
-                if (contentH > 0) {
-                    CRect windowRect, clientRect;
-                    m_pWebDlg->GetWindowRect(&windowRect);
-                    m_pWebDlg->GetClientRect(&clientRect);
-
-                    const int frameW = max(0, windowRect.Width() - clientRect.Width());
-                    const int frameH = max(0, windowRect.Height() - clientRect.Height());
-                    const int targetW = max(windowRect.Width(), contentW + frameW + 8);
-                    const int targetH = max(contentH + frameH + 8, 740);
-                    m_pWebDlg->ResizeWindowToSize(targetW, targetH);
-                }
-            }
+            // 旧前端可能还会上报内容高度；当前版本固定 Web 窗口尺寸，忽略动态 resize。
         }
         else if (action == "cmd_auth") {
             std::string codeStr = j["code"].get<std::string>();
