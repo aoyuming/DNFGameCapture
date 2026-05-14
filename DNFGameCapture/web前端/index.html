@@ -8,8 +8,10 @@
 </head>
 <body>
 
-    <div class="app-shell">
-        <div class="left-stack">
+    <div class="app-viewport" id="app-viewport">
+    <div class="app-stage" id="app-stage">
+    <div class="app-shell" id="app-shell">
+        <div class="left-stack" id="left-stack">
             <div class="main-container" id="main-container">
                 <div class="teams-wrap" id="teams-wrap">
                     <div class="team-panel team-red" id="team-red">
@@ -53,6 +55,8 @@
                         <span>&#26368;&#36817;&#35782;&#21035;</span>
                         <span class="review-toggle-count" id="review-toggle-count">0</span>
                     </button>
+                </div>
+                <div class="control-row control-row-cloud">
                     <button class="ctrl-btn btn-sync-db" id="btn-sync-alias-db">☁ 同步云端库</button>
                     <button class="ctrl-btn btn-push-db" id="btn-push-alias-db">⬆ 推送本地库</button>
                     <button class="ctrl-btn btn-console-toggle" id="btn-console-toggle" aria-expanded="false">
@@ -90,6 +94,8 @@
             </div>
             <div class="console-list" id="console-list"></div>
         </div>
+    </div>
+    </div>
     </div>
 
     <div class="modal-overlay" id="custom-modal">

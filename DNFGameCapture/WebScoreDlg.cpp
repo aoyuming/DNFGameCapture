@@ -82,6 +82,7 @@ void CWebScoreDlg::InitWebView2()
                             CRect rect;
                             GetClientRect(&rect);
                             m_webviewController->put_Bounds(rect);
+                            ApplyDpiNormalizedZoom();
 
                             // 接收来自 JS 的 JSON 数据
                             EventRegistrationToken token;
@@ -128,6 +129,7 @@ void CWebScoreDlg::OnSize(UINT nType, int cx, int cy)
 	if (m_webviewController != nullptr) {
 		CRect bounds(0, 0, cx, cy);
 		m_webviewController->put_Bounds(bounds);
+        ApplyDpiNormalizedZoom();
 	}
 }
 
@@ -166,8 +168,32 @@ void CWebScoreDlg::ResizeWindowToSize(int targetWindowW, int targetWindowH)
     if (newY + targetWindowH > work.bottom) newY = work.bottom - targetWindowH;
     if (newY < work.top) newY = work.top;
 
-    if (abs(windowRect.Width() - targetWindowW) < 2 && abs(windowRect.Height() - targetWindowH) < 2) return;
+    if (abs(windowRect.Width() - targetWindowW) < 2 && abs(windowRect.Height() - targetWindowH) < 2) {
+        ApplyDpiNormalizedZoom();
+        return;
+    }
     SetWindowPos(nullptr, newX, newY, targetWindowW, targetWindowH, SWP_NOZORDER | SWP_NOACTIVATE);
+    ApplyDpiNormalizedZoom();
+}
+
+void CWebScoreDlg::ApplyDpiNormalizedZoom()
+{
+    if (m_webviewController == nullptr) return;
+
+    UINT dpi = 96;
+    HMODULE user32 = ::GetModuleHandleW(L"user32.dll");
+    if (user32) {
+        using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+        auto getDpiForWindow = reinterpret_cast<GetDpiForWindowFn>(::GetProcAddress(user32, "GetDpiForWindow"));
+        if (getDpiForWindow && m_hWnd) dpi = getDpiForWindow(m_hWnd);
+    }
+
+    if (dpi == 0) dpi = 96;
+    constexpr double kTargetVisualScale = 1.25;
+    double zoom = kTargetVisualScale / (static_cast<double>(dpi) / 96.0);
+    if (zoom < 0.50) zoom = 0.50;
+    if (zoom > 2.00) zoom = 2.00;
+    m_webviewController->put_ZoomFactor(zoom);
 }
 
 void CWebScoreDlg::ApplyFixedWindowHeight()

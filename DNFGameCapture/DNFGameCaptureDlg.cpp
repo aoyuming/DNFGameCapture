@@ -2943,9 +2943,6 @@ OcrResultData CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaI
 void CDNFGameCaptureDlg::AddReviewEvent(const RecentEvent& ev)
 {
     m_recentEvents.push_back(ev);
-    while (m_recentEvents.size() > 10) {
-        m_recentEvents.erase(m_recentEvents.begin());
-    }
 }
 
 bool CDNFGameCaptureDlg::ToggleReviewEvent(int eventId)

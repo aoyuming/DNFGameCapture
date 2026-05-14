@@ -5,6 +5,9 @@
     --red-team: #ff0055;
     --text-main: #ffffff;
     --text-muted: #8b8b9f;
+    --fit-scale: 1;
+    --design-width: 900px;
+    --design-height: 565px;
 }
 
 body {
@@ -12,12 +15,33 @@ body {
     color: var(--text-main);
     font-family: 'Microsoft YaHei', sans-serif;
     margin: 0;
-    padding: 20px 18px 18px; 
+    padding: 0;
     display: flex;
     flex-direction: column;
     align-items: center;
-    overflow-y: auto;
-    overflow-x: hidden;
+    justify-content: flex-start;
+    overflow: hidden;
+}
+
+.app-viewport {
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    overflow: hidden;
+}
+
+.app-stage {
+    width: var(--design-width);
+    height: calc(var(--design-height) * var(--fit-scale));
+    transform: scale(var(--fit-scale));
+    transform-origin: top center;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding-top: 20px;
+    box-sizing: border-box;
 }
 
 .app-shell {
@@ -25,7 +49,7 @@ body {
     align-items: stretch;
     justify-content: center;
     gap: 15px;
-    width: fit-content;
+    width: var(--design-width);
     margin-left: 0;
 }
 
@@ -33,6 +57,7 @@ body {
     display: flex;
     flex-direction: column;
     align-items: center;
+    width: var(--design-width);
 }
 
 /* 🚨 核心修复 1：强行拔高主体战绩区的层级，让它盖过底部的按钮区！ */
@@ -280,7 +305,7 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     align-items: center;
     gap: 10px;
     background: rgba(255,255,255,0.05); padding: 16px 18px; border-radius: 12px;
-    width: 100%; max-width: min(900px, calc(100vw - 36px)); box-sizing: border-box;
+    width: var(--design-width); max-width: var(--design-width); box-sizing: border-box;
     position: relative; z-index: 1; /* 🚨 降低底部控制区的层级，给上面的弹窗让路 */
 }
 .control-row {
@@ -289,9 +314,10 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     align-items: center;
     gap: 8px;
     width: 100%;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
 }
 .control-row-main { max-width: 860px; }
+.control-row-cloud { max-width: 660px; }
 .control-row-tools { max-width: 860px; }
 .ctrl-btn { 
     min-width: 0;
@@ -303,6 +329,12 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     overflow: hidden;
     text-overflow: ellipsis;
 }
+.control-row-main .btn-swap { flex: 0 0 190px; max-width: 190px; }
+.control-row-main #btn-monitor { flex: 0 0 190px; max-width: 190px; }
+.control-row-main .algo-select-wrap { flex: 0 0 250px; }
+.control-row-main .btn-review-toggle { flex: 0 0 190px; max-width: 190px; }
+.control-row-cloud .ctrl-btn { flex: 0 0 212px; max-width: 212px; }
+.control-row-tools .ctrl-btn { flex: 1 0 164px; max-width: 170px; }
 .algo-select-wrap {
     display: flex; align-items: center; gap: 6px;
     padding: 8px 10px; border-radius: 6px;

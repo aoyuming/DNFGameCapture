@@ -31,6 +31,8 @@ let pendingAliasPopoverName = '';
 let pendingAliasPopoverInput = null;
 let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
+const APP_DESIGN_WIDTH = 900;
+const APP_DESIGN_HEIGHT = 565;
 
 // Ctrl 选择互换模式状态（与所在行无关，模块级即可，但放在 createPlayerRow 外更好）
 // 建议放在文件顶部全局区域，或至少在 createPlayerRow 外定义
@@ -588,12 +590,37 @@ function applyStateFromServer(state) {
     });
     isSyncingFromServer = false;
     updateStartButtonGuard();
+    updateLayoutScale();
 }
 
 const triggerSync = () => {
     updateStartButtonGuard();
     pushStateToServer();
 };
+
+function updateLayoutScale() {
+    const root = document.documentElement;
+    const viewportW = Math.max(1, window.innerWidth || APP_DESIGN_WIDTH);
+    const viewportH = Math.max(1, window.innerHeight || APP_DESIGN_HEIGHT);
+    const marginW = 20;
+    const marginH = 18;
+    const scale = Math.min(
+        1,
+        (viewportW - marginW) / APP_DESIGN_WIDTH,
+        (viewportH - marginH) / APP_DESIGN_HEIGHT
+    );
+    const safeScale = Math.max(0.25, Number.isFinite(scale) ? scale : 1);
+    root.style.setProperty('--fit-scale', safeScale.toFixed(4));
+    root.style.setProperty('--design-width', `${APP_DESIGN_WIDTH}px`);
+    root.style.setProperty('--design-height', `${APP_DESIGN_HEIGHT}px`);
+}
+
+function detachOverlayPanelsFromScaledStage() {
+    ['review-backdrop', 'review-panel', 'console-panel'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el && el.parentElement !== document.body) document.body.appendChild(el);
+    });
+}
 
 function getWebContentHeight() {
     const scrollTop = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
@@ -2164,10 +2191,24 @@ document.addEventListener('keyup', function (e) {
 });
 
 if (window.ResizeObserver) {
-    const webSizeObserver = new ResizeObserver(() => requestWebWindowResize());
+    const webSizeObserver = new ResizeObserver(() => {
+        updateLayoutScale();
+        requestWebWindowResize();
+    });
     webSizeObserver.observe(document.body);
 }
-window.addEventListener('load', requestWebWindowResize);
-window.addEventListener('resize', requestWebWindowResize);
+window.addEventListener('load', () => {
+    detachOverlayPanelsFromScaledStage();
+    updateLayoutScale();
+    requestWebWindowResize();
+});
+window.addEventListener('resize', () => {
+    updateLayoutScale();
+    requestWebWindowResize();
+});
 window.addEventListener('resize', layoutActiveAliasPopovers);
-setTimeout(requestWebWindowResize, 300);
+setTimeout(() => {
+    detachOverlayPanelsFromScaledStage();
+    updateLayoutScale();
+    requestWebWindowResize();
+}, 300);

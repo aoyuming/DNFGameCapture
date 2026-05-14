@@ -47,4 +47,5 @@ private:
 	bool m_initialWindowSizeApplied = false;
 
 	void InitWebView2();
+	void ApplyDpiNormalizedZoom();
 };
