@@ -20,6 +20,7 @@ public:
 	void SendStateToWeb(const CString& jsonStr);
 	void ApplyFixedWindowHeight();
 	void ResizeWindowToSize(int targetWindowW, int targetWindowH);
+	void ResizeWindowForClientSize(int targetClientW, int targetClientH);
 
 	// 对话框数据
 #ifdef AFX_DESIGN_TIME

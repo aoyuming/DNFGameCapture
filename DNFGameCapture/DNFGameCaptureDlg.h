@@ -320,6 +320,9 @@ private:
     BOOL m_bCanTrigger;
     BOOL m_bCanTriggerTeamScore;
     bool m_bPendingTeamScoreWin;
+    bool m_deathXStableState[8] = {};
+    int m_deathXStableOn[8] = {};
+    int m_deathXStableOff[8] = {};
 
     int m_totalScoreRed;
     int m_totalScoreBlue;

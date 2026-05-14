@@ -51,6 +51,9 @@ constexpr int DEATH_X_ALGO_PATCH = 1;      // 打补丁红蓝点算法
 constexpr int DEATH_X_PATCH_COLOR_TOL = 30;
 constexpr int DEATH_X_COLOR_TOL = 40;       // 当前算法：#D53000 三通道上下容差
 constexpr int DEATH_X_PATCH_REQUIRED_HITS = 3;       // 打补丁红蓝判断：左右一红一蓝 + 上/下至少一个红蓝点
+constexpr int DEATH_X_PATCH_SEARCH_RADIUS = 2;        // 打补丁算法：固定理论点周围的小容错窗口
+constexpr int DEATH_X_STABLE_ON_FRAMES = 2;           // 连续命中 2 次才认为死亡，避免录像压缩/运动单帧跳点误判
+constexpr int DEATH_X_STABLE_OFF_FRAMES = 2;          // 连续消失 2 次才认为复活，避免残留 X 抖动造成重复边沿
 constexpr float DEATH_X_PATCH_MUL_ACTIVE = 4.6f;     // 主将大 X 的检测点外移倍数
 constexpr float DEATH_X_PATCH_MUL_NORMAL = 5.4f;     // 下方小 X 的检测点外移倍数
 static const wchar_t* DEATH_X_PATCH_FILE_NAME = L"sprite(击杀大XX).NPK";
@@ -3004,7 +3007,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
     bool killerIsLeft = (killerArea == 0);
 
     CString triggerDiag;
-    triggerDiag.Format(L"[击杀触发诊断] 进入OCR匹配：当前是否翻转红蓝=%s；物理死亡侧=%s；物理杀手侧=%s；说明=翻转红蓝不改变OCR区域和X检测位置；简化兜底会按翻转后的物理左/右队伍映射选择候选。",
+    triggerDiag.Format(L"[击杀触发诊断] 进入OCR匹配：当前是否翻转红蓝=%s；物理死亡侧=%s；物理杀手侧=%s；说明=翻转红蓝只影响界面/OBS左右显示，不改变OCR区域、X检测位置和物理侧候选队伍。",
         m_bFlipSides ? L"是" : L"否",
         triggerSide == 0 ? L"左边" : L"右边",
         killerArea == 0 ? L"左边" : L"右边");
@@ -3355,9 +3358,8 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             CString roleText = isKiller ? L"杀手" : L"死者";
             CString sideText = areaIndex == 0 ? L"左框" : L"右框";
             TDnfPanelSide panelSide = (areaIndex == 0) ? TDnfPanelSide::LeftNameArea : TDnfPanelSide::RightAreaName;
-            int sideTeam = (areaIndex == 0)
-                ? (m_bFlipSides ? 1 : 0)
-                : (m_bFlipSides ? 0 : 1);
+            // 翻转红蓝只改界面/OBS显示方向，不改游戏物理左/右框对应的候选队伍。
+            int sideTeam = (areaIndex == 0) ? 0 : 1;
             int beginP = (sideTeam == 0) ? 0 : 4;
             int endP = beginP + 4;
             CString sideTeamText = (sideTeam == 0) ? L"红队" : L"蓝队";
@@ -4185,6 +4187,7 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
         return;
 
     bool isDeadArr[DEATH_POINT_COUNT] = { false };
+    bool rawDeadArr[DEATH_POINT_COUNT] = { false };
     COLORREF colorDeath[DEATH_POINT_COUNT] = { 0 };
     int debugMatchCount[DEATH_POINT_COUNT] = { 0 };
     int debugRoiHits[DEATH_POINT_COUNT] = { 0 };
@@ -4361,7 +4364,12 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
         auto findPatchColorNear = [&](int x, int y, int radius) -> PatchColorSample {
             PatchColorSample best = { 0, RGB(0, 0, 0), x, y };
             if (x >= 0 && x < m_w && y >= 0 && y < m_h) best.color = ::GetPixel(hMemDC, x, y);
-            int bestScore = 999999;
+            int redHits = 0;
+            int blueHits = 0;
+            int redBestDist = 999999;
+            int blueBestDist = 999999;
+            COLORREF redBestColor = best.color;
+            COLORREF blueBestColor = best.color;
             for (int dy = -radius; dy <= radius; ++dy) {
                 for (int dx = -radius; dx <= radius; ++dx) {
                     int sx = x + dx;
@@ -4370,16 +4378,32 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
                     COLORREF c = ::GetPixel(hMemDC, sx, sy);
                     int cls = classifyPatchColor(c);
                     if (cls == 0) continue;
-                    int colorScore = (cls == 1) ? patchColorDist(c, 255, 0, 0) : patchColorDist(c, 0, 0, 255);
-                    int posScore = abs(dx) + abs(dy);
-                    int score = colorScore * 10 + posScore;
-                    if (score < bestScore) {
-                        bestScore = score;
-                        best.cls = cls;
-                        best.color = c;
-                        best.x = sx;
-                        best.y = sy;
+                    if (cls == 1) {
+                        redHits++;
+                        int dist = patchColorDist(c, 255, 0, 0);
+                        if (dist < redBestDist) {
+                            redBestDist = dist;
+                            redBestColor = c;
+                        }
                     }
+                    else if (cls == 2) {
+                        blueHits++;
+                        int dist = patchColorDist(c, 0, 0, 255);
+                        if (dist < blueBestDist) {
+                            blueBestDist = dist;
+                            blueBestColor = c;
+                        }
+                    }
+                }
+            }
+            if (redHits > 0 || blueHits > 0) {
+                if (redHits > blueHits || (redHits == blueHits && redBestDist <= blueBestDist)) {
+                    best.cls = 1;
+                    best.color = redBestColor;
+                }
+                else {
+                    best.cls = 2;
+                    best.color = blueBestColor;
                 }
             }
             return best;
@@ -4424,9 +4448,9 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
             for (int pidx = 0; pidx < 4; ++pidx) {
                 int sx = (int)(pxNorm[pidx] * m_w);
                 int sy = (int)(pyNorm[pidx] * m_h);
-                PatchColorSample sample = findPatchColorNear(sx, sy, 2);
-                debugPatchX[logicalIdx][pidx] = sample.x / (float)max(1, m_w);
-                debugPatchY[logicalIdx][pidx] = sample.y / (float)max(1, m_h);
+                PatchColorSample sample = findPatchColorNear(sx, sy, DEATH_X_PATCH_SEARCH_RADIUS);
+                debugPatchX[logicalIdx][pidx] = sx / (float)max(1, m_w);
+                debugPatchY[logicalIdx][pidx] = sy / (float)max(1, m_h);
                 debugPatchColor[logicalIdx][pidx] = sample.color;
                 debugPatchClass[logicalIdx][pidx] = sample.cls;
                 if (sample.cls != 0) okCount++;
@@ -4634,7 +4658,31 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
         // 0-3 左侧，4-7 右侧。
         for (int logicalIdx = 0; logicalIdx < DEATH_POINT_COUNT; logicalIdx++) {
             int startIdx = GetDeathRawIndex(logicalIdx);
-            isDeadArr[logicalIdx] = checkDeadRaw(logicalIdx, startIdx);
+            rawDeadArr[logicalIdx] = checkDeadRaw(logicalIdx, startIdx);
+        }
+
+        for (int logicalIdx = 0; logicalIdx < DEATH_POINT_COUNT; logicalIdx++) {
+            if (rawDeadArr[logicalIdx]) {
+                if (m_deathXStableOn[logicalIdx] < DEATH_X_STABLE_ON_FRAMES) {
+                    m_deathXStableOn[logicalIdx]++;
+                }
+                m_deathXStableOff[logicalIdx] = 0;
+            }
+            else {
+                if (m_deathXStableOff[logicalIdx] < DEATH_X_STABLE_OFF_FRAMES) {
+                    m_deathXStableOff[logicalIdx]++;
+                }
+                m_deathXStableOn[logicalIdx] = 0;
+            }
+
+            if (!m_deathXStableState[logicalIdx] && m_deathXStableOn[logicalIdx] >= DEATH_X_STABLE_ON_FRAMES) {
+                m_deathXStableState[logicalIdx] = true;
+            }
+            else if (m_deathXStableState[logicalIdx] && m_deathXStableOff[logicalIdx] >= DEATH_X_STABLE_OFF_FRAMES) {
+                m_deathXStableState[logicalIdx] = false;
+            }
+
+            isDeadArr[logicalIdx] = m_deathXStableState[logicalIdx];
         }
 
         // 实时调试快照：只显示 8 个逻辑状态，不参与判定。
@@ -4739,7 +4787,7 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
 
     auto fireActiveXTrigger = [&](int deadSide, const CString& sourceReason) {
         CString line;
-        line.Format(L"[X触发诊断] %s侧大X进入OCR匹配：来源=%s；当前是否翻转红蓝=%s；物理死亡侧=%s；物理杀手侧=%s；说明=翻转红蓝不改变OCR区域和X检测位置；简化兜底会按翻转后的物理左/右队伍映射选择候选。",
+        line.Format(L"[X触发诊断] %s侧大X进入OCR匹配：来源=%s；当前是否翻转红蓝=%s；物理死亡侧=%s；物理杀手侧=%s；说明=翻转红蓝只影响界面/OBS左右显示，不改变OCR区域、X检测位置和物理侧候选队伍。",
             deadSide == 0 ? L"左" : L"右", sourceReason.GetString(), m_bFlipSides ? L"是" : L"否",
             deadSide == 0 ? L"左边" : L"右边", deadSide == 0 ? L"右边" : L"左边");
         WriteMatchLog(line);
@@ -4925,6 +4973,9 @@ LRESULT CDNFGameCaptureDlg::OnTrayMessage(WPARAM wParam, LPARAM lParam) {
 void CDNFGameCaptureDlg::DoRealExit() {
     m_bIsRunning = FALSE;
     KillTimer(1); KillTimer(2); KillTimer(3); KillTimer(4);
+    memset(m_deathXStableState, 0, sizeof(m_deathXStableState));
+    memset(m_deathXStableOn, 0, sizeof(m_deathXStableOn));
+    memset(m_deathXStableOff, 0, sizeof(m_deathXStableOff));
 
     // ==========================================
     // 【新增】：主程序退出时，拉着 OCR 一起陪葬
@@ -5088,6 +5139,9 @@ void CDNFGameCaptureDlg::OnBnClickedStart()
 
         m_nBlankFrameCount = 0;
         m_bAlreadyPrompted = false;
+        memset(m_deathXStableState, 0, sizeof(m_deathXStableState));
+        memset(m_deathXStableOn, 0, sizeof(m_deathXStableOn));
+        memset(m_deathXStableOff, 0, sizeof(m_deathXStableOff));
 
         // 打印相应的状态日志
         if (m_bUseWGC) {
@@ -5120,6 +5174,9 @@ void CDNFGameCaptureDlg::OnBnClickedStart()
         m_bIsRunning = FALSE;
         KillTimer(1);
         KillTimer(3);
+        memset(m_deathXStableState, 0, sizeof(m_deathXStableState));
+        memset(m_deathXStableOn, 0, sizeof(m_deathXStableOn));
+        memset(m_deathXStableOff, 0, sizeof(m_deathXStableOff));
 
         // ==========================================
         // 【关键修复】：停止监控时，绝不能销毁 m_pWGC！
@@ -5241,7 +5298,7 @@ void CDNFGameCaptureDlg::OnBnClickedApply() {
 void CDNFGameCaptureDlg::OnBnClickedFlip() {
     m_bFlipSides = (m_chkFlip.GetCheck() == BST_CHECKED);
     CString flipLog;
-    flipLog.Format(L"[红蓝翻转] 用户点击翻转红蓝：翻转后状态=%s；说明=影响软件界面、网页、OBS输出显示和简化兜底候选队伍映射；不改变游戏物理左/右框，不清空身份缓存，不改变OCR区域，不改变X检测位置。",
+    flipLog.Format(L"[红蓝翻转] 用户点击翻转红蓝：翻转后状态=%s；说明=只影响软件界面、网页和OBS输出左右显示；不改变游戏物理左/右框、简化兜底候选队伍、身份缓存、OCR区域和X检测位置。",
         m_bFlipSides ? L"开启" : L"关闭");
     WriteMatchLog(flipLog);
     WriteScoreToFile();
@@ -5279,6 +5336,9 @@ void CDNFGameCaptureDlg::OnBnClickedReset() {
         m_totalScoreRed = 0;
         m_totalScoreBlue = 0;
         m_recentEvents.clear();
+        memset(m_deathXStableState, 0, sizeof(m_deathXStableState));
+        memset(m_deathXStableOn, 0, sizeof(m_deathXStableOn));
+        memset(m_deathXStableOff, 0, sizeof(m_deathXStableOff));
         for (int i = 0; i < 8; i++) {
             m_players[i].kills = 0; m_players[i].deaths = 0;
             m_players[i].currentStreak = 0; m_players[i].akCount = 0;

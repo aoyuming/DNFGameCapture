@@ -4,6 +4,40 @@
 #include "WebScoreDlg.h"
 #include <WebView2EnvironmentOptions.h>
 
+namespace {
+    // 参考图1的紧凑 CSS 视口尺寸。窗口外框会按当前系统边框自动反推。
+    constexpr int kReferenceClientWidth = 720;
+    constexpr int kReferenceClientHeight = 560;
+    constexpr double kTargetVisualScale = 1.25;
+
+    double GetDpiScaleForWindow(HWND hwnd)
+    {
+        UINT dpi = 96;
+        HMODULE user32 = ::GetModuleHandleW(L"user32.dll");
+        if (user32 && hwnd) {
+            using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+            auto getDpiForWindow = reinterpret_cast<GetDpiForWindowFn>(
+                ::GetProcAddress(user32, "GetDpiForWindow"));
+            if (getDpiForWindow) dpi = getDpiForWindow(hwnd);
+        }
+        if (dpi == 0) dpi = 96;
+        return static_cast<double>(dpi) / 96.0;
+    }
+
+    double GetDpiNormalizedWebZoom(HWND hwnd)
+    {
+        double zoom = kTargetVisualScale / GetDpiScaleForWindow(hwnd);
+        if (zoom < 0.50) zoom = 0.50;
+        if (zoom > 2.00) zoom = 2.00;
+        return zoom;
+    }
+
+    int ScaleCssSizeToNativePixels(int cssSize, double visualScale)
+    {
+        return static_cast<int>(cssSize * visualScale + 0.5);
+    }
+}
+
 IMPLEMENT_DYNAMIC(CWebScoreDlg, CDialogEx)
 
 CWebScoreDlg::CWebScoreDlg(CWnd* pParent /*=nullptr*/)
@@ -176,24 +210,25 @@ void CWebScoreDlg::ResizeWindowToSize(int targetWindowW, int targetWindowH)
     ApplyDpiNormalizedZoom();
 }
 
+void CWebScoreDlg::ResizeWindowForClientSize(int targetClientW, int targetClientH)
+{
+    if (!m_hWnd || targetClientW <= 0 || targetClientH <= 0) return;
+
+    CRect windowRect;
+    CRect clientRect;
+    GetWindowRect(&windowRect);
+    GetClientRect(&clientRect);
+
+    const int frameW = max(0, windowRect.Width() - clientRect.Width());
+    const int frameH = max(0, windowRect.Height() - clientRect.Height());
+    ResizeWindowToSize(targetClientW + frameW, targetClientH + frameH);
+}
+
 void CWebScoreDlg::ApplyDpiNormalizedZoom()
 {
     if (m_webviewController == nullptr) return;
-
-    UINT dpi = 96;
-    HMODULE user32 = ::GetModuleHandleW(L"user32.dll");
-    if (user32) {
-        using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
-        auto getDpiForWindow = reinterpret_cast<GetDpiForWindowFn>(::GetProcAddress(user32, "GetDpiForWindow"));
-        if (getDpiForWindow && m_hWnd) dpi = getDpiForWindow(m_hWnd);
-    }
-
-    if (dpi == 0) dpi = 96;
-    constexpr double kTargetVisualScale = 1.25;
-    double zoom = kTargetVisualScale / (static_cast<double>(dpi) / 96.0);
-    if (zoom < 0.50) zoom = 0.50;
-    if (zoom > 2.00) zoom = 2.00;
-    m_webviewController->put_ZoomFactor(zoom);
+    // 以 Windows 125% 缩放下的旧版图1为视觉基准。
+    m_webviewController->put_ZoomFactor(GetDpiNormalizedWebZoom(m_hWnd));
 }
 
 void CWebScoreDlg::ApplyFixedWindowHeight()
@@ -208,8 +243,8 @@ void CWebScoreDlg::ApplyFixedWindowHeight()
     if (m_initialWindowSizeApplied) return;
     m_initialWindowSizeApplied = true;
 
-    // 使用固定窗口尺寸，避免 Web 内容变化时反复调整窗口大小。
-    const int fixedWindowWidth = max(m_baseWindowWidth, 960);
-    const int fixedWindowHeight = max(m_baseWindowHeight, 740);
-    ResizeWindowToSize(fixedWindowWidth, fixedWindowHeight);
+    // 窗口按目标视觉基准缩放一次即可；WebView2 Zoom 已经负责抵消系统 DPI。
+    ResizeWindowForClientSize(
+        ScaleCssSizeToNativePixels(kReferenceClientWidth, kTargetVisualScale),
+        ScaleCssSizeToNativePixels(kReferenceClientHeight, kTargetVisualScale));
 }
