@@ -30,6 +30,7 @@ namespace {
 
 
     struct TAliasMetaForIdentity {
+        CString fullId;
         CString realId;
         CString area;
         CString job;
@@ -107,6 +108,8 @@ namespace {
             body.Trim();
         }
 
+        meta.fullId = body;
+        meta.fullId.Trim();
         meta.hasArea = DnfIdentityExtractArea(body, meta.area);
         body.Trim();
         meta.realId = body;
@@ -152,6 +155,7 @@ std::vector<TDnfCandidateIdentity> CDNFGameCaptureDlg::BuildIdentityCandidatesFo
             alias.isAlias = true;
 
             TAliasMetaForIdentity meta = DnfParseAliasForIdentity(a.name);
+            alias.fullMatchName = meta.fullId.IsEmpty() ? a.name : meta.fullId;
             alias.matchName = meta.realId.IsEmpty() ? a.name : meta.realId;
             alias.declaredArea = meta.area;
             alias.declaredJob = meta.job;

@@ -69,7 +69,8 @@ struct TDnfCandidateIdentity {
 
     // 解析后的匹配字段。用于让“大区在前/在后”等价：
     //   上海1夏雫 == 夏雫上海1
-    //   上海1夏雫#气功师 -> matchName=夏雫 declaredArea=上海1 declaredJob=气功师
+    //   上海1夏雫#气功师 -> fullMatchName=上海1夏雫 matchName=夏雫 declaredArea=上海1 declaredJob=气功师
+    CString fullMatchName;
     CString matchName;
     CString declaredArea;
     CString declaredJob;
@@ -92,12 +93,18 @@ struct TDnfCandidateScore {
     int gapToSecond = 0;
 
     bool areaMatched = false;
+    bool areaShortIdAssist = false;
     bool jobMatched = false;
     bool areaConflict = false;
     bool jobConflict = false;
     bool accepted = false;
 
     CString bestIdText;
+    CString scoreCandidateId;
+    CString scoreOcrId;
+    CString idMatchMode;
+    CString idMatchNote;
+    bool allowStrongIdLock = false;
     CString areaNow;
     CString jobNow;
     CString decisionReason;
@@ -270,34 +277,69 @@ public:
             s.jobNow = jobTop.value;
 
             CString candMatchName = cand.matchName.IsEmpty() ? cand.name : cand.matchName;
+            CString candFullName = cand.fullMatchName.IsEmpty() ? candMatchName : cand.fullMatchName;
             const bool symbolIdMode = cand.isSymbolicId || IsSymbolLikeId(candMatchName);
 
             // ID 分：取最近窗口内所有 nameText 的最高分。
             // 注意：纯符号 ID 不强求 ID 分，因为 OCR 很可能只读到职业/大区。
             if (!symbolIdMode) {
                 for (const auto& nt : c.nameTexts) {
-                    int idScore = m_nameMatcher.GetMatchScore(ToW(candMatchName), ToW(nt.value), false);
+                    bool bothHaveArea = cand.hasDeclaredArea && !areaTop.value.IsEmpty();
+                    CString scoreCandId = bothHaveArea ? candFullName : candMatchName;
+                    CString scoreOcrId = nt.value;
+                    int idScore = 0;
+                    CString mode = bothHaveArea ? L"完整ID" : L"真实ID";
+                    bool shortAssist = false;
+                    if (bothHaveArea) {
+                        int exactFullScore = ExactFullIdWithAreaScore(cand.declaredArea, candMatchName,
+                            areaTop.value, nt.value);
+                        int realScore = IdPartScore(candMatchName, nt.value);
+                        bool twoCharAssist = VisibleLen(candMatchName) == 2 && LcsLen(NormalizeRaw(candMatchName), NormalizeRaw(nt.value)) >= 1 && realScore > 0;
+                        if (exactFullScore >= 95) {
+                            idScore = exactFullScore;
+                        }
+                        else if (twoCharAssist) {
+                            idScore = (std::max)(realScore, 55);
+                            shortAssist = true;
+                        }
+                        else {
+                            idScore = realScore;
+                        }
+                    }
+                    else {
+                        idScore = IdPartScore(scoreCandId, scoreOcrId);
+                    }
                     if (idScore > s.idScore) {
                         s.idScore = idScore;
                         s.bestIdText = nt.value;
+                        s.scoreCandidateId = scoreCandId;
+                        s.scoreOcrId = scoreOcrId;
+                        s.idMatchMode = mode;
+                        s.areaShortIdAssist = shortAssist;
                     }
                 }
             }
 
             const int nameLen = VisibleLen(candMatchName);
+            if (nameLen <= 1) {
+                bool oneCharExactRealId = NormalizeRaw(candMatchName) == NormalizeRaw(s.bestIdText);
+                s.allowStrongIdLock = (cand.hasDeclaredArea && !areaTop.value.IsEmpty() && s.idScore >= 95 && oneCharExactRealId);
+                s.idMatchNote = s.allowStrongIdLock ? L"两边都有大区，且1字真实ID精确一致" : L"真实ID仅1字，不作为强ID锁定依据";
+            }
+            else {
+                s.allowStrongIdLock = true;
+                s.idMatchNote = s.idMatchMode.IsEmpty() ? L"无ID证据" : (s.idMatchMode + L"匹配");
+            }
             RuntimeHint hint = GetRuntimeHint(cand.name);
 
-            // 声明式大区上下文：小号里手动写了大区时，直接参与评分。
-            // 这让“大区在前/在后”等价，也解决首次识别还没学习画像时没有上下文分的问题。
+            // 大区不再作为普通加分项；只保留匹配标记，真正的短 ID 辅助在 ID 分里收窄处理。
             if (!areaTop.value.IsEmpty() && cand.hasDeclaredArea) {
                 if (AreaFuzzySame(areaTop.value, cand.declaredArea)) {
                     s.areaMatched = true;
-                    // 大区只做弱辅助，不能单独决定身份。
-                    s.areaCtxScore += symbolIdMode ? 20 : ((nameLen <= 2) ? 16 : 8);
                 }
                 else {
                     s.areaConflict = true;
-                    s.penalty += symbolIdMode ? 8 : ((nameLen <= 2) ? 8 : 4);
+                    s.penalty += symbolIdMode ? 8 : ((nameLen <= 2) ? 6 : 3);
                 }
             }
 
@@ -306,11 +348,10 @@ public:
             if (!areaTop.value.IsEmpty() && !learnedArea.IsEmpty()) {
                 if (AreaFuzzySame(areaTop.value, learnedArea)) {
                     s.areaMatched = true;
-                    s.areaCtxScore += (nameLen <= 2) ? 10 : 5;
                 }
                 else if (!cand.hasDeclaredArea) {
                     s.areaConflict = true;
-                    s.penalty += (nameLen <= 2) ? 8 : 4;
+                    s.penalty += (nameLen <= 2) ? 6 : 3;
                 }
             }
 
@@ -369,9 +410,11 @@ public:
         int topN = (int)(scores.size() < 3 ? scores.size() : 3);
         for (int i = 0; i < topN; ++i) {
             const auto& s = scores[i];
-            Log(debug, Format(L"  ├ Top%d 候选=%s(owner=%s%s) id=%d text=\"%s\" areaCtx=%+d jobCtx=%+d stable=%+d penalty=-%d final=%d\r\n",
+            Log(debug, Format(L"  ├ Top%d 候选=%s(owner=%s%s) id=%d text=\"%s\" scoreId=\"%s\" ocrId=\"%s\" mode=%s note=%s areaCtx=%+d jobCtx=%+d stable=%+d penalty=-%d final=%d\r\n",
                 i + 1, s.candidate.name.GetString(), s.candidate.ownerName.GetString(), s.candidate.isAlias ? L"/小号" : L"",
-                s.idScore, s.bestIdText.GetString(), s.areaCtxScore, s.jobCtxScore, s.stableBonus, s.penalty, s.finalScore));
+                s.idScore, s.bestIdText.GetString(),
+                s.scoreCandidateId.GetString(), s.scoreOcrId.GetString(), s.idMatchMode.GetString(), s.idMatchNote.GetString(),
+                s.areaCtxScore, s.jobCtxScore, s.stableBonus, s.penalty, s.finalScore));
         }
 
         if (result.ok) {
@@ -697,11 +740,11 @@ private:
             // 1) 高置信 ID 可以过；
             // 2) 手动声明的大区/#职业已命中时，短 ID 也允许低一点的 ID 分通过，
             //    解决“两字 ID + 上海1 / #职业”第一轮帧数不足的问题。
-            if (best.idScore >= 95 && gap >= 18) {
+            if (best.allowStrongIdLock && best.idScore >= 95 && gap >= 18) {
                 best.decisionReason = L"缓存不足，但 ID 高置信通过；不建议学习职业";
                 return true;
             }
-            if (nameLen <= 2 && best.idScore >= 35 && best.finalScore >= 65 && gap >= 10 && (best.areaMatched || best.jobMatched)) {
+            if (nameLen <= 2 && best.allowStrongIdLock && best.idScore >= 35 && best.finalScore >= 65 && gap >= 10 && (best.areaMatched || best.jobMatched)) {
                 best.decisionReason = L"缓存不足，但短 ID 有手动大区/职业上下文支撑";
                 return true;
             }
@@ -710,13 +753,17 @@ private:
         }
 
         if (nameLen <= 2) {
-            if (best.idScore >= 95 && best.finalScore >= 95 && gap >= 18) {
+            if (best.allowStrongIdLock && best.idScore >= 95 && best.finalScore >= 95 && gap >= 18) {
                 best.decisionReason = L"两字 ID 完整高置信命中";
                 return true;
             }
-            if (best.idScore >= 50 && best.finalScore >= 85 && gap >= 12 && (best.areaMatched || best.jobMatched)) {
+            if (best.allowStrongIdLock && best.idScore >= 50 && best.finalScore >= 85 && gap >= 12 && (best.areaMatched || best.jobMatched)) {
                 best.decisionReason = L"两字 ID 模糊命中，且有已学习大区/职业上下文支撑";
                 return true;
+            }
+            if (!best.allowStrongIdLock) {
+                best.decisionReason = L"短 ID 保护：真实ID仅1字，不靠ID分强锁，等待职业唯一";
+                return false;
             }
             best.decisionReason = L"两字 ID 保护：缺少高置信 ID 或上下文支撑";
             return false;
@@ -858,6 +905,60 @@ private:
         if (score < 0) score = 0;
         if (score > 100) score = 100;
         return score;
+    }
+
+    static int NgramCoverageScore(const CString& candidateText, const CString& ocrText, int n) {
+        CString x = NormalizeRaw(candidateText);
+        CString y = NormalizeRaw(ocrText);
+        if (x.IsEmpty() || y.IsEmpty() || n <= 0 || x.GetLength() < n) return 0;
+
+        int total = x.GetLength() - n + 1;
+        int hits = 0;
+        for (int i = 0; i <= x.GetLength() - n; ++i) {
+            CString part = x.Mid(i, n);
+            if (!part.IsEmpty() && y.Find(part) >= 0) hits++;
+        }
+        if (total <= 0) return 0;
+        return (hits * 100) / total;
+    }
+
+    static int IdPartScore(const CString& candidateText, const CString& ocrText) {
+        CString x = NormalizeRaw(candidateText);
+        CString y = NormalizeRaw(ocrText);
+        if (x.IsEmpty() || y.IsEmpty()) return 0;
+
+        int candLen = x.GetLength();
+        if (x == y) return candLen <= 1 ? 35 : 100;
+        if (y.Find(x) >= 0) return candLen <= 1 ? 28 : 100;
+
+        int lcs = LcsLen(x, y);
+        if (lcs <= 0) return 0;
+        if (candLen <= 1) return (std::min)(28, lcs * 28);
+        if (candLen == 2 && lcs == 1) return 28;
+
+        int score = (std::max)(NgramCoverageScore(x, y, 2), NgramCoverageScore(x, y, 3));
+        if (lcs >= 2 && candLen <= 4) score = (std::max)(score, 55);
+
+        int lenDiff = abs(candLen - y.GetLength());
+        if (lenDiff > candLen + 2) {
+            score -= (std::min)(25, (lenDiff - candLen - 2) * 3);
+        }
+        if (score < 0) score = 0;
+        if (score > 100) score = 100;
+        return score;
+    }
+
+    static int ExactFullIdWithAreaScore(const CString& candArea, const CString& candReal,
+        const CString& ocrArea, const CString& ocrReal) {
+        CString candForms[2] = { candArea + candReal, candReal + candArea };
+        CString ocrForms[2] = { ocrArea + ocrReal, ocrReal + ocrArea };
+        int best = 0;
+        for (const CString& c : candForms) {
+            for (const CString& o : ocrForms) {
+                best = (std::max)(best, IdPartScore(c, o));
+            }
+        }
+        return best;
     }
 
     static int LcsLen(const CString& a, const CString& b) {

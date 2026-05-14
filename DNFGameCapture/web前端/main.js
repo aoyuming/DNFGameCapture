@@ -1151,25 +1151,6 @@ function updateAliasForPlayer(playerName, oldAlias, newAlias) {
     return true;
 }
 
-function migrateMainNameInDb(oldName, newName) {
-    const oldClean = normalizeAliasTextForCompare(oldName);
-    const newClean = normalizeAliasTextForCompare(newName);
-    if (!oldClean || !newClean || oldClean === newClean) return false;
-    if (!savedDB[oldClean] && !playerDB[oldClean]) return false;
-
-    const oldSavedAliases = uniqueAliasArray(savedDB[oldClean] || []);
-    const oldPlayerAliases = uniqueAliasArray(playerDB[oldClean] || oldSavedAliases);
-    const newSavedAliases = uniqueAliasArray(savedDB[newClean] || []);
-    const newPlayerAliases = uniqueAliasArray(playerDB[newClean] || []);
-
-    savedDB[newClean] = uniqueAliasArray([...newSavedAliases, ...oldSavedAliases]);
-    playerDB[newClean] = uniqueAliasArray([...newPlayerAliases, ...oldPlayerAliases, ...savedDB[newClean]]);
-
-    delete savedDB[oldClean];
-    delete playerDB[oldClean];
-    return true;
-}
-
 function findAliasConflict(playerName, aliasName, selfInput = null) {
     const aliasClean = (aliasName || '').trim();
     if (!aliasClean) return null;
@@ -1505,12 +1486,7 @@ function createPlayerRow() {
         }
 
         const currentName = this.value.trim();
-        const previousName = (this.dataset.previousMainName || '').trim();
-        if (previousName && currentName && previousName !== currentName && !savedDB[currentName]) {
-            if (migrateMainNameInDb(previousName, currentName)) {
-                this.dataset.previousMainName = currentName;
-            }
-        }
+        this.dataset.previousMainName = currentName;
 
         const inlinePair = parseInlineMainAliasInput(currentName);
         if (inlinePair) {

@@ -70,6 +70,7 @@ static CString DnfJoinPath(const CString& a, const CString& b);
 static void DnfSendWebToast(CWebScoreDlg* webDlg, const CString& action, const CString& message);
 static bool DnfPostCloudJson(const std::string& jsonUtf8, std::string& responseUtf8, CString& errorMsg, int timeoutMs = 8000);
 static CString DnfReadLocalLicenseKey();
+void WriteMatchLog(const CString& logLine);
 void AppLog(const CString& msg, COLORREF color);
 
 static const wchar_t* DNF_CLOUD_API_HOST = L"verifykey-thaovfpoib.cn-hangzhou.fcapp.run";
@@ -155,6 +156,15 @@ static CString DnfAliasDuplicateKey(const CString& aliasRaw)
     if (sharp >= 0) key = key.Left(sharp);
     key.Trim();
     return key;
+}
+
+static CString DnfAliasDisplayName(const CString& aliasRaw, bool showDeclaredJob)
+{
+    CString alias = aliasRaw;
+    alias.Trim();
+    if (alias.IsEmpty() || showDeclaredJob) return alias;
+    CString display = DnfAliasDuplicateKey(alias);
+    return display.IsEmpty() ? alias : display;
 }
 
 static bool DnfAliasSameDuplicateId(const CString& a, const CString& b)
@@ -344,11 +354,31 @@ static CString DnfFormatClockNow()
 struct TDnfSimpleAliasMeta
 {
     CString raw;
+    CString matchId;
     CString realId;
     CString area;
     CString job;
     bool hasArea = false;
     bool hasJob = false;
+};
+
+struct TDnfPreparedIdMatch
+{
+    CString candidateId;
+    CString ocrId;
+    CString mode;
+    int score = 0;
+    int realIdLen = 0;
+    int ocrRealIdLen = 0;
+    int realIdLcs = 0;
+    bool candidateHasArea = false;
+    bool ocrHasArea = false;
+    bool bothHaveArea = false;
+    bool usedRealId = false;
+    bool oneCharRealId = false;
+    bool allowStrongIdLock = false;
+    bool areaShortIdAssist = false;
+    CString note;
 };
 
 static CString DnfNormalizeLooseText(CString s)
@@ -414,6 +444,78 @@ static int DnfFuzzyTextScore(const CString& a, const CString& b)
     int score = (lcs * 100) / mx;
     if (lcs >= 2 && mn <= 3) score = max(score, 76); // 柔道室 vs 柔道家、夏乘 vs 夏雫这类短文本
     return score;
+}
+
+static int DnfNgramCoverageScore(const CString& candidateText, const CString& ocrText, int n)
+{
+    CString x = DnfNormalizeLooseText(candidateText);
+    CString y = DnfNormalizeLooseText(ocrText);
+    if (x.IsEmpty() || y.IsEmpty() || n <= 0 || x.GetLength() < n) return 0;
+
+    int total = x.GetLength() - n + 1;
+    int hits = 0;
+    for (int i = 0; i <= x.GetLength() - n; ++i) {
+        CString part = x.Mid(i, n);
+        if (!part.IsEmpty() && y.Find(part) >= 0) hits++;
+    }
+    if (total <= 0) return 0;
+    return (hits * 100) / total;
+}
+
+static int DnfFallbackIdPartScore(const CString& candidateText, const CString& ocrText)
+{
+    CString x = DnfNormalizeLooseText(candidateText);
+    CString y = DnfNormalizeLooseText(ocrText);
+    if (x.IsEmpty() || y.IsEmpty()) return 0;
+
+    int candLen = x.GetLength();
+    if (x == y) return candLen <= 1 ? 35 : 100;
+    if (y.Find(x) >= 0) return candLen <= 1 ? 28 : 100;
+
+    int lcs = DnfLongestCommonSubstringLen(x, y);
+    if (lcs <= 0) return 0;
+    if (candLen <= 1) return min(28, lcs * 28);
+    if (candLen == 2 && lcs == 1) return 28;
+
+    int bigramScore = DnfNgramCoverageScore(x, y, 2);
+    int trigramScore = DnfNgramCoverageScore(x, y, 3);
+    int score = max(bigramScore, trigramScore);
+
+    // n-gram 分数能避免“同大区”公共片段独自把所有候选都抬到高分；
+    // LCS 只在候选很短、且确实出现连续两字以上时兜底补一点相似度。
+    if (lcs >= 2 && candLen <= 4) {
+        score = max(score, 55);
+    }
+
+    int lenDiff = abs(candLen - y.GetLength());
+    if (lenDiff > candLen + 2) {
+        score -= min(25, (lenDiff - candLen - 2) * 3);
+    }
+    if (score < 0) score = 0;
+    if (score > 100) score = 100;
+    return score;
+}
+
+static int DnfFallbackIdScore(const CString& candidateId, const CString& ocrText)
+{
+    CString x = DnfNormalizeLooseText(candidateId);
+    CString y = DnfNormalizeLooseText(ocrText);
+    if (x.IsEmpty() || y.IsEmpty()) return 0;
+    return DnfFallbackIdPartScore(candidateId, ocrText);
+}
+
+static int DnfExactFullIdWithAreaScore(const CString& candArea, const CString& candReal,
+    const CString& ocrArea, const CString& ocrReal)
+{
+    CString candForms[2] = { candArea + candReal, candReal + candArea };
+    CString ocrForms[2] = { ocrArea + ocrReal, ocrReal + ocrArea };
+    int best = 0;
+    for (const CString& c : candForms) {
+        for (const CString& o : ocrForms) {
+            best = max(best, DnfFallbackIdScore(c, o));
+        }
+    }
+    return best;
 }
 
 static CString DnfNormalizeJobAlias(CString s)
@@ -538,11 +640,92 @@ static TDnfSimpleAliasMeta DnfParseAliasMeta(const CString& rawText)
         body.Trim();
     }
 
+    meta.matchId = body;
+    meta.matchId.Trim();
     meta.hasArea = DnfTryExtractAreaToken(body, meta.area);
     body.Trim();
     meta.realId = body;
     meta.realId.Trim();
     return meta;
+}
+
+static TDnfPreparedIdMatch DnfPrepareIdMatch(const TDnfSimpleAliasMeta& candMeta, const TDnfSimpleAliasMeta& ocrMeta)
+{
+    TDnfPreparedIdMatch out;
+    out.candidateHasArea = candMeta.hasArea;
+    out.ocrHasArea = ocrMeta.hasArea;
+    out.bothHaveArea = candMeta.hasArea && ocrMeta.hasArea;
+
+    CString candFull = candMeta.matchId.IsEmpty() ? candMeta.raw : candMeta.matchId;
+    CString ocrFull = ocrMeta.matchId.IsEmpty() ? ocrMeta.raw : ocrMeta.matchId;
+    CString candReal = candMeta.realId.IsEmpty() ? candFull : candMeta.realId;
+    CString ocrReal = ocrMeta.realId.IsEmpty() ? ocrFull : ocrMeta.realId;
+    candFull.Trim(); ocrFull.Trim(); candReal.Trim(); ocrReal.Trim();
+
+    if (out.bothHaveArea) {
+        out.candidateId = candFull;
+        out.ocrId = ocrFull;
+        out.mode = L"完整ID";
+        out.usedRealId = false;
+    }
+    else {
+        out.candidateId = candReal;
+        out.ocrId = ocrReal;
+        out.mode = L"真实ID";
+        out.usedRealId = true;
+    }
+
+    CString nCandReal = DnfNormalizeLooseText(candReal);
+    out.oneCharRealId = (nCandReal.GetLength() <= 1);
+    CString nOcrReal = DnfNormalizeLooseText(ocrReal);
+    out.realIdLen = nCandReal.GetLength();
+    out.ocrRealIdLen = nOcrReal.GetLength();
+    out.realIdLcs = DnfLongestCommonSubstringLen(candReal, ocrReal);
+
+    int realScore = DnfFallbackIdScore(candReal, ocrReal);
+    int exactFullScore = out.bothHaveArea
+        ? DnfExactFullIdWithAreaScore(candMeta.area, candReal, ocrMeta.area, ocrReal)
+        : 0;
+
+    bool oneCharExactRealId = out.oneCharRealId && !nCandReal.IsEmpty() && nCandReal == nOcrReal;
+    bool twoCharAreaAssist = out.bothHaveArea && out.realIdLen == 2 && out.realIdLcs >= 1 && realScore > 0;
+    out.areaShortIdAssist = twoCharAreaAssist;
+
+    if (out.bothHaveArea && exactFullScore >= 95) {
+        out.score = exactFullScore;
+    }
+    else if (twoCharAreaAssist) {
+        out.score = max(realScore, 55);
+    }
+    else {
+        out.score = realScore;
+    }
+
+    if (out.bothHaveArea && exactFullScore >= 95 && (!out.oneCharRealId || oneCharExactRealId)) {
+        out.allowStrongIdLock = true;
+        out.note = out.oneCharRealId ? L"两边都有大区，且1字真实ID精确一致" : L"两边都有大区，完整ID高置信";
+    }
+    else if (twoCharAreaAssist) {
+        out.allowStrongIdLock = true;
+        out.note = L"2字真实ID命中1字，且两边大区一致，仅作为短ID辅助";
+    }
+    else if (!out.oneCharRealId) {
+        out.allowStrongIdLock = true;
+        out.note = out.usedRealId ? L"按真实ID匹配" : L"按完整ID匹配";
+    }
+    else {
+        out.allowStrongIdLock = false;
+        out.note = L"真实ID仅1字，不作为强ID锁定依据";
+    }
+
+    return out;
+}
+
+static TDnfPreparedIdMatch DnfPrepareIdMatch(const CString& candidateId, const CString& ocrText)
+{
+    TDnfSimpleAliasMeta candMeta = DnfParseAliasMeta(candidateId);
+    TDnfSimpleAliasMeta ocrMeta = DnfParseAliasMeta(ocrText);
+    return DnfPrepareIdMatch(candMeta, ocrMeta);
 }
 
 static bool DnfAliasMetaExactSame(const TDnfSimpleAliasMeta& a, const TDnfSimpleAliasMeta& b)
@@ -562,15 +745,9 @@ static int DnfMetaContextScore(const TDnfSimpleAliasMeta& cand, const TDnfSimple
     strongContext = false;
 
     if (cand.hasArea && ocr.hasArea) {
-        int areaScore = 0;
-        if (DnfAreaWeakSame(cand.area, ocr.area)) {
-            areaScore = (DnfAreaDigit(cand.area) == DnfAreaDigit(ocr.area) && DnfAreaDigit(cand.area) > 0) ? 18 : 10;
-            score += (visibleIdLen <= 2) ? areaScore : max(6, areaScore / 2);
-            // 大区是弱辅助：短 ID 时可以辅助，但不单独决定身份。
-        }
-        else {
-            score -= (visibleIdLen <= 2) ? 10 : 5;
-        }
+        // 大区不再作为普通上下文加分或放行条件。
+        // 它只在 DnfPrepareIdMatch() 中用于决定完整ID/真实ID打分，以及 2 字短 ID 的窄辅助。
+        if (!DnfAreaWeakSame(cand.area, ocr.area)) score -= (visibleIdLen <= 2) ? 6 : 3;
     }
 
     if (cand.hasJob && ocr.hasJob) {
@@ -1186,6 +1363,12 @@ std::mutex g_deathXDebugMutex;
 // Timer(2) 当前含义：0=无，1=普通击杀冷却，2=局间/大比分冷却。
 // 只在普通击杀冷却里允许记录“待触发X”；局间冷却不补触发，避免残留X重复计分。
 static int g_triggerCooldownKind = 0;
+static bool g_leftActiveWasDead = false;
+static bool g_rightActiveWasDead = false;
+static int g_pendingActiveDeathSide = -1; // 0=左侧，1=右侧，-1=无
+static DWORD g_pendingActiveDeathTick = 0;
+static CString g_pendingActiveDeathReason;
+static DWORD g_lastDeathXBlockedLogTick = 0;
 
 static const wchar_t* GetDeathPointName(int idx)
 {
@@ -1207,6 +1390,30 @@ void CDNFGameCaptureDlg::ResetDeathXStableState()
     memset(m_deathXStableState, 0, sizeof(m_deathXStableState));
     memset(m_deathXStableOn, 0, sizeof(m_deathXStableOn));
     memset(m_deathXStableOff, 0, sizeof(m_deathXStableOff));
+}
+
+void CDNFGameCaptureDlg::ResetMatchCooldownState(const CString& reason)
+{
+    KillTimer(2);
+    KillTimer(4);
+    m_bCanTrigger = TRUE;
+    m_bCanTriggerTeamScore = TRUE;
+    m_bPendingTeamScoreWin = false;
+    m_lastKillerTeam = -1;
+    g_triggerCooldownKind = 0;
+    ResetDeathXStableState();
+
+    g_leftActiveWasDead = false;
+    g_rightActiveWasDead = false;
+    g_pendingActiveDeathSide = -1;
+    g_pendingActiveDeathTick = 0;
+    g_pendingActiveDeathReason.Empty();
+    g_lastDeathXBlockedLogTick = 0;
+
+    CString line;
+    line.Format(L"[冷却重置] 来源=%s；已清空击杀冷却、局间冷却、队伍分冷却、待触发X和死亡X稳定状态。",
+        reason.GetString());
+    WriteMatchLog(line);
 }
 
 ScorePointF CDNFGameCaptureDlg::GetDeathXPoint(int logicalIdx) const
@@ -3413,11 +3620,28 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
     int deadBestP = -1, deadBestA = -1;
     int lockedKillerTeam = -1, lockedDeadTeam = -1;
 
-    // 全局最优记录（用于二轮兜底）
+    // 首轮全局最优记录：首轮只收集，扫完再统一决定是否锁定。
     int globalKillerBestScore = -1, globalKillerBestP = -1, globalKillerBestA = -1, globalKillerPassLine = 999;
     CString globalKillerName;
+    CString globalKillerAlias;
+    CString globalKillerFrameText;
+    int globalKillerFrameIdx = -1;
+    int globalKillerBestRealLen = 0;
+    bool globalKillerBestHasMetaContext = false;
+    int globalKillerSecondScore = -1;
+    CString globalKillerSecondName;
+    CString globalKillerSecondAlias;
+
     int globalDeadBestScore = -1, globalDeadBestP = -1, globalDeadBestA = -1, globalDeadPassLine = 999;
     CString globalDeadName;
+    CString globalDeadAlias;
+    CString globalDeadFrameText;
+    int globalDeadFrameIdx = -1;
+    int globalDeadBestRealLen = 0;
+    bool globalDeadBestHasMetaContext = false;
+    int globalDeadSecondScore = -1;
+    CString globalDeadSecondName;
+    CString globalDeadSecondAlias;
     static std::atomic<int> s_reviewEventSeq{ 1 };
     int reviewEventId = s_reviewEventSeq.fetch_add(1);
     CString killerFusionSummary;
@@ -3437,6 +3661,16 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             return;
         }
 
+        time_t now_t = time(0);
+        tm t;
+        localtime_s(&t, &now_t);
+        CString tStr;
+        tStr.Format(L"[%02d:%02d:%02d] %s", t.tm_hour, t.tm_min, t.tm_sec, (LPCTSTR)msg);
+        std::lock_guard<std::mutex> lk(g_visualLogMutex);
+        g_visualLogs.push_back({ tStr, color });
+        };
+
+    auto PushVisualOnlyLog = [&](const CString& msg, COLORREF color) {
         time_t now_t = time(0);
         tm t;
         localtime_s(&t, &now_t);
@@ -3512,9 +3746,63 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
     }
     PostMessage(WM_UPDATE_OCR_DROPDOWNS, 1, 0);
 
+    auto recordFirstRoundCandidate = [&](bool isKiller, int score, int p, int a, int passLine,
+        int realLen, bool hasMetaContext, const CString& aliasName, const CString& ocrText, int frameIdx) {
+            int& bestScore = isKiller ? globalKillerBestScore : globalDeadBestScore;
+            int& bestP = isKiller ? globalKillerBestP : globalDeadBestP;
+            int& bestA = isKiller ? globalKillerBestA : globalDeadBestA;
+            int& bestPassLine = isKiller ? globalKillerPassLine : globalDeadPassLine;
+            CString& bestName = isKiller ? globalKillerName : globalDeadName;
+            CString& bestAlias = isKiller ? globalKillerAlias : globalDeadAlias;
+            CString& bestFrameText = isKiller ? globalKillerFrameText : globalDeadFrameText;
+            int& bestFrameIdx = isKiller ? globalKillerFrameIdx : globalDeadFrameIdx;
+            int& bestRealLen = isKiller ? globalKillerBestRealLen : globalDeadBestRealLen;
+            bool& bestMeta = isKiller ? globalKillerBestHasMetaContext : globalDeadBestHasMetaContext;
+            int& secondScore = isKiller ? globalKillerSecondScore : globalDeadSecondScore;
+            CString& secondName = isKiller ? globalKillerSecondName : globalDeadSecondName;
+            CString& secondAlias = isKiller ? globalKillerSecondAlias : globalDeadSecondAlias;
+
+            CString ownerName;
+            {
+                std::lock_guard<std::mutex> lock(m_dataMutex);
+                if (p >= 0 && p < 8) ownerName = m_players[p].name;
+            }
+
+            bool replaceBest = false;
+            if (score > bestScore) {
+                replaceBest = true;
+            }
+            else if (score == bestScore && score > 0 && realLen > bestRealLen) {
+                replaceBest = true;
+            }
+
+            if (replaceBest) {
+                if (bestP != -1) {
+                    secondScore = bestScore;
+                    secondName = bestName;
+                    secondAlias = bestAlias;
+                }
+                bestScore = score;
+                bestP = p;
+                bestA = a;
+                bestPassLine = passLine;
+                bestName = ownerName;
+                bestAlias = aliasName;
+                bestFrameText = ocrText;
+                bestFrameIdx = frameIdx;
+                bestRealLen = realLen;
+                bestMeta = hasMetaContext;
+            }
+            else if (score > secondScore) {
+                secondScore = score;
+                secondName = ownerName;
+                secondAlias = aliasName;
+            }
+        };
+
     auto processMatch = [&](CString ocrResult, bool& resolved, CString& finalName,
         bool isKiller, int& outBestP, int& outBestA,
-        int& frameScore, bool isAggressive, int frameIdx) -> bool
+        int& frameScore, bool isAggressive, int frameIdx, bool collectOnly) -> bool
         {
             frameScore = -2;
             if (resolved || ocrResult.IsEmpty() || ocrResult.Find(L"No text") != -1)
@@ -3523,7 +3811,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             CString logMsg;
             logMsg.Format(L"▶ [%s] 第%d帧提取: \"%s\"",
                 isKiller ? L"找杀手" : L"找死者", frameIdx, (LPCTSTR)ocrResult);
-            PushVisualLog(logMsg, RGB(180, 180, 180));
+            WriteMatchLog(logMsg);
 
             TDnfSimpleAliasMeta ocrMeta = DnfParseAliasMeta(ocrResult);
 
@@ -3533,7 +3821,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             if (weakSingleCharOcr) {
                 CString guardLog;
                 guardLog.Format(L"  └ [🛡单字OCR保护] 本帧只读到 [%s]，没有大区/#职业，不参与名称匹配，避免误命中长ID", (LPCTSTR)ocrResult);
-                PushVisualLog(guardLog, RGB(255, 210, 80));
+                WriteMatchLog(guardLog);
                 return false;
             }
 
@@ -3552,8 +3840,17 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                     if (m_players[p].name.IsEmpty()) continue;
                     for (size_t a = 0; a < m_players[p].aliases.size(); a++) {
                         TDnfSimpleAliasMeta aliasMeta = DnfParseAliasMeta(m_players[p].aliases[a].name);
+                        TDnfPreparedIdMatch preparedExact = DnfPrepareIdMatch(aliasMeta, ocrMeta);
                         bool exactFull = (DnfNormalizeLooseText(m_players[p].aliases[a].name) == DnfNormalizeLooseText(ocrResult));
                         bool exactMeta = DnfAliasMetaExactSame(aliasMeta, ocrMeta);
+                        if ((exactFull || exactMeta) && !preparedExact.allowStrongIdLock) {
+                            CString exactSkip;
+                            exactSkip.Format(L"  └ [🛡单字ID保护] 候选[%s] 与OCR[%s] 看似唯一，但%s，等待职业唯一或更多证据。",
+                                (LPCTSTR)m_players[p].aliases[a].name, (LPCTSTR)ocrResult, (LPCTSTR)preparedExact.note);
+                            WriteMatchLog(exactSkip);
+                            exactFull = false;
+                            exactMeta = false;
+                        }
                         if (exactFull || exactMeta) {
                             exactMatchCount++;
                             exactMatchP = p;
@@ -3567,6 +3864,24 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             }
 
             if (exactMatchCount == 1) {
+                if (collectOnly) {
+                    CString aliasName;
+                    {
+                        std::lock_guard<std::mutex> lock(m_dataMutex);
+                        if (exactMatchP >= 0 && exactMatchP < 8 && exactMatchA >= 0
+                            && (size_t)exactMatchA < m_players[exactMatchP].aliases.size()) {
+                            aliasName = m_players[exactMatchP].aliases[exactMatchA].name;
+                        }
+                    }
+                    recordFirstRoundCandidate(isKiller, 100, exactMatchP, exactMatchA, 100,
+                        99, true, aliasName, ocrResult, frameIdx);
+                    CString collectLog;
+                    collectLog.Format(L"  └ [首轮收集] 精确别名候选：%s / %s，100分；等待首轮全部帧结束后统一锁定。",
+                        isKiller ? L"杀手" : L"死者",
+                        aliasName.IsEmpty() ? L"未知小号" : aliasName.GetString());
+                    WriteMatchLog(collectLog);
+                    return false;
+                }
                 // 唯一别名，直接锁定！安全且精确
                 resolved = true;
                 finalName = m_players[exactMatchP].name; // 🚨 【换成这行】：底层查重统一使用主号！
@@ -3585,7 +3900,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 return false;
             }
             else if (exactMatchCount > 1) {
-                PushVisualLog(L"  └ [⚠️别名冲突] 多个玩家拥有相同别名，等待ID帧...", RGB(255, 165, 0));
+                WriteMatchLog(L"  └ [⚠️别名冲突] 多个玩家拥有相同别名，等待ID帧...");
                 return false; // 本帧放弃
             }
 
@@ -3595,6 +3910,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             int maxScore = -2, bestP = -1, bestA = -1, bestRealLen = 0;
             bool bestHasMetaContext = false;
             std::wstring bestName;
+            CString bestAliasName;
 
             m_dataMutex.lock();
             for (int p = 0; p < 8; p++) {
@@ -3618,8 +3934,9 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                     if (m_players[p].aliases[a].name.IsEmpty()) continue;
 
                     TDnfSimpleAliasMeta aliasMeta = DnfParseAliasMeta(m_players[p].aliases[a].name);
-                    CString candId = aliasMeta.realId.IsEmpty() ? m_players[p].aliases[a].name : aliasMeta.realId;
-                    CString ocrId = ocrMeta.realId.IsEmpty() ? ocrResult : ocrMeta.realId;
+                    TDnfPreparedIdMatch prepared = DnfPrepareIdMatch(aliasMeta, ocrMeta);
+                    CString candId = prepared.candidateId.IsEmpty() ? m_players[p].aliases[a].name : prepared.candidateId;
+                    CString ocrId = prepared.ocrId.IsEmpty() ? ocrResult : prepared.ocrId;
 
                     int aliasScore = m_matcher.GetMatchScore(candId.GetString(), ocrId.GetString(), isAggressive);
                     if (aliasScore == -1) {
@@ -3627,13 +3944,19 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                         maxScore = -1;
                         break;
                     }
+                    aliasScore = max(aliasScore, prepared.score);
 
                     bool strongMetaContext = false;
                     int metaScore = DnfMetaContextScore(aliasMeta, ocrMeta, candId.GetLength(), strongMetaContext);
                     aliasScore += metaScore;
+                    if (!prepared.allowStrongIdLock) {
+                        strongMetaContext = false;
+                        aliasScore = min(aliasScore, 34);
+                    }
+                    if (prepared.areaShortIdAssist && prepared.realIdLen == 2) {
+                        strongMetaContext = true;
+                    }
 
-                    // 如果 OCR 文本里包含大区，而候选小号也声明了同一大区，
-                    // 大区在前/在后都等价加分，专门保护两字 ID 被 OCR 错一字的场景。
                     if (aliasScore > 160) aliasScore = 160;
                     aliasScore -= teamPenalty;
 
@@ -3641,7 +3964,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                         curScore = aliasScore;
                         curBestName = m_players[p].aliases[a].name.GetString();
                         curBestAlias = (int)a;
-                        curRealLen = candId.GetLength();
+                        curRealLen = prepared.realIdLen > 0 ? prepared.realIdLen : candId.GetLength();
                         curBestMetaContext = strongMetaContext;
                     }
                 }
@@ -3653,6 +3976,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                     bestP = p;
                     bestA = curBestAlias;
                     bestName = curBestName;
+                    bestAliasName = curBestName.c_str();
                     bestRealLen = curRealLen;
                     bestHasMetaContext = curBestMetaContext;
                 }
@@ -3665,11 +3989,10 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 if (isAggressive) {
                     CString keepJob;
                     keepJob.Format(L"  └ [二轮职业帧] 本帧是职业文本 [%s]，不再当成无效噪声；保留给 #职业/同职业ID 二轮兜底。", (LPCTSTR)ocrResult);
-                    PushVisualLog(keepJob, RGB(255, 210, 80));
                     WriteMatchLog(keepJob);
                 }
                 else {
-                    PushVisualLog(L"  └ [⚠️职业干扰] 跳过本帧...", RGB(120, 120, 120));
+                    WriteMatchLog(L"  └ [⚠️职业干扰] 跳过本帧...");
                 }
                 return true;
             }
@@ -3678,20 +4001,24 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
 
             // 更新全局最优记录
             if (bestP != -1) {
-                if (isKiller && maxScore > globalKillerBestScore) {
-                    globalKillerBestScore = maxScore;
-                    globalKillerBestP = bestP;
-                    globalKillerBestA = bestA;
-                    globalKillerPassLine = passLine;
-                    globalKillerName = bestName.c_str();
+                recordFirstRoundCandidate(isKiller, maxScore, bestP, bestA, passLine,
+                    bestRealLen, bestHasMetaContext, bestAliasName, ocrResult, frameIdx);
+            }
+
+            if (collectOnly) {
+                CString collectLog;
+                if (bestP != -1) {
+                    int secondScore = isKiller ? globalKillerSecondScore : globalDeadSecondScore;
+                    collectLog.Format(L"  └ [首轮收集] 本帧最高候选[%s] %d分/线%d；当前首轮最高=%d，第二=%d；等待全部帧结束后统一锁定",
+                        bestName.c_str(), maxScore, passLine,
+                        isKiller ? globalKillerBestScore : globalDeadBestScore,
+                        secondScore);
                 }
-                else if (!isKiller && maxScore > globalDeadBestScore) {
-                    globalDeadBestScore = maxScore;
-                    globalDeadBestP = bestP;
-                    globalDeadBestA = bestA;
-                    globalDeadPassLine = passLine;
-                    globalDeadName = bestName.c_str();
+                else {
+                    collectLog.Format(L"  └ [首轮收集] 本帧没有可用候选，最高=%d", maxScore);
                 }
+                WriteMatchLog(collectLog);
+                return false;
             }
 
             if (bestP != -1 && maxScore >= passLine) {
@@ -3705,7 +4032,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                     CString guardLog;
                     guardLog.Format(L"  └ [🛡短名保护] 旧算法命中候选[%s] %d分/线%d，但长度=%d；缺少大区/#职业上下文，暂不单帧锁定",
                         bestName.c_str(), maxScore, passLine, bestRealLen);
-                    PushVisualLog(guardLog, RGB(255, 210, 80));
+                    WriteMatchLog(guardLog);
                     return false;
                 }
 
@@ -3718,7 +4045,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 if (isAggressive)
                     successLog.Format(L"  └ [✨二轮匹配] 强行锁定: %s (%d分)", (LPCTSTR)finalName, maxScore);
                 else
-                    successLog.Format(L"  └ [✔首轮匹配] 成功指向: %s (%d分)", (LPCTSTR)finalName, maxScore);
+                    successLog.Format(L"  └ [✔单帧匹配] 成功指向: %s (%d分)", (LPCTSTR)finalName, maxScore);
 
                 COLORREF teamColor = (m_players[bestP].team == 0) ? RGB(255, 80, 80) : RGB(80, 180, 255);
                 PushVisualLog(successLog, teamColor);
@@ -3732,17 +4059,117 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 CString failLog;
                 failLog.Format(L"  └ [✖未达标] 最高 %d 分 (及格线: %d)", maxScore, passLine);
                 if (!isAggressive)
-                    PushVisualLog(failLog, RGB(120, 120, 120));
+                    WriteMatchLog(failLog);
             }
 
             return false;
         };
 
+    auto acceptCollectedFirstRound = [&](bool isKiller, bool& resolved, CString& finalName,
+        int& outBestP, int& outBestA, int& lockedTeam) -> bool {
+            if (resolved) return false;
+
+            int bestScore = isKiller ? globalKillerBestScore : globalDeadBestScore;
+            int bestP = isKiller ? globalKillerBestP : globalDeadBestP;
+            int bestA = isKiller ? globalKillerBestA : globalDeadBestA;
+            int passLine = isKiller ? globalKillerPassLine : globalDeadPassLine;
+            int realLen = isKiller ? globalKillerBestRealLen : globalDeadBestRealLen;
+            bool hasMeta = isKiller ? globalKillerBestHasMetaContext : globalDeadBestHasMetaContext;
+            int secondScore = isKiller ? globalKillerSecondScore : globalDeadSecondScore;
+            CString bestName = isKiller ? globalKillerName : globalDeadName;
+            CString bestAlias = isKiller ? globalKillerAlias : globalDeadAlias;
+            CString secondName = isKiller ? globalKillerSecondName : globalDeadSecondName;
+            CString secondAlias = isKiller ? globalKillerSecondAlias : globalDeadSecondAlias;
+            CString frameText = isKiller ? globalKillerFrameText : globalDeadFrameText;
+            int frameIdx = isKiller ? globalKillerFrameIdx : globalDeadFrameIdx;
+            CString roleText = isKiller ? L"杀手" : L"死者";
+
+            if (bestP < 0 || bestScore < 0) {
+                CString noBest;
+                noBest.Format(L"[首轮统一决策][%s] 未锁定：没有可用候选。", (LPCTSTR)roleText);
+                WriteMatchLog(noBest);
+                return false;
+            }
+
+            int gap = (secondScore >= 0) ? (bestScore - secondScore) : 999;
+            bool pass = bestScore >= passLine;
+            CString rejectReason;
+            if (!pass) {
+                rejectReason.Format(L"分数不够：最高%d，及格线%d", bestScore, passLine);
+            }
+            else if (realLen <= 2 && !hasMeta) {
+                pass = false;
+                rejectReason.Format(L"短ID保护：真实ID长度=%d，缺少#职业或2字ID大区辅助", realLen);
+            }
+            else if (gap < 8 && secondScore >= 0 && bestScore < 95) {
+                pass = false;
+                rejectReason.Format(L"分差不够：最高%d，第二%d，分差%d", bestScore, secondScore, gap);
+            }
+
+            if (!pass) {
+                CString fail;
+                fail.Format(L"[首轮统一决策][%s] 未锁定：最高=%s/%s %d分/线%d；第二=%s/%s %d分；来源=第%d帧\"%s\"；原因=%s。",
+                    (LPCTSTR)roleText,
+                    bestName.IsEmpty() ? L"无" : bestName.GetString(),
+                    bestAlias.IsEmpty() ? L"无" : bestAlias.GetString(),
+                    bestScore, passLine,
+                    secondName.IsEmpty() ? L"无" : secondName.GetString(),
+                    secondAlias.IsEmpty() ? L"无" : secondAlias.GetString(),
+                    secondScore,
+                    frameIdx,
+                    frameText.IsEmpty() ? L"无" : frameText.GetString(),
+                    (LPCTSTR)rejectReason);
+                WriteMatchLog(fail);
+                CString uiFail;
+                uiFail.Format(L"[首轮未锁定][%s] 最高=%s/%s %d分，原因=%s",
+                    (LPCTSTR)roleText,
+                    bestName.IsEmpty() ? L"无" : bestName.GetString(),
+                    bestAlias.IsEmpty() ? L"无" : bestAlias.GetString(),
+                    bestScore,
+                    (LPCTSTR)rejectReason);
+                PushVisualOnlyLog(uiFail, RGB(255, 210, 80));
+                return false;
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(m_dataMutex);
+                if (bestP < 0 || bestP >= 8 || m_players[bestP].name.IsEmpty()) return false;
+                finalName = m_players[bestP].name;
+                outBestP = bestP;
+                outBestA = bestA;
+                lockedTeam = m_players[bestP].team;
+            }
+            resolved = true;
+
+            CString ok;
+            ok.Format(L"[首轮统一决策][%s] 采用：主号=%s；命中小号=%s；最高=%d/线%d；第二=%s/%s %d分；分差=%d；来源=第%d帧\"%s\"；说明=首轮全部帧扫完后统一选择。",
+                (LPCTSTR)roleText,
+                (LPCTSTR)finalName,
+                bestAlias.IsEmpty() ? L"无" : bestAlias.GetString(),
+                bestScore, passLine,
+                secondName.IsEmpty() ? L"无" : secondName.GetString(),
+                secondAlias.IsEmpty() ? L"无" : secondAlias.GetString(),
+                secondScore, gap, frameIdx,
+                frameText.IsEmpty() ? L"无" : frameText.GetString());
+            COLORREF teamColor = (lockedTeam == 0) ? RGB(255, 80, 80) : RGB(80, 180, 255);
+            WriteMatchLog(ok);
+            CString bestAliasDisplay = DnfAliasDisplayName(bestAlias, false);
+            CString uiOk;
+            uiOk.Format(L"[首轮采用][%s] %s <= %s (%d分)",
+                (LPCTSTR)roleText,
+                (LPCTSTR)finalName,
+                bestAliasDisplay.IsEmpty() ? L"无" : bestAliasDisplay.GetString(),
+                bestScore);
+            PushVisualOnlyLog(uiOk, teamColor);
+            return true;
+        };
+
     // ============================================================
-    // 【简化兜底】只处理旧算法不稳定的两类：
-    //   1. 两字短 ID：需要 ID 有相似 + 职业/大区任一辅助 + 当前物理侧唯一。
-    //   2. 纯符号 ID：不看 ID 分，只看 #职业 + 当前物理侧唯一；大区只做弱辅助。
-    //   3. 普通小号：当 OCR 只给出职业帧时，允许 #职业 在当前物理侧唯一的成员兜底命中。
+    // 【简化兜底】两轮规则：
+    //   1. 第一轮只用非纯职业 OCR 帧做正常 ID 匹配。
+    //   2. 第一轮未锁定时，第二轮才用纯职业帧匹配 #职业。
+    //      同职业唯一直接锁定；同职业多人按第一轮 ID 分择优；ID 分相同固定取遍历顺序第一个。
+    //   3. 大区不再作为独立条件/加分/放行依据，只保留在 # 前完整 ID 字符串里参与普通匹配。
     // ============================================================
     auto trySimpleMetaFallback = [&](bool isKiller, int areaIndex, const std::vector<FrameData>& frames,
         bool& resolved, CString& finalName, int& outBestP, int& outBestA, int& lockedTeam) -> bool
@@ -3752,27 +4179,21 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             CString roleText = isKiller ? L"杀手" : L"死者";
             CString sideText = areaIndex == 0 ? L"左框" : L"右框";
             TDnfPanelSide panelSide = (areaIndex == 0) ? TDnfPanelSide::LeftNameArea : TDnfPanelSide::RightAreaName;
-            // 翻转红蓝只改界面/OBS显示方向，不改游戏物理左/右框对应的候选队伍。
-            int sideTeam = (areaIndex == 0) ? 0 : 1;
-            int beginP = (sideTeam == 0) ? 0 : 4;
-            int endP = beginP + 4;
-            CString sideTeamText = (sideTeam == 0) ? L"红队" : L"蓝队";
+            CString candidateScopeText = L"上场8人";
+            const int ID_LOCK_SCORE = 35;
 
             struct Evidence {
                 CString topJob;
                 int topJobCount = 0;
-                CString topArea;
-                CString weakArea;
-                int areaCount = 0;
                 std::vector<CString> idTexts;
                 CString rawList;
             } ev;
 
-            // 先收集当前物理侧候选声明过的职业，用于判断 OCR 帧是不是职业帧。
+            // 先收集上场 8 人候选声明过的职业，用于判断 OCR 帧是不是职业帧。
             std::vector<CString> declaredJobs;
             {
                 std::lock_guard<std::mutex> lock(m_dataMutex);
-                for (int p = beginP; p < endP; ++p) {
+                for (int p = 0; p < 8; ++p) {
                     for (const auto& a : m_players[p].aliases) {
                         TDnfSimpleAliasMeta am = DnfParseAliasMeta(a.name);
                         if (am.hasJob) declaredJobs.push_back(am.job);
@@ -3781,19 +4202,20 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             }
 
             auto isJobFrame = [&](const CString& raw, CString& jobOut) -> bool {
-                // 先用全局 DNF 职业库解析，避免“候选未声明职业”时把稳定职业 OCR 当成无证据。
+                // 只把纯职业帧当职业证据。含 ID/大区/额外文字的帧必须留给第一轮 ID 匹配。
                 TDnfParsedPanelText parsed = m_identityMatcher.ParsePanelText(raw, panelSide);
                 if (parsed.kind == TDnfFrameKind::Profession && !parsed.profession.IsEmpty()) {
                     jobOut = parsed.profession;
                     return true;
                 }
 
-                // 再用当前队伍小号声明的 #职业 做补充，兼容职业别名/自定义写法。
+                // 再用上场小号声明的 #职业 做补充，兼容职业别名/自定义写法。
                 CString nr = DnfNormalizeLooseText(raw);
                 if (nr.IsEmpty()) return false;
                 for (const CString& j : declaredJobs) {
                     CString nj = DnfNormalizeLooseText(j);
                     if (nj.IsEmpty()) continue;
+                    if (nr.GetLength() > nj.GetLength() + 2) continue;
                     int js = DnfFuzzyJobScore(j, raw);
                     if (js >= 72) {
                         // 输出声明职业名，后面仍用模糊匹配判断，不再要求完全相等。
@@ -3830,41 +4252,6 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 one.Format(L"第%d帧=\"%s\"", f.frameIdx, (LPCTSTR)raw);
                 ev.rawList += one;
 
-                // 大区和ID按整体OCR文本处理，但仍把大区作为弱辅助记录下来。
-                TDnfSimpleAliasMeta om = DnfParseAliasMeta(raw);
-                if (om.hasArea) {
-                    ev.topArea = om.area;
-                    ev.areaCount++;
-                }
-                else {
-                    CString weak;
-                    if (DnfRawContainsWeakArea(raw, weak)) {
-                        ev.weakArea = weak;
-                        ev.areaCount++;
-                    }
-                }
-
-                // 关键修正：# 前面的内容永远按 ID 保存；OCR 原文也永远保留参与名称匹配。
-                // 例如“上海1柔道夏乘”：
-                //   1) 原文整体：上海1柔道夏乘
-                //   2) 去大区：柔道夏乘
-                //   3) 去职业词辅助片段：夏乘
-                // 匹配时取最高分，不能因为识别出“柔道”职业词就把“柔道夏乘”丢掉。
-                addIdEvidence(raw, L"OCR原文整体");
-                if (!om.realId.IsEmpty()) addIdEvidence(om.realId, L"去掉大区后的名称");
-
-                CString noArea = raw;
-                CString areaTmp;
-                if (DnfTryExtractAreaToken(noArea, areaTmp)) {
-                    addIdEvidence(noArea, L"去掉大区后的OCR原文");
-                }
-
-                CString idText = om.realId.IsEmpty() ? noArea : om.realId;
-                CString strippedId = DnfStripJobWordsFromName(idText);
-                if (DnfNormalizeLooseText(strippedId) != DnfNormalizeLooseText(idText)) {
-                    addIdEvidence(strippedId, L"去掉职业词后的辅助ID片段");
-                }
-
                 CString job;
                 if (isJobFrame(raw, job)) {
                     CString normJob = DnfNormalizeJobAlias(job);
@@ -3886,200 +4273,338 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                         }
                     }
                 }
+                else {
+                    addIdEvidence(raw, L"非职业OCR原文整体");
+                }
             }
 
             CString head;
-            head.Format(L"[简化兜底][%s-%s] 开始：候选队伍=%s；翻转红蓝=%s；OCR原文={%s}；职业证据=%s(%d帧)；大区证据=%s；弱大区=%s；ID文本数量=%d。",
+            head.Format(L"[简化兜底][%s-%s] 开始：候选范围=%s；翻转红蓝=%s；OCR原文={%s}；职业证据=%s(%d帧)；ID文本数量=%d；规则=第一轮ID匹配，第二轮#职业匹配，大区仅作为ID普通字符。",
                 (LPCTSTR)sideText, (LPCTSTR)roleText,
-                (LPCTSTR)sideTeamText, m_bFlipSides ? L"是" : L"否",
+                (LPCTSTR)candidateScopeText, m_bFlipSides ? L"是" : L"否",
                 ev.rawList.IsEmpty() ? L"空" : ev.rawList.GetString(),
                 ev.topJob.IsEmpty() ? L"无" : ev.topJob.GetString(), ev.topJobCount,
-                ev.topArea.IsEmpty() ? L"无" : ev.topArea.GetString(),
-                ev.weakArea.IsEmpty() ? L"无" : ev.weakArea.GetString(),
                 (int)ev.idTexts.size());
             WriteMatchLog(head);
 
             struct SimpleCandidate {
                 int p = -1;
                 int a = -1;
+                int team = -1;
+                int realIdLen = 0;
+                int passLine = 999;
                 CString owner;
                 CString alias;
-                CString realId;
+                CString matchId;
                 CString job;
-                CString area;
-                bool isShort = false;
-                bool isSymbol = false;
-                bool normalIdJobFallback = false;
+                CString bestIdText;
+                CString scoreCandId;
+                CString scoreOcrId;
+                CString matchMode;
+                CString idNote;
+                bool hasJob = false;
                 bool jobMatch = false;
-                bool areaMatch = false;
+                bool allowStrongIdLock = false;
+                bool areaShortIdAssist = false;
                 int idScore = 0;
-                int finalScore = 0;
-                CString reason;
-                bool qualified = false;
             };
             std::vector<SimpleCandidate> list;
 
             {
                 std::lock_guard<std::mutex> lock(m_dataMutex);
-                for (int p = beginP; p < endP; ++p) {
+                for (int p = 0; p < 8; ++p) {
                     if (m_players[p].name.IsEmpty()) continue;
                     for (size_t a = 0; a < m_players[p].aliases.size(); ++a) {
                         TDnfSimpleAliasMeta am = DnfParseAliasMeta(m_players[p].aliases[a].name);
-                        CString realId = am.realId.IsEmpty() ? m_players[p].aliases[a].name : am.realId;
-                        CString nReal = DnfNormalizeLooseText(realId);
-                        bool isSymbol = DnfIsSymbolLikeRealId(realId);
-                        bool isShort = (nReal.GetLength() > 0 && nReal.GetLength() < 3) || isSymbol;
-
-                        // 通常只有短ID/纯符号ID进入这里；但 OCR 只给出职业帧时，
-                        // 普通小号也需要用 #职业 + 当前物理侧唯一做安全兜底。
-                        bool allowNormalIdJobFallback = (!ev.topJob.IsEmpty() && !isShort);
-                        if (!isShort && !allowNormalIdJobFallback) continue;
+                        CString matchId = am.matchId.IsEmpty() ? m_players[p].aliases[a].name : am.matchId;
+                        if (matchId.IsEmpty()) continue;
 
                         SimpleCandidate c;
                         c.p = p;
                         c.a = (int)a;
+                        c.team = m_players[p].team;
                         c.owner = m_players[p].name;
                         c.alias = m_players[p].aliases[a].name;
-                        c.realId = realId;
+                        c.matchId = matchId;
                         c.job = am.job;
-                        c.area = am.area;
-                        c.isShort = isShort;
-                        c.isSymbol = isSymbol;
-                        c.normalIdJobFallback = allowNormalIdJobFallback;
+                        c.hasJob = am.hasJob;
+                        c.realIdLen = DnfNormalizeLooseText(am.realId.IsEmpty() ? matchId : am.realId).GetLength();
+                        c.passLine = CNameMatcher::GetDynamicThreshold(c.realIdLen);
                         int jobFuzzyScore = 0;
                         c.jobMatch = am.hasJob && !ev.topJob.IsEmpty() && DnfFuzzyJobSame(am.job, ev.topJob, &jobFuzzyScore);
-                        c.areaMatch = am.hasArea && ((!ev.topArea.IsEmpty() && DnfAreaWeakSame(am.area, ev.topArea)) || (!ev.weakArea.IsEmpty() && DnfAreaWeakSame(am.area, ev.weakArea)));
 
                         for (const CString& idText : ev.idTexts) {
-                            int s1 = m_matcher.GetMatchScore(realId.GetString(), idText.GetString(), false);
-                            int s2 = DnfFuzzyTextScore(realId, idText);
-                            int s = max(s1, s2);
-                            if (s > c.idScore) c.idScore = s;
+                            TDnfPreparedIdMatch prepared = DnfPrepareIdMatch(matchId, idText);
+                            if (prepared.score > c.idScore) {
+                                c.idScore = prepared.score;
+                                c.bestIdText = idText;
+                                c.scoreCandId = prepared.candidateId;
+                                c.scoreOcrId = prepared.ocrId;
+                                c.matchMode = prepared.mode;
+                                c.idNote = prepared.note;
+                                c.allowStrongIdLock = prepared.allowStrongIdLock;
+                                c.areaShortIdAssist = prepared.areaShortIdAssist;
+                            }
                         }
 
-                        // 如果没有抽出ID片段，先记录职业词和正常小号ID的相似度；
-                        // 是否允许命中由后面的 #职业 唯一性规则决定。
-                        if (allowNormalIdJobFallback && ev.idTexts.empty()) {
-                            c.idScore = max(c.idScore, DnfFuzzyTextScore(realId, ev.topJob));
-                        }
-
-                        // 这里先只计算基础分，真正“职业唯一/同职业多人看ID”的判定放到 list 全部建好之后。
-                        if (c.isSymbol) {
-                            c.finalScore = (c.jobMatch ? 80 : 0) + (c.areaMatch ? 10 : 0);
-                            c.reason = c.jobMatch ? L"纯符号ID：职业一致，等待同侧唯一确认" : L"纯符号ID：职业证据不足";
-                        }
-                        else if (c.isShort) {
-                            c.finalScore = c.idScore + (c.jobMatch ? 25 : 0) + (c.areaMatch ? 10 : 0);
-                            c.reason = L"短ID：等待职业唯一或同职业ID分比较";
-                        }
-                        else {
-                            c.finalScore = c.idScore;
-                            c.reason = L"无#职业成员时：用职业文本弱匹配正常小号";
-                        }
                         list.push_back(c);
                     }
                 }
             }
 
-            int jobMatchCount = 0;
-            int declaredJobMatchCount = 0;
-            for (const auto& c : list) {
-                if (c.jobMatch) {
-                    jobMatchCount++;
-                    if (!c.job.IsEmpty()) declaredJobMatchCount++;
-                }
-            }
-
-            // 二轮职业规则：
-            // 1) 有 #职业 且同侧唯一：只靠职业即可锁定；
-            // 2) 同侧多个相同 #职业：再看 OCR 名称片段和各自ID谁更像；
-            // 3) 没有任何 #职业 成员：才拿职业文本去弱匹配普通小号。
-            for (auto& c : list) {
-                if (c.isSymbol) {
-                    c.qualified = c.jobMatch && ev.topJobCount >= 1;
-                    c.reason = c.qualified ? L"纯符号ID：职业模糊一致；最终还要检查同侧唯一" : L"纯符号ID：职业证据不足";
-                }
-                else if (c.isShort) {
-                    if (c.jobMatch && declaredJobMatchCount == 1) {
-                        c.qualified = true;
-                        c.finalScore = max(c.finalScore, 90 + c.idScore + (c.areaMatch ? 10 : 0));
-                        c.reason = L"短ID：职业模糊一致，且当前物理侧只有这一个 #职业 成员";
-                    }
-                    else if (c.jobMatch && declaredJobMatchCount > 1) {
-                        c.qualified = (c.idScore >= 35);
-                        c.finalScore = c.idScore + 45 + (c.areaMatch ? 10 : 0);
-                        c.reason = c.qualified ? L"短ID：同职业多人，使用OCR名称片段比较ID后通过" : L"短ID：同职业多人，但ID分不够，拒绝强判";
-                    }
-                    else {
-                        c.qualified = (c.idScore >= 45 && (c.areaMatch || ev.topJob.IsEmpty()));
-                        c.reason = c.qualified ? L"短ID：职业未命中，但ID/大区证据足够" : L"短ID：职业未命中，ID或大区证据不足";
-                    }
-                }
-                else if (c.normalIdJobFallback) {
-                    if (c.jobMatch && declaredJobMatchCount == 1) {
-                        c.qualified = true;
-                        c.finalScore = max(c.finalScore, 88 + c.idScore + (c.areaMatch ? 10 : 0));
-                        c.reason = L"正常ID：职业模糊一致，且当前物理侧只有这一个 #职业 成员";
-                    }
-                    else if (c.jobMatch && declaredJobMatchCount > 1) {
-                        c.qualified = (c.idScore >= 45 || c.areaMatch);
-                        c.finalScore = c.idScore + 45 + (c.areaMatch ? 10 : 0);
-                        c.reason = c.qualified ? L"正常ID：同职业多人，使用OCR名称片段/大区辅助后通过" : L"正常ID：同职业多人，但ID/大区证据不足，拒绝强判";
-                    }
-                    else {
-                        c.qualified = (declaredJobMatchCount == 0 && c.idScore >= 60);
-                        c.reason = c.qualified ? L"没有 #职业 成员：职业文本弱匹配正常小号通过" : L"正常ID：职业未命中，且职业文本弱匹配分不足";
-                    }
-                }
-            }
-
-            int qualifiedCount = 0;
-            int bestIdx = -1;
             for (int i = 0; i < (int)list.size(); ++i) {
                 const auto& c = list[i];
                 CString line;
-                line.Format(L"[简化兜底][%s-%s] 候选：主号=%s；小号=%s；真实ID=%s；声明职业=%s；声明大区=%s；类型=%s；ID分=%d；职业一致=%s；大区辅助一致=%s；总分=%d；是否符合=%s；原因=%s。",
+                line.Format(L"[简化兜底][%s-%s] 候选：主号=%s；小号=%s；匹配ID=%s；职业=%s；真实ID长度=%d；动态线=%d；ID分=%d；最佳ID证据=%s；候选打分ID=%s；OCR打分ID=%s；匹配方式=%s；2字大区辅助=%s；职业一致=%s；阶段=候选收集；是否采用=否；原因=%s。",
                     (LPCTSTR)sideText, (LPCTSTR)roleText,
-                    (LPCTSTR)c.owner, (LPCTSTR)c.alias, (LPCTSTR)c.realId,
+                    (LPCTSTR)c.owner, (LPCTSTR)c.alias,
+                    c.matchId.IsEmpty() ? L"无" : c.matchId.GetString(),
                     c.job.IsEmpty() ? L"无" : c.job.GetString(),
-                    c.area.IsEmpty() ? L"无" : c.area.GetString(),
-                    c.normalIdJobFallback ? L"正常ID职业弱匹配" : (c.isSymbol ? L"纯符号ID" : L"短ID"),
-                    c.idScore, (LPCTSTR)DnfBoolCN(c.jobMatch), (LPCTSTR)DnfBoolCN(c.areaMatch), c.finalScore,
-                    (LPCTSTR)DnfBoolCN(c.qualified), (LPCTSTR)c.reason);
+                    c.realIdLen, c.passLine, c.idScore,
+                    c.bestIdText.IsEmpty() ? L"无" : c.bestIdText.GetString(),
+                    c.scoreCandId.IsEmpty() ? L"无" : c.scoreCandId.GetString(),
+                    c.scoreOcrId.IsEmpty() ? L"无" : c.scoreOcrId.GetString(),
+                    c.matchMode.IsEmpty() ? L"无" : c.matchMode.GetString(),
+                    (LPCTSTR)DnfBoolCN(c.areaShortIdAssist),
+                    (LPCTSTR)DnfBoolCN(c.jobMatch),
+                    c.idNote.IsEmpty() ? L"等待两轮规则选择" : c.idNote.GetString());
                 WriteMatchLog(line);
-                if (c.qualified) {
-                    qualifiedCount++;
-                    if (bestIdx < 0 || c.finalScore > list[bestIdx].finalScore) bestIdx = i;
-                }
             }
 
-            if (qualifiedCount == 1 && bestIdx >= 0) {
-                const auto& c = list[bestIdx];
+            int blockedTeam = -1;
+            if (isKiller && lockedDeadTeam != -1) blockedTeam = lockedDeadTeam;
+            if (!isKiller && lockedKillerTeam != -1) blockedTeam = lockedKillerTeam;
+
+            auto chooseByIdScore = [&](const std::vector<int>& indices, int minScore, bool requirePassLine,
+                bool allowOneCharStrongId, CString& tieList, int& tieCount, int& bestScore) -> int {
+                bestScore = -1;
+                tieCount = 0;
+                tieList.Empty();
+                int selectedIdx = -1;
+                for (int idx : indices) {
+                    if (idx < 0 || idx >= (int)list.size()) continue;
+                    const auto& c = list[idx];
+                    if (blockedTeam != -1 && c.team == blockedTeam) {
+                        CString skip;
+                        skip.Format(L"[简化兜底][%s-%s] 跳过候选：主号=%s；小号=%s；ID分=%d；队伍=%d；原因=与另一方已锁定队伍%d冲突。",
+                            (LPCTSTR)sideText, (LPCTSTR)roleText,
+                            (LPCTSTR)c.owner, (LPCTSTR)c.alias,
+                            c.idScore, c.team, blockedTeam);
+                        WriteMatchLog(skip);
+                        continue;
+                    }
+                    if (c.idScore < minScore) continue;
+                    if (requirePassLine && c.idScore < c.passLine) continue;
+                    if (!allowOneCharStrongId && c.realIdLen <= 1 && !c.allowStrongIdLock) continue;
+                    if (!c.allowStrongIdLock) {
+                        CString skip;
+                        skip.Format(L"[简化兜底][%s-%s] 跳过候选：主号=%s；小号=%s；ID分=%d；候选打分ID=%s；OCR打分ID=%s；匹配方式=%s；原因=%s。",
+                            (LPCTSTR)sideText, (LPCTSTR)roleText,
+                            (LPCTSTR)c.owner, (LPCTSTR)c.alias,
+                            c.idScore,
+                            c.scoreCandId.IsEmpty() ? L"无" : c.scoreCandId.GetString(),
+                            c.scoreOcrId.IsEmpty() ? L"无" : c.scoreOcrId.GetString(),
+                            c.matchMode.IsEmpty() ? L"无" : c.matchMode.GetString(),
+                            c.idNote.IsEmpty() ? L"真实ID仅1字，不作为强ID锁定依据" : c.idNote.GetString());
+                        WriteMatchLog(skip);
+                        continue;
+                    }
+                    if (c.idScore > bestScore) {
+                        bestScore = c.idScore;
+                        selectedIdx = idx;
+                        tieCount = 1;
+                        tieList.Empty();
+                        CString one;
+                        one.Format(L"%s/%s/槽位%d/队伍%d", (LPCTSTR)c.owner, (LPCTSTR)c.alias, c.p + 1, c.team);
+                        tieList = one;
+                    }
+                    else if (c.idScore == bestScore) {
+                        tieCount++;
+                        CString one;
+                        one.Format(L"%s/%s/槽位%d/队伍%d", (LPCTSTR)c.owner, (LPCTSTR)c.alias, c.p + 1, c.team);
+                        if (!tieList.IsEmpty()) tieList += L"；";
+                        tieList += one;
+                    }
+                }
+                return selectedIdx;
+            };
+
+            auto chooseJobCandidateByIdScore = [&](const std::vector<int>& indices,
+                CString& tieList, int& tieCount, int& bestScore, CString& bestDetail, CString& allScores) -> int {
+                    bestScore = 0;
+                    tieCount = 0;
+                    tieList.Empty();
+                    bestDetail.Empty();
+                    allScores.Empty();
+                    int selectedIdx = -1;
+                    for (int idx : indices) {
+                        if (idx < 0 || idx >= (int)list.size()) continue;
+                        const auto& c = list[idx];
+                        CString oneScore;
+                        oneScore.Format(L"%s/%s ID分=%d", (LPCTSTR)c.owner, (LPCTSTR)c.alias, c.idScore);
+                        if (!allScores.IsEmpty()) allScores += L"；";
+                        allScores += oneScore;
+
+                        if (c.idScore < 1) continue;
+                        if (c.idScore > bestScore) {
+                            bestScore = c.idScore;
+                            selectedIdx = idx;
+                            tieCount = 1;
+                            CString one;
+                            one.Format(L"%s/%s/槽位%d/队伍%d/ID分%d", (LPCTSTR)c.owner, (LPCTSTR)c.alias, c.p + 1, c.team, c.idScore);
+                            tieList = one;
+                            bestDetail.Format(L"%s/%s ID分=%d", (LPCTSTR)c.owner, (LPCTSTR)c.alias, c.idScore);
+                        }
+                        else if (c.idScore == bestScore) {
+                            tieCount++;
+                            CString one;
+                            one.Format(L"%s/%s/槽位%d/队伍%d/ID分%d", (LPCTSTR)c.owner, (LPCTSTR)c.alias, c.p + 1, c.team, c.idScore);
+                            if (!tieList.IsEmpty()) tieList += L"；";
+                            tieList += one;
+                        }
+                    }
+                    return selectedIdx;
+                };
+
+            auto acceptCandidate = [&](int selectedIdx, const CString& mode, const CString& reason) -> bool {
+                if (selectedIdx < 0 || selectedIdx >= (int)list.size()) return false;
+                const auto& c = list[selectedIdx];
                 resolved = true;
                 finalName = c.owner;
                 outBestP = c.p;
                 outBestA = c.a;
-                lockedTeam = (c.p < 4) ? 0 : 1;
+                lockedTeam = c.team;
                 CString ok;
-                ok.Format(L"[最终采用结果][%s-%s] 通过简化兜底：主号=%s；命中小号=%s；模式=%s；采用原因=%s；说明=只在当前物理侧4人中唯一符合，所以允许锁定。",
+                ok.Format(L"[最终采用结果][%s-%s] 通过简化兜底：主号=%s；命中小号=%s；模式=%s；ID分=%d；队伍=%d；采用原因=%s；说明=两轮兜底；大区未作为独立条件、加分项或放行条件。",
                     (LPCTSTR)sideText, (LPCTSTR)roleText,
                     (LPCTSTR)c.owner, (LPCTSTR)c.alias,
-                    c.normalIdJobFallback ? L"普通小号#职业兜底" : (c.isSymbol ? L"纯符号ID职业唯一兜底" : L"短ID安全兜底"),
-                    (LPCTSTR)c.reason);
+                    (LPCTSTR)mode, c.idScore, c.team,
+                    (LPCTSTR)reason);
                 WriteMatchLog(ok);
                 COLORREF teamColor = (lockedTeam == 0) ? RGB(255, 80, 80) : RGB(80, 180, 255);
-                CString uiHit = L"  └ [简化兜底命中] ";
-                uiHit += roleText;
-                uiHit += L" => ";
-                uiHit += finalName;
-                PushVisualLog(uiHit, teamColor);
+                CString aliasDisplay = DnfAliasDisplayName(c.alias, mode.Find(L"第二轮职业") == 0);
+                CString uiHit;
+                uiHit.Format(L"[简化兜底命中][%s] %s <= %s (%s, ID分=%d)",
+                    (LPCTSTR)roleText,
+                    (LPCTSTR)finalName,
+                    aliasDisplay.IsEmpty() ? L"无" : aliasDisplay.GetString(),
+                    (LPCTSTR)mode,
+                    c.idScore);
+                PushVisualOnlyLog(uiHit, teamColor);
                 return true;
+            };
+
+            std::vector<int> allIndices;
+            allIndices.reserve(list.size());
+            for (int i = 0; i < (int)list.size(); ++i) allIndices.push_back(i);
+
+            CString tieList;
+            int tieCount = 0;
+            int bestIdScore = -1;
+            int selectedIdx = chooseByIdScore(allIndices, 1, true, true, tieList, tieCount, bestIdScore);
+            if (selectedIdx >= 0) {
+                const auto& picked = list[selectedIdx];
+                CString summary;
+                summary.Format(L"[简化兜底][%s-%s] 第一轮正常ID匹配：候选范围=上场8人；采用动态及格线；选中动态线=%d；最高ID分=%d；最高分同分候选数=%d；同分处理=固定选择遍历顺序第一个；并列=%s。",
+                    (LPCTSTR)sideText, (LPCTSTR)roleText,
+                    picked.passLine, bestIdScore, tieCount,
+                    tieList.IsEmpty() ? L"无" : tieList.GetString());
+                WriteMatchLog(summary);
+                return acceptCandidate(selectedIdx, L"第一轮正常ID匹配", L"非职业ID帧达到动态及格线，按最高ID分选择；ID分相同固定取遍历顺序第一个");
+            }
+
+            CString firstFail;
+            firstFail.Format(L"[简化兜底][%s-%s] 第一轮正常ID匹配未锁定：候选范围=上场8人；规则=动态及格线+短ID保护；当前最高可用ID分=%d；处理=进入第二轮职业匹配。",
+                (LPCTSTR)sideText, (LPCTSTR)roleText, bestIdScore);
+            WriteMatchLog(firstFail);
+
+            std::vector<int> jobIndices;
+            for (int i = 0; i < (int)list.size(); ++i) {
+                if (list[i].jobMatch) jobIndices.push_back(i);
+            }
+
+            if (ev.topJob.IsEmpty() || jobIndices.empty()) {
+                CString fail;
+                fail.Format(L"[简化兜底][%s-%s] 第二轮职业匹配失败：职业证据=%s；同职业候选数=%d。处理结果=两轮均失败，彻底失败。",
+                    (LPCTSTR)sideText, (LPCTSTR)roleText,
+                    ev.topJob.IsEmpty() ? L"无" : ev.topJob.GetString(),
+                    (int)jobIndices.size());
+                WriteMatchLog(fail);
+                CString uiFail;
+                uiFail.Format(L"[二轮职业失败][%s] 职业=%s，同职业候选=%d",
+                    (LPCTSTR)roleText,
+                    ev.topJob.IsEmpty() ? L"无" : ev.topJob.GetString(),
+                    (int)jobIndices.size());
+                PushVisualOnlyLog(uiFail, RGB(255, 210, 80));
+                return false;
+            }
+
+            std::vector<int> usableJobIndices;
+            for (int idx : jobIndices) {
+                if (idx < 0 || idx >= (int)list.size()) continue;
+                const auto& c = list[idx];
+                if (blockedTeam != -1 && c.team == blockedTeam) {
+                    CString skip;
+                    skip.Format(L"[简化兜底][%s-%s] 跳过候选：主号=%s；小号=%s；ID分=%d；队伍=%d；阶段=第二轮职业匹配；原因=与另一方已锁定队伍%d冲突。",
+                        (LPCTSTR)sideText, (LPCTSTR)roleText,
+                        (LPCTSTR)c.owner, (LPCTSTR)c.alias,
+                        c.idScore, c.team, blockedTeam);
+                    WriteMatchLog(skip);
+                    continue;
+                }
+                usableJobIndices.push_back(idx);
+            }
+
+            if (usableJobIndices.empty()) {
+                CString fail;
+                fail.Format(L"[简化兜底][%s-%s] 第二轮职业匹配失败：同职业候选数=%d，但全部被队伍约束跳过。处理结果=两轮均失败，彻底失败。",
+                    (LPCTSTR)sideText, (LPCTSTR)roleText, (int)jobIndices.size());
+                WriteMatchLog(fail);
+                CString uiFail;
+                uiFail.Format(L"[二轮职业失败][%s] 同职业候选全部被队伍约束跳过", (LPCTSTR)roleText);
+                PushVisualOnlyLog(uiFail, RGB(255, 210, 80));
+                return false;
+            }
+
+            if (usableJobIndices.size() == 1) {
+                int onlyIdx = usableJobIndices[0];
+                CString summary;
+                summary.Format(L"[简化兜底][%s-%s] 第二轮职业匹配：职业=%s；同职业可用候选数=1；处理=职业唯一直接锁定。",
+                    (LPCTSTR)sideText, (LPCTSTR)roleText,
+                    ev.topJob.IsEmpty() ? L"无" : ev.topJob.GetString());
+                WriteMatchLog(summary);
+                return acceptCandidate(onlyIdx, L"第二轮职业唯一匹配", L"#职业在上场8人可用候选中唯一，直接锁定");
+            }
+
+            CString jobTieList;
+            int jobTieCount = 0;
+            int jobBestIdScore = -1;
+            CString jobBestDetail;
+            CString jobAllScores;
+            int jobSelectedIdx = chooseJobCandidateByIdScore(usableJobIndices, jobTieList, jobTieCount, jobBestIdScore, jobBestDetail, jobAllScores);
+            if (jobSelectedIdx >= 0) {
+                CString summary;
+                summary.Format(L"[简化兜底][%s-%s] 第二轮职业匹配：职业=%s；同职业可用候选数=%d；最高ID分=%d；最高分同分候选数=%d；同分处理=固定选择遍历顺序第一个；并列=%s；同职业ID分=%s；选择说明=同职业多人按ID分选择：%s。",
+                    (LPCTSTR)sideText, (LPCTSTR)roleText,
+                    ev.topJob.IsEmpty() ? L"无" : ev.topJob.GetString(),
+                    (int)usableJobIndices.size(), jobBestIdScore, jobTieCount,
+                    jobTieList.IsEmpty() ? L"无" : jobTieList.GetString(),
+                    jobAllScores.IsEmpty() ? L"无" : jobAllScores.GetString(),
+                    jobBestDetail.IsEmpty() ? L"无" : jobBestDetail.GetString());
+                WriteMatchLog(summary);
+                return acceptCandidate(jobSelectedIdx, L"第二轮职业多人按ID分匹配", L"同职业多人，按第一轮ID分最高选择；ID分相同固定取遍历顺序第一个");
             }
 
             CString fail;
-            fail.Format(L"[简化兜底][%s-%s] 未通过：符合条件候选数=%d。处理结果=拒绝强判，避免只靠职业/大区误判。",
-                (LPCTSTR)sideText, (LPCTSTR)roleText, qualifiedCount);
+            fail.Format(L"[简化兜底][%s-%s] 第二轮职业匹配失败：职业=%s；同职业可用候选数=%d；最高ID分=%d；同职业ID分=%s；原因=同职业多人但ID分全为0，拒绝猜测。处理结果=两轮均失败，彻底失败。",
+                (LPCTSTR)sideText, (LPCTSTR)roleText,
+                ev.topJob.IsEmpty() ? L"无" : ev.topJob.GetString(),
+                (int)usableJobIndices.size(), jobBestIdScore,
+                jobAllScores.IsEmpty() ? L"无" : jobAllScores.GetString());
             WriteMatchLog(fail);
+            CString uiFail;
+            uiFail.Format(L"[二轮职业失败][%s] 同职业多人但ID分全为0", (LPCTSTR)roleText);
+            PushVisualOnlyLog(uiFail, RGB(255, 210, 80));
             return false;
         };
 
@@ -4198,7 +4723,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
     // 【核心优化】：逐帧克隆 → OCR → 匹配 → 释放
     // ========================================================
     for (size_t i = 0; i < validSlots.size(); i++) {
-        if (!m_bIsRunning || (killerResolved && deadResolved))
+        if (!m_bIsRunning)
             break;
 
         // 按需克隆单帧
@@ -4208,10 +4733,8 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
 
         // 并行 OCR
         std::future<OcrResultData> futKiller, futDead;
-        if (!killerResolved)
-            futKiller = std::async(std::launch::async, &CDNFGameCaptureDlg::RunOCR_Internal, this, hSnapshot, killerArea);
-        if (!deadResolved)
-            futDead = std::async(std::launch::async, &CDNFGameCaptureDlg::RunOCR_Internal, this, hSnapshot, deadArea);
+        futKiller = std::async(std::launch::async, &CDNFGameCaptureDlg::RunOCR_Internal, this, hSnapshot, killerArea);
+        futDead = std::async(std::launch::async, &CDNFGameCaptureDlg::RunOCR_Internal, this, hSnapshot, deadArea);
 
         OcrResultData resK = { L"", NULL };
         OcrResultData resD = { L"", NULL };
@@ -4222,15 +4745,15 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
         ::DeleteObject(hSnapshot);
 
         // 记录有效文本用于二轮匹配
-        if (!killerResolved && !resK.text.IsEmpty() && resK.text.Find(L"No text") == -1)
+        if (!resK.text.IsEmpty() && resK.text.Find(L"No text") == -1)
             historyKTexts.push_back({ resK.text, (int)(i + 1) });
-        if (!deadResolved && !resD.text.IsEmpty() && resD.text.Find(L"No text") == -1)
+        if (!resD.text.IsEmpty() && resD.text.Find(L"No text") == -1)
             historyDTexts.push_back({ resD.text, (int)(i + 1) });
 
-        // 首轮匹配
+        // 首轮只收集候选，不在单帧内直接锁定。
         int kScore = -2, dScore = -2;
-        processMatch(resK.text, killerResolved, finalKillerName, true, killerBestP, killerBestA, kScore, false, (int)(i + 1));
-        processMatch(resD.text, deadResolved, finalDeadName, false, deadBestP, deadBestA, dScore, false, (int)(i + 1));
+        processMatch(resK.text, killerResolved, finalKillerName, true, killerBestP, killerBestA, kScore, false, (int)(i + 1), true);
+        processMatch(resD.text, deadResolved, finalDeadName, false, deadBestP, deadBestA, dScore, false, (int)(i + 1), true);
 
         // 更新 OCR 下拉框
         OcrResultData& resL = killerIsLeft ? resK : resD;
@@ -4255,16 +4778,23 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             std::lock_guard<std::mutex> lk(m_debugMutex);
             m_debugOcrResult.Format(L"时光倒流 %d/%d | 杀:%s 亡:%s",
                 (int)(i + 1), (int)validSlots.size(),
-                killerResolved ? finalKillerName : L"未定",
-                deadResolved ? finalDeadName : L"未定");
+                globalKillerName.IsEmpty() ? L"未定" : globalKillerName.GetString(),
+                globalDeadName.IsEmpty() ? L"未定" : globalDeadName.GetString());
         }
         ::InvalidateRect(m_hWnd, &m_previewRect, FALSE);
     }
 
     // ============================================================
-    // 【简化兜底】首轮 OCR 扫描结束后，对短ID/纯符号ID，以及纯职业帧下的普通小号做一次安全兜底。
+    // 首轮 OCR 扫描结束后，统一采用首轮最高候选；未锁定再进入两轮兜底。
     // ============================================================
-    WriteMatchLog(L"[简化兜底] 首轮OCR结束：检查短ID/纯符号ID，以及普通小号是否满足 #职业/大区/同侧唯一兜底。" );
+    WriteMatchLog(L"[首轮统一决策] 首轮OCR扫描结束：普通模糊匹配不再单帧锁定，开始按最高分/分差/短ID保护统一决策。");
+    acceptCollectedFirstRound(true, killerResolved, finalKillerName, killerBestP, killerBestA, lockedKillerTeam);
+    acceptCollectedFirstRound(false, deadResolved, finalDeadName, deadBestP, deadBestA, lockedDeadTeam);
+
+    // ============================================================
+    // 【简化兜底】首轮统一决策未锁定后，再按两轮规则补充判断。
+    // ============================================================
+    WriteMatchLog(L"[简化兜底] 首轮OCR结束：按两轮规则检查上场8人：先用非职业ID帧匹配，未锁定再用纯职业帧匹配 #职业。" );
     trySimpleMetaFallback(true, killerArea, historyKTexts, killerResolved, finalKillerName, killerBestP, killerBestA, lockedKillerTeam);
     trySimpleMetaFallback(false, deadArea, historyDTexts, deadResolved, finalDeadName, deadBestP, deadBestA, lockedDeadTeam);
 
@@ -4274,7 +4804,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
         for (const auto& frame : historyKTexts) {
             int kScore = -2;
             processMatch(frame.text, killerResolved, finalKillerName, true,
-                killerBestP, killerBestA, kScore, true, frame.frameIdx);
+                killerBestP, killerBestA, kScore, true, frame.frameIdx, false);
             if (killerResolved) break;
         }
     }
@@ -4285,14 +4815,14 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
         for (const auto& frame : historyDTexts) {
             int dScore = -2;
             processMatch(frame.text, deadResolved, finalDeadName, false,
-                deadBestP, deadBestA, dScore, true, frame.frameIdx);
+                deadBestP, deadBestA, dScore, true, frame.frameIdx, false);
             if (deadResolved) break;
         }
     }
 
     // 二轮后再尝试一次简化兜底。
     if (!killerResolved || !deadResolved) {
-        WriteMatchLog(L"[简化兜底] 二轮OCR结束：再次检查短ID/纯符号ID/普通小号是否满足安全兜底。" );
+        WriteMatchLog(L"[简化兜底] 二轮OCR结束：再次按两轮规则检查上场8人：ID帧优先，职业帧只做第二轮兜底。" );
         trySimpleMetaFallback(true, killerArea, historyKTexts, killerResolved, finalKillerName, killerBestP, killerBestA, lockedKillerTeam);
         trySimpleMetaFallback(false, deadArea, historyDTexts, deadResolved, finalDeadName, deadBestP, deadBestA, lockedDeadTeam);
     }
@@ -4331,6 +4861,45 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
         if (!deadResolved) {
             PushVisualLog(L"❌ [彻底失败] 无法识别【死者】！请检查是否漏绑小号，或右键手动加分！", RGB(255, 80, 80));
         }
+    }
+
+    if (killerResolved && deadResolved && lockedKillerTeam != -1 && lockedDeadTeam != -1
+        && lockedKillerTeam == lockedDeadTeam) {
+        CString sameTeamLog;
+        sameTeamLog.Format(L"[队伍约束] 拒绝落账：杀手=%s(队伍%d)，死者=%s(队伍%d)，两者同队；请检查 OCR/小号绑定或手动加分。",
+            (LPCTSTR)finalKillerName, lockedKillerTeam,
+            (LPCTSTR)finalDeadName, lockedDeadTeam);
+        WriteMatchLog(sameTeamLog);
+        PushVisualLog(L"❌ [队伍约束] 杀手和死者识别到同一队，本次不自动加分", RGB(255, 120, 80));
+
+        RecentEvent review;
+        review.id = reviewEventId;
+        review.killer = finalKillerName;
+        review.dead = finalDeadName;
+        review.time = GetTickCount();
+        review.timeText = DnfFormatClockNow();
+        review.triggerSide = triggerSide;
+        review.killerIdx = killerBestP;
+        review.deadIdx = deadBestP;
+        review.killerTeam = lockedKillerTeam;
+        review.deadTeam = lockedDeadTeam;
+        review.statsApplied = false;
+        review.status = L"队伍冲突";
+        review.algorithmName = (m_nDeathAlgorithmChoice == DEATH_X_ALGO_PATCH) ? L"打补丁红蓝判断" : L"大X颜色个数判断";
+        review.ocrSummary = L"杀手OCR: ";
+        for (const auto& f : historyKTexts) {
+            CString one; one.Format(L"第%d帧=%s; ", f.frameIdx, (LPCTSTR)f.text);
+            review.ocrSummary += one;
+        }
+        review.ocrSummary += L" 死者OCR: ";
+        for (const auto& f : historyDTexts) {
+            CString one; one.Format(L"第%d帧=%s; ", f.frameIdx, (LPCTSTR)f.text);
+            review.ocrSummary += one;
+        }
+        review.candidateSummary = sameTeamLog;
+        AddReviewEvent(review);
+        PostMessage(WM_UPDATE_ALL_UI, 0, 0);
+        return;
     }
 
     // ---- 战绩更新（与原版逻辑完全一致） ----
@@ -4425,18 +4994,19 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 CString displayName = m_players[killerBestP].name;
                 if (killerBestA != -1 && (size_t)killerBestA < m_players[killerBestP].aliases.size())
                     displayName = m_players[killerBestP].aliases[killerBestA].name;
+                CString visualDisplayName = DnfAliasDisplayName(displayName, false);
 
                 COLORREF teamColor = (m_players[killerBestP].team == 0) ? RGB(255, 100, 100) : RGB(100, 180, 255);
                 CString actionLog;
                 actionLog.Format(L"⚔ [击杀成功] 玩家 [%s] 拿下一击！连杀: %d",
-                    (LPCTSTR)displayName, m_players[killerBestP].currentStreak);
+                    (LPCTSTR)visualDisplayName, m_players[killerBestP].currentStreak);
                 PushVisualLog(actionLog, teamColor);
 
                 if (m_players[killerBestP].currentStreak == 4) {
                     m_players[killerBestP].akCount++;
                     m_players[killerBestP].currentStreak = 0;
                     review.akDelta = 1;
-                    PushVisualLog(L"🌟 [AK宣告] 恐怖如斯！玩家 [" + displayName + L"] 完成一次 AK！",
+                    PushVisualLog(L"🌟 [AK宣告] 恐怖如斯！玩家 [" + visualDisplayName + L"] 完成一次 AK！",
                         RGB(255, 215, 0));
                 }
                 m_lastKillerTeam = m_players[killerBestP].team;
@@ -5134,28 +5704,23 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
     // ========================================================
     // 4. 状态机：跟踪【左侧/右侧】正在打的选手的生死，触发单局击杀
     // ========================================================
-    static bool s_leftActiveWasDead = false;
-    static bool s_rightActiveWasDead = false;
     DWORD nowTick = GetTickCount();
 
     // 普通击杀冷却期间出现的新 X，不能直接吃掉边沿；
     // 记录为“待触发 X”，等普通击杀冷却结束后，如果 X 仍存在，再补触发一次。
     // 注意：局间 ROUND_END 35 秒冷却不补触发，避免本局结束残留 X 被重复计算。
-    static int s_pendingActiveDeathSide = -1; // 0=左侧，1=右侧，-1=无
-    static DWORD s_pendingActiveDeathTick = 0;
-    static CString s_pendingActiveDeathReason;
     const DWORD PENDING_ACTIVE_X_KEEP_MS = COOLDOWN_KILL_TRIGGER + 5000;
 
     auto clearPendingActiveX = [&](const CString& reason) {
-        if (s_pendingActiveDeathSide >= 0) {
+        if (g_pendingActiveDeathSide >= 0) {
             CString line;
             line.Format(L"[X待触发] 清除待触发X：原物理侧=%s；原因=%s。",
-                s_pendingActiveDeathSide == 0 ? L"左边" : L"右边", reason.GetString());
+                g_pendingActiveDeathSide == 0 ? L"左边" : L"右边", reason.GetString());
             WriteMatchLog(line);
         }
-        s_pendingActiveDeathSide = -1;
-        s_pendingActiveDeathTick = 0;
-        s_pendingActiveDeathReason.Empty();
+        g_pendingActiveDeathSide = -1;
+        g_pendingActiveDeathTick = 0;
+        g_pendingActiveDeathReason.Empty();
     };
 
     auto rememberPendingActiveX = [&](int side, const CString& reason) {
@@ -5168,10 +5733,10 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
             WriteMatchLog(line);
             return;
         }
-        if (s_pendingActiveDeathSide == side) return;
-        s_pendingActiveDeathSide = side;
-        s_pendingActiveDeathTick = nowTick;
-        s_pendingActiveDeathReason = reason;
+        if (g_pendingActiveDeathSide == side) return;
+        g_pendingActiveDeathSide = side;
+        g_pendingActiveDeathTick = nowTick;
+        g_pendingActiveDeathReason = reason;
         CString line;
         line.Format(L"[X待触发] 已记录普通冷却期间出现的新X：物理死亡侧=%s；记录原因=%s；保留时间=%lu毫秒；说明=冷却结束后若X仍存在，将补进OCR匹配。",
             side == 0 ? L"左边" : L"右边", reason.GetString(), PENDING_ACTIVE_X_KEEP_MS);
@@ -5191,9 +5756,9 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
     };
 
     // 如果普通冷却期间吞过一次 X 边沿，冷却结束后在这里补触发。
-    if (s_pendingActiveDeathSide >= 0) {
-        bool pendingStillDead = (s_pendingActiveDeathSide == 0) ? leftActiveDead : rightActiveDead;
-        DWORD pendingAge = nowTick - s_pendingActiveDeathTick;
+    if (g_pendingActiveDeathSide >= 0) {
+        bool pendingStillDead = (g_pendingActiveDeathSide == 0) ? leftActiveDead : rightActiveDead;
+        DWORD pendingAge = nowTick - g_pendingActiveDeathTick;
         if (!pendingStillDead) {
             clearPendingActiveX(L"对应大X已经消失，说明不需要补触发");
         }
@@ -5201,8 +5766,8 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
             clearPendingActiveX(L"待触发X超过保留时间，避免录像暂停/残留X重复结算");
         }
         else if (m_bCanTrigger) {
-            int side = s_pendingActiveDeathSide;
-            CString oldReason = s_pendingActiveDeathReason;
+            int side = g_pendingActiveDeathSide;
+            CString oldReason = g_pendingActiveDeathReason;
             clearPendingActiveX(L"普通冷却结束且X仍存在，准备补触发");
             CString fireReason = L"普通冷却期间待触发X补触发；原记录原因=";
             fireReason += oldReason;
@@ -5213,41 +5778,40 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
     // ========================================================
     // 日志输出：只提示主将 X 已识别但未触发，避免刷屏
     // ========================================================
-    static DWORD s_lastDebugLogTime = 0;
-    if (nowTick - s_lastDebugLogTime > 1000)
+    if (nowTick - g_lastDeathXBlockedLogTick > 1000)
     {
-        if (leftActiveDead && (!m_bCanTrigger || s_leftActiveWasDead))
+        if (leftActiveDead && (!m_bCanTrigger || g_leftActiveWasDead))
         {
             CString reason = !m_bCanTrigger ? L"防抖冷却中" : L"状态已记录(未重置)";
             AppLog(L"🟡 左侧大X已识别但未触发匹配 (原因:" + reason + L")", RGB(255, 180, 0));
             CString diag;
             diag.Format(L"[X触发诊断] 大X已经识别但没有进入OCR匹配：当前是否翻转红蓝=%s；物理侧=左边；是否允许触发击杀=%s；未触发原因=%s；左侧X上一状态=%s；右侧X上一状态=%s；待触发X=%s。",
                 m_bFlipSides ? L"是" : L"否", m_bCanTrigger ? L"是" : L"否", (LPCTSTR)reason,
-                s_leftActiveWasDead ? L"已记录为死亡" : L"未记录为死亡",
-                s_rightActiveWasDead ? L"已记录为死亡" : L"未记录为死亡",
-                s_pendingActiveDeathSide == 0 ? L"左侧已记录" : (s_pendingActiveDeathSide == 1 ? L"右侧已记录" : L"无"));
+                g_leftActiveWasDead ? L"已记录为死亡" : L"未记录为死亡",
+                g_rightActiveWasDead ? L"已记录为死亡" : L"未记录为死亡",
+                g_pendingActiveDeathSide == 0 ? L"左侧已记录" : (g_pendingActiveDeathSide == 1 ? L"右侧已记录" : L"无"));
             WriteMatchLog(diag);
-            s_lastDebugLogTime = nowTick;
+            g_lastDeathXBlockedLogTick = nowTick;
         }
 
-        if (rightActiveDead && (!m_bCanTrigger || s_rightActiveWasDead))
+        if (rightActiveDead && (!m_bCanTrigger || g_rightActiveWasDead))
         {
             CString reason = !m_bCanTrigger ? L"防抖冷却中" : L"状态已记录(未重置)";
             AppLog(L"🟡 右侧大X已识别但未触发匹配 (原因:" + reason + L")", RGB(255, 180, 0));
             CString diag;
             diag.Format(L"[X触发诊断] 大X已经识别但没有进入OCR匹配：当前是否翻转红蓝=%s；物理侧=右边；是否允许触发击杀=%s；未触发原因=%s；左侧X上一状态=%s；右侧X上一状态=%s；待触发X=%s。",
                 m_bFlipSides ? L"是" : L"否", m_bCanTrigger ? L"是" : L"否", (LPCTSTR)reason,
-                s_leftActiveWasDead ? L"已记录为死亡" : L"未记录为死亡",
-                s_rightActiveWasDead ? L"已记录为死亡" : L"未记录为死亡",
-                s_pendingActiveDeathSide == 0 ? L"左侧已记录" : (s_pendingActiveDeathSide == 1 ? L"右侧已记录" : L"无"));
+                g_leftActiveWasDead ? L"已记录为死亡" : L"未记录为死亡",
+                g_rightActiveWasDead ? L"已记录为死亡" : L"未记录为死亡",
+                g_pendingActiveDeathSide == 0 ? L"左侧已记录" : (g_pendingActiveDeathSide == 1 ? L"右侧已记录" : L"无"));
             WriteMatchLog(diag);
-            s_lastDebugLogTime = nowTick;
+            g_lastDeathXBlockedLogTick = nowTick;
         }
     }
 
     // 🎯 左边正在打的死了 -> 右边赢了这一小局！(传入 0 代表左边被击杀)
-    if (leftActiveDead && !s_leftActiveWasDead) {
-        s_leftActiveWasDead = true;
+    if (leftActiveDead && !g_leftActiveWasDead) {
+        g_leftActiveWasDead = true;
         if (m_bCanTrigger) {
             fireActiveXTrigger(0, L"左侧大X产生新的死亡边沿，允许触发");
         }
@@ -5255,14 +5819,14 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
             rememberPendingActiveX(0, L"左侧大X产生新的死亡边沿，但当时正在防抖冷却");
         }
     }
-    else if (!leftActiveDead && s_leftActiveWasDead) {
-        s_leftActiveWasDead = false;
-        if (s_pendingActiveDeathSide == 0) clearPendingActiveX(L"左侧大X消失，边沿状态复位");
+    else if (!leftActiveDead && g_leftActiveWasDead) {
+        g_leftActiveWasDead = false;
+        if (g_pendingActiveDeathSide == 0) clearPendingActiveX(L"左侧大X消失，边沿状态复位");
     }
 
     // 🎯 右边正在打的死了 -> 左边赢了这一小局！(传入 1 代表右边被击杀)
-    if (rightActiveDead && !s_rightActiveWasDead) {
-        s_rightActiveWasDead = true;
+    if (rightActiveDead && !g_rightActiveWasDead) {
+        g_rightActiveWasDead = true;
         if (m_bCanTrigger) {
             fireActiveXTrigger(1, L"右侧大X产生新的死亡边沿，允许触发");
         }
@@ -5270,9 +5834,9 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
             rememberPendingActiveX(1, L"右侧大X产生新的死亡边沿，但当时正在防抖冷却");
         }
     }
-    else if (!rightActiveDead && s_rightActiveWasDead) {
-        s_rightActiveWasDead = false;
-        if (s_pendingActiveDeathSide == 1) clearPendingActiveX(L"右侧大X消失，边沿状态复位");
+    else if (!rightActiveDead && g_rightActiveWasDead) {
+        g_rightActiveWasDead = false;
+        if (g_pendingActiveDeathSide == 1) clearPendingActiveX(L"右侧大X消失，边沿状态复位");
     }
 
     // ========================================================
@@ -5723,7 +6287,7 @@ void CDNFGameCaptureDlg::OnBnClickedReset() {
         m_totalScoreRed = 0;
         m_totalScoreBlue = 0;
         m_recentEvents.clear();
-        ResetDeathXStableState();
+        ResetMatchCooldownState(L"手动战绩归零");
         for (int i = 0; i < 8; i++) {
             m_players[i].kills = 0; m_players[i].deaths = 0;
             m_players[i].currentStreak = 0; m_players[i].akCount = 0;
@@ -8385,6 +8949,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 m_totalScoreRed = 0;
                 m_totalScoreBlue = 0;
                 m_recentEvents.clear();
+                ResetMatchCooldownState(L"Web重置");
                 for (int i = 0; i < 8; i++) {
                     m_players[i].kills = 0;
                     m_players[i].deaths = 0;
