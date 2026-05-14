@@ -31,6 +31,10 @@ let pendingAliasPopoverName = '';
 let pendingAliasPopoverInput = null;
 let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
+const WEB_LAYOUT_VERSION = '20260515-layout-fit-diagnostics';
+let lastLayoutFitScale = 1;
+let lastLayoutDiagSignature = '';
+let layoutDiagnosticsTimer = null;
 
 // Ctrl 选择互换模式状态（与所在行无关，模块级即可，但放在 createPlayerRow 外更好）
 // 建议放在文件顶部全局区域，或至少在 createPlayerRow 外定义
@@ -332,6 +336,77 @@ function layoutActiveAliasPopovers() {
     });
 }
 
+function getLayoutDiagnostics() {
+    const shell = document.querySelector('.app-shell');
+    const body = document.body;
+    const html = document.documentElement;
+    const previousScale = lastLayoutFitScale || 1;
+
+    if (shell) shell.style.setProperty('--layout-fit-scale', '1');
+    const shellRect = shell ? shell.getBoundingClientRect() : { width: 0, height: 0 };
+    const viewportW = window.innerWidth || html.clientWidth || 0;
+    const viewportH = window.innerHeight || html.clientHeight || 0;
+    const bodyStyle = window.getComputedStyle(body);
+    const padLeft = parseFloat(bodyStyle.paddingLeft) || 0;
+    const padRight = parseFloat(bodyStyle.paddingRight) || 0;
+    const usableW = Math.max(1, viewportW - padLeft - padRight);
+    const naturalW = Math.ceil(shellRect.width || body.scrollWidth || 0);
+    const naturalH = Math.ceil(shellRect.height || body.scrollHeight || 0);
+    const fitScale = naturalW > usableW ? Math.max(0.5, Math.min(1, usableW / naturalW)) : 1;
+
+    if (shell) shell.style.setProperty('--layout-fit-scale', String(fitScale));
+    lastLayoutFitScale = fitScale;
+
+    return {
+        layoutVersion: WEB_LAYOUT_VERSION,
+        metaLayoutVersion: document.querySelector('meta[name="dnf-web-layout-version"]')?.content || '',
+        href: location.href,
+        innerWidth: viewportW,
+        innerHeight: viewportH,
+        devicePixelRatio: Number(window.devicePixelRatio || 1),
+        bodyScrollWidth: body.scrollWidth,
+        bodyScrollHeight: body.scrollHeight,
+        htmlClientWidth: html.clientWidth,
+        htmlClientHeight: html.clientHeight,
+        appShellNaturalWidth: naturalW,
+        appShellNaturalHeight: naturalH,
+        usableWidth: Math.round(usableW),
+        fitScale,
+        previousScale
+    };
+}
+
+function applyLayoutFitScale(sendDiag = false, reason = 'layout') {
+    const diag = getLayoutDiagnostics();
+    if (sendDiag && window.chrome?.webview) {
+        const signature = [
+            reason,
+            diag.innerWidth,
+            diag.bodyScrollWidth,
+            diag.appShellNaturalWidth,
+            diag.fitScale.toFixed(3),
+            diag.devicePixelRatio
+        ].join('|');
+        if (signature !== lastLayoutDiagSignature) {
+            lastLayoutDiagSignature = signature;
+            window.chrome.webview.postMessage({
+                action: 'web_layout_diagnostics',
+                reason,
+                data: diag
+            });
+        }
+    }
+    layoutActiveAliasPopovers();
+    return diag;
+}
+
+function scheduleLayoutFit(sendDiag = false, reason = 'layout') {
+    if (layoutDiagnosticsTimer) clearTimeout(layoutDiagnosticsTimer);
+    layoutDiagnosticsTimer = setTimeout(() => {
+        applyLayoutFitScale(sendDiag, reason);
+    }, 50);
+}
+
 if (window.chrome && window.chrome.webview) {
     window.chrome.webview.addEventListener('message', function (event) {
         try {
@@ -398,6 +473,7 @@ if (window.chrome && window.chrome.webview) {
                 }
                 normalizeAllAliasStores();
                 applyStateFromServer(msg.data);
+                scheduleLayoutFit(true, 'sync-state');
 
                 if (!restorePendingAliasPopover()) {
                     let activeRowInput = document.querySelector('.player-row.active-row .name-input');
@@ -412,6 +488,9 @@ if (window.chrome && window.chrome.webview) {
             }
             else if (msg.action === 'console_logs') {
                 appendConsoleLogs(msg.logs || []);
+            }
+            else if (msg.action === 'web_zoom_calibrated') {
+                scheduleLayoutFit(true, 'zoom-calibrated');
             }
             else if (msg.action === 'auth_result' || msg.action === 'start_guard' || msg.action === 'patch_result' || msg.action === 'alias_submit_result' || msg.action === 'alias_sync_result') { showAlert(msg.message); }
             else if (msg.action === 'alias_direct_sync_result') {
@@ -635,8 +714,7 @@ function getWebContentHeight() {
 }
 
 function requestWebWindowResize(force = false) {
-    // WebView 窗口现在由 C++ 使用固定尺寸控制。保留这个函数给现有调用点，
-    // 但不再把内容高度回推给 C++，避免页面渲染/弹层变化导致窗口反复跳动。
+    scheduleLayoutFit(!!force, force ? 'resize-force' : 'resize');
 }
 
 function getActivePlayerNames() {
@@ -2156,7 +2234,7 @@ if (window.ResizeObserver) {
     const webSizeObserver = new ResizeObserver(() => requestWebWindowResize());
     webSizeObserver.observe(document.body);
 }
-window.addEventListener('load', requestWebWindowResize);
+window.addEventListener('load', () => scheduleLayoutFit(true, 'load'));
 window.addEventListener('resize', requestWebWindowResize);
 window.addEventListener('resize', layoutActiveAliasPopovers);
-setTimeout(requestWebWindowResize, 300);
+setTimeout(() => scheduleLayoutFit(true, 'startup-300ms'), 300);

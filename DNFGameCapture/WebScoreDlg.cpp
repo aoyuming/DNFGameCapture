@@ -4,6 +4,8 @@
 #include "WebScoreDlg.h"
 #include <WebView2EnvironmentOptions.h>
 
+void WriteMatchLog(const CString& logLine);
+
 namespace {
     // 参考图1的紧凑 CSS 视口尺寸。窗口外框会按当前系统边框自动反推。
     constexpr int kReferenceClientWidth = 720;
@@ -117,6 +119,7 @@ void CWebScoreDlg::InitWebView2()
                             GetClientRect(&rect);
                             m_webviewController->put_Bounds(rect);
                             ApplyDpiNormalizedZoom();
+                            WriteWebHostDiagnostics(L"WebView2控制器已创建");
 
                             // 接收来自 JS 的 JSON 数据
                             EventRegistrationToken token;
@@ -163,7 +166,7 @@ void CWebScoreDlg::OnSize(UINT nType, int cx, int cy)
 	if (m_webviewController != nullptr) {
 		CRect bounds(0, 0, cx, cy);
 		m_webviewController->put_Bounds(bounds);
-        ApplyDpiNormalizedZoom();
+        if (!m_webZoomCalibrated) ApplyDpiNormalizedZoom();
 	}
 }
 
@@ -203,11 +206,11 @@ void CWebScoreDlg::ResizeWindowToSize(int targetWindowW, int targetWindowH)
     if (newY < work.top) newY = work.top;
 
     if (abs(windowRect.Width() - targetWindowW) < 2 && abs(windowRect.Height() - targetWindowH) < 2) {
-        ApplyDpiNormalizedZoom();
+        if (!m_webZoomCalibrated) ApplyDpiNormalizedZoom();
         return;
     }
     SetWindowPos(nullptr, newX, newY, targetWindowW, targetWindowH, SWP_NOZORDER | SWP_NOACTIVATE);
-    ApplyDpiNormalizedZoom();
+    if (!m_webZoomCalibrated) ApplyDpiNormalizedZoom();
 }
 
 void CWebScoreDlg::ResizeWindowForClientSize(int targetClientW, int targetClientH)
@@ -228,7 +231,78 @@ void CWebScoreDlg::ApplyDpiNormalizedZoom()
 {
     if (m_webviewController == nullptr) return;
     // 以 Windows 125% 缩放下的旧版图1为视觉基准。
-    m_webviewController->put_ZoomFactor(GetDpiNormalizedWebZoom(m_hWnd));
+    m_currentWebZoom = GetDpiNormalizedWebZoom(m_hWnd);
+    m_webviewController->put_ZoomFactor(m_currentWebZoom);
+}
+
+bool CWebScoreDlg::CalibrateZoomFromWebMetrics(int innerWidth, int innerHeight, const CString& reason)
+{
+    if (m_webviewController == nullptr || innerWidth <= 0 || innerHeight <= 0) return false;
+
+    double actualZoom = m_currentWebZoom > 0.0 ? m_currentWebZoom : GetDpiNormalizedWebZoom(m_hWnd);
+    double controllerZoom = 0.0;
+    if (SUCCEEDED(m_webviewController->get_ZoomFactor(&controllerZoom)) && controllerZoom > 0.0) {
+        actualZoom = controllerZoom;
+    }
+
+    const double widthRatio = static_cast<double>(innerWidth) / static_cast<double>(kReferenceClientWidth);
+    const double heightRatio = static_cast<double>(innerHeight) / static_cast<double>(kReferenceClientHeight);
+    double measuredRatio = widthRatio;
+    if (heightRatio > 0.0 && heightRatio < measuredRatio) measuredRatio = heightRatio;
+    if (measuredRatio <= 0.0) return false;
+
+    double correctedZoom = actualZoom * measuredRatio;
+    if (correctedZoom < 0.50) correctedZoom = 0.50;
+    if (correctedZoom > 2.00) correctedZoom = 2.00;
+
+    if (fabs(correctedZoom - actualZoom) < 0.015) return false;
+
+    CString line;
+    line.Format(L"[Web布局诊断][C++] 自动校正WebViewZoom：原因=%s；JS inner=%dx%d；目标CSS=%dx%d；原Zoom=%.3f；新Zoom=%.3f；说明=按前端实测视口反推，修正系统/兼容性DPI未被GetDpiForWindow捕获的额外缩放。",
+        reason.GetString(),
+        innerWidth, innerHeight,
+        kReferenceClientWidth, kReferenceClientHeight,
+        actualZoom, correctedZoom);
+    WriteMatchLog(line);
+
+    m_currentWebZoom = correctedZoom;
+    m_webZoomCalibrated = true;
+    m_webviewController->put_ZoomFactor(correctedZoom);
+    return true;
+}
+
+void CWebScoreDlg::WriteWebHostDiagnostics(const CString& reason)
+{
+    if (!m_hWnd) return;
+
+    wchar_t exePath[MAX_PATH] = {};
+    GetModuleFileName(NULL, exePath, MAX_PATH);
+
+    CRect clientRect;
+    CRect windowRect;
+    GetClientRect(&clientRect);
+    GetWindowRect(&windowRect);
+
+    double zoom = GetDpiNormalizedWebZoom(m_hWnd);
+    if (m_webviewController != nullptr) {
+        double actualZoom = 0.0;
+        if (SUCCEEDED(m_webviewController->get_ZoomFactor(&actualZoom)) && actualZoom > 0.0) {
+            zoom = actualZoom;
+        }
+    }
+
+    CString line;
+    line.Format(L"[Web布局诊断][C++] 原因=%s；exe版本=%s；exe路径=%s；窗口=%dx%d；client=%dx%d；DPI缩放=%.3f；WebViewZoom=%.3f；布局期望CSS=%dx%d；目标视觉缩放=%.3f。",
+        reason.GetString(),
+        CURRENT_VERSION,
+        exePath,
+        windowRect.Width(), windowRect.Height(),
+        clientRect.Width(), clientRect.Height(),
+        GetDpiScaleForWindow(m_hWnd),
+        zoom,
+        kReferenceClientWidth, kReferenceClientHeight,
+        kTargetVisualScale);
+    WriteMatchLog(line);
 }
 
 void CWebScoreDlg::ApplyFixedWindowHeight()
@@ -247,4 +321,5 @@ void CWebScoreDlg::ApplyFixedWindowHeight()
     ResizeWindowForClientSize(
         ScaleCssSizeToNativePixels(kReferenceClientWidth, kTargetVisualScale),
         ScaleCssSizeToNativePixels(kReferenceClientHeight, kTargetVisualScale));
+    WriteWebHostDiagnostics(L"固定Web窗口尺寸已应用");
 }

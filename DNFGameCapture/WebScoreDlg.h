@@ -21,6 +21,8 @@ public:
 	void ApplyFixedWindowHeight();
 	void ResizeWindowToSize(int targetWindowW, int targetWindowH);
 	void ResizeWindowForClientSize(int targetClientW, int targetClientH);
+	void WriteWebHostDiagnostics(const CString& reason);
+	bool CalibrateZoomFromWebMetrics(int innerWidth, int innerHeight, const CString& reason);
 
 	// 对话框数据
 #ifdef AFX_DESIGN_TIME
@@ -46,6 +48,8 @@ private:
 	int m_baseWindowWidth = 0;
 	int m_baseWindowHeight = 0;
 	bool m_initialWindowSizeApplied = false;
+	double m_currentWebZoom = 0.0;
+	bool m_webZoomCalibrated = false;
 
 	void InitWebView2();
 	void ApplyDpiNormalizedZoom();

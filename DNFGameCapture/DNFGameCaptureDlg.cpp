@@ -8645,6 +8645,51 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
         // 🚨 接收前端的心跳，立马给它推送全部数据！
         if (action == "page_ready") {
             BroadcastStateToWeb();
+            if (m_pWebDlg) m_pWebDlg->WriteWebHostDiagnostics(L"前端page_ready");
+        }
+        else if (action == "web_layout_diagnostics") {
+            auto& data = j["data"];
+            CString layoutVersion = data.contains("layoutVersion") ? CA2W(data["layoutVersion"].get<std::string>().c_str(), CP_UTF8) : L"";
+            CString metaLayoutVersion = data.contains("metaLayoutVersion") ? CA2W(data["metaLayoutVersion"].get<std::string>().c_str(), CP_UTF8) : L"";
+            CString href = data.contains("href") ? CA2W(data["href"].get<std::string>().c_str(), CP_UTF8) : L"";
+            double fitScale = data.value("fitScale", 1.0);
+            double dpr = data.value("devicePixelRatio", 1.0);
+            int innerWidth = data.value("innerWidth", 0);
+            int innerHeight = data.value("innerHeight", 0);
+            int bodyScrollWidth = data.value("bodyScrollWidth", 0);
+            int bodyScrollHeight = data.value("bodyScrollHeight", 0);
+            int appShellNaturalWidth = data.value("appShellNaturalWidth", 0);
+            int appShellNaturalHeight = data.value("appShellNaturalHeight", 0);
+            int usableWidth = data.value("usableWidth", 0);
+            CString reason = j.contains("reason") ? CA2W(j["reason"].get<std::string>().c_str(), CP_UTF8) : L"";
+
+            CString diag;
+            diag.Format(L"[Web布局诊断][JS] 原因=%s；layoutVersion=%s；meta=%s；href=%s；inner=%dx%d；DPR=%.3f；bodyScroll=%dx%d；appShell自然=%dx%d；usableWidth=%d；fitScale=%.3f。",
+                reason.GetString(),
+                layoutVersion.GetString(),
+                metaLayoutVersion.GetString(),
+                href.GetString(),
+                innerWidth, innerHeight,
+                dpr,
+                bodyScrollWidth, bodyScrollHeight,
+                appShellNaturalWidth, appShellNaturalHeight,
+                usableWidth,
+                fitScale);
+            WriteMatchLog(diag);
+
+            if (m_pWebDlg && reason != L"zoom-calibrated") {
+                bool calibrated = m_pWebDlg->CalibrateZoomFromWebMetrics(innerWidth, innerHeight, reason);
+                if (calibrated) {
+                    DnfSendWebToast(m_pWebDlg, L"web_zoom_calibrated", L"");
+                }
+            }
+
+            if (layoutVersion != metaLayoutVersion || fitScale < 0.999 || bodyScrollWidth > innerWidth + 2) {
+                CString warn;
+                warn.Format(L"⚠️ [Web布局] 前端尺寸异常或文件未同步：JS=%s，HTML=%s，fit=%.3f，scrollW=%d，innerW=%d",
+                    layoutVersion.GetString(), metaLayoutVersion.GetString(), fitScale, bodyScrollWidth, innerWidth);
+                AppLog(warn, RGB(255, 180, 0));
+            }
         }
         else if (action == "update_state") {
             std::lock_guard<std::mutex> lock(m_dataMutex);

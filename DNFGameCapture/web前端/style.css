@@ -5,6 +5,7 @@
     --red-team: #ff0055;
     --text-main: #ffffff;
     --text-muted: #8b8b9f;
+    --layout-fit-scale: 1;
 }
 
 body {
@@ -27,6 +28,8 @@ body {
     gap: 15px;
     width: fit-content;
     margin-left: 0;
+    transform: scale(var(--layout-fit-scale));
+    transform-origin: top center;
 }
 
 .left-stack {
