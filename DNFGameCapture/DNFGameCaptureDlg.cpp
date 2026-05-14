@@ -44,10 +44,16 @@ const int ID_BTN_RESET = 1008;
 const int ID_BTN_BROWSE = 1013;
 const int ID_EDIT_DIR = 1014;
 const int ID_BTN_INPUT_KEY = 1020; // 输入授权码按钮ID
+const int ID_BTN_DEATH_X_CALIBRATE = 1036;
+const int ID_BTN_DEATH_X_SAVE = 1037;
+const int ID_BTN_DEATH_X_CANCEL = 1038;
+const int ID_BTN_DEATH_X_DEFAULT = 1039;
 const CString PLACEHOLDER_TEXT = L"输入：主号(小号1)(小号2)...";
 
 constexpr int DEATH_X_ALGO_COLOR = 0;      // 当前颜色采样算法
 constexpr int DEATH_X_ALGO_PATCH = 1;      // 打补丁红蓝点算法
+constexpr int DEATH_X_COLOR_SAMPLE_COUNT = 16;
+constexpr int DEATH_X_PATCH_SAMPLE_COUNT = 4;
 constexpr int DEATH_X_PATCH_COLOR_TOL = 30;
 constexpr int DEATH_X_COLOR_TOL = 40;       // 当前算法：#D53000 三通道上下容差
 constexpr int DEATH_X_PATCH_REQUIRED_HITS = 3;       // 打补丁红蓝判断：左右一红一蓝 + 上/下至少一个红蓝点
@@ -67,9 +73,6 @@ static CString DnfReadLocalLicenseKey();
 void AppLog(const CString& msg, COLORREF color);
 
 static const wchar_t* DNF_CLOUD_API_HOST = L"verifykey-thaovfpoib.cn-hangzhou.fcapp.run";
-
-struct ScorePointF { float x; float y; };
-
 
 // ========================================================
 // 小号格式校验：真实 ID 少于 3 个字符时，必须带大区或 #职业。
@@ -1084,6 +1087,67 @@ static ScorePointF GetDeathLogicPoint(int logicalIdx)
     return g_deathPts[GetDeathRawIndex(logicalIdx)];
 }
 
+static bool IsValidDeathPoint(ScorePointF pt)
+{
+    return pt.x > 0.0f && pt.x < 1.0f && pt.y > 0.0f && pt.y < 1.0f;
+}
+
+static bool IsActiveDeathPoint(int logicalIdx)
+{
+    return logicalIdx == DP_LEFT_ACTIVE || logicalIdx == DP_RIGHT_ACTIVE;
+}
+
+static void GetDeathXColorStep(int logicalIdx, float& stepX, float& stepY)
+{
+    stepX = 0.015f / 4.0f;
+    stepY = 0.025f / 4.0f;
+    if (!IsActiveDeathPoint(logicalIdx)) {
+        stepX /= 2.0f;
+        stepY /= 2.0f;
+    }
+}
+
+static int BuildDeathXColorSamples(int logicalIdx, ScorePointF center, float outX[DEATH_X_COLOR_SAMPLE_COUNT], float outY[DEATH_X_COLOR_SAMPLE_COUNT])
+{
+    float stepX = 0.0f;
+    float stepY = 0.0f;
+    GetDeathXColorStep(logicalIdx, stepX, stepY);
+
+    int count = 0;
+    for (int i = 1; i <= 4 && count + 3 < DEATH_X_COLOR_SAMPLE_COUNT; ++i) {
+        outX[count] = center.x - i * stepX; outY[count] = center.y - i * stepY; ++count; // 左上
+        outX[count] = center.x + i * stepX; outY[count] = center.y + i * stepY; ++count; // 右下
+        outX[count] = center.x + i * stepX; outY[count] = center.y - i * stepY; ++count; // 右上
+        outX[count] = center.x - i * stepX; outY[count] = center.y + i * stepY; ++count; // 左下
+    }
+    return count;
+}
+
+static void GetDeathXPatchStep(int logicalIdx, float& stepX, float& stepY, float& patchMul)
+{
+    stepX = 0.015f / 4.0f;
+    stepY = 0.015f / 4.0f;
+    if (!IsActiveDeathPoint(logicalIdx)) {
+        stepX /= 2.0f;
+        stepY /= 2.0f;
+    }
+    patchMul = IsActiveDeathPoint(logicalIdx) ? DEATH_X_PATCH_MUL_ACTIVE : DEATH_X_PATCH_MUL_NORMAL;
+}
+
+static int BuildDeathXPatchSamples(int logicalIdx, ScorePointF center, float outX[DEATH_X_PATCH_SAMPLE_COUNT], float outY[DEATH_X_PATCH_SAMPLE_COUNT])
+{
+    float stepX = 0.0f;
+    float stepY = 0.0f;
+    float patchMul = 1.0f;
+    GetDeathXPatchStep(logicalIdx, stepX, stepY, patchMul);
+
+    outX[0] = center.x;                    outY[0] = center.y - patchMul * stepY; // 上
+    outX[1] = center.x;                    outY[1] = center.y + patchMul * stepY; // 下
+    outX[2] = center.x - patchMul * stepX; outY[2] = center.y;                    // 左
+    outX[3] = center.x + patchMul * stepX; outY[3] = center.y;                    // 右
+    return DEATH_X_PATCH_SAMPLE_COUNT;
+}
+
 // ========================================================
 // 【实时调试】8 个死亡 X 的检测快照
 // 说明：CheckColorTrigger() 每次刷新这里，Draw() 直接画到预览画面上。
@@ -1102,6 +1166,11 @@ struct DeathXDebugState {
     float hitY[DEATH_POINT_COUNT][16];
     int hitDir[DEATH_POINT_COUNT][16];
     COLORREF hitColor[DEATH_POINT_COUNT][16];       // 命中点实际像素颜色
+    int colorSampleCount[DEATH_POINT_COUNT];
+    float colorSampleX[DEATH_POINT_COUNT][DEATH_X_COLOR_SAMPLE_COUNT];     // 大X颜色算法全部理论采样点
+    float colorSampleY[DEATH_POINT_COUNT][DEATH_X_COLOR_SAMPLE_COUNT];
+    bool colorSampleHit[DEATH_POINT_COUNT][DEATH_X_COLOR_SAMPLE_COUNT];    // 当前帧该理论点是否命中红橙
+    COLORREF colorSampleColor[DEATH_POINT_COUNT][DEATH_X_COLOR_SAMPLE_COUNT];
     int patchPointCount[DEATH_POINT_COUNT];
     float patchX[DEATH_POINT_COUNT][4];             // 打补丁红蓝判断 4 个检测点
     float patchY[DEATH_POINT_COUNT][4];
@@ -1133,6 +1202,218 @@ static const wchar_t* GetDeathPointName(int idx)
     }
 }
 
+void CDNFGameCaptureDlg::ResetDeathXStableState()
+{
+    memset(m_deathXStableState, 0, sizeof(m_deathXStableState));
+    memset(m_deathXStableOn, 0, sizeof(m_deathXStableOn));
+    memset(m_deathXStableOff, 0, sizeof(m_deathXStableOff));
+}
+
+ScorePointF CDNFGameCaptureDlg::GetDeathXPoint(int logicalIdx) const
+{
+    if (logicalIdx < 0 || logicalIdx >= DEATH_POINT_COUNT) return GetDeathLogicPoint(0);
+    return m_deathXPoints[logicalIdx];
+}
+
+void CDNFGameCaptureDlg::SetDeathXPoint(int logicalIdx, ScorePointF pt)
+{
+    if (logicalIdx < 0 || logicalIdx >= DEATH_POINT_COUNT) return;
+    pt.x = max(0.0f, min(1.0f, pt.x));
+    pt.y = max(0.0f, min(1.0f, pt.y));
+    m_deathXPoints[logicalIdx] = pt;
+    ResetDeathXStableState();
+}
+
+void CDNFGameCaptureDlg::SelectDeathXPoint(int logicalIdx)
+{
+    if (logicalIdx < 0 || logicalIdx >= DEATH_POINT_COUNT) return;
+    m_selectedDeathXPoint = logicalIdx;
+    InvalidateRect(&m_previewRect, FALSE);
+}
+
+bool CDNFGameCaptureDlg::MoveSelectedDeathXPointByPixels(int dx, int dy)
+{
+    if (!m_bDeathXCalibrationMode ||
+        m_selectedDeathXPoint < 0 ||
+        m_selectedDeathXPoint >= DEATH_POINT_COUNT ||
+        m_previewRect.Width() <= 0 ||
+        m_previewRect.Height() <= 0) {
+        return false;
+    }
+
+    ScorePointF pt = GetDeathXPoint(m_selectedDeathXPoint);
+    pt.x += (float)dx / (float)max(1, m_previewRect.Width());
+    pt.y += (float)dy / (float)max(1, m_previewRect.Height());
+    SetDeathXPoint(m_selectedDeathXPoint, pt);
+    InvalidateRect(&m_previewRect, FALSE);
+    return true;
+}
+
+void CDNFGameCaptureDlg::ApplyDefaultDeathXPoints()
+{
+    for (int i = 0; i < DEATH_POINT_COUNT; ++i) {
+        m_deathXPoints[i] = GetDeathLogicPoint(i);
+    }
+    m_bDeathXCustomPoints = false;
+    ResetDeathXStableState();
+}
+
+void CDNFGameCaptureDlg::SnapshotDeathXCalibration()
+{
+    for (int i = 0; i < DEATH_POINT_COUNT; ++i) {
+        m_deathXSnapshotPoints[i] = m_deathXPoints[i];
+    }
+}
+
+CPoint CDNFGameCaptureDlg::DeathXPointToClient(ScorePointF pt) const
+{
+    return CPoint(
+        m_previewRect.left + (int)(pt.x * m_previewRect.Width()),
+        m_previewRect.top + (int)(pt.y * m_previewRect.Height()));
+}
+
+ScorePointF CDNFGameCaptureDlg::ClientToDeathXPoint(CPoint point) const
+{
+    ScorePointF pt;
+    pt.x = (float)(point.x - m_previewRect.left) / (float)max(1, m_previewRect.Width());
+    pt.y = (float)(point.y - m_previewRect.top) / (float)max(1, m_previewRect.Height());
+    pt.x = max(0.0f, min(1.0f, pt.x));
+    pt.y = max(0.0f, min(1.0f, pt.y));
+    return pt;
+}
+
+int CDNFGameCaptureDlg::HitTestDeathXPoint(CPoint point) const
+{
+    if (!m_bDeathXCalibrationMode || m_previewRect.Width() <= 0 || m_previewRect.Height() <= 0) return -1;
+    int bestIdx = -1;
+    int bestDist2 = 999999;
+    const int hitRadius = 18;
+    for (int i = 0; i < DEATH_POINT_COUNT; ++i) {
+        CPoint p = DeathXPointToClient(m_deathXPoints[i]);
+        int dx = point.x - p.x;
+        int dy = point.y - p.y;
+        int d2 = dx * dx + dy * dy;
+        if (d2 < bestDist2) {
+            bestDist2 = d2;
+            bestIdx = i;
+        }
+    }
+    return bestDist2 <= hitRadius * hitRadius ? bestIdx : -1;
+}
+
+void CDNFGameCaptureDlg::LoadDeathXCalibrationFromIni()
+{
+    ApplyDefaultDeathXPoints();
+    if (m_iniPath.IsEmpty()) return;
+    if (GetPrivateProfileInt(L"Settings", L"DeathXCustomEnabled", 0, m_iniPath) != 1) return;
+
+    ScorePointF loaded[DEATH_POINT_COUNT] = {};
+    for (int i = 0; i < DEATH_POINT_COUNT; ++i) {
+        CString key;
+        key.Format(L"DeathXPoint%d", i);
+        wchar_t buf[64] = {};
+        ::GetPrivateProfileString(L"Settings", key, L"", buf, 64, m_iniPath);
+        float x = -1.0f, y = -1.0f;
+        if (swscanf_s(buf, L"%f,%f", &x, &y) != 2) {
+            ApplyDefaultDeathXPoints();
+            return;
+        }
+        loaded[i] = { x, y };
+        if (!IsValidDeathPoint(loaded[i])) {
+            ApplyDefaultDeathXPoints();
+            return;
+        }
+    }
+
+    for (int i = 0; i < DEATH_POINT_COUNT; ++i) {
+        m_deathXPoints[i] = loaded[i];
+    }
+    m_bDeathXCustomPoints = true;
+    ResetDeathXStableState();
+}
+
+void CDNFGameCaptureDlg::SaveDeathXCalibrationToIni()
+{
+    bool sameAsDefault = true;
+    for (int i = 0; i < DEATH_POINT_COUNT; ++i) {
+        ScorePointF defPt = GetDeathLogicPoint(i);
+        if (fabs(m_deathXPoints[i].x - defPt.x) > 0.00005f ||
+            fabs(m_deathXPoints[i].y - defPt.y) > 0.00005f) {
+            sameAsDefault = false;
+            break;
+        }
+    }
+
+    if (sameAsDefault) {
+        ::WritePrivateProfileString(L"Settings", L"DeathXCustomEnabled", L"0", m_iniPath);
+        for (int i = 0; i < DEATH_POINT_COUNT; ++i) {
+            CString key;
+            key.Format(L"DeathXPoint%d", i);
+            ::WritePrivateProfileString(L"Settings", key, NULL, m_iniPath);
+        }
+        m_bDeathXCustomPoints = false;
+    }
+    else {
+        ::WritePrivateProfileString(L"Settings", L"DeathXCustomEnabled", L"1", m_iniPath);
+        for (int i = 0; i < DEATH_POINT_COUNT; ++i) {
+            CString key, val;
+            key.Format(L"DeathXPoint%d", i);
+            val.Format(L"%.6f,%.6f", m_deathXPoints[i].x, m_deathXPoints[i].y);
+            ::WritePrivateProfileString(L"Settings", key, val, m_iniPath);
+        }
+        m_bDeathXCustomPoints = true;
+    }
+    ResetDeathXStableState();
+}
+
+void CDNFGameCaptureDlg::UpdateDeathXCalibrationButtons()
+{
+    if (!m_btnDeathXSave.m_hWnd || !m_btnDeathXCancel.m_hWnd || !m_btnDeathXDefault.m_hWnd) return;
+    bool show = m_bDeathXCalibrationMode && m_previewRect.Width() > 0 && m_previewRect.Height() > 0;
+    int y = m_previewRect.top + 10;
+    int x = m_previewRect.left + 10;
+    int h = 28;
+    m_btnDeathXSave.MoveWindow(x, y, 90, h);
+    m_btnDeathXCancel.MoveWindow(x + 96, y, 70, h);
+    m_btnDeathXDefault.MoveWindow(x + 172, y, 90, h);
+    m_btnDeathXSave.ShowWindow(show ? SW_SHOW : SW_HIDE);
+    m_btnDeathXCancel.ShowWindow(show ? SW_SHOW : SW_HIDE);
+    m_btnDeathXDefault.ShowWindow(show ? SW_SHOW : SW_HIDE);
+}
+
+void CDNFGameCaptureDlg::EnterDeathXCalibrationMode()
+{
+    if (m_bDeathXCalibrationMode) return;
+    SnapshotDeathXCalibration();
+    m_bDeathXCalibrationMode = true;
+    m_selectedDeathXPoint = 0;
+    m_dragDeathXPoint = -1;
+    m_bDraggingDeathXPoint = false;
+    if (m_btnDeathXCalibrate.m_hWnd) m_btnDeathXCalibrate.SetWindowText(L"校准中");
+    UpdateDeathXCalibrationButtons();
+    ResetDeathXStableState();
+    InvalidateRect(&m_previewRect, FALSE);
+    SetFocus();
+    AppLog(L"🎯 [X校准] 已进入死亡X拖拽校准模式，拖动预览上的 8 个点实时调整。", RGB(0, 255, 255));
+}
+
+void CDNFGameCaptureDlg::ExitDeathXCalibrationMode(bool restoreSnapshot)
+{
+    if (restoreSnapshot) {
+        for (int i = 0; i < DEATH_POINT_COUNT; ++i) {
+            m_deathXPoints[i] = m_deathXSnapshotPoints[i];
+        }
+    }
+    m_bDeathXCalibrationMode = false;
+    m_selectedDeathXPoint = -1;
+    m_dragDeathXPoint = -1;
+    m_bDraggingDeathXPoint = false;
+    if (GetCapture() == this) ReleaseCapture();
+    if (m_btnDeathXCalibrate.m_hWnd) m_btnDeathXCalibrate.SetWindowText(L"X校准");
+    UpdateDeathXCalibrationButtons();
+    ResetDeathXStableState();
+    InvalidateRect(&m_previewRect, FALSE);
+}
 
 // ========================================================
 // 【新增】：完美的 MessageBox 强行居中钩子引擎
@@ -1580,13 +1861,19 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     ON_WM_PAINT()
     ON_WM_ERASEBKGND()
     ON_WM_CLOSE()
+    ON_WM_KEYDOWN()
     ON_WM_LBUTTONDOWN()
+    ON_WM_LBUTTONUP()
     ON_BN_CLICKED(ID_BTN_START, OnBnClickedStart)
     ON_BN_CLICKED(ID_BTN_APPLY, OnBnClickedApply)
     ON_BN_CLICKED(ID_CHK_FLIP, OnBnClickedFlip)
     ON_BN_CLICKED(ID_BTN_RESET, OnBnClickedReset)
     ON_BN_CLICKED(ID_BTN_BROWSE, OnBnClickedBrowseDir)
     ON_BN_CLICKED(ID_BTN_INPUT_KEY, OnBnClickedInputKey)
+    ON_BN_CLICKED(ID_BTN_DEATH_X_CALIBRATE, OnBnClickedDeathXCalibrate)
+    ON_BN_CLICKED(ID_BTN_DEATH_X_SAVE, OnBnClickedDeathXSave)
+    ON_BN_CLICKED(ID_BTN_DEATH_X_CANCEL, OnBnClickedDeathXCancel)
+    ON_BN_CLICKED(ID_BTN_DEATH_X_DEFAULT, OnBnClickedDeathXDefault)
     ON_WM_SYSCOMMAND()
     ON_WM_HOTKEY()
     ON_EN_CHANGE(1025, &CDNFGameCaptureDlg::OnChangeEditNamesInput) // 1001是你输入框的ID
@@ -1622,7 +1909,64 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
 
 END_MESSAGE_MAP()
 
+bool CDNFGameCaptureDlg::HandleDeathXCalibrationKey(UINT vk)
+{
+    if (!m_bDeathXCalibrationMode) return false;
+
+    if (vk >= '1' && vk <= '8') {
+        SelectDeathXPoint((int)(vk - '1'));
+        return true;
+    }
+
+    int step = (::GetKeyState(VK_SHIFT) & 0x8000) ? 10 : 1;
+    int dx = 0;
+    int dy = 0;
+    switch (vk) {
+    case VK_LEFT:
+        dx = -step;
+        break;
+    case VK_RIGHT:
+        dx = step;
+        break;
+    case VK_UP:
+        dy = -step;
+        break;
+    case VK_DOWN:
+        dy = step;
+        break;
+    default:
+        break;
+    }
+
+    return (dx != 0 || dy != 0) && MoveSelectedDeathXPointByPixels(dx, dy);
+}
+
+BOOL CDNFGameCaptureDlg::PreTranslateMessage(MSG* pMsg)
+{
+    if (m_bDeathXCalibrationMode && pMsg && pMsg->message == WM_KEYDOWN) {
+        if (HandleDeathXCalibrationKey((UINT)pMsg->wParam)) return TRUE;
+    }
+
+    return CWnd::PreTranslateMessage(pMsg);
+}
+
+void CDNFGameCaptureDlg::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
+{
+    if (HandleDeathXCalibrationKey(nChar)) return;
+    CWnd::OnKeyDown(nChar, nRepCnt, nFlags);
+}
+
 void CDNFGameCaptureDlg::OnMouseMove(UINT nFlags, CPoint point) {
+    if (m_bDeathXCalibrationMode && m_bDraggingDeathXPoint && m_dragDeathXPoint >= 0) {
+        if (m_previewRect.PtInRect(point)) {
+            m_selectedDeathXPoint = m_dragDeathXPoint;
+            SetDeathXPoint(m_dragDeathXPoint, ClientToDeathXPoint(point));
+            InvalidateRect(&m_previewRect, FALSE);
+        }
+        CWnd::OnMouseMove(nFlags, point);
+        return;
+    }
+
     // 鼠标在预览区移动时，高频重绘触发显微镜画面
     if (m_w > 0 && m_previewRect.PtInRect(point)) {
         InvalidateRect(&m_previewRect, FALSE);
@@ -1631,38 +1975,79 @@ void CDNFGameCaptureDlg::OnMouseMove(UINT nFlags, CPoint point) {
 }
 
 void CDNFGameCaptureDlg::OnRButtonDown(UINT nFlags, CPoint point) {
-    // 【右键撤销功能】：点错了直接右键，删掉上一个点
-    if (m_w > 0 && m_previewRect.PtInRect(point)) {
-        if (!m_selectPts.empty()) {
-            m_selectPts.pop_back();
-            InvalidateRect(&m_previewRect, FALSE);
-        }
+    if (m_bDeathXCalibrationMode) {
+        CWnd::OnRButtonDown(nFlags, point);
+        return;
     }
     CWnd::OnRButtonDown(nFlags, point);
 }
 
 void CDNFGameCaptureDlg::OnLButtonDown(UINT nFlags, CPoint point) {
     if (m_w <= 0 || m_h <= 0) return;
-    if (m_previewRect.PtInRect(point)) {
-        if (m_selectPts.size() >= DEATH_RAW_POINT_COUNT) m_selectPts.clear(); // 改为 8 个关键点
-        m_selectPts.push_back(CPoint(
-            (int)(((float)(point.x - m_previewRect.left) / m_previewRect.Width()) * 10000.0f),
-            (int)(((float)(point.y - m_previewRect.top) / m_previewRect.Height()) * 10000.0f)
-        ));
-        InvalidateRect(&m_previewRect, FALSE);
-
-        // 凑齐 40 个点后，直接生成全新的数组代码
-        if (m_selectPts.size() == DEATH_RAW_POINT_COUNT) {
-            CString res;
-            res.Format(L"ScorePointF g_deathPts[%d] = {\r\n", DEATH_RAW_POINT_COUNT);
-            for (int i = 0; i < DEATH_RAW_POINT_COUNT; i++) {
-                CString t; t.Format(L"    { %.4ff, %.4ff },\r\n", m_selectPts[i].x / 10000.0f, m_selectPts[i].y / 10000.0f); res += t;
-            }
-            m_editOcrResult.SetWindowText(res + L"};\r\n");
-            MessageBox(L"🎉 40个大X坐标已采集完毕！\r\n请去右侧日志框复制代码。");
+    if (m_bDeathXCalibrationMode) {
+        int idx = HitTestDeathXPoint(point);
+        if (idx >= 0) {
+            SelectDeathXPoint(idx);
+            m_dragDeathXPoint = idx;
+            m_bDraggingDeathXPoint = true;
+            SetCapture();
+            SetDeathXPoint(idx, ClientToDeathXPoint(point));
+            InvalidateRect(&m_previewRect, FALSE);
+            CString msg;
+            msg.Format(L"🎯 [X校准] 正在拖动 %s：%.4f, %.4f",
+                GetDeathPointName(idx), m_deathXPoints[idx].x, m_deathXPoints[idx].y);
+            AppLog(msg, RGB(0, 255, 255));
         }
+        CWnd::OnLButtonDown(nFlags, point);
+        return;
     }
     CWnd::OnLButtonDown(nFlags, point);
+}
+
+void CDNFGameCaptureDlg::OnLButtonUp(UINT nFlags, CPoint point) {
+    if (m_bDeathXCalibrationMode && m_bDraggingDeathXPoint) {
+        if (m_previewRect.PtInRect(point) && m_dragDeathXPoint >= 0) {
+            SetDeathXPoint(m_dragDeathXPoint, ClientToDeathXPoint(point));
+        }
+        m_bDraggingDeathXPoint = false;
+        m_dragDeathXPoint = -1;
+        if (GetCapture() == this) ReleaseCapture();
+        InvalidateRect(&m_previewRect, FALSE);
+        CWnd::OnLButtonUp(nFlags, point);
+        return;
+    }
+    CWnd::OnLButtonUp(nFlags, point);
+}
+
+void CDNFGameCaptureDlg::OnBnClickedDeathXCalibrate() {
+    if (m_bDeathXCalibrationMode) {
+        ExitDeathXCalibrationMode(true);
+        AppLog(L"↩️ [X校准] 已取消校准，恢复进入校准前的点位。", RGB(255, 180, 0));
+    }
+    else {
+        EnterDeathXCalibrationMode();
+    }
+}
+
+void CDNFGameCaptureDlg::OnBnClickedDeathXSave() {
+    SaveDeathXCalibrationToIni();
+    SnapshotDeathXCalibration();
+    ExitDeathXCalibrationMode(false);
+    AppLog(L"✅ [X校准] 死亡X点位已保存到 config.ini。", RGB(0, 255, 100));
+}
+
+void CDNFGameCaptureDlg::OnBnClickedDeathXCancel() {
+    ExitDeathXCalibrationMode(true);
+    AppLog(L"↩️ [X校准] 已取消校准，恢复进入校准前的点位。", RGB(255, 180, 0));
+}
+
+void CDNFGameCaptureDlg::OnBnClickedDeathXDefault() {
+    ApplyDefaultDeathXPoints();
+    if (m_bDeathXCalibrationMode && m_selectedDeathXPoint < 0) {
+        m_selectedDeathXPoint = 0;
+    }
+    InvalidateRect(&m_previewRect, FALSE);
+    AppLog(L"🎯 [X校准] 已恢复内置默认点位；点击保存后才会写入 config.ini。", RGB(0, 255, 255));
 }
 
 void CDNFGameCaptureDlg::OnHotKey(UINT nHotKeyId, UINT nKey1, UINT nKey2) {
@@ -2498,6 +2883,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_hDebugOcrBmp[0] = NULL; m_hDebugOcrBmp[1] = NULL;
     m_viewIndexLeft = -1; m_viewIndexRight = -1;
     m_lastLaunchOcrTime = 0;
+    ApplyDefaultDeathXPoints();
 
     GdiplusStartupInput gpi;
     GdiplusStartup(&m_gdiplusToken, &gpi, NULL);
@@ -2578,13 +2964,20 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     if (m_nDeathAlgorithmChoice < 0 || m_nDeathAlgorithmChoice > 1) m_nDeathAlgorithmChoice = 0;
     m_cmbDeathAlgorithm.SetCurSel(m_nDeathAlgorithmChoice);
 
-    m_cmbCaptureEngine.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, CRect(460, row1_Y, 590, row1_Y + 200), this, 1030); m_cmbCaptureEngine.SetFont(&m_font);
+    m_btnDeathXCalibrate.Create(L"X校准", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(460, row1_Y, 530, row1_Y + 25), this, ID_BTN_DEATH_X_CALIBRATE); m_btnDeathXCalibrate.SetFont(&m_font);
+
+    m_cmbCaptureEngine.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, CRect(535, row1_Y, 665, row1_Y + 200), this, 1030); m_cmbCaptureEngine.SetFont(&m_font);
     m_cmbCaptureEngine.AddString(L"🔄 自动选择引擎"); m_cmbCaptureEngine.AddString(L"🎮 WGC 硬件捕获"); m_cmbCaptureEngine.AddString(L"🖥️ PrintWindow");
     m_nCaptureEngineChoice = GetPrivateProfileInt(L"Settings", L"CaptureEngine", 0, m_iniPath); if (m_nCaptureEngineChoice < 0 || m_nCaptureEngineChoice > 2) m_nCaptureEngineChoice = 0;
     m_cmbCaptureEngine.SetCurSel(m_nCaptureEngineChoice);
-    m_cmbTargetWindow.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, CRect(595, row1_Y, r.right - 105, row1_Y + 400), this, 1031); m_cmbTargetWindow.SetFont(&m_font);
+    m_cmbTargetWindow.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, CRect(670, row1_Y, r.right - 105, row1_Y + 400), this, 1031); m_cmbTargetWindow.SetFont(&m_font);
     RefreshTargetList();
     m_chkCropTitle.Create(L"去标题栏", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, CRect(r.right - 100, row1_Y, r.right - 10, row1_Y + 25), this, 1032); m_chkCropTitle.SetFont(&m_font); m_chkCropTitle.SetCheck(BST_CHECKED);
+
+    m_btnDeathXSave.Create(L"保存X点位", WS_CHILD | BS_PUSHBUTTON, CRect(10, 10, 100, 38), this, ID_BTN_DEATH_X_SAVE); m_btnDeathXSave.SetFont(&m_font); m_btnDeathXSave.ShowWindow(SW_HIDE);
+    m_btnDeathXCancel.Create(L"取消", WS_CHILD | BS_PUSHBUTTON, CRect(106, 10, 176, 38), this, ID_BTN_DEATH_X_CANCEL); m_btnDeathXCancel.SetFont(&m_font); m_btnDeathXCancel.ShowWindow(SW_HIDE);
+    m_btnDeathXDefault.Create(L"恢复默认", WS_CHILD | BS_PUSHBUTTON, CRect(182, 10, 272, 38), this, ID_BTN_DEATH_X_DEFAULT); m_btnDeathXDefault.SetFont(&m_font); m_btnDeathXDefault.ShowWindow(SW_HIDE);
+
     int row2_Y = row1_Y + 35; int halfW = (r.right - 30) / 2;
     m_cmbTeamSelect.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, CRect(10, row2_Y, 80, row2_Y + 200), this, 1024); m_cmbTeamSelect.SetFont(&m_font); m_cmbTeamSelect.AddString(L"[红队]"); m_cmbTeamSelect.AddString(L"[蓝队]"); m_cmbTeamSelect.SetCurSel(0);
     m_editQuickAdd.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_MULTILINE | ES_WANTRETURN | WS_VSCROLL, CRect(85, row2_Y, halfW - 55, row2_Y + 30), this, 1025); m_editQuickAdd.SetFont(&m_font); m_editQuickAdd.SetWindowText(PLACEHOLDER_TEXT);
@@ -2609,6 +3002,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_btnInputKey.Create(L"输入授权码", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(r.right - rightBtnW - 10, dirY, r.right - 10, dirY + btnH), this, ID_BTN_INPUT_KEY); m_btnInputKey.SetFont(&m_font);
 
     // 加载配置
+    LoadDeathXCalibrationFromIni();
     LoadConfigFromFile();
     LoadAliasDB();
     SyncDataToTree();
@@ -4199,6 +4593,11 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
     float debugHitY[DEATH_POINT_COUNT][16] = { 0 };
     int debugHitDir[DEATH_POINT_COUNT][16] = { 0 };
     COLORREF debugHitColor[DEATH_POINT_COUNT][16] = { 0 };
+    int debugColorSampleCount[DEATH_POINT_COUNT] = { 0 };
+    float debugColorSampleX[DEATH_POINT_COUNT][DEATH_X_COLOR_SAMPLE_COUNT] = { 0 };
+    float debugColorSampleY[DEATH_POINT_COUNT][DEATH_X_COLOR_SAMPLE_COUNT] = { 0 };
+    bool debugColorSampleHit[DEATH_POINT_COUNT][DEATH_X_COLOR_SAMPLE_COUNT] = { false };
+    COLORREF debugColorSampleColor[DEATH_POINT_COUNT][DEATH_X_COLOR_SAMPLE_COUNT] = { 0 };
     int debugPatchPointCount[DEATH_POINT_COUNT] = { 0 };
     float debugPatchX[DEATH_POINT_COUNT][4] = { 0 };
     float debugPatchY[DEATH_POINT_COUNT][4] = { 0 };
@@ -4413,39 +4812,22 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
         // 点位顺序：0=上，1=下，2=左，3=右。
         // 判定条件：左右必须都接近纯红或纯蓝，并且一红一蓝；上/下至少一个点接近纯红或纯蓝。
         // 每个点只允许接近纯红或纯蓝，RGB 单通道容差 ±30。
-        auto checkDeadPatchRaw = [&](int logicalIdx, int startIdx) -> bool {
-            float cx = g_deathPts[startIdx].x;
-            float cy = g_deathPts[startIdx].y;
+        auto checkDeadPatchRaw = [&](int logicalIdx) -> bool {
+            ScorePointF logicPt = GetDeathXPoint(logicalIdx);
+            float cx = logicPt.x;
+            float cy = logicPt.y;
             if (cx <= 0 || cy <= 0) return false;
 
             int centerX = (int)(cx * m_w);
             int centerY = (int)(cy * m_h);
             if (centerX < 0 || centerX >= m_w || centerY < 0 || centerY >= m_h) return false;
 
-            const bool isActive = (logicalIdx == DP_LEFT_ACTIVE || logicalIdx == DP_RIGHT_ACTIVE);
-            float stepX = 0.015f / 4.0f;
-            float stepY = 0.015f / 4.0f;
-            if (!isActive) {
-                stepX /= 2.0f;
-                stepY /= 2.0f;
-            }
-
-            const float patchMul = isActive ? DEATH_X_PATCH_MUL_ACTIVE : DEATH_X_PATCH_MUL_NORMAL;
-            float pxNorm[4] = {
-                cx,
-                cx,
-                cx - patchMul * stepX,
-                cx + patchMul * stepX
-            };
-            float pyNorm[4] = {
-                cy - patchMul * stepY,
-                cy + patchMul * stepY,
-                cy,
-                cy
-            };
+            float pxNorm[DEATH_X_PATCH_SAMPLE_COUNT] = {};
+            float pyNorm[DEATH_X_PATCH_SAMPLE_COUNT] = {};
+            BuildDeathXPatchSamples(logicalIdx, logicPt, pxNorm, pyNorm);
 
             int okCount = 0;
-            for (int pidx = 0; pidx < 4; ++pidx) {
+            for (int pidx = 0; pidx < DEATH_X_PATCH_SAMPLE_COUNT; ++pidx) {
                 int sx = (int)(pxNorm[pidx] * m_w);
                 int sy = (int)(pyNorm[pidx] * m_h);
                 PatchColorSample sample = findPatchColorNear(sx, sy, DEATH_X_PATCH_SEARCH_RADIUS);
@@ -4477,13 +4859,14 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
 
         // 红色中心 + X 四方向结构探测器：
         // 仍然只使用每组第 0 个有效点作为中心；中心必须有红色系证据，四方向至少 3 个方向命中红色系。
-        auto checkDeadRaw = [&](int logicalIdx, int startIdx) -> bool {
+        auto checkDeadRaw = [&](int logicalIdx) -> bool {
             if (currentDeathAlgorithm == DEATH_X_ALGO_PATCH) {
-                return checkDeadPatchRaw(logicalIdx, startIdx);
+                return checkDeadPatchRaw(logicalIdx);
             }
 
-            float cx = g_deathPts[startIdx].x;
-            float cy = g_deathPts[startIdx].y;
+            ScorePointF logicPt = GetDeathXPoint(logicalIdx);
+            float cx = logicPt.x;
+            float cy = logicPt.y;
             if (cx <= 0 || cy <= 0) return false;
 
             int centerX = (int)(cx * m_w);
@@ -4491,7 +4874,7 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
             if (centerX < 0 || centerX >= m_w || centerY < 0 || centerY >= m_h)
                 return false;
 
-            const bool isActive = (logicalIdx == DP_LEFT_ACTIVE || logicalIdx == DP_RIGHT_ACTIVE);
+            const bool isActive = IsActiveDeathPoint(logicalIdx);
             const int localRadius = isActive ? 3 : 3;
             
             int matchCount = 0;
@@ -4529,17 +4912,15 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
                 debugRoiHits[logicalIdx] = 0;
                 debugDrawX[logicalIdx] = cx;
                 debugDrawY[logicalIdx] = cy;
+                debugColorSampleCount[logicalIdx] = BuildDeathXColorSamples(logicalIdx, logicPt, debugColorSampleX[logicalIdx], debugColorSampleY[logicalIdx]);
                 return false;
             }
             matchCount++;
 
             // 动态步长：主将大 X 使用原步长，替补小 X 步长减半。
-            float stepX = 0.015f / 4.0f;
-            float stepY = 0.025f / 4.0f;
-            if (!isActive) {
-                stepX /= 2.0f;
-                stepY /= 2.0f;
-            }
+            float stepX = 0.0f;
+            float stepY = 0.0f;
+            GetDeathXColorStep(logicalIdx, stepX, stepY);
 
             // 沿 X 的两条斜边四个方向采样。
             // 最终判定不再看单方向/远端，只统计上边两条边和下边两条边的橙红命中采样点数量。
@@ -4547,12 +4928,16 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
             int dirStrongSamples[4] = { 0, 0, 0, 0 };
             int dirWeakSamples[4] = { 0, 0, 0, 0 };
 
-            auto sampleDirectionPoint = [&](int dirIdx, int stepIndex, float nx, float ny) {
+            auto sampleDirectionPoint = [&](int sampleIdx, int dirIdx, int stepIndex, float nx, float ny) {
                 int px = (int)(nx * m_w);
                 int py = (int)(ny * m_h);
                 if (px < 0 || px >= m_w || py < 0 || py >= m_h) return;
 
                 XRayColorStat stat = countLocalXRedColorDynamic(px, py, localRadius, isActive, stepIndex);
+                if (sampleIdx >= 0 && sampleIdx < DEATH_X_COLOR_SAMPLE_COUNT) {
+                    debugColorSampleColor[logicalIdx][sampleIdx] = stat.hasColor ? stat.firstColor : ::GetPixel(hMemDC, px, py);
+                    debugColorSampleHit[logicalIdx][sampleIdx] = (stat.strongHits > 0 || stat.weakHits > 0);
+                }
                 if (stat.strongHits <= 0 && stat.weakHits <= 0) return;
 
                 // 一个采样点最多给本方向一次分：严格红 +2，动态弱红 +1。
@@ -4573,14 +4958,16 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
                 appendDebugHit(nx, ny, dirIdx, stat.hasColor ? stat.firstColor : ::GetPixel(hMemDC, px, py));
             };
 
+            debugColorSampleCount[logicalIdx] = BuildDeathXColorSamples(logicalIdx, logicPt, debugColorSampleX[logicalIdx], debugColorSampleY[logicalIdx]);
             for (int i = 1; i <= 4; i++) {
+                int baseSample = (i - 1) * 4;
                 // \ 方向：左上、右下
-                sampleDirectionPoint(0, i, cx - i * stepX, cy - i * stepY);
-                sampleDirectionPoint(1, i, cx + i * stepX, cy + i * stepY);
+                sampleDirectionPoint(baseSample + 0, 0, i, cx - i * stepX, cy - i * stepY);
+                sampleDirectionPoint(baseSample + 1, 1, i, cx + i * stepX, cy + i * stepY);
 
                 // / 方向：右上、左下
-                sampleDirectionPoint(2, i, cx + i * stepX, cy - i * stepY);
-                sampleDirectionPoint(3, i, cx - i * stepX, cy + i * stepY);
+                sampleDirectionPoint(baseSample + 2, 2, i, cx + i * stepX, cy - i * stepY);
+                sampleDirectionPoint(baseSample + 3, 3, i, cx - i * stepX, cy + i * stepY);
             }
 
             // 水平/垂直方向统计只保留为调试参考，不参与死亡判定。
@@ -4657,8 +5044,7 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
         // 8 个逻辑状态，使用旧 40 点中每组第 0 个有效点：
         // 0-3 左侧，4-7 右侧。
         for (int logicalIdx = 0; logicalIdx < DEATH_POINT_COUNT; logicalIdx++) {
-            int startIdx = GetDeathRawIndex(logicalIdx);
-            rawDeadArr[logicalIdx] = checkDeadRaw(logicalIdx, startIdx);
+            rawDeadArr[logicalIdx] = checkDeadRaw(logicalIdx);
         }
 
         for (int logicalIdx = 0; logicalIdx < DEATH_POINT_COUNT; logicalIdx++) {
@@ -4702,6 +5088,13 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
                     g_deathXDebug.hitY[i][k] = debugHitY[i][k];
                     g_deathXDebug.hitDir[i][k] = debugHitDir[i][k];
                     g_deathXDebug.hitColor[i][k] = debugHitColor[i][k];
+                }
+                g_deathXDebug.colorSampleCount[i] = debugColorSampleCount[i];
+                for (int k = 0; k < DEATH_X_COLOR_SAMPLE_COUNT; k++) {
+                    g_deathXDebug.colorSampleX[i][k] = debugColorSampleX[i][k];
+                    g_deathXDebug.colorSampleY[i][k] = debugColorSampleY[i][k];
+                    g_deathXDebug.colorSampleHit[i][k] = debugColorSampleHit[i][k];
+                    g_deathXDebug.colorSampleColor[i][k] = debugColorSampleColor[i][k];
                 }
                 g_deathXDebug.patchPointCount[i] = debugPatchPointCount[i];
                 g_deathXDebug.patchPass[i] = debugPatchPass[i];
@@ -4973,9 +5366,7 @@ LRESULT CDNFGameCaptureDlg::OnTrayMessage(WPARAM wParam, LPARAM lParam) {
 void CDNFGameCaptureDlg::DoRealExit() {
     m_bIsRunning = FALSE;
     KillTimer(1); KillTimer(2); KillTimer(3); KillTimer(4);
-    memset(m_deathXStableState, 0, sizeof(m_deathXStableState));
-    memset(m_deathXStableOn, 0, sizeof(m_deathXStableOn));
-    memset(m_deathXStableOff, 0, sizeof(m_deathXStableOff));
+    ResetDeathXStableState();
 
     // ==========================================
     // 【新增】：主程序退出时，拉着 OCR 一起陪葬
@@ -5139,9 +5530,7 @@ void CDNFGameCaptureDlg::OnBnClickedStart()
 
         m_nBlankFrameCount = 0;
         m_bAlreadyPrompted = false;
-        memset(m_deathXStableState, 0, sizeof(m_deathXStableState));
-        memset(m_deathXStableOn, 0, sizeof(m_deathXStableOn));
-        memset(m_deathXStableOff, 0, sizeof(m_deathXStableOff));
+        ResetDeathXStableState();
 
         // 打印相应的状态日志
         if (m_bUseWGC) {
@@ -5174,9 +5563,7 @@ void CDNFGameCaptureDlg::OnBnClickedStart()
         m_bIsRunning = FALSE;
         KillTimer(1);
         KillTimer(3);
-        memset(m_deathXStableState, 0, sizeof(m_deathXStableState));
-        memset(m_deathXStableOn, 0, sizeof(m_deathXStableOn));
-        memset(m_deathXStableOff, 0, sizeof(m_deathXStableOff));
+        ResetDeathXStableState();
 
         // ==========================================
         // 【关键修复】：停止监控时，绝不能销毁 m_pWGC！
@@ -5336,9 +5723,7 @@ void CDNFGameCaptureDlg::OnBnClickedReset() {
         m_totalScoreRed = 0;
         m_totalScoreBlue = 0;
         m_recentEvents.clear();
-        memset(m_deathXStableState, 0, sizeof(m_deathXStableState));
-        memset(m_deathXStableOn, 0, sizeof(m_deathXStableOn));
-        memset(m_deathXStableOff, 0, sizeof(m_deathXStableOff));
+        ResetDeathXStableState();
         for (int i = 0; i < 8; i++) {
             m_players[i].kills = 0; m_players[i].deaths = 0;
             m_players[i].currentStreak = 0; m_players[i].akCount = 0;
@@ -5757,6 +6142,7 @@ void CDNFGameCaptureDlg::Capture() {
     if (drawH > topHalf.Height()) { drawH = topHalf.Height(); drawW = (int)(drawH * aspect); }
     int dX = topHalf.left + (topHalf.Width() - drawW) / 2; int dY = topHalf.top + (topHalf.Height() - drawH) / 2;
     m_previewRect = CRect(dX, dY, dX + drawW, dY + drawH);
+    UpdateDeathXCalibrationButtons();
     InvalidateRect(&topHalf, FALSE);
 }
 
@@ -6148,17 +6534,6 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
         }
     }
 
-    // ----- 绘制鼠标坐标采集的绿点（手动采集模式） -----
-    CPen pPoint(PS_SOLID, 2, RGB(0, 255, 0));
-    dc.SelectStockObject(NULL_BRUSH);
-    CPen* pOldPointPen = dc.SelectObject(&pPoint);
-    for (size_t i = 0; i < m_selectPts.size(); i++) {
-        int px = m_previewRect.left + (int)((m_selectPts[i].x / 10000.0f) * m_previewRect.Width());
-        int py = m_previewRect.top + (int)((m_selectPts[i].y / 10000.0f) * m_previewRect.Height());
-        dc.Ellipse(px - 3, py - 3, px + 3, py + 3);
-    }
-    dc.SelectObject(pOldPointPen);
-
     // ===================================================
     // 极简死亡 X 调试显示
     // 未检测到死亡：沿用原来的青蓝色 X；检测到死亡：同一个 X 改成红色。
@@ -6171,75 +6546,94 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
             snap = g_deathXDebug;
         }
 
+        int currentDrawAlgorithm = m_nDeathAlgorithmChoice;
         dc.SelectStockObject(NULL_BRUSH);
+
+        auto drawPreviewDot = [&](int x, int y, int radius, COLORREF outline, COLORREF fill, bool filled) {
+            CPen dotPen(PS_SOLID, 1, outline);
+            CBrush dotBrush(fill);
+            CPen* oldPen = dc.SelectObject(&dotPen);
+            CBrush* oldBrush = filled ? dc.SelectObject(&dotBrush) : (CBrush*)dc.SelectStockObject(NULL_BRUSH);
+            dc.Ellipse(x - radius, y - radius, x + radius, y + radius);
+            dc.SelectObject(oldBrush);
+            dc.SelectObject(oldPen);
+        };
 
         // 遍历 8 个关键死亡 X 中心点
         for (int i = 0; i < DEATH_POINT_COUNT; i++) {
-            ScorePointF logicPt = GetDeathLogicPoint(i);
+            ScorePointF logicPt = GetDeathXPoint(i);
             float cx = logicPt.x;
             float cy = logicPt.y;
 
             // 基础射线的伸展步长，与底层检测代码保持同步
-            float stepX = 0.015f / 4.0f;
-            float stepY = 0.025f / 4.0f;
-
-            // 替补席小 X 缩小采样范围
-            if (i != DP_LEFT_ACTIVE && i != DP_RIGHT_ACTIVE) {
-                stepX /= 2.0f;
-                stepY /= 2.0f;
-            }
+            float stepX = 0.0f;
+            float stepY = 0.0f;
+            GetDeathXColorStep(i, stepX, stepY);
 
             COLORREF xColor = snap.dead[i] ? RGB(255, 0, 0) : RGB(0, 255, 255); // 上方 8 个检测位：触发画红色，未触发画蓝色
-            CPen centerPen(PS_SOLID, 2, xColor);
-            CPen* pOldPen = dc.SelectObject(&centerPen);
 
-            // 绘制: 左上 (\) 到 右下 (\)
-            int tl_x = m_previewRect.left + (int)((cx - 4 * stepX) * m_previewRect.Width());
-            int tl_y = m_previewRect.top + (int)((cy - 4 * stepY) * m_previewRect.Height());
-            int br_x = m_previewRect.left + (int)((cx + 4 * stepX) * m_previewRect.Width());
-            int br_y = m_previewRect.top + (int)((cy + 4 * stepY) * m_previewRect.Height());
-            dc.MoveTo(tl_x, tl_y);
-            dc.LineTo(br_x, br_y);
+            if (currentDrawAlgorithm == DEATH_X_ALGO_COLOR) {
+                CPen centerPen(PS_SOLID, 2, xColor);
+                CPen* pOldPen = dc.SelectObject(&centerPen);
 
-            // 绘制: 右上 (/) 到 左下 (/)
-            int tr_x = m_previewRect.left + (int)((cx + 4 * stepX) * m_previewRect.Width());
-            int tr_y = m_previewRect.top + (int)((cy - 4 * stepY) * m_previewRect.Height());
-            int bl_x = m_previewRect.left + (int)((cx - 4 * stepX) * m_previewRect.Width());
-            int bl_y = m_previewRect.top + (int)((cy + 4 * stepY) * m_previewRect.Height());
-            dc.MoveTo(tr_x, tr_y);
-            dc.LineTo(bl_x, bl_y);
+                // 绘制: 左上 (\) 到 右下 (\)
+                int tl_x = m_previewRect.left + (int)((cx - 4 * stepX) * m_previewRect.Width());
+                int tl_y = m_previewRect.top + (int)((cy - 4 * stepY) * m_previewRect.Height());
+                int br_x = m_previewRect.left + (int)((cx + 4 * stepX) * m_previewRect.Width());
+                int br_y = m_previewRect.top + (int)((cy + 4 * stepY) * m_previewRect.Height());
+                dc.MoveTo(tl_x, tl_y);
+                dc.LineTo(br_x, br_y);
 
-            for (int k = 0; k < snap.hitCount[i] && k < 16; k++) {
-                COLORREF hitColor = snap.hitColor[i][k];
-                if (hitColor == 0) hitColor = RGB(255, 255, 0);
+                // 绘制: 右上 (/) 到 左下 (/)
+                int tr_x = m_previewRect.left + (int)((cx + 4 * stepX) * m_previewRect.Width());
+                int tr_y = m_previewRect.top + (int)((cy - 4 * stepY) * m_previewRect.Height());
+                int bl_x = m_previewRect.left + (int)((cx - 4 * stepX) * m_previewRect.Width());
+                int bl_y = m_previewRect.top + (int)((cy + 4 * stepY) * m_previewRect.Height());
+                dc.MoveTo(tr_x, tr_y);
+                dc.LineTo(bl_x, bl_y);
+                dc.SelectObject(pOldPen);
 
-                int hx = m_previewRect.left + (int)(snap.hitX[i][k] * m_previewRect.Width());
-                int hy = m_previewRect.top + (int)(snap.hitY[i][k] * m_previewRect.Height());
+                float sampleX[DEATH_X_COLOR_SAMPLE_COUNT] = {};
+                float sampleY[DEATH_X_COLOR_SAMPLE_COUNT] = {};
+                bool sampleHit[DEATH_X_COLOR_SAMPLE_COUNT] = {};
+                COLORREF sampleColor[DEATH_X_COLOR_SAMPLE_COUNT] = {};
+                int sampleCount = BuildDeathXColorSamples(i, logicPt, sampleX, sampleY);
+                int liveSampleCount = min(snap.colorSampleCount[i], DEATH_X_COLOR_SAMPLE_COUNT);
+                for (int k = 0; k < sampleCount && k < liveSampleCount; ++k) {
+                    sampleHit[k] = snap.colorSampleHit[i][k];
+                    sampleColor[k] = snap.colorSampleColor[i][k];
+                }
 
-                CPen hitPen(PS_SOLID, 1, RGB(0, 0, 0));
-                CBrush hitBrush(hitColor);
-                CPen* pOldHitPen = dc.SelectObject(&hitPen);
-                CBrush* pOldHitBrush = dc.SelectObject(&hitBrush);
-                dc.Ellipse(hx - 4, hy - 4, hx + 4, hy + 4);
-                dc.SelectObject(pOldHitBrush);
-                dc.SelectObject(pOldHitPen);
+                for (int k = 0; k < sampleCount; ++k) {
+                    if (sampleX[k] <= 0.0f || sampleX[k] >= 1.0f || sampleY[k] <= 0.0f || sampleY[k] >= 1.0f) continue;
+                    int hx = m_previewRect.left + (int)(sampleX[k] * m_previewRect.Width());
+                    int hy = m_previewRect.top + (int)(sampleY[k] * m_previewRect.Height());
+                    if (sampleHit[k]) {
+                        COLORREF hitColor = sampleColor[k] == 0 ? RGB(255, 230, 0) : sampleColor[k];
+                        drawPreviewDot(hx, hy, 4, RGB(0, 0, 0), hitColor, true);
+                    }
+                    else {
+                        drawPreviewDot(hx, hy, 3, RGB(180, 180, 180), RGB(25, 25, 25), false);
+                    }
+                }
+            }
+            else {
+                float patchX[DEATH_X_PATCH_SAMPLE_COUNT] = {};
+                float patchY[DEATH_X_PATCH_SAMPLE_COUNT] = {};
+                int patchCount = BuildDeathXPatchSamples(i, logicPt, patchX, patchY);
+
+                for (int k = 0; k < patchCount; ++k) {
+                    if (patchX[k] <= 0.0f || patchX[k] >= 1.0f || patchY[k] <= 0.0f || patchY[k] >= 1.0f) continue;
+                    int px = m_previewRect.left + (int)(patchX[k] * m_previewRect.Width());
+                    int py = m_previewRect.top + (int)(patchY[k] * m_previewRect.Height());
+                    bool hasLivePatch = snap.patchPointCount[i] > k;
+                    COLORREF pc = hasLivePatch ? snap.patchColor[i][k] : RGB(25, 25, 25);
+                    COLORREF outline = !hasLivePatch || snap.patchClass[i][k] == 0 ? RGB(255, 255, 255) : RGB(0, 0, 0);
+                    drawPreviewDot(px, py, 5, outline, pc, hasLivePatch && snap.patchClass[i][k] != 0);
+                }
             }
 
-            for (int k = 0; k < snap.patchPointCount[i] && k < 4; ++k) {
-                int px = m_previewRect.left + (int)(snap.patchX[i][k] * m_previewRect.Width());
-                int py = m_previewRect.top + (int)(snap.patchY[i][k] * m_previewRect.Height());
-                COLORREF pc = snap.patchColor[i][k];
-                COLORREF outline = snap.patchClass[i][k] == 0 ? RGB(255, 255, 255) : RGB(0, 0, 0);
-                CPen patchPen(PS_SOLID, 2, outline);
-                CBrush patchBrush(pc);
-                CPen* oldPatchPen = dc.SelectObject(&patchPen);
-                CBrush* oldPatchBrush = dc.SelectObject(&patchBrush);
-                dc.Ellipse(px - 5, py - 5, px + 5, py + 5);
-                dc.SelectObject(oldPatchBrush);
-                dc.SelectObject(oldPatchPen);
-            }
-
-            if (snap.centerGate[i]) {
+            if (currentDrawAlgorithm == DEATH_X_ALGO_COLOR && snap.centerGate[i]) {
                 int ccx = m_previewRect.left + (int)(cx * m_previewRect.Width());
                 int ccy = m_previewRect.top + (int)(cy * m_previewRect.Height());
                 CPen centerGatePen(PS_SOLID, 1, RGB(255, 255, 255));
@@ -6249,8 +6643,59 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
                 dc.LineTo(ccx - 4, ccy - 4);
                 dc.SelectObject(pOldGatePen);
             }
-            dc.SelectObject(pOldPen);
         }
+    }
+
+    if (m_bDeathXCalibrationMode && m_previewRect.Width() > 0 && m_previewRect.Height() > 0) {
+        dc.SetBkMode(TRANSPARENT);
+        CFont labelFont;
+        labelFont.CreatePointFont(95, L"微软雅黑");
+        CFont* oldFont = dc.SelectObject(&labelFont);
+
+        CString tip = L"X校准：拖动或方向键1像素微调；1-8选点，Shift+方向键10像素";
+        CRect tipRect(m_previewRect.left + 10, m_previewRect.top + 45, m_previewRect.left + 650, m_previewRect.top + 72);
+        dc.FillSolidRect(&tipRect, RGB(20, 20, 20));
+        dc.SetTextColor(RGB(0, 255, 255));
+        dc.DrawText(tip, &tipRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        for (int i = 0; i < DEATH_POINT_COUNT; ++i) {
+            CPoint p = DeathXPointToClient(m_deathXPoints[i]);
+            bool dragging = (i == m_dragDeathXPoint);
+            bool selected = (i == m_selectedDeathXPoint);
+            COLORREF markerColor = (i < 4) ? RGB(255, 70, 70) : RGB(80, 170, 255);
+            COLORREF borderColor = selected ? RGB(255, 255, 0) : RGB(255, 255, 255);
+            CPen markerPen(PS_SOLID, selected || dragging ? 3 : 2, borderColor);
+            CBrush markerBrush(markerColor);
+            CPen* oldPen = dc.SelectObject(&markerPen);
+            CBrush* oldBrush = dc.SelectObject(&markerBrush);
+            int radius = selected || dragging ? 10 : 7;
+            dc.Ellipse(p.x - radius, p.y - radius, p.x + radius, p.y + radius);
+            dc.SelectObject(oldBrush);
+            dc.SelectObject(oldPen);
+
+            CPen centerPen(PS_SOLID, 2, RGB(255, 255, 255));
+            CPen* oldCenterPen = dc.SelectObject(&centerPen);
+            dc.MoveTo(p.x - 5, p.y);
+            dc.LineTo(p.x + 6, p.y);
+            dc.MoveTo(p.x, p.y - 5);
+            dc.LineTo(p.x, p.y + 6);
+            dc.SelectObject(oldCenterPen);
+
+            if (selected) {
+                CPen selectPen(PS_SOLID, 1, RGB(0, 0, 0));
+                CPen* oldSelectPen = dc.SelectObject(&selectPen);
+                dc.Ellipse(p.x - radius - 3, p.y - radius - 3, p.x + radius + 3, p.y + radius + 3);
+                dc.SelectObject(oldSelectPen);
+            }
+
+            CString label;
+            label.Format(L"%d %s", i + 1, GetDeathPointName(i));
+            CRect labelRect(p.x + 12, p.y - 12, p.x + 82, p.y + 14);
+            dc.FillSolidRect(&labelRect, selected ? RGB(60, 55, 0) : RGB(10, 10, 10));
+            dc.SetTextColor(selected ? RGB(255, 255, 0) : markerColor);
+            dc.DrawText(label, &labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
+        dc.SelectObject(oldFont);
     }
 
     // ===================================================
@@ -6340,18 +6785,15 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
                             bottomY + bottomCellH);
                     }
 
-                    ScorePointF logicPt = GetDeathLogicPoint(idx);
+                    ScorePointF logicPt = GetDeathXPoint(idx);
                     int srcCX = (int)(logicPt.x * m_w);
                     int srcCY = (int)(logicPt.y * m_h);
-                    bool isActive = (idx == DP_LEFT_ACTIVE || idx == DP_RIGHT_ACTIVE);
+                    bool isActive = IsActiveDeathPoint(idx);
 
                     // 这里只放大“蓝色 X 实际检查范围”，不再带大量周边无效画面。
-                    float stepX = 0.015f / 4.0f;
-                    float stepY = 0.025f / 4.0f;
-                    if (!isActive) {
-                        stepX /= 2.0f;
-                        stepY /= 2.0f;
-                    }
+                    float stepX = 0.0f;
+                    float stepY = 0.0f;
+                    GetDeathXColorStep(idx, stepX, stepY);
 
                     int rayHalfW = max(10, (int)(4.0f * stepX * m_w));
                     int rayHalfH = max(10, (int)(4.0f * stepY * m_h));
@@ -6412,7 +6854,18 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
                         dc.SelectObject(oldXP);
                     }
 
-                    if (snap.centerGate[idx]) {
+                    int currentDrawAlgorithm = m_nDeathAlgorithmChoice;
+                    auto drawCellDot = [&](int x, int y, int radius, COLORREF outline, COLORREF fill, bool filled) {
+                        CPen dotPen(PS_SOLID, 1, outline);
+                        CBrush dotBrush(fill);
+                        CPen* oldPen = dc.SelectObject(&dotPen);
+                        CBrush* oldBrush = filled ? dc.SelectObject(&dotBrush) : (CBrush*)dc.SelectStockObject(NULL_BRUSH);
+                        dc.Ellipse(x - radius, y - radius, x + radius, y + radius);
+                        dc.SelectObject(oldBrush);
+                        dc.SelectObject(oldPen);
+                    };
+
+                    if (currentDrawAlgorithm == DEATH_X_ALGO_COLOR && snap.centerGate[idx]) {
                         int ccx = mapToCellX(logicPt.x);
                         int ccy = mapToCellY(logicPt.y);
                         CPen gatePen(PS_SOLID, 1, RGB(255, 255, 255));
@@ -6423,39 +6876,51 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
                         dc.SelectObject(oldGatePen);
                     }
 
-                    for (int k = 0; k < snap.hitCount[idx] && k < 16; ++k) {
-                        COLORREF hitColor = snap.hitColor[idx][k];
-                        if (hitColor == 0) hitColor = RGB(255, 255, 0);
+                    if (currentDrawAlgorithm == DEATH_X_ALGO_COLOR) {
+                        float sampleX[DEATH_X_COLOR_SAMPLE_COUNT] = {};
+                        float sampleY[DEATH_X_COLOR_SAMPLE_COUNT] = {};
+                        bool sampleHit[DEATH_X_COLOR_SAMPLE_COUNT] = {};
+                        COLORREF sampleColor[DEATH_X_COLOR_SAMPLE_COUNT] = {};
+                        int sampleCount = BuildDeathXColorSamples(idx, logicPt, sampleX, sampleY);
+                        int liveSampleCount = min(snap.colorSampleCount[idx], DEATH_X_COLOR_SAMPLE_COUNT);
+                        for (int k = 0; k < sampleCount && k < liveSampleCount; ++k) {
+                            sampleHit[k] = snap.colorSampleHit[idx][k];
+                            sampleColor[k] = snap.colorSampleColor[idx][k];
+                        }
 
-                        int hx = mapToCellX(snap.hitX[idx][k]);
-                        int hy = mapToCellY(snap.hitY[idx][k]);
-                        CPen hitPen(PS_SOLID, 1, RGB(0, 0, 0));
-                        CBrush hitBrush(hitColor);
-                        CPen* oldHitPen = dc.SelectObject(&hitPen);
-                        CBrush* oldHitBrush = dc.SelectObject(&hitBrush);
-                        dc.Ellipse(hx - 3, hy - 3, hx + 4, hy + 4);
-                        dc.SelectObject(oldHitBrush);
-                        dc.SelectObject(oldHitPen);
+                        for (int k = 0; k < sampleCount; ++k) {
+                            if (sampleX[k] <= 0.0f || sampleX[k] >= 1.0f || sampleY[k] <= 0.0f || sampleY[k] >= 1.0f) continue;
+                            int hx = mapToCellX(sampleX[k]);
+                            int hy = mapToCellY(sampleY[k]);
+                            if (sampleHit[k]) {
+                                COLORREF hitColor = sampleColor[k] == 0 ? RGB(255, 230, 0) : sampleColor[k];
+                                drawCellDot(hx, hy, 3, RGB(0, 0, 0), hitColor, true);
+                            }
+                            else {
+                                drawCellDot(hx, hy, 2, RGB(190, 190, 190), RGB(20, 20, 20), false);
+                            }
+                        }
                     }
+                    else {
+                        float patchX[DEATH_X_PATCH_SAMPLE_COUNT] = {};
+                        float patchY[DEATH_X_PATCH_SAMPLE_COUNT] = {};
+                        int patchCount = BuildDeathXPatchSamples(idx, logicPt, patchX, patchY);
 
-                    for (int k = 0; k < snap.patchPointCount[idx] && k < 4; ++k) {
-                        int px = mapToCellX(snap.patchX[idx][k]);
-                        int py = mapToCellY(snap.patchY[idx][k]);
-                        COLORREF pc = snap.patchColor[idx][k];
-                        COLORREF outline = snap.patchClass[idx][k] == 0 ? RGB(255, 255, 255) : RGB(0, 0, 0);
-                        CPen patchPen(PS_SOLID, 2, outline);
-                        CBrush patchBrush(pc);
-                        CPen* oldPatchPen = dc.SelectObject(&patchPen);
-                        CBrush* oldPatchBrush = dc.SelectObject(&patchBrush);
-                        dc.Ellipse(px - 4, py - 4, px + 5, py + 5);
-                        dc.SelectObject(oldPatchBrush);
-                        dc.SelectObject(oldPatchPen);
+                        for (int k = 0; k < patchCount; ++k) {
+                            if (patchX[k] <= 0.0f || patchX[k] >= 1.0f || patchY[k] <= 0.0f || patchY[k] >= 1.0f) continue;
+                            int px = mapToCellX(patchX[k]);
+                            int py = mapToCellY(patchY[k]);
+                            bool hasLivePatch = snap.patchPointCount[idx] > k;
+                            COLORREF pc = hasLivePatch ? snap.patchColor[idx][k] : RGB(20, 20, 20);
+                            COLORREF outline = !hasLivePatch || snap.patchClass[idx][k] == 0 ? RGB(255, 255, 255) : RGB(0, 0, 0);
+                            drawCellDot(px, py, 4, outline, pc, hasLivePatch && snap.patchClass[idx][k] != 0);
 
-                        CString label;
-                        label.Format(L"%d", k + 1);
-                        dc.SetBkMode(TRANSPARENT);
-                        dc.SetTextColor(outline == RGB(0, 0, 0) ? RGB(255, 255, 255) : RGB(255, 220, 0));
-                        dc.TextOut(px + 5, py - 7, label);
+                            CString label;
+                            label.Format(L"%d", k + 1);
+                            dc.SetBkMode(TRANSPARENT);
+                            dc.SetTextColor(outline == RGB(0, 0, 0) ? RGB(255, 255, 255) : RGB(255, 220, 0));
+                            dc.TextOut(px + 5, py - 7, label);
+                        }
                     }
                 }
             }
@@ -6472,7 +6937,7 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
     CPoint pt;
     GetCursorPos(&pt);
     ScreenToClient(&pt);
-    if (m_previewRect.PtInRect(pt)) {
+    if (!m_bDeathXCalibrationMode && m_previewRect.PtInRect(pt)) {
         int origX = (int)(((float)(pt.x - m_previewRect.left) / m_previewRect.Width()) * m_w);
         int origY = (int)(((float)(pt.y - m_previewRect.top) / m_previewRect.Height()) * m_h);
 
@@ -6512,11 +6977,13 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
         dc.LineTo(drawX + magW, drawY + magH / 2);
         dc.SelectObject(pOldPen);
 
-        // 进度提示
+        // 坐标提示
         dc.SetBkMode(TRANSPARENT);
         dc.SetTextColor(RGB(0, 255, 0));
         CString tip;
-        tip.Format(L"已采: %d/%d (右键撤销)", (int)m_selectPts.size(), DEATH_POINT_COUNT);
+        tip.Format(L"坐标: %.4f, %.4f",
+            (float)(pt.x - m_previewRect.left) / (float)max(1, m_previewRect.Width()),
+            (float)(pt.y - m_previewRect.top) / (float)max(1, m_previewRect.Height()));
         dc.TextOut(drawX + 5, drawY + magH - 25, tip);
     }
 }

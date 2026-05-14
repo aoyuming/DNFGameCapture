@@ -19,11 +19,16 @@
 #include "WebScoreDlg.h"
 #include "json.hpp"
 
+struct ScorePointF {
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
 #include <urlmon.h>
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"3.5.5"    //当前版本号
+#define CURRENT_VERSION L"3.5.6"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -163,7 +168,9 @@ protected:
     afx_msg void OnPaint();
     afx_msg BOOL OnEraseBkgnd(CDC* pDC);
     afx_msg void OnClose();
+    afx_msg void OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags);
     afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
+    afx_msg void OnLButtonUp(UINT nFlags, CPoint point);
     afx_msg void OnBnClickedStart();
     afx_msg void OnBnClickedApply();
     afx_msg void OnBnClickedFlip();
@@ -284,6 +291,27 @@ private:
 
     afx_msg void OnMouseMove(UINT nFlags, CPoint point);
     afx_msg void OnRButtonDown(UINT nFlags, CPoint point);
+    afx_msg void OnBnClickedDeathXCalibrate();
+    afx_msg void OnBnClickedDeathXSave();
+    afx_msg void OnBnClickedDeathXCancel();
+    afx_msg void OnBnClickedDeathXDefault();
+    void EnterDeathXCalibrationMode();
+    void ExitDeathXCalibrationMode(bool restoreSnapshot);
+    void SaveDeathXCalibrationToIni();
+    void LoadDeathXCalibrationFromIni();
+    void ApplyDefaultDeathXPoints();
+    void SnapshotDeathXCalibration();
+    void ResetDeathXStableState();
+    ScorePointF GetDeathXPoint(int logicalIdx) const;
+    void SetDeathXPoint(int logicalIdx, ScorePointF pt);
+    void SelectDeathXPoint(int logicalIdx);
+    bool MoveSelectedDeathXPointByPixels(int dx, int dy);
+    bool HandleDeathXCalibrationKey(UINT vk);
+    int HitTestDeathXPoint(CPoint point) const;
+    CPoint DeathXPointToClient(ScorePointF pt) const;
+    ScorePointF ClientToDeathXPoint(CPoint point) const;
+    void UpdateDeathXCalibrationButtons();
+    virtual BOOL PreTranslateMessage(MSG* pMsg);
 
     // 【新增】：强制居中的自定义 MessageBox
     int ShowCenteredMsgBox(LPCTSTR lpszText, LPCTSTR lpszCaption = NULL, UINT nType = MB_OK);
@@ -323,6 +351,13 @@ private:
     bool m_deathXStableState[8] = {};
     int m_deathXStableOn[8] = {};
     int m_deathXStableOff[8] = {};
+    ScorePointF m_deathXPoints[8] = {};
+    ScorePointF m_deathXSnapshotPoints[8] = {};
+    bool m_bDeathXCustomPoints = false;
+    bool m_bDeathXCalibrationMode = false;
+    int m_selectedDeathXPoint = -1;
+    int m_dragDeathXPoint = -1;
+    bool m_bDraggingDeathXPoint = false;
 
     int m_totalScoreRed;
     int m_totalScoreBlue;
@@ -330,7 +365,6 @@ private:
     bool m_bFlipSides;
 
     CRect m_previewRect;
-    std::vector<CPoint> m_selectPts;
 
     // --- 新增以下控件：---
     CComboBox m_cmbTeamSelect; // 选择红蓝队
@@ -345,6 +379,10 @@ private:
     CButton         m_btnApply;
     CButton         m_btnReset;
     CButton         m_btnBrowseDir;
+    CButton         m_btnDeathXCalibrate;
+    CButton         m_btnDeathXSave;
+    CButton         m_btnDeathXCancel;
+    CButton         m_btnDeathXDefault;
     CEdit           m_editOutDir;
     CFont           m_font;
 

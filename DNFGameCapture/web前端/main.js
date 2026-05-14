@@ -528,6 +528,17 @@ function getRowData(row, teamId) {
     };
 }
 
+function shouldPreserveNoAliasInput(inputElem, serverName) {
+    if (!inputElem || inputElem.classList.contains('input-error')) return false;
+
+    const currentName = inputElem.value.trim();
+    const incomingName = String(serverName || '').trim();
+    if (!currentName || incomingName) return false;
+
+    const aliases = uniqueAliasArray([...(playerDB[currentName] || []), ...(savedDB[currentName] || [])]);
+    return aliases.length === 0;
+}
+
 function applyStateFromServer(state) {
     isSyncingFromServer = true;
 
@@ -581,7 +592,9 @@ function applyStateFromServer(state) {
         if (idx >= 8) return;
         let row = rows[idx];
         let nameInp = row.querySelector('.name-input');
-        if (!nameInp.classList.contains('input-error')) nameInp.value = p.name;
+        if (!nameInp.classList.contains('input-error') && !shouldPreserveNoAliasInput(nameInp, p.name)) {
+            nameInp.value = p.name;
+        }
         row.querySelector('.stat-kill').value = p.kills;
         row.querySelector('.stat-death').value = p.deaths;
         row.querySelector('.stat-ak').value = p.akCount === 0 ? '-' : p.akCount;
