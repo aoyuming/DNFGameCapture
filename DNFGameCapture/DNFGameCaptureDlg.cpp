@@ -70,10 +70,16 @@ static CString DnfJoinPath(const CString& a, const CString& b);
 static void DnfSendWebToast(CWebScoreDlg* webDlg, const CString& action, const CString& message);
 static bool DnfPostCloudJson(const std::string& jsonUtf8, std::string& responseUtf8, CString& errorMsg, int timeoutMs = 8000);
 static CString DnfReadLocalLicenseKey();
+static bool DnfWriteLocalLicenseKey(const CString& key);
+static CString DnfReadLicenseFromFile();
 void WriteMatchLog(const CString& logLine);
 void AppLog(const CString& msg, COLORREF color);
 
 static const wchar_t* DNF_CLOUD_API_HOST = L"verifykey-thaovfpoib.cn-hangzhou.fcapp.run";
+static const wchar_t* DNF_LICENSE_REG_PATH = L"Software\\DNFCapture";
+static const wchar_t* DNF_LICENSE_REG_VALUE = L"LicenseKey";
+static CString g_lastLicenseSource = L"未读取";
+static CString g_lastLicenseRepair = L"";
 
 // ========================================================
 // 小号格式校验：真实 ID 少于 3 个字符时，必须带大区或 #职业。
@@ -2318,18 +2324,12 @@ LRESULT CDNFGameCaptureDlg::OnCloudAuthFail(WPARAM wParam, LPARAM lParam) {
         m_bIsAuthValid = false;
         m_cloudExpireTime = 0;
 
+        // 🚨 还原旧的卡密到双存储（注册表 + license.txt）
+        DnfWriteLocalLicenseKey(s_backupAuthCode);
+
         if (m_editVisualLogs.m_hWnd) m_editVisualLogs.SetWindowText(L"");
         OutputDebugAuthInfo();
         if (m_bIsRunning) OnBnClickedStart();
-
-        // 🚨 还原旧的卡密到文件
-        wchar_t exePath[MAX_PATH]; GetModuleFileName(NULL, exePath, MAX_PATH);
-        CString path = exePath; path = path.Left(path.ReverseFind(L'\\') + 1) + L"license.txt";
-        CFile fileWrite;
-        if (fileWrite.Open(path, CFile::modeCreate | CFile::modeWrite)) {
-            std::string ansiKey = CW2A(s_backupAuthCode, CP_UTF8);
-            fileWrite.Write(ansiKey.c_str(), (UINT)ansiKey.length()); fileWrite.Close();
-        }
 
         if (m_bIsManualAuthCheck) { // 🚨 只有手动点授权，才弹失败提示！
             json reply; reply["action"] = "auth_result"; reply["success"] = false;
@@ -2454,22 +2454,39 @@ CString CDNFGameCaptureDlg::CheckCloudBinding(CString key, CString hwid, long lo
     return resultMsg;
 }
 
-static CString DnfReadLocalLicenseKey()
+static CString DnfNormalizeLicenseKey(CString key)
+{
+    if (!key.IsEmpty() && key[0] == 0xFEFF) key = key.Mid(1);
+    key.Remove(L'\r');
+    key.Remove(L'\n');
+    key.Trim();
+    return key;
+}
+
+static CString DnfGetLicenseFilePath()
 {
     wchar_t exePath[MAX_PATH] = { 0 };
     GetModuleFileName(NULL, exePath, MAX_PATH);
     CString path = exePath;
-    path = path.Left(path.ReverseFind(L'\\') + 1) + L"license.txt";
+    int slash = path.ReverseFind(L'\\');
+    if (slash >= 0) path = path.Left(slash + 1);
+    path += L"license.txt";
+    return path;
+}
 
+static CString DnfReadLicenseFromFile()
+{
+    CString path = DnfGetLicenseFilePath();
     CFile file;
-    if (!file.Open(path, CFile::modeRead)) return L"";
+    if (!file.Open(path, CFile::modeRead | CFile::typeBinary)) return L"";
 
-    int len = (int)file.GetLength();
-    if (len <= 0) {
+    ULONGLONG rawLen = file.GetLength();
+    if (rawLen <= 0 || rawLen > 4096) {
         file.Close();
         return L"";
     }
 
+    int len = (int)rawLen;
     std::vector<char> buf(len + 1, 0);
     file.Read(buf.data(), len);
     file.Close();
@@ -2480,10 +2497,144 @@ static CString DnfReadLocalLicenseKey()
     }
 
     CString key = CA2W(start, CP_UTF8);
-    key.Remove(L'\r');
-    key.Remove(L'\n');
-    key.Trim();
-    return key;
+    return DnfNormalizeLicenseKey(key);
+}
+
+static bool DnfWriteLicenseToFileAtomic(const CString& key)
+{
+    CString path = DnfGetLicenseFilePath();
+    CString tmpPath = path + L".tmp";
+    CString normalized = DnfNormalizeLicenseKey(key);
+
+    {
+        CFile file;
+        if (!file.Open(tmpPath, CFile::modeCreate | CFile::modeWrite | CFile::typeBinary)) {
+            return false;
+        }
+        std::string utf8 = CW2A(normalized, CP_UTF8);
+        if (!utf8.empty()) {
+            file.Write(utf8.c_str(), (UINT)utf8.size());
+        }
+        file.Flush();
+        file.Close();
+    }
+
+    if (!MoveFileEx(tmpPath, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFile(tmpPath);
+        return false;
+    }
+    return true;
+}
+
+static CString DnfReadLicenseFromRegistry()
+{
+    HKEY hKey = nullptr;
+    if (RegOpenKeyEx(HKEY_CURRENT_USER, DNF_LICENSE_REG_PATH, 0, KEY_READ, &hKey) != ERROR_SUCCESS) {
+        return L"";
+    }
+
+    DWORD type = 0;
+    DWORD bytes = 0;
+    LONG rc = RegQueryValueEx(hKey, DNF_LICENSE_REG_VALUE, nullptr, &type, nullptr, &bytes);
+    if (rc != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ) || bytes < sizeof(wchar_t) || bytes > 4096) {
+        RegCloseKey(hKey);
+        return L"";
+    }
+
+    std::vector<wchar_t> buf((bytes / sizeof(wchar_t)) + 1, 0);
+    rc = RegQueryValueEx(hKey, DNF_LICENSE_REG_VALUE, nullptr, &type, (LPBYTE)buf.data(), &bytes);
+    RegCloseKey(hKey);
+    if (rc != ERROR_SUCCESS) return L"";
+
+    return DnfNormalizeLicenseKey(CString(buf.data()));
+}
+
+static bool DnfWriteLicenseToRegistry(const CString& key)
+{
+    HKEY hKey = nullptr;
+    DWORD disposition = 0;
+    LONG rc = RegCreateKeyEx(HKEY_CURRENT_USER, DNF_LICENSE_REG_PATH, 0, nullptr, 0,
+        KEY_READ | KEY_WRITE, nullptr, &hKey, &disposition);
+    if (rc != ERROR_SUCCESS) return false;
+
+    CString normalized = DnfNormalizeLicenseKey(key);
+    if (normalized.IsEmpty()) {
+        RegDeleteValue(hKey, DNF_LICENSE_REG_VALUE);
+        RegCloseKey(hKey);
+        return true;
+    }
+
+    rc = RegSetValueEx(hKey, DNF_LICENSE_REG_VALUE, 0, REG_SZ,
+        (const BYTE*)normalized.GetString(),
+        (DWORD)((normalized.GetLength() + 1) * sizeof(wchar_t)));
+    RegCloseKey(hKey);
+    return rc == ERROR_SUCCESS;
+}
+
+static bool DnfWriteLocalLicenseKey(const CString& key)
+{
+    CString normalized = DnfNormalizeLicenseKey(key);
+    bool fileOk = DnfWriteLicenseToFileAtomic(normalized);
+    bool regOk = DnfWriteLicenseToRegistry(normalized);
+
+    g_lastLicenseSource = normalized.IsEmpty() ? L"无" : L"手动写入";
+    g_lastLicenseRepair.Empty();
+    if (!fileOk || !regOk) {
+        CString msg;
+        msg.Format(L"[授权备份] 写入授权存储不完整：license.txt=%s；注册表=%s。",
+            fileOk ? L"成功" : L"失败",
+            regOk ? L"成功" : L"失败");
+        WriteMatchLog(msg);
+    }
+    return fileOk || regOk;
+}
+
+static CString DnfReadLocalLicenseKey()
+{
+    CString regKey = DnfReadLicenseFromRegistry();
+    CString fileKey = DnfReadLicenseFromFile();
+
+    g_lastLicenseRepair.Empty();
+    if (!regKey.IsEmpty()) {
+        g_lastLicenseSource = L"注册表";
+        if (fileKey.IsEmpty()) {
+            if (DnfWriteLicenseToFileAtomic(regKey)) {
+                g_lastLicenseRepair = L"已用注册表自动补写 license.txt";
+                WriteMatchLog(L"[授权备份] license.txt 缺失或为空，已用注册表授权码自动补写。");
+            }
+            else {
+                g_lastLicenseRepair = L"license.txt 缺失，自动补写失败";
+                WriteMatchLog(L"[授权备份] license.txt 缺失或为空，但自动补写失败。");
+            }
+        }
+        else if (DnfNormalizeLicenseKey(fileKey) != regKey) {
+            if (DnfWriteLicenseToFileAtomic(regKey)) {
+                g_lastLicenseRepair = L"license.txt 与注册表不一致，已按注册表覆盖";
+                WriteMatchLog(L"[授权备份] license.txt 与注册表授权码不一致，普通启动按注册表优先并已覆盖 license.txt。");
+            }
+            else {
+                g_lastLicenseRepair = L"license.txt 与注册表不一致，覆盖文件失败";
+                WriteMatchLog(L"[授权备份] license.txt 与注册表授权码不一致，普通启动按注册表优先，但覆盖 license.txt 失败。");
+            }
+        }
+        return regKey;
+    }
+
+    if (!fileKey.IsEmpty()) {
+        g_lastLicenseSource = L"license.txt";
+        if (DnfWriteLicenseToRegistry(fileKey)) {
+            g_lastLicenseRepair = L"已用 license.txt 自动补写注册表";
+            WriteMatchLog(L"[授权备份] 注册表授权码缺失，已用 license.txt 自动补写。");
+        }
+        else {
+            g_lastLicenseRepair = L"注册表缺失，自动补写失败";
+            WriteMatchLog(L"[授权备份] 注册表授权码缺失，但自动补写失败。");
+        }
+        return fileKey;
+    }
+
+    g_lastLicenseSource = L"无";
+    return L"";
 }
 
 static bool DnfPostCloudJson(const std::string& jsonUtf8, std::string& responseUtf8, CString& errorMsg, int timeoutMs)
@@ -2918,45 +3069,29 @@ void CDNFGameCaptureDlg::CheckTrialAndLicense() {
     // 获取机器码
     CString hwid = GetMachineID();
 
-    // 定位本地 license.txt 路径
-    wchar_t exePath[MAX_PATH];
-    GetModuleFileName(NULL, exePath, MAX_PATH);
-    CString path = exePath;
-    path = path.Left(path.ReverseFind(L'\\') + 1) + L"license.txt";
+    // --- 第一阶段：尝试读取本地卡密（注册表优先，license.txt 互补备份） ---
+    CString inputKey = DnfReadLocalLicenseKey();
+    if (!inputKey.IsEmpty() && VerifyKey(inputKey, hwid)) {
+        // 【关键修复 2】：删掉 m_bIsAuthValid = true;
+        // 离线格式对了也没用，必须设为 false，等待云端判决！
+        m_bIsTrial = false;
+        long long duration = m_keyDuration;
+        HWND hWnd = GetSafeHwnd();
 
-    // --- 第一阶段：尝试读取本地卡密 ---
-    CFile file;
-    if (file.Open(path, CFile::modeRead)) {
-        char buf[256] = { 0 };
-        UINT nRead = file.Read(buf, 255);
-        file.Close();
+        std::thread([this, hWnd, inputKey, hwid, duration]() {
+            long long cloudExpTime = 0;
+            CString cloudResult = CheckCloudBinding(inputKey, hwid, duration, cloudExpTime);
 
-        CString inputKey(buf);
-        inputKey.Trim();
+            if (cloudResult != L"OK" && ::IsWindow(hWnd)) {
+                CString* pResult = new CString(cloudResult);
+                ::PostMessage(hWnd, WM_CLOUD_AUTH_FAIL, 0, (LPARAM)pResult);
+            }
+            else if (cloudResult == L"OK" && ::IsWindow(hWnd)) {
+                ::PostMessage(hWnd, WM_UPDATE_AUTH_TIME, 0, (LPARAM)cloudExpTime);
+            }
+            }).detach();
 
-        // 基础算法校验（这里现在只有 CDK 能通过了）
-        if (!inputKey.IsEmpty() && VerifyKey(inputKey, hwid)) {
-            // 【关键修复 2】：删掉 m_bIsAuthValid = true; 
-            // 离线格式对了也没用，必须设为 false，等待云端判决！
-            m_bIsTrial = false;
-            long long duration = m_keyDuration;
-            HWND hWnd = GetSafeHwnd();
-
-            std::thread([this, hWnd, inputKey, hwid, duration]() {
-                long long cloudExpTime = 0;
-                CString cloudResult = CheckCloudBinding(inputKey, hwid, duration, cloudExpTime);
-
-                if (cloudResult != L"OK" && ::IsWindow(hWnd)) {
-                    CString* pResult = new CString(cloudResult);
-                    ::PostMessage(hWnd, WM_CLOUD_AUTH_FAIL, 0, (LPARAM)pResult);
-                }
-                else if (cloudResult == L"OK" && ::IsWindow(hWnd)) {
-                    ::PostMessage(hWnd, WM_UPDATE_AUTH_TIME, 0, (LPARAM)cloudExpTime);
-                }
-                }).detach();
-
-            return;
-        }
+        return;
     }
 
     // --- 第三阶段：如果没有卡密，检查注册表试用期 ---
@@ -3019,19 +3154,8 @@ void CDNFGameCaptureDlg::OutputDebugAuthInfo() {
         RegCloseKey(hKey);
     }
 
-    wchar_t exePath[MAX_PATH];
-    GetModuleFileName(NULL, exePath, MAX_PATH);
-    CString path = exePath;
-    path = path.Left(path.ReverseFind(L'\\') + 1) + L"license.txt";
-
-    CFile file;
-    if (file.Open(path, CFile::modeRead)) {
-        char buf[256] = { 0 };
-        file.Read(buf, 255);
-        file.Close();
-        CString inputKey(buf);
-        inputKey.Trim();
-
+    CString inputKey = DnfReadLocalLicenseKey();
+    if (!inputKey.IsEmpty()) {
         // ==========================================
         // 【新增】：卡密脱敏处理 (数据打码)
         // ==========================================
@@ -3043,6 +3167,10 @@ void CDNFGameCaptureDlg::OutputDebugAuthInfo() {
         }
 
         print(L"本地卡密记录: " + displayKey, RGB(180, 180, 180));
+        print(L"卡密来源: " + g_lastLicenseSource, RGB(180, 180, 180));
+        if (!g_lastLicenseRepair.IsEmpty()) {
+            print(L"卡密备份: " + g_lastLicenseRepair, RGB(180, 180, 180));
+        }
 
         if (inputKey.Left(4) == L"CDK-") {
             // ... 下面保持不变
@@ -3063,6 +3191,9 @@ void CDNFGameCaptureDlg::OutputDebugAuthInfo() {
             // 【新增】：旧版卡密无情拒绝提示
             print(L"该卡密状态: ❌ 已淘汰的旧版卡密，请联系管理员更换新版 CDK！", RGB(255, 80, 80));
         }
+    }
+    else {
+        print(L"本地卡密记录: 未找到", RGB(150, 150, 150));
     }
     print(L"==================================", RGB(255, 215, 0));
 }
@@ -6185,10 +6316,8 @@ void CDNFGameCaptureDlg::OnBnClickedInputKey() {
     // 阶段一：点击“输入授权码”，打开记事本，并将按钮变身
     // ==========================================
     if (currentText == L"输入授权码") {
-        wchar_t exePath[MAX_PATH];
-        GetModuleFileName(NULL, exePath, MAX_PATH);
-        CString path = exePath;
-        path = path.Left(path.ReverseFind(L'\\') + 1) + L"license.txt";
+        s_backupAuthCode = DnfReadLocalLicenseKey();
+        CString path = DnfGetLicenseFilePath();
 
         CFile file;
         if (file.Open(path, CFile::modeCreate | CFile::modeNoTruncate | CFile::modeWrite)) {
@@ -6207,10 +6336,16 @@ void CDNFGameCaptureDlg::OnBnClickedInputKey() {
     // 阶段二：点击“应用授权码”，校验卡密，并将按钮还原
     // ==========================================
     else {
-        // 1. 重新读取卡密并执行静默检查
+        // 1. 以用户刚保存的 license.txt 为输入来源，覆盖注册表旧值后再验证
+        CString fileKey = DnfReadLicenseFromFile();
+        if (!fileKey.IsEmpty()) {
+            DnfWriteLocalLicenseKey(fileKey);
+        }
+
+        // 2. 重新读取卡密并执行静默检查
         CheckTrialAndLicense();
 
-        // 2. 清空旧面板，强制打印最新的状态
+        // 3. 清空旧面板，强制打印最新的状态
         if (m_editVisualLogs.m_hWnd) {
             m_editVisualLogs.SetWindowText(L"");
         }
@@ -6218,7 +6353,7 @@ void CDNFGameCaptureDlg::OnBnClickedInputKey() {
 
         m_status.SetWindowText(L"授权码校验已触发");
 
-        // 3. 【关键】：将按钮文字还原，完成闭环
+        // 4. 【关键】：将按钮文字还原，完成闭环
         m_btnInputKey.SetWindowText(L"输入授权码");
     }
 }
@@ -8826,20 +8961,8 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             // 🚨 【新增】：标记本次云端校验是用户手动触发的！
             m_bIsManualAuthCheck = true;
 
-            wchar_t exePath[MAX_PATH]; GetModuleFileName(NULL, exePath, MAX_PATH);
-            CString path = exePath; path = path.Left(path.ReverseFind(L'\\') + 1) + L"license.txt";
-
-            CFile fileRead;
-            if (fileRead.Open(path, CFile::modeRead)) {
-                char buf[256] = { 0 }; fileRead.Read(buf, 255);
-                s_backupAuthCode = CA2W(buf, CP_UTF8); fileRead.Close();
-            }
-
-            CFile fileWrite;
-            if (fileWrite.Open(path, CFile::modeCreate | CFile::modeWrite)) {
-                std::string ansiKey = CW2A(newAuthCode, CP_UTF8);
-                fileWrite.Write(ansiKey.c_str(), (UINT)ansiKey.length()); fileWrite.Close();
-            }
+            s_backupAuthCode = DnfReadLocalLicenseKey();
+            DnfWriteLocalLicenseKey(newAuthCode);
 
             CheckTrialAndLicense();
 
