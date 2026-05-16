@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DNF 赛事计分板 - WebView2 版</title>
-    <meta name="dnf-web-layout-version" content="20260515-layout-fit-diagnostics">
-    <link rel="stylesheet" href="style.css?v=20260515-layout-fit-diagnostics">
+    <meta name="dnf-web-layout-version" content="20260517-seat-no-scroll">
+    <link rel="stylesheet" href="style.css?v=20260517-seat-no-scroll">
 </head>
 <body>
 
@@ -42,7 +42,10 @@
             <div class="control-panel">
                 <div class="control-row control-row-main">
                     <button class="ctrl-btn btn-swap" id="btn-swap">🔄 翻转红蓝</button>
+                    <button class="ctrl-btn btn-random" id="btn-random-teams">🎲 随机分组</button>
                     <button class="ctrl-btn btn-monitor-start" id="btn-monitor">▶ 运行</button>
+                </div>
+                <div class="control-row control-row-runtime">
                     <label class="algo-select-wrap" title="选择死亡X检测算法">
                         <span>死亡X</span>
                         <select id="death-algo-select" class="algo-select">
@@ -107,6 +110,6 @@
         </div>
     </div>
 
-    <script src="main.js?v=20260515-layout-fit-diagnostics" defer></script>
+    <script src="main.js?v=20260517-seat-no-scroll" defer></script>
 </body>
 </html>

@@ -8,6 +8,10 @@
     --layout-fit-scale: 1;
 }
 
+html {
+    overflow: hidden;
+}
+
 body {
     background-color: var(--bg-color);
     color: var(--text-main);
@@ -17,8 +21,7 @@ body {
     display: flex;
     flex-direction: column;
     align-items: center;
-    overflow-y: auto;
-    overflow-x: hidden;
+    overflow: hidden;
 }
 
 .app-shell {
@@ -134,13 +137,30 @@ body {
     border-radius: 6px;
 }
 
-.name-wrapper { position: relative; display: flex; align-items: center; width: 105px; gap: 4px; }
+.name-wrapper { position: relative; display: flex; align-items: center; width: 124px; gap: 4px; }
+.seat-number {
+    flex: 0 0 22px;
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    color: #8d91a3;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1;
+    text-shadow: none;
+    user-select: none;
+}
 .name-input, .stat-item input {
     background: transparent; border: 1px solid transparent; border-radius: 4px; 
     color: white; font-weight: bold; text-align: center; outline: none; transition: 0.2s;
     text-shadow: 0 0 2px rgba(255,255,255,0.3);
 }
-.name-input { width: 100%; font-size: 18px; padding: 2px 4px; }
+.name-input { flex: 1 1 auto; min-width: 0; width: auto; font-size: 18px; padding: 2px 2px; }
 .name-input::placeholder { color: var(--text-muted); font-weight: normal; text-shadow: none; }
 .stat-item input { width: 45px; font-size: 22px; padding: 2px 0; }
 .stats-group { display: flex; gap: 8px; }
@@ -172,7 +192,7 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     overflow-y: auto;  /* 超出内容自动显示滚动条 */
 }
 .alias-popover { 
-    top: -8px; left: 80px;
+    top: -8px; left: 0;
     width: max-content;
     min-width: 190px;
     max-width: min(320px, calc(100vw - 16px));
@@ -294,7 +314,8 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     width: 100%;
     flex-wrap: wrap;
 }
-.control-row-main { max-width: 860px; }
+.control-row-main { max-width: 560px; }
+.control-row-runtime { max-width: 560px; }
 .control-row-tools { max-width: 860px; }
 .ctrl-btn { 
     min-width: 0;
@@ -323,6 +344,7 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 #btn-monitor { font-size: 15px !important; padding: 9px 18px !important; letter-spacing: 1px; }
 
 .btn-swap { background: #4a4a60; }
+.btn-random { background: #6a3d8f; border: 1px solid rgba(215, 178, 255, 0.55); }
 .btn-sync-db { background: #235b74; }
 .btn-push-db { background: #126047; }
 .btn-monitor-start { background: #00e5ff; color: #000; box-shadow: 0 0 10px rgba(0, 229, 255, 0.4); }
@@ -836,7 +858,7 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 /* 小号菜单恢复为横向常驻按钮布局：名称按剩余空间自动省略 */
 .alias-popover {
     top: -8px;
-    left: 80px;
+    left: 0;
     width: max-content;
     min-width: 190px;
     max-width: min(320px, calc(100vw - 16px));

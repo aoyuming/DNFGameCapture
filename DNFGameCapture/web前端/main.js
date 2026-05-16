@@ -31,7 +31,7 @@ let pendingAliasPopoverName = '';
 let pendingAliasPopoverInput = null;
 let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
-const WEB_LAYOUT_VERSION = '20260515-layout-fit-diagnostics';
+const WEB_LAYOUT_VERSION = '20260517-seat-no-scroll';
 let lastLayoutFitScale = 1;
 let lastLayoutDiagSignature = '';
 let layoutDiagnosticsTimer = null;
@@ -259,6 +259,14 @@ function openAliasPopover(inputElem, playerName, options = {}) {
     return aliasPopover;
 }
 
+function alignAliasPopoverToDragHandle(popElement) {
+    const row = popElement?.closest('.player-row');
+    const dragHandle = row?.querySelector('.drag-handle');
+    if (!popElement || !dragHandle) return;
+
+    popElement.style.left = `${Math.round(dragHandle.offsetLeft)}px`;
+}
+
 function clampAliasPopoverToViewport(popElement) {
     if (!popElement || !popElement.classList.contains('active')) return;
 
@@ -270,6 +278,7 @@ function clampAliasPopoverToViewport(popElement) {
     popElement.style.left = '';
     popElement.style.width = '';
     popElement.style.maxHeight = '';
+    alignAliasPopoverToDragHandle(popElement);
 
     let rect = popElement.getBoundingClientRect();
     if (!rect.width || !rect.height) return;
@@ -349,10 +358,15 @@ function getLayoutDiagnostics() {
     const bodyStyle = window.getComputedStyle(body);
     const padLeft = parseFloat(bodyStyle.paddingLeft) || 0;
     const padRight = parseFloat(bodyStyle.paddingRight) || 0;
+    const padTop = parseFloat(bodyStyle.paddingTop) || 0;
+    const padBottom = parseFloat(bodyStyle.paddingBottom) || 0;
     const usableW = Math.max(1, viewportW - padLeft - padRight);
+    const usableH = Math.max(1, viewportH - padTop - padBottom);
     const naturalW = Math.ceil(shellRect.width || body.scrollWidth || 0);
     const naturalH = Math.ceil(shellRect.height || body.scrollHeight || 0);
-    const fitScale = naturalW > usableW ? Math.max(0.5, Math.min(1, usableW / naturalW)) : 1;
+    const widthScale = naturalW > usableW ? usableW / naturalW : 1;
+    const heightScale = naturalH > usableH ? usableH / naturalH : 1;
+    const fitScale = Math.max(0.5, Math.min(1, widthScale, heightScale));
 
     if (shell) shell.style.setProperty('--layout-fit-scale', String(fitScale));
     lastLayoutFitScale = fitScale;
@@ -371,6 +385,7 @@ function getLayoutDiagnostics() {
         appShellNaturalWidth: naturalW,
         appShellNaturalHeight: naturalH,
         usableWidth: Math.round(usableW),
+        usableHeight: Math.round(usableH),
         fitScale,
         previousScale
     };
@@ -605,6 +620,88 @@ function getRowData(row, teamId) {
         akCount: parseInt(row.querySelector('.stat-ak').value) || 0,
         aliases: name ? aliases : []
     };
+}
+
+function getRandomGroupRowData(row) {
+    const nameElem = row.querySelector('.name-input');
+    const name = (nameElem?.value || '').trim();
+    return {
+        seatNumber: row.querySelector('.seat-number')?.textContent || '',
+        name,
+        inputError: !!nameElem?.classList.contains('input-error'),
+        errorMsg: nameElem?.getAttribute('data-error-msg') || '',
+        kills: row.querySelector('.stat-kill')?.value || '0',
+        deaths: row.querySelector('.stat-death')?.value || '0',
+        akCount: row.querySelector('.stat-ak')?.value || '-'
+    };
+}
+
+function setRandomGroupRowData(row, data) {
+    const seatElem = row.querySelector('.seat-number');
+    if (seatElem) seatElem.textContent = data?.seatNumber || '';
+
+    const nameElem = row.querySelector('.name-input');
+    if (nameElem) {
+        nameElem.value = data?.name || '';
+        nameElem.classList.toggle('input-error', !!data?.inputError);
+        if (data?.errorMsg) nameElem.setAttribute('data-error-msg', data.errorMsg);
+        else nameElem.removeAttribute('data-error-msg');
+    }
+    row.querySelector('.stat-kill').value = data?.kills || '0';
+    row.querySelector('.stat-death').value = data?.deaths || '0';
+    row.querySelector('.stat-ak').value = data?.akCount || '-';
+}
+
+function shuffleInPlace(items) {
+    for (let i = items.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [items[i], items[j]] = [items[j], items[i]];
+    }
+    return items;
+}
+
+function resetRandomGroupTransientUi() {
+    document.querySelectorAll('.popover').forEach(p => p.classList.remove('active'));
+    clearPendingAliasPopoverLock();
+    draggedRow = null;
+    ctrlSwapState.active = false;
+    ctrlSwapState.sourceRow = null;
+    ctrlSwapState.targetRow = null;
+    ctrlSwapState.currentIndex = -1;
+    document.querySelectorAll('.player-row').forEach(row => {
+        row.draggable = false;
+        row.classList.remove('active-row', 'dragging', 'drag-over', 'drag-source', 'drag-target');
+    });
+}
+
+function randomizeTeams() {
+    if (isMonitoring) {
+        showAlert('请先停止监控，再进行随机分组。');
+        return;
+    }
+
+    const rows = Array.from(document.querySelectorAll('.player-row'));
+    const players = rows
+        .map(row => getRandomGroupRowData(row))
+        .filter(Boolean);
+
+    if (players.length !== 8) {
+        showAlert('当前行数异常，随机分组需要完整的 8 个位置。');
+        return;
+    }
+
+    resetRandomGroupTransientUi();
+    shuffleInPlace(players);
+
+    const redRows = Array.from(document.querySelectorAll('#team-red .player-row'));
+    const blueRows = Array.from(document.querySelectorAll('#team-blue .player-row'));
+    const redPlayers = players.slice(0, 4);
+    const bluePlayers = players.slice(4, 8);
+
+    redRows.forEach((row, idx) => setRandomGroupRowData(row, redPlayers[idx] || null));
+    blueRows.forEach((row, idx) => setRandomGroupRowData(row, bluePlayers[idx] || null));
+
+    triggerSync();
 }
 
 function shouldPreserveNoAliasInput(inputElem, serverName) {
@@ -1269,7 +1366,7 @@ function getFieldConflict(newMainName, excludeInput) {
 
 // ==========================================
 // 4. 渲染选手行与交互
-function createPlayerRow() {
+function createPlayerRow(seatNumber = '') {
 
     const row = document.createElement('div');
     row.className = 'player-row';
@@ -1279,6 +1376,7 @@ function createPlayerRow() {
     // 🚨 1. HTML 结构：把拖拽柄放回 name-wrapper 里面（原来齿轮的位置）
     row.innerHTML = `
         <div class="name-wrapper">
+            <span class="seat-number">${seatNumber}</span>
             <input type="text" class="name-input" placeholder="" autocomplete="off">
             <div class="drag-handle" title="按住拖动以交换位置">⋮⋮</div>
             <div class="popover autocomplete-popover"></div>
@@ -1964,8 +2062,8 @@ function renderAliasMenu(playerName, popElement) {
 const blueTeam = document.getElementById('team-blue');
 const redTeam = document.getElementById('team-red');
 for (let i = 0; i < 4; i++) {
-    redTeam.querySelector('.rows-container').appendChild(createPlayerRow());
-    blueTeam.querySelector('.rows-container').appendChild(createPlayerRow());
+    redTeam.querySelector('.rows-container').appendChild(createPlayerRow(i + 1));
+    blueTeam.querySelector('.rows-container').appendChild(createPlayerRow(i + 5));
 }
 
 document.querySelectorAll('.team-score-input').forEach(input => { input.type = 'text'; bindProNumberControls(input); });
@@ -1992,6 +2090,7 @@ document.addEventListener('input', (e) => {
 });
 
 document.getElementById('btn-swap').addEventListener('click', () => window.chrome.webview.postMessage({ action: "cmd_swap" }));
+document.getElementById('btn-random-teams')?.addEventListener('click', randomizeTeams);
 document.getElementById('btn-monitor').addEventListener('click', () => {
     const violations = updateStartButtonGuard();
     if (!isMonitoring && violations.length > 0) {

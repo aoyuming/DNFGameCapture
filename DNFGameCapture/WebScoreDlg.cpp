@@ -9,7 +9,7 @@ void WriteMatchLog(const CString& logLine);
 namespace {
     // 参考图1的紧凑 CSS 视口尺寸。窗口外框会按当前系统边框自动反推。
     constexpr int kReferenceClientWidth = 720;
-    constexpr int kReferenceClientHeight = 560;
+    constexpr int kReferenceClientHeight = 590;
     constexpr double kTargetVisualScale = 1.25;
 
     double GetDpiScaleForWindow(HWND hwnd)
