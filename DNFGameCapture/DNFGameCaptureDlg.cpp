@@ -8819,10 +8819,18 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 }
             }
 
-            if (layoutVersion != metaLayoutVersion || fitScale < 0.999 || bodyScrollWidth > innerWidth + 2) {
+            const bool versionMismatch = layoutVersion != metaLayoutVersion;
+            const bool severeAutoFit = fitScale > 0.0 && fitScale < 0.90;
+            if (versionMismatch) {
                 CString warn;
-                warn.Format(L"⚠️ [Web布局] 前端尺寸异常或文件未同步：JS=%s，HTML=%s，fit=%.3f，scrollW=%d，innerW=%d",
+                warn.Format(L"⚠️ [Web布局] 前端文件可能未同步：JS=%s，HTML=%s，fit=%.3f，scrollW=%d，innerW=%d",
                     layoutVersion.GetString(), metaLayoutVersion.GetString(), fitScale, bodyScrollWidth, innerWidth);
+                AppLog(warn, RGB(255, 180, 0));
+            }
+            else if (severeAutoFit) {
+                CString warn;
+                warn.Format(L"⚠️ [Web布局] 窗口空间不足，前端已自动缩放适配：fit=%.3f，scrollW=%d，innerW=%d",
+                    fitScale, bodyScrollWidth, innerWidth);
                 AppLog(warn, RGB(255, 180, 0));
             }
         }
