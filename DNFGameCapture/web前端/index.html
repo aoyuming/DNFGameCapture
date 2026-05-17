@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DNF 赛事计分板 - WebView2 版</title>
-    <meta name="dnf-web-layout-version" content="20260517-seat-no-scroll">
-    <link rel="stylesheet" href="style.css?v=20260517-seat-no-scroll">
+    <meta name="dnf-web-layout-version" content="20260517-random-group-count">
+    <link rel="stylesheet" href="style.css?v=20260517-random-group-count">
 </head>
 <body>
 
@@ -42,8 +42,8 @@
             <div class="control-panel">
                 <div class="control-row control-row-main">
                     <button class="ctrl-btn btn-swap" id="btn-swap">🔄 翻转红蓝</button>
-                    <button class="ctrl-btn btn-random" id="btn-random-teams">🎲 随机分组</button>
                     <button class="ctrl-btn btn-monitor-start" id="btn-monitor">▶ 运行</button>
+                    <button class="ctrl-btn btn-random" id="btn-random-teams">🎲 分组和抽签</button>
                 </div>
                 <div class="control-row control-row-runtime">
                     <label class="algo-select-wrap" title="选择死亡X检测算法">
@@ -69,8 +69,7 @@
                 <div class="control-row control-row-tools">
                     <button class="ctrl-btn btn-auth" id="btn-auth">🔑 授权</button>
                     <button class="ctrl-btn btn-pro" id="btn-pro">👑 专业模式</button>
-                    <button class="ctrl-btn btn-clear-red" id="btn-clear-red">🗑️ 清空红队</button>
-                    <button class="ctrl-btn btn-clear-blue" id="btn-clear-blue">🗑️ 清空蓝队</button>
+                    <button class="ctrl-btn btn-clear-teams" id="btn-clear-teams">🗑️ 清空</button>
                     <button class="ctrl-btn btn-reset" id="btn-reset">✨ 重置战绩</button>
                 </div>
 
@@ -98,6 +97,60 @@
         </div>
     </div>
 
+    <div class="random-tool-overlay" id="random-tool-overlay" aria-hidden="true">
+        <div class="random-tool-panel" role="dialog" aria-modal="true" aria-labelledby="random-tool-title">
+            <div class="random-tool-header">
+                <div>
+                    <div class="random-tool-title" id="random-tool-title">随机工具</div>
+                    <div class="random-tool-subtitle">随机分组或者抽签</div>
+                </div>
+                <button class="random-tool-close" id="btn-random-tool-close" title="关闭">&times;</button>
+            </div>
+
+            <div class="random-tool-body">
+                <div class="random-tool-left">
+                    <div class="random-roster-box">
+                        <textarea class="random-roster-input" id="random-roster-input" placeholder="一行一个人，可输入库里主号、临时名字或编号&#10;例如：1号&#10;张三&#10;小王"></textarea>
+                        <div class="random-roster-suggestions" id="random-roster-suggestions"></div>
+                        <div class="random-tool-note">输入库里已有主号时会出现提示；临时名字只用于本次随机，不会写入小号库。</div>
+                    </div>
+
+                    <div class="random-options">
+                        <label class="random-option-line">
+                            <span>分成几组</span>
+                            <input type="text" id="random-group-sizes" class="random-group-sizes" value="2" placeholder="默认 2 组">
+                        </label>
+                        <label class="random-option-line">
+                            <span>抽签人数</span>
+                            <input type="text" id="random-draw-count" class="random-draw-count" value="1">
+                        </label>
+                    </div>
+
+                    <div class="random-participant-box">
+                        <div class="random-section-title">
+                            <span>参与人员</span>
+                            <span class="random-participant-count" id="random-participant-count">0</span>
+                        </div>
+                        <div class="random-participant-list" id="random-participant-list"></div>
+                    </div>
+                </div>
+
+                <div class="random-tool-right">
+                    <div class="random-actions">
+                        <button class="random-action-btn primary" id="btn-random-run">随机分组</button>
+                        <button class="random-action-btn" id="btn-random-draw">抽签</button>
+                        <button class="random-action-btn" id="btn-random-apply">应用到红蓝</button>
+                        <button class="random-action-btn" id="btn-random-copy">复制结果</button>
+                        <button class="random-action-btn reset" id="btn-random-reset">重置</button>
+                    </div>
+                    <div class="random-result" id="random-result">
+                        <div class="random-empty">输入名单后，可以随机分组或者抽签。</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="modal-overlay" id="custom-modal">
         <div class="modal-box">
             <div class="modal-msg" id="modal-msg">提示信息</div>
@@ -110,6 +163,6 @@
         </div>
     </div>
 
-    <script src="main.js?v=20260517-seat-no-scroll" defer></script>
+    <script src="main.js?v=20260517-random-group-count" defer></script>
 </body>
 </html>

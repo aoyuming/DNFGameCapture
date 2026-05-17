@@ -9,6 +9,7 @@
     "build:exe": "npx --yes @yao-pkg/pkg . --targets node22-win-x64 --output dist/dnf-capture-admin.exe",
     "build:web-exe": "npx --yes @yao-pkg/pkg . --targets node22-win-x64 --output dist/dnf-capture-admin-web.exe",
     "build:cli-exe": "npx --yes @yao-pkg/pkg admin.js --targets node22-win-x64 --output dist/dnf-capture-admin-cli.exe",
+    "build:update-uploader-exe": "npx --yes @yao-pkg/pkg update-uploader-console.js --targets node22-win-x64 --output dist/dnf-update-uploader.exe",
     "build:all-exe": "npm.cmd run build:web-exe && npm.cmd run build:cli-exe"
   },
   "bin": "admin-web.js",

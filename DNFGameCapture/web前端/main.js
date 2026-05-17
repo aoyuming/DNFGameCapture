@@ -31,10 +31,17 @@ let pendingAliasPopoverName = '';
 let pendingAliasPopoverInput = null;
 let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
-const WEB_LAYOUT_VERSION = '20260517-seat-no-scroll';
+const WEB_LAYOUT_VERSION = '20260517-random-group-count';
 let lastLayoutFitScale = 1;
 let lastLayoutDiagSignature = '';
 let layoutDiagnosticsTimer = null;
+const randomToolState = {
+    fixedIds: new Set(),
+    fixedOrder: [],
+    lastResult: null,
+    activeSuggestLine: -1
+};
+let pendingClearAllUntil = 0;
 
 // Ctrl 选择互换模式状态（与所在行无关，模块级即可，但放在 createPlayerRow 外更好）
 // 建议放在文件顶部全局区域，或至少在 createPlayerRow 外定义
@@ -674,34 +681,601 @@ function resetRandomGroupTransientUi() {
     });
 }
 
-function randomizeTeams() {
-    if (isMonitoring) {
-        showAlert('请先停止监控，再进行随机分组。');
+function cloneRandomRowData(data) {
+    return {
+        seatNumber: data?.seatNumber || '',
+        name: data?.name || '',
+        inputError: !!data?.inputError,
+        errorMsg: data?.errorMsg || '',
+        kills: data?.kills || '0',
+        deaths: data?.deaths || '0',
+        akCount: data?.akCount || '-'
+    };
+}
+
+function makeRandomRowData(name, seatNumber = '') {
+    return {
+        seatNumber,
+        name: name || '',
+        inputError: false,
+        errorMsg: '',
+        kills: '0',
+        deaths: '0',
+        akCount: '-'
+    };
+}
+
+function getRandomParticipantLabel(data, fallback) {
+    const name = (data?.name || '').trim();
+    if (name) return name;
+    const seat = (data?.seatNumber || '').trim();
+    return seat ? `位置${seat}` : fallback;
+}
+
+function getAllLibraryMainNames() {
+    const names = new Set([...Object.keys(savedDB || {}), ...Object.keys(playerDB || {})]);
+    return Array.from(names)
+        .map(name => String(name || '').trim())
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+}
+
+function normalizeRandomRosterLines(raw) {
+    const text = String(raw || '').replace(/\r/g, '');
+    if (!text.trim()) return [];
+    const lines = text.split('\n');
+    while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
+    return lines;
+}
+
+function getRandomRosterLines() {
+    const input = document.getElementById('random-roster-input');
+    return normalizeRandomRosterLines(input?.value || '');
+}
+
+function getRandomSeatLabel(row, fallbackIndex) {
+    const text = (row?.querySelector('.seat-number')?.textContent || '').trim();
+    return text || String(fallbackIndex + 1);
+}
+
+function getRandomSeatSortValue(seatLabel, fallbackIndex) {
+    const n = Number.parseInt(seatLabel, 10);
+    return Number.isFinite(n) ? n : fallbackIndex + 1;
+}
+
+function makeRandomSeatPlaceholder(seatNumber) {
+    return `[编号${seatNumber}]`;
+}
+
+function isRandomSeatPlaceholderName(name) {
+    return /^\[编号\d+\]$/.test(String(name || '').trim());
+}
+
+function normalizeRandomRosterSourceName(name) {
+    const clean = String(name || '').trim();
+    return isRandomSeatPlaceholderName(clean) ? '' : clean;
+}
+
+function getRandomApplyName(displayName, seatNumber, isPlaceholder = false) {
+    const clean = String(displayName || '').trim();
+    if (!clean || isPlaceholder || isRandomSeatPlaceholderName(clean)) return '';
+
+    const duplicateSuffix = clean.match(/^(.*)\[编号\d+\]$/);
+    if (duplicateSuffix && duplicateSuffix[1].trim()) return duplicateSuffix[1].trim();
+
+    return clean;
+}
+
+function buildUniqueRandomRosterItems(rawItems) {
+    const prepared = rawItems.map((item, idx) => {
+        const seatNumber = String(item.seatNumber || idx + 1).trim() || String(idx + 1);
+        const rawName = normalizeRandomRosterSourceName(item.name);
+        const isPlaceholder = rawName === '';
+        const baseName = rawName || makeRandomSeatPlaceholder(seatNumber);
+        return { rawName, baseName, seatNumber, isPlaceholder };
+    });
+    const counts = new Map();
+    prepared.forEach(item => counts.set(item.baseName, (counts.get(item.baseName) || 0) + 1));
+    return prepared.map(item => {
+        const duplicated = !item.isPlaceholder && (counts.get(item.baseName) || 0) > 1;
+        const displayName = duplicated ? `${item.baseName}[编号${item.seatNumber}]` : item.baseName;
+        return { ...item, displayName, duplicated };
+    });
+}
+
+function buildDefaultRandomRosterLinesFromSeats() {
+    const rows = Array.from(document.querySelectorAll('.player-row')).map((row, idx) => {
+        const seatNumber = getRandomSeatLabel(row, idx);
+        const name = normalizeRandomRosterSourceName(row.querySelector('.name-input')?.value || '');
+        return {
+            name,
+            seatNumber,
+            sortValue: getRandomSeatSortValue(seatNumber, idx),
+            originalIndex: idx
+        };
+    });
+    rows.sort((a, b) => (a.sortValue - b.sortValue) || (a.originalIndex - b.originalIndex));
+    return buildUniqueRandomRosterItems(rows).map(item => item.displayName);
+}
+
+function ensureRandomRosterDefaultFromSeats() {
+    const input = document.getElementById('random-roster-input');
+    if (!input || input.value.trim()) return false;
+    const lines = buildDefaultRandomRosterLinesFromSeats();
+    if (lines.length === 0) return false;
+    input.value = lines.join('\n');
+    randomToolState.fixedIds.clear();
+    randomToolState.fixedOrder = [];
+    invalidateRandomToolResult('已默认载入当前 8 个座位，可以随机分组或者抽签。');
+    return true;
+}
+
+function getRandomRosterLineRange(textarea) {
+    const value = textarea?.value || '';
+    const caret = textarea?.selectionStart || 0;
+    const start = value.lastIndexOf('\n', Math.max(0, caret - 1)) + 1;
+    let end = value.indexOf('\n', caret);
+    if (end < 0) end = value.length;
+    return { start, end, text: value.slice(start, end), index: value.slice(0, start).split('\n').length - 1 };
+}
+
+function getRosterRandomParticipants() {
+    const lines = getRandomRosterLines();
+    const rosterItems = buildUniqueRandomRosterItems(lines.map((line, idx) => ({
+        name: line,
+        seatNumber: String(idx + 1)
+    })));
+    return rosterItems.map((item, idx) => {
+        return {
+            id: `roster:${idx}:${item.displayName}`,
+            source: 'roster',
+            label: item.displayName,
+            isPlaceholder: item.isPlaceholder,
+            meta: item.duplicated ? `重复名/编号${item.seatNumber}` : (item.isPlaceholder ? '空名字' : '名单'),
+            rowData: makeRandomRowData(getRandomApplyName(item.displayName, item.seatNumber, item.isPlaceholder), item.seatNumber)
+        };
+    });
+}
+
+function getRandomToolParticipants() {
+    return getRosterRandomParticipants();
+}
+
+function invalidateRandomToolResult(message = '输入名单后，可以随机分组或者抽签。') {
+    randomToolState.lastResult = null;
+    const result = document.getElementById('random-result');
+    if (result) result.innerHTML = `<div class="random-empty">${escapeHtml(message)}</div>`;
+}
+
+function updateRandomRosterSuggestions() {
+    const textarea = document.getElementById('random-roster-input');
+    const box = document.getElementById('random-roster-suggestions');
+    if (!textarea || !box) return;
+    const range = getRandomRosterLineRange(textarea);
+    randomToolState.activeSuggestLine = range.index;
+    const query = range.text.trim();
+    if (!query) {
+        box.classList.remove('active');
+        box.innerHTML = '';
         return;
     }
+    const names = getAllLibraryMainNames()
+        .filter(name => name.includes(query))
+        .slice(0, 8);
+    if (names.length === 0) {
+        box.classList.remove('active');
+        box.innerHTML = '';
+        return;
+    }
+    box.innerHTML = names.map(name => `<div class="random-roster-suggestion" data-name="${escapeHtml(name)}">${escapeHtml(name)}</div>`).join('');
+    box.classList.add('active');
+    box.querySelectorAll('.random-roster-suggestion').forEach(item => {
+        item.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            applyRandomRosterSuggestion(item.getAttribute('data-name') || '');
+        });
+    });
+}
 
-    const rows = Array.from(document.querySelectorAll('.player-row'));
-    const players = rows
-        .map(row => getRandomGroupRowData(row))
-        .filter(Boolean);
+function applyRandomRosterSuggestion(name) {
+    const textarea = document.getElementById('random-roster-input');
+    if (!textarea || !name) return;
+    const range = getRandomRosterLineRange(textarea);
+    textarea.value = textarea.value.slice(0, range.start) + name + textarea.value.slice(range.end);
+    const caret = range.start + name.length;
+    textarea.focus();
+    textarea.setSelectionRange(caret, caret);
+    document.getElementById('random-roster-suggestions')?.classList.remove('active');
+    invalidateRandomToolResult('名单已更新，请重新随机分组或者抽签。');
+    renderRandomParticipants();
+}
 
-    if (players.length !== 8) {
-        showAlert('当前行数异常，随机分组需要完整的 8 个位置。');
+function handleRandomRosterInput() {
+    invalidateRandomToolResult('名单已更新，请重新随机分组或者抽签。');
+    renderRandomParticipants();
+    updateRandomRosterSuggestions();
+}
+
+function syncRandomFixedState(participants) {
+    const ids = new Set(participants.map(p => p.id));
+    randomToolState.fixedOrder = randomToolState.fixedOrder.filter(id => ids.has(id));
+    randomToolState.fixedIds = new Set(randomToolState.fixedOrder);
+}
+
+function toggleRandomFixed(id) {
+    if (randomToolState.fixedIds.has(id)) {
+        randomToolState.fixedIds.delete(id);
+        randomToolState.fixedOrder = randomToolState.fixedOrder.filter(item => item !== id);
+    } else {
+        randomToolState.fixedIds.add(id);
+        randomToolState.fixedOrder.push(id);
+    }
+    invalidateRandomToolResult('固定人员已更新，请重新随机分组。');
+    renderRandomParticipants();
+}
+
+function renderRandomParticipants() {
+    const list = document.getElementById('random-participant-list');
+    if (!list) return;
+    const participants = getRandomToolParticipants();
+    const countEl = document.getElementById('random-participant-count');
+    if (countEl) countEl.textContent = String(participants.length);
+    syncRandomFixedState(participants);
+    if (participants.length === 0) {
+        list.innerHTML = '<div class="random-empty">暂无参与人员。</div>';
+        return;
+    }
+    list.innerHTML = participants.map(p => {
+        const fixed = randomToolState.fixedIds.has(p.id);
+        return `<div class="random-participant-row">
+            <span class="random-person-name" title="${escapeHtml(p.label)}">${escapeHtml(p.label)}</span>
+            <span class="random-person-meta">${escapeHtml(p.meta || '')}</span>
+            <button class="random-fixed-btn${fixed ? ' active' : ''}" data-id="${escapeHtml(p.id)}">${fixed ? '已固定' : '固定'}</button>
+        </div>`;
+    }).join('');
+    list.querySelectorAll('.random-fixed-btn').forEach(btn => {
+        btn.addEventListener('click', () => toggleRandomFixed(btn.getAttribute('data-id') || ''));
+    });
+}
+
+function getDefaultRandomGroupSizes(count) {
+    const larger = Math.ceil(count / 2);
+    const smaller = Math.floor(count / 2);
+    if (count % 2 === 1 && Math.random() < 0.5) return [smaller, larger];
+    return [larger, smaller];
+}
+
+function buildBalancedRandomGroupSizes(count, groupCount) {
+    const base = Math.floor(count / groupCount);
+    const sizes = Array(groupCount).fill(base);
+    const extraIndexes = Array.from({ length: groupCount }, (_, idx) => idx);
+    shuffleInPlace(extraIndexes);
+    for (let i = 0; i < count % groupCount; i++) {
+        sizes[extraIndexes[i]] += 1;
+    }
+    return sizes;
+}
+
+function parseRandomGroupSizes(count) {
+    const input = document.getElementById('random-group-sizes');
+    const raw = (input?.value || '2').trim() || '2';
+    const groupCount = Number(raw);
+    if (!Number.isInteger(groupCount) || groupCount <= 0) {
+        return { error: '分成几组必须是大于 0 的整数。' };
+    }
+    if (groupCount > count) {
+        return { error: `当前只有 ${count} 人，不能分成 ${groupCount} 组。` };
+    }
+    if (groupCount === 2 && count > 0) return { sizes: getDefaultRandomGroupSizes(count) };
+    return { sizes: buildBalancedRandomGroupSizes(count, groupCount) };
+}
+
+function getRandomGroupCountFromSizes(sizes) {
+    return Array.isArray(sizes) ? sizes.length : 0;
+}
+
+function buildRandomSlotOrder(sizes) {
+    const slots = [];
+    const maxSize = Math.max(...sizes);
+    for (let pos = 0; pos < maxSize; pos++) {
+        for (let groupIdx = 0; groupIdx < sizes.length; groupIdx++) {
+            if (pos < sizes[groupIdx]) slots.push(groupIdx);
+        }
+    }
+    return slots;
+}
+
+function buildRandomGrouping(participants, sizes) {
+    const byId = new Map(participants.map(p => [p.id, p]));
+    const fixed = randomToolState.fixedOrder.map(id => byId.get(id)).filter(Boolean);
+    const capacity = sizes.reduce((sum, n) => sum + n, 0);
+    if (fixed.length > capacity) {
+        return { error: `固定人员 ${fixed.length} 人，超过当前分组容量 ${capacity} 人。` };
+    }
+    const fixedIds = new Set(fixed.map(p => p.id));
+    const randomPool = participants.filter(p => !fixedIds.has(p.id));
+    shuffleInPlace(randomPool);
+
+    if (fixed.length === 0) {
+        const groups = [];
+        let cursor = 0;
+        sizes.forEach(size => {
+            groups.push(randomPool.slice(cursor, cursor + size));
+            cursor += size;
+        });
+        return {
+            type: 'groups',
+            groups,
+            leftover: randomPool.slice(cursor),
+            sizes,
+            fixedCount: 0
+        };
+    }
+
+    const slots = buildRandomSlotOrder(sizes);
+    const groups = sizes.map(() => []);
+    const selected = [...fixed, ...randomPool.slice(0, capacity - fixed.length)];
+    selected.forEach((participant, idx) => {
+        const groupIdx = slots[idx];
+        if (Number.isInteger(groupIdx)) groups[groupIdx].push(participant);
+    });
+    return {
+        type: 'groups',
+        groups,
+        leftover: randomPool.slice(Math.max(0, capacity - fixed.length)),
+        sizes,
+        fixedCount: fixed.length
+    };
+}
+
+function formatRandomParticipant(participant) {
+    return participant?.label || participant?.rowData?.name || '空位';
+}
+
+function formatRandomResultText(result) {
+    if (!result) return '';
+    if (result.type === 'draw') {
+        return `抽签：${(result.picks || []).map(formatRandomParticipant).join('、') || '空'}`;
+    }
+    if (!Array.isArray(result.groups)) return '';
+    const lines = [];
+    result.groups.forEach((group, idx) => {
+        lines.push(`${idx + 1}组：${group.map(formatRandomParticipant).join('、') || '空'}`);
+    });
+    if (result.leftover?.length) {
+        lines.push(`候补：${result.leftover.map(formatRandomParticipant).join('、')}`);
+    }
+    return lines.join('\n');
+}
+
+function renderRandomResult(result) {
+    const box = document.getElementById('random-result');
+    if (!box) return;
+    if (!result) {
+        box.innerHTML = '<div class="random-empty">输入名单后，可以随机分组或者抽签。</div>';
+        return;
+    }
+    if (result.error) {
+        box.innerHTML = `<div class="random-error">${escapeHtml(result.error)}</div>`;
+        return;
+    }
+    if (result.type === 'draw') {
+        box.innerHTML = `<div class="random-draw-result">抽签结果：<b>${escapeHtml((result.picks || []).map(formatRandomParticipant).join('、') || '空')}</b></div>`;
+        return;
+    }
+    const groupsHtml = result.groups.map((group, idx) => `
+        ${idx === 0 ? '<div class="random-success">已生成随机分组。</div>' : ''}
+        <div class="random-group">
+            <div class="random-group-title">${idx + 1}组 (${group.length}人)</div>
+            <div class="random-group-list">
+                ${group.map(p => `<span class="random-chip" title="${escapeHtml(formatRandomParticipant(p))}">${escapeHtml(formatRandomParticipant(p))}</span>`).join('') || '<span class="random-empty">空</span>'}
+            </div>
+        </div>
+    `).join('');
+    const leftoverHtml = result.leftover?.length ? `
+        <div class="random-group">
+            <div class="random-group-title">候补/未分配 (${result.leftover.length}人)</div>
+            <div class="random-group-list">
+                ${result.leftover.map(p => `<span class="random-chip" title="${escapeHtml(formatRandomParticipant(p))}">${escapeHtml(formatRandomParticipant(p))}</span>`).join('')}
+            </div>
+        </div>` : '';
+    box.innerHTML = groupsHtml + leftoverHtml;
+}
+
+function runRandomToolGrouping(options = {}) {
+    const notify = options.notify !== false;
+    const returnError = options.returnError === true;
+    if (isMonitoring) {
+        const result = { error: '请先停止监控，再进行随机分组。' };
+        if (notify) showAlert(`随机分组失败：${result.error}`);
+        return returnError ? result : null;
+    }
+
+    const participants = getRandomToolParticipants();
+    syncRandomFixedState(participants);
+    if (participants.length === 0) {
+        const result = { error: '当前没有可随机的人员。' };
+        randomToolState.lastResult = result;
+        renderRandomResult(result);
+        if (notify) showAlert(`随机分组失败：${result.error}`);
+        return returnError ? result : null;
+    }
+
+    const parsed = parseRandomGroupSizes(participants.length);
+    if (parsed.error) {
+        const result = { error: parsed.error };
+        randomToolState.lastResult = result;
+        renderRandomResult(result);
+        if (notify) showAlert(`随机分组失败：${result.error}`);
+        return returnError ? result : null;
+    }
+
+    const result = buildRandomGrouping(participants, parsed.sizes);
+    randomToolState.lastResult = result;
+    renderRandomResult(result);
+    if (result.error) {
+        if (notify) showAlert(`随机分组失败：${result.error}`);
+        return returnError ? result : null;
+    }
+    if (notify) {
+        const assignedCount = result.groups.reduce((sum, group) => sum + group.length, 0);
+        const leftoverCount = result.leftover?.length || 0;
+        const suffix = leftoverCount > 0 ? `，候补 ${leftoverCount} 人` : '';
+        showAlert(`随机分组成功：已分成 ${getRandomGroupCountFromSizes(result.sizes)} 组，已分配 ${assignedCount} 人${suffix}。`);
+    }
+    return result;
+}
+
+function applyRandomResultToTeams() {
+    if (isMonitoring) {
+        showAlert('请先停止监控，再应用随机分组。');
+        return;
+    }
+    const result = randomToolState.lastResult && randomToolState.lastResult.type === 'groups' && !randomToolState.lastResult.error
+        ? randomToolState.lastResult
+        : runRandomToolGrouping({ notify: false, returnError: true });
+    if (!result) {
+        showAlert('应用失败：当前没有可应用的随机分组结果。');
+        return;
+    }
+    if (result.error) {
+        showAlert(`应用失败：${result.error}`);
+        return;
+    }
+    if (result.groups.length !== 2) {
+        showAlert('应用失败：只有 2 组结果可以直接应用到红蓝座位。');
+        return;
+    }
+    if (result.groups[0].length > 4 || result.groups[1].length > 4) {
+        showAlert('应用失败：红蓝每队最多 4 个座位，请调整分成几组。');
         return;
     }
 
     resetRandomGroupTransientUi();
-    shuffleInPlace(players);
-
     const redRows = Array.from(document.querySelectorAll('#team-red .player-row'));
     const blueRows = Array.from(document.querySelectorAll('#team-blue .player-row'));
-    const redPlayers = players.slice(0, 4);
-    const bluePlayers = players.slice(4, 8);
+    const redPlayers = result.groups[0];
+    const bluePlayers = result.groups[1];
 
-    redRows.forEach((row, idx) => setRandomGroupRowData(row, redPlayers[idx] || null));
-    blueRows.forEach((row, idx) => setRandomGroupRowData(row, bluePlayers[idx] || null));
+    redRows.forEach((row, idx) => setRandomGroupRowData(row, redPlayers[idx]?.rowData || null));
+    blueRows.forEach((row, idx) => setRandomGroupRowData(row, bluePlayers[idx]?.rowData || null));
 
     triggerSync();
+    showAlert(`应用成功：已写入红蓝座位，共 ${redPlayers.length + bluePlayers.length} 人。`);
+}
+
+function parseRandomDrawCount(maxCount) {
+    const raw = (document.getElementById('random-draw-count')?.value || '1').trim();
+    const count = Number(raw);
+    if (!Number.isInteger(count) || count <= 0) {
+        return { error: '抽签人数必须是大于 0 的整数。' };
+    }
+    if (count > maxCount) {
+        return { error: `抽签人数 ${count} 人，但当前名单只有 ${maxCount} 人。` };
+    }
+    return { count };
+}
+
+function drawRandomParticipant() {
+    const participants = getRandomToolParticipants();
+    syncRandomFixedState(participants);
+    if (participants.length === 0) {
+        const result = { error: '当前没有可抽签的人员。' };
+        randomToolState.lastResult = result;
+        renderRandomResult(result);
+        showAlert(`抽签失败：${result.error}`);
+        return;
+    }
+    const parsed = parseRandomDrawCount(participants.length);
+    if (parsed.error) {
+        const result = { error: parsed.error };
+        randomToolState.lastResult = result;
+        renderRandomResult(result);
+        showAlert(`抽签失败：${result.error}`);
+        return;
+    }
+    const pool = [...participants];
+    shuffleInPlace(pool);
+    const result = { type: 'draw', picks: pool.slice(0, parsed.count) };
+    randomToolState.lastResult = result;
+    renderRandomResult(result);
+    showAlert(`抽签成功：${result.picks.map(formatRandomParticipant).join('、')}。`);
+}
+
+function copyRandomResult() {
+    const text = formatRandomResultText(randomToolState.lastResult);
+    if (!text) {
+        showAlert('复制失败：当前还没有可复制的随机结果。');
+        return;
+    }
+    const notifyCopySuccess = () => showAlert('复制成功：随机结果已复制。');
+    const notifyCopyFail = () => showAlert('复制失败：浏览器暂时无法写入剪贴板。');
+    const fallbackCopy = () => {
+        try {
+            const area = document.createElement('textarea');
+            area.value = text;
+            area.style.position = 'fixed';
+            area.style.left = '-9999px';
+            document.body.appendChild(area);
+            area.select();
+            const ok = document.execCommand('copy');
+            document.body.removeChild(area);
+            if (ok) notifyCopySuccess();
+            else notifyCopyFail();
+        } catch (e) {
+            notifyCopyFail();
+        }
+    };
+    if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(text).then(notifyCopySuccess).catch(fallbackCopy);
+    } else {
+        fallbackCopy();
+    }
+}
+
+function resetRandomToolToInitialState(options = {}) {
+    const notify = options.notify !== false;
+    const input = document.getElementById('random-roster-input');
+    if (input) {
+        input.value = buildDefaultRandomRosterLinesFromSeats().join('\n');
+    }
+
+    const groupSizesInput = document.getElementById('random-group-sizes');
+    if (groupSizesInput) groupSizesInput.value = '2';
+
+    const drawCountInput = document.getElementById('random-draw-count');
+    if (drawCountInput) drawCountInput.value = '1';
+
+    randomToolState.fixedIds.clear();
+    randomToolState.fixedOrder = [];
+    randomToolState.lastResult = null;
+    randomToolState.activeSuggestLine = -1;
+    document.getElementById('random-roster-suggestions')?.classList.remove('active');
+    renderRandomParticipants();
+    invalidateRandomToolResult('已恢复到默认名单，可以随机分组或者抽签。');
+    if (notify) showAlert('重置成功：随机工具已重新读取当前 8 个座位。');
+}
+
+function openRandomTool() {
+    if (isMonitoring) {
+        showAlert('请先停止监控，再打开随机分组。');
+        return;
+    }
+    resetRandomGroupTransientUi();
+    const overlay = document.getElementById('random-tool-overlay');
+    if (!overlay) return;
+    overlay.classList.add('active');
+    overlay.setAttribute('aria-hidden', 'false');
+    resetRandomToolToInitialState({ notify: false });
+    updateRandomRosterSuggestions();
+}
+
+function closeRandomTool() {
+    const overlay = document.getElementById('random-tool-overlay');
+    if (!overlay) return;
+    overlay.classList.remove('active');
+    overlay.setAttribute('aria-hidden', 'true');
+    document.getElementById('random-roster-suggestions')?.classList.remove('active');
 }
 
 function shouldPreserveNoAliasInput(inputElem, serverName) {
@@ -755,6 +1329,27 @@ function applyStateFromServer(state) {
     // 🚨 接收来自 C++ 的最新输出目录并显示
     if (state.outputDir) {
         document.getElementById('dir-display').innerText = `📁 输出目录: ${state.outputDir}`;
+    }
+
+    if (Date.now() < pendingClearAllUntil) {
+        recentEvents = [];
+        renderReviewEvents();
+        document.querySelector('#team-blue .team-score-input').value = 0;
+        document.querySelector('#team-red .team-score-input').value = 0;
+        document.querySelectorAll('.player-row').forEach(row => {
+            const nameInp = row.querySelector('.name-input');
+            if (nameInp) {
+                nameInp.value = '';
+                nameInp.classList.remove('input-error');
+                nameInp.removeAttribute('data-error-msg');
+            }
+            row.querySelector('.stat-kill').value = '0';
+            row.querySelector('.stat-death').value = '0';
+            row.querySelector('.stat-ak').value = '-';
+        });
+        isSyncingFromServer = false;
+        updateStartButtonGuard();
+        return;
     }
 
     recentEvents = Array.isArray(state.recentEvents) ? state.recentEvents : [];
@@ -1228,8 +1823,10 @@ function showAliasPrompt(playerName, callback, msg = null, initialValue = '') {
 
 function showConfirm(msg, callback) {
     resetModalInputUi();
+    currentModalOptions = {};
     modalMsg.innerHTML = msg;
     modalInput.style.display = 'none';
+    modalCancel.style.display = 'inline-block';
     customModal.classList.add('active');
     currentModalCallback = callback;
 }
@@ -2090,7 +2687,7 @@ document.addEventListener('input', (e) => {
 });
 
 document.getElementById('btn-swap').addEventListener('click', () => window.chrome.webview.postMessage({ action: "cmd_swap" }));
-document.getElementById('btn-random-teams')?.addEventListener('click', randomizeTeams);
+document.getElementById('btn-random-teams')?.addEventListener('click', openRandomTool);
 document.getElementById('btn-monitor').addEventListener('click', () => {
     const violations = updateStartButtonGuard();
     if (!isMonitoring && violations.length > 0) {
@@ -2205,15 +2802,75 @@ document.getElementById('btn-console-clear')?.addEventListener('click', () => {
     renderConsoleLogs();
 });
 
-function clearTeamData(teamId) {
-    const panel = document.getElementById(teamId);
-    panel.querySelectorAll('.name-input').forEach(input => { input.value = ''; input.classList.remove('input-error'); });
-    panel.querySelectorAll('.stat-kill, .stat-death').forEach(input => input.value = '0');
-    panel.querySelectorAll('.stat-ak').forEach(input => input.value = '-');
-    triggerSync();
+document.getElementById('btn-random-tool-close')?.addEventListener('click', closeRandomTool);
+document.getElementById('random-tool-overlay')?.addEventListener('mousedown', (e) => {
+    if (e.target?.id === 'random-tool-overlay') closeRandomTool();
+});
+const randomRosterInput = document.getElementById('random-roster-input');
+randomRosterInput?.addEventListener('input', handleRandomRosterInput);
+randomRosterInput?.addEventListener('keyup', updateRandomRosterSuggestions);
+randomRosterInput?.addEventListener('click', updateRandomRosterSuggestions);
+randomRosterInput?.addEventListener('focus', updateRandomRosterSuggestions);
+randomRosterInput?.addEventListener('blur', () => {
+    setTimeout(() => document.getElementById('random-roster-suggestions')?.classList.remove('active'), 120);
+});
+document.getElementById('random-group-sizes')?.addEventListener('input', () => {
+    invalidateRandomToolResult('分组数量已更新，请重新随机。');
+});
+document.getElementById('random-draw-count')?.addEventListener('input', () => {
+    invalidateRandomToolResult('抽签人数已更新，请重新抽签或随机分组。');
+});
+document.getElementById('btn-random-run')?.addEventListener('click', runRandomToolGrouping);
+document.getElementById('btn-random-draw')?.addEventListener('click', drawRandomParticipant);
+document.getElementById('btn-random-apply')?.addEventListener('click', applyRandomResultToTeams);
+document.getElementById('btn-random-copy')?.addEventListener('click', copyRandomResult);
+document.getElementById('btn-random-reset')?.addEventListener('click', resetRandomToolToInitialState);
+
+function resetSeatNumbers() {
+    document.querySelectorAll('.player-row').forEach((row, idx) => {
+        const seat = row.querySelector('.seat-number');
+        if (seat) seat.textContent = String(idx + 1);
+    });
 }
-document.getElementById('btn-clear-blue').addEventListener('click', () => { showConfirm('⚠️ 确定清空 <span style="color:#00e5ff">蓝队</span>？', (res) => { if (res) clearTeamData('team-blue'); }); });
-document.getElementById('btn-clear-red').addEventListener('click', () => { showConfirm('⚠️ 确定清空 <span style="color:#ff0055">红队</span>？', (res) => { if (res) clearTeamData('team-red'); }); });
+
+function clearAllTeamsData() {
+    if (isMonitoring) {
+        showAlert('请先停止监控，再清空场上数据。');
+        return;
+    }
+    pendingClearAllUntil = Date.now() + 3000;
+    resetRandomGroupTransientUi();
+    closeRandomTool();
+    document.querySelectorAll('.name-input').forEach(input => {
+        input.value = '';
+        input.classList.remove('input-error');
+        input.removeAttribute('data-error-msg');
+    });
+    document.querySelectorAll('.stat-kill, .stat-death').forEach(input => input.value = '0');
+    document.querySelectorAll('.stat-ak').forEach(input => input.value = '-');
+    document.querySelectorAll('.team-score-input').forEach(input => input.value = '0');
+    resetSeatNumbers();
+    recentEvents = [];
+    renderReviewEvents();
+    if (window.chrome?.webview) {
+        window.chrome.webview.postMessage({ action: 'cmd_reset_stats', clearPlayers: true });
+        triggerSync();
+        [80, 250, 800, 1800].forEach(delay => setTimeout(triggerSync, delay));
+        setTimeout(() => {
+            pendingClearAllUntil = 0;
+            triggerSync();
+        }, 2600);
+    } else {
+        triggerSync();
+        pendingClearAllUntil = 0;
+    }
+    showAlert('清空成功：场上座位、战绩、大比分、最近识别和冷却已清空。');
+}
+document.getElementById('btn-clear-teams')?.addEventListener('click', () => {
+    showConfirm('⚠️ 确定清空当前场上 8 个座位、战绩、大比分、最近识别和冷却吗？', (res) => {
+        if (res) clearAllTeamsData();
+    });
+});
 document.getElementById('btn-reset').addEventListener('click', () => {
     showConfirm('确定重置所有战绩吗？', (res) => {
         if (res) {

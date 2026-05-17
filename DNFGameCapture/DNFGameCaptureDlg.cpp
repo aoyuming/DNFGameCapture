@@ -9120,6 +9120,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             PostMessage(WM_UPDATE_ALL_UI, 0, 0);
         }
         else if (action == "cmd_reset_stats") {
+            const bool clearPlayers = j.value("clearPlayers", false);
             {
                 std::lock_guard<std::mutex> dataLock(m_dataMutex);
                 m_totalScoreRed = 0;
@@ -9127,6 +9128,11 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 m_recentEvents.clear();
                 ResetMatchCooldownState(L"Web重置");
                 for (int i = 0; i < 8; i++) {
+                    if (clearPlayers) {
+                        m_players[i].name.Empty();
+                        m_players[i].aliases.clear();
+                        m_players[i].team = (i < 4) ? 0 : 1;
+                    }
                     m_players[i].kills = 0;
                     m_players[i].deaths = 0;
                     m_players[i].currentStreak = 0;
@@ -9134,8 +9140,8 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 }
             }
             if (m_editVisualLogs.m_hWnd) m_editVisualLogs.SetWindowText(L"");
-            NotifyIdentityRoundReset(L"Web端重置战绩/清空复盘事件");
-            m_status.SetWindowText(L"战绩已归零！");
+            NotifyIdentityRoundReset(clearPlayers ? L"Web端清空场上数据/重置战绩/清空复盘事件" : L"Web端重置战绩/清空复盘事件");
+            m_status.SetWindowText(clearPlayers ? L"场上数据已清空！" : L"战绩已归零！");
             PostMessage(WM_UPDATE_ALL_UI, 0, 0);
         }
     }
