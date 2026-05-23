@@ -1,4 +1,4 @@
-// ==========================================
+﻿// ==========================================
 // 1. 核心：WebView2 同步引擎
 // ==========================================
 let playerDB = {};
@@ -6,6 +6,7 @@ let savedDB = {};
 let isSyncingFromServer = false;
 let hasReceivedInitialData = false;
 let isMonitoring = false;
+let isStartPending = false;
 let isProMode = false;
 let deathXAlgorithm = 0;
 let deathPatchInstalled = false;
@@ -1293,9 +1294,23 @@ function applyStateFromServer(state) {
     isSyncingFromServer = true;
 
     isMonitoring = state.isMonitoring;
+    isStartPending = !!state.isStartPending && !isMonitoring;
     const btnMonitor = document.getElementById('btn-monitor');
-    btnMonitor.innerHTML = isMonitoring ? '🛑 停止' : '▶ 运行';
-    btnMonitor.className = isMonitoring ? 'ctrl-btn btn-monitor-stop' : 'ctrl-btn btn-monitor-start';
+    btnMonitor.disabled = false;
+    btnMonitor.removeAttribute('aria-busy');
+    if (isMonitoring) {
+        btnMonitor.innerHTML = '🛑 停止';
+        btnMonitor.className = 'ctrl-btn btn-monitor-stop';
+    } else if (isStartPending) {
+        btnMonitor.innerHTML = '⏳ 开启OCR服务中...';
+        btnMonitor.className = 'ctrl-btn btn-monitor-pending';
+        btnMonitor.disabled = true;
+        btnMonitor.setAttribute('aria-busy', 'true');
+        btnMonitor.title = 'OCR 服务正在启动中，请稍候...';
+    } else {
+        btnMonitor.innerHTML = '▶ 运行';
+        btnMonitor.className = 'ctrl-btn btn-monitor-start';
+    }
 
     const teamsWrap = document.getElementById('teams-wrap') || document.getElementById('main-container');
     teamsWrap.style.flexDirection = state.isFlipped ? 'row-reverse' : 'row';
@@ -1720,6 +1735,13 @@ function updateStartButtonGuard() {
         v.row.setAttribute('data-no-alias-warning', msg);
         if (v.input) v.input.title = msg;
     });
+
+    if (!isMonitoring && isStartPending) {
+        btnMonitor.disabled = true;
+        btnMonitor.classList.add('btn-monitor-disabled');
+        btnMonitor.title = 'OCR 服务正在启动中，请稍候...';
+        return noAliasViolations.concat(shortWarnings);
+    }
 
     // 允许小号列表存在 2 字短 ID，但开始监控必须拦截：短 ID 容易被 OCR 误识别。
     const shouldBlockStart = !isMonitoring && (noAliasViolations.length > 0 || shortWarnings.length > 0);
@@ -2689,6 +2711,11 @@ document.addEventListener('input', (e) => {
 document.getElementById('btn-swap').addEventListener('click', () => window.chrome.webview.postMessage({ action: "cmd_swap" }));
 document.getElementById('btn-random-teams')?.addEventListener('click', openRandomTool);
 document.getElementById('btn-monitor').addEventListener('click', () => {
+    if (isStartPending && !isMonitoring) {
+        showAlert('OCR 服务正在启动中，请稍候...');
+        return;
+    }
+
     const violations = updateStartButtonGuard();
     if (!isMonitoring && violations.length > 0) {
         showAlert(getStartGuardMessage());

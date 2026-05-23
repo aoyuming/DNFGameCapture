@@ -28,7 +28,7 @@ struct ScorePointF {
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"3.6.1"    //当前版本号
+#define CURRENT_VERSION L"3.6.3"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -61,6 +61,8 @@ struct ScorePointF {
 #define WM_CLOUD_AUTH_FAIL      (WM_USER + 106) // 【新增】：云端授权失败专属消息
 #define WM_UPDATE_AUTH_TIME     (WM_USER + 107) // 【新增】：同步云端到期时间
 #define WM_OCR_SERVICE_FAIL     (WM_USER + 108) // 【新增】：Umi-OCR 离线/恢复失败，停止监控
+#define WM_OCR_START_RESULT     (WM_USER + 109) // 【新增】：Umi-OCR 启动流程完成
+#define WM_OCR_RECOVER_RESULT   (WM_USER + 110) // 【新增】：Umi-OCR 运行中恢复完成
 
 // =========================================================
 // 【编译环境切换开关】
@@ -197,6 +199,8 @@ protected:
     afx_msg LRESULT OnUpdateAllUI(WPARAM wParam, LPARAM lParam);
     afx_msg LRESULT OnCloudAuthFail(WPARAM wParam, LPARAM lParam); // 【新增】
     afx_msg LRESULT OnOcrServiceFail(WPARAM wParam, LPARAM lParam); // 【新增】：OCR 服务恢复失败时停止监控并提醒
+    afx_msg LRESULT OnOcrStartResult(WPARAM wParam, LPARAM lParam); // 【新增】：OCR 启动完成回调
+    afx_msg LRESULT OnOcrRecoverResult(WPARAM wParam, LPARAM lParam); // 【新增】：OCR 运行中恢复完成回调
 
     std::vector<CString> m_autoExpandedNodes; // 【新增】：记忆刚才修改过，需要临时展开3秒的主号
 
@@ -231,7 +235,13 @@ private:
     void WriteScoreToFile();
     void AppendResultText(const CString& t, COLORREF c);
     void RefreshDisplay();
-    bool EnsureOcrRunning();
+    bool EnsureOcrRunning(bool forceRestart = false);
+    bool ProbeOcrServiceReady();
+    void StartMonitoringAfterOcrReady();
+    void BeginOcrServiceBootstrap();
+    void BeginOcrServiceRecovery(bool probeBeforePending = false);
+    void SetOcrStartupPendingUI(bool pending);
+    bool RefreshOcrExePathFromRunningProcess(bool persistToIni);
     void SaveConfigToFile();
 
     // 托盘图标初始化与清理
@@ -260,6 +270,8 @@ private:
     bool IsRunningAsAdmin();
     bool RelaunchAsAdmin(); // 权限检测与自动提权
     bool IsBitmapBlank(HBITMAP hBmp, int w, int h);
+    bool TryAutoCropBlackBars(HBITMAP& hBmp, int& w, int& h, const wchar_t* sourceTag);
+    void ResetFrameHistory();
 
     int m_nBlankFrameCount = 0;
     bool m_bAlreadyPrompted = false;
@@ -280,6 +292,8 @@ private:
     afx_msg void OnCbnCloseupTargetWindow();
     // 【新增】：去标题栏复选框
     CButton m_chkCropTitle;
+    CButton m_chkAutoCropBlackBars;
+    afx_msg void OnBnClickedAutoCropBlackBars();
 
     void RefreshTargetList(); // 刷新目标列表的方法
     static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam); // 遍历窗口的回调函数
@@ -302,6 +316,7 @@ private:
     void ApplyDefaultDeathXPoints();
     void SnapshotDeathXCalibration();
     void ResetDeathXStableState();
+    void EnsureBackgroundTimersStarted();
     void ResetMatchCooldownState(const CString& reason);
     ScorePointF GetDeathXPoint(int logicalIdx) const;
     void SetDeathXPoint(int logicalIdx, ScorePointF pt);
@@ -331,6 +346,7 @@ private:
 
     WGCCapture* m_pWGC = nullptr;
     bool m_bUseWGC = false;   // 是否使用 WGC 模式
+    HWND m_cachedGameHwnd = NULL; // 最近一次成功抓到的游戏窗口句柄
     // 🚨【新增】：WGC 线程安全延迟销毁器
     void SafeDeleteWGC();
 
@@ -467,6 +483,11 @@ private:
 
     std::mutex m_launchMutex;
     DWORD m_lastLaunchOcrTime;
+    std::atomic<bool> m_bOcrStartPending{ false };
+    std::atomic<DWORD> m_ocrStartRequestId{ 0 };
+    std::atomic<bool> m_bOcrHealthCheckPending{ false };
+    std::atomic<bool> m_bOcrRecoveryPending{ false };
+    std::atomic<DWORD> m_ocrRecoveryRequestId{ 0 };
 
     // 【新增】：用于防止多开的互斥体句柄
     HANDLE m_hSingleInstanceMutex;

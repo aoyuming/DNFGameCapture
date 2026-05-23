@@ -63,6 +63,10 @@ constexpr int DEATH_X_STABLE_OFF_FRAMES = 2;          // 连续消失 2 次才�
 constexpr float DEATH_X_PATCH_MUL_ACTIVE = 4.6f;     // 主将大 X 的检测点外移倍数
 constexpr float DEATH_X_PATCH_MUL_NORMAL = 5.4f;     // 下方小 X 的检测点外移倍数
 static const wchar_t* DEATH_X_PATCH_FILE_NAME = L"sprite(击杀大XX).NPK";
+static const int ID_CHK_AUTO_CROP_BLACK_BARS = 1040;
+static const int DNF_BLACK_BAR_PIXEL_MAX = 18;
+static const int DNF_BLACK_BAR_MIN_EDGE = 4;
+static const double DNF_BLACK_BAR_ROW_RATIO = 0.965;
 
 // 打补丁文件路径检查辅助函数在文件后部实现；这里提前声明，方便同步给 Web。
 static bool DnfFileExists(const CString& path);
@@ -75,11 +79,99 @@ static CString DnfReadLicenseFromFile();
 void WriteMatchLog(const CString& logLine);
 void AppLog(const CString& msg, COLORREF color);
 
+static bool DnfIsProcessRunningByName(const CString& processName)
+{
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap == INVALID_HANDLE_VALUE) return false;
+
+    PROCESSENTRY32 pe;
+    pe.dwSize = sizeof(PROCESSENTRY32);
+
+    bool found = false;
+    if (Process32First(hSnap, &pe)) {
+        do {
+            CString currentName(pe.szExeFile);
+            if (currentName.CompareNoCase(processName) == 0) {
+                found = true;
+                break;
+            }
+        } while (Process32Next(hSnap, &pe));
+    }
+
+    CloseHandle(hSnap);
+    return found;
+}
+
+static bool DnfGetProcessImagePathByName(const CString& processName, CString& pathOut)
+{
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap == INVALID_HANDLE_VALUE) return false;
+
+    PROCESSENTRY32 pe;
+    pe.dwSize = sizeof(PROCESSENTRY32);
+
+    bool found = false;
+    if (Process32First(hSnap, &pe)) {
+        do {
+            CString currentName(pe.szExeFile);
+            if (currentName.CompareNoCase(processName) != 0) continue;
+
+            HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+            if (!hProcess) continue;
+
+            wchar_t buf[MAX_PATH] = { 0 };
+            DWORD size = MAX_PATH;
+            if (QueryFullProcessImageNameW(hProcess, 0, buf, &size)) {
+                pathOut = buf;
+                pathOut.Trim();
+                found = !pathOut.IsEmpty();
+            }
+            CloseHandle(hProcess);
+            if (found) break;
+        } while (Process32Next(hSnap, &pe));
+    }
+
+    CloseHandle(hSnap);
+    return found;
+}
+
 static const wchar_t* DNF_CLOUD_API_HOST = L"verifykey-thaovfpoib.cn-hangzhou.fcapp.run";
 static const wchar_t* DNF_LICENSE_REG_PATH = L"Software\\DNFCapture";
 static const wchar_t* DNF_LICENSE_REG_VALUE = L"LicenseKey";
 static CString g_lastLicenseSource = L"未读取";
 static CString g_lastLicenseRepair = L"";
+
+static bool DnfIsBlackBarPixel(BYTE r, BYTE g, BYTE b)
+{
+    return r <= DNF_BLACK_BAR_PIXEL_MAX &&
+           g <= DNF_BLACK_BAR_PIXEL_MAX &&
+           b <= DNF_BLACK_BAR_PIXEL_MAX;
+}
+
+static bool DnfIsBlackBarRow(const std::vector<BYTE>& pixels, int w, int h, int y)
+{
+    if (w <= 0 || h <= 0 || y < 0 || y >= h) return false;
+
+    int blackCount = 0;
+    const BYTE* row = pixels.data() + (size_t)y * w * 4;
+    for (int x = 0; x < w; ++x) {
+        const BYTE* px = row + (size_t)x * 4;
+        if (DnfIsBlackBarPixel(px[2], px[1], px[0])) ++blackCount;
+    }
+    return blackCount >= (int)(w * DNF_BLACK_BAR_ROW_RATIO + 0.5);
+}
+
+static bool DnfIsBlackBarColumn(const std::vector<BYTE>& pixels, int w, int h, int x)
+{
+    if (w <= 0 || h <= 0 || x < 0 || x >= w) return false;
+
+    int blackCount = 0;
+    for (int y = 0; y < h; ++y) {
+        const BYTE* px = pixels.data() + ((size_t)y * w + x) * 4;
+        if (DnfIsBlackBarPixel(px[2], px[1], px[0])) ++blackCount;
+    }
+    return blackCount >= (int)(h * DNF_BLACK_BAR_ROW_RATIO + 0.5);
+}
 
 // ========================================================
 // 小号格式校验：真实 ID 少于 3 个字符时，必须带大区或 #职业。
@@ -1583,12 +1675,23 @@ void CDNFGameCaptureDlg::UpdateDeathXCalibrationButtons()
 {
     if (!m_btnDeathXSave.m_hWnd || !m_btnDeathXCancel.m_hWnd || !m_btnDeathXDefault.m_hWnd) return;
     bool show = m_bDeathXCalibrationMode && m_previewRect.Width() > 0 && m_previewRect.Height() > 0;
-    int y = m_previewRect.top + 10;
-    int x = m_previewRect.left + 10;
-    int h = 28;
-    m_btnDeathXSave.MoveWindow(x, y, 90, h);
-    m_btnDeathXCancel.MoveWindow(x + 96, y, 70, h);
-    m_btnDeathXDefault.MoveWindow(x + 172, y, 90, h);
+    if (!show) {
+        m_btnDeathXSave.ShowWindow(SW_HIDE);
+        m_btnDeathXCancel.ShowWindow(SW_HIDE);
+        m_btnDeathXDefault.ShowWindow(SW_HIDE);
+        return;
+    }
+
+    const int footerGap = 8;
+    const int footerH = 54;
+    const int btnH = 28;
+    const int btnYGap = 22;
+    const int footerTop = max(m_previewRect.top + 10, m_previewRect.bottom - footerGap - footerH);
+    const int x = m_previewRect.left + 10;
+    const int y = footerTop + btnYGap;
+    m_btnDeathXSave.MoveWindow(x, y, 90, btnH);
+    m_btnDeathXCancel.MoveWindow(x + 96, y, 70, btnH);
+    m_btnDeathXDefault.MoveWindow(x + 172, y, 90, btnH);
     m_btnDeathXSave.ShowWindow(show ? SW_SHOW : SW_HIDE);
     m_btnDeathXCancel.ShowWindow(show ? SW_SHOW : SW_HIDE);
     m_btnDeathXDefault.ShowWindow(show ? SW_SHOW : SW_HIDE);
@@ -2111,8 +2214,11 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     ON_CBN_SELCHANGE(1034, &CDNFGameCaptureDlg::OnCbnSelchangeDeathAlgorithm)
     ON_MESSAGE(WM_UPDATE_AUTH_TIME, &CDNFGameCaptureDlg::OnUpdateAuthTime)
     ON_MESSAGE(WM_OCR_SERVICE_FAIL, &CDNFGameCaptureDlg::OnOcrServiceFail)
+    ON_MESSAGE(WM_OCR_START_RESULT, &CDNFGameCaptureDlg::OnOcrStartResult)
+    ON_MESSAGE(WM_OCR_RECOVER_RESULT, &CDNFGameCaptureDlg::OnOcrRecoverResult)
     ON_CBN_DROPDOWN(1031, &CDNFGameCaptureDlg::OnCbnDropdownTargetWindow)
     ON_CBN_CLOSEUP(1031, &CDNFGameCaptureDlg::OnCbnCloseupTargetWindow)
+    ON_BN_CLICKED(ID_CHK_AUTO_CROP_BLACK_BARS, &CDNFGameCaptureDlg::OnBnClickedAutoCropBlackBars)
     // ⬇️ 【新增】：绑定 1033 (我们给新列表框的ID) 的点击事件
     ON_LBN_SELCHANGE(1033, &CDNFGameCaptureDlg::OnLbnSelchangeRecentPlayers)
     ON_MESSAGE(WM_WEB_CMD_RECEIVED, &CDNFGameCaptureDlg::OnWebCmdReceived)
@@ -3221,6 +3327,9 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_hDebugOcrBmp[0] = NULL; m_hDebugOcrBmp[1] = NULL;
     m_viewIndexLeft = -1; m_viewIndexRight = -1;
     m_lastLaunchOcrTime = 0;
+    m_bOcrRecoveryPending = false;
+    m_bOcrHealthCheckPending = false;
+    m_ocrRecoveryRequestId = 0;
     ApplyDefaultDeathXPoints();
 
     GdiplusStartupInput gpi;
@@ -3238,9 +3347,15 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     int pos = appDir.ReverseFind(L'\\');
     if (pos != -1) appDir = appDir.Left(pos + 1);
 
-    m_ocrExePath = appDir + L"Umi-OCR.exe";
     m_configPath = appDir + L"players_config.txt";
     m_iniPath = appDir + L"config.ini";
+    wchar_t ocrPathBuf[MAX_PATH];
+    ::GetPrivateProfileString(L"Settings", L"OcrExePath", L"", ocrPathBuf, MAX_PATH, m_iniPath);
+    m_ocrExePath = ocrPathBuf;
+    m_ocrExePath.Trim(L" \t\r\n\"");
+    if (m_ocrExePath.IsEmpty()) {
+        m_ocrExePath = appDir + L"Umi-OCR.exe";
+    }
 
     wchar_t dirBuf[MAX_PATH];
     GetPrivateProfileString(L"Settings", L"OutputDir", appDir, dirBuf, MAX_PATH, m_iniPath);
@@ -3311,12 +3426,14 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_cmbTargetWindow.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, CRect(670, row1_Y, r.right - 105, row1_Y + 400), this, 1031); m_cmbTargetWindow.SetFont(&m_font);
     RefreshTargetList();
     m_chkCropTitle.Create(L"去标题栏", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, CRect(r.right - 100, row1_Y, r.right - 10, row1_Y + 25), this, 1032); m_chkCropTitle.SetFont(&m_font); m_chkCropTitle.SetCheck(BST_CHECKED);
+    m_chkAutoCropBlackBars.Create(L"自动裁黑边", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, CRect(r.right - 125, row1_Y + 28, r.right - 10, row1_Y + 53), this, ID_CHK_AUTO_CROP_BLACK_BARS); m_chkAutoCropBlackBars.SetFont(&m_font);
+    m_chkAutoCropBlackBars.SetCheck(GetPrivateProfileInt(L"Settings", L"AutoCropBlackBars", 1, m_iniPath) ? BST_CHECKED : BST_UNCHECKED);
 
     m_btnDeathXSave.Create(L"保存X点位", WS_CHILD | BS_PUSHBUTTON, CRect(10, 10, 100, 38), this, ID_BTN_DEATH_X_SAVE); m_btnDeathXSave.SetFont(&m_font); m_btnDeathXSave.ShowWindow(SW_HIDE);
     m_btnDeathXCancel.Create(L"取消", WS_CHILD | BS_PUSHBUTTON, CRect(106, 10, 176, 38), this, ID_BTN_DEATH_X_CANCEL); m_btnDeathXCancel.SetFont(&m_font); m_btnDeathXCancel.ShowWindow(SW_HIDE);
     m_btnDeathXDefault.Create(L"恢复默认", WS_CHILD | BS_PUSHBUTTON, CRect(182, 10, 272, 38), this, ID_BTN_DEATH_X_DEFAULT); m_btnDeathXDefault.SetFont(&m_font); m_btnDeathXDefault.ShowWindow(SW_HIDE);
 
-    int row2_Y = row1_Y + 35; int halfW = (r.right - 30) / 2;
+    int row2_Y = row1_Y + 60; int halfW = (r.right - 30) / 2;
     m_cmbTeamSelect.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, CRect(10, row2_Y, 80, row2_Y + 200), this, 1024); m_cmbTeamSelect.SetFont(&m_font); m_cmbTeamSelect.AddString(L"[红队]"); m_cmbTeamSelect.AddString(L"[蓝队]"); m_cmbTeamSelect.SetCurSel(0);
     m_editQuickAdd.Create(WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_MULTILINE | ES_WANTRETURN | WS_VSCROLL, CRect(85, row2_Y, halfW - 55, row2_Y + 30), this, 1025); m_editQuickAdd.SetFont(&m_font); m_editQuickAdd.SetWindowText(PLACEHOLDER_TEXT);
     m_btnQuickAdd.Create(L"添加", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(halfW - 50, row2_Y, 10 + halfW, row2_Y + 28), this, 1022); m_btnQuickAdd.SetFont(&m_font);
@@ -3356,6 +3473,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
 
     SetTimer(5, 100, NULL);
     SetTimer(6, 1000, NULL);
+    EnsureBackgroundTimersStarted();
 
     if (m_pWebDlg == nullptr) {
         m_pWebDlg = new CWebScoreDlg(nullptr);
@@ -3436,6 +3554,315 @@ void CDNFGameCaptureDlg::OnClose() {
     BroadcastStateToWeb(); // 👈 新增
 }
 
+bool CDNFGameCaptureDlg::ProbeOcrServiceReady()
+{
+    std::lock_guard<std::mutex> lk(m_launchMutex);
+
+    if (!m_hHttpSession) {
+        m_hHttpSession = WinHttpOpen(L"DNF Capture", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (m_hHttpSession) WinHttpSetTimeouts(m_hHttpSession, 800, 800, 800, 800);
+    }
+    if (!m_hHttpSession) return false;
+
+    if (!m_hHttpConnect) {
+        m_hHttpConnect = WinHttpConnect(m_hHttpSession, L"127.0.0.1", 1224, 0);
+    }
+    if (!m_hHttpConnect) return false;
+
+    HINTERNET hProbe = WinHttpOpenRequest(
+        m_hHttpConnect, L"GET", L"/",
+        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (!hProbe) return false;
+
+    WinHttpSetTimeouts(hProbe, 800, 800, 800, 800);
+    BOOL ok = WinHttpSendRequest(hProbe, NULL, 0, NULL, 0, 0, 0) && WinHttpReceiveResponse(hProbe, NULL);
+    WinHttpCloseHandle(hProbe);
+    if (ok) {
+        RefreshOcrExePathFromRunningProcess(true);
+    }
+    return ok == TRUE;
+}
+
+bool CDNFGameCaptureDlg::RefreshOcrExePathFromRunningProcess(bool persistToIni)
+{
+    CString runningPath;
+    if (!DnfGetProcessImagePathByName(L"Umi-OCR.exe", runningPath)) {
+        return false;
+    }
+
+    runningPath.Trim(L" \t\r\n\"");
+    if (runningPath.IsEmpty()) {
+        return false;
+    }
+
+    if (runningPath.CompareNoCase(m_ocrExePath) != 0) {
+        CString msg;
+        msg.Format(L"🔎 [Umi-OCR] 已缓存实际程序路径：%s", (LPCTSTR)runningPath);
+        AppLog(msg, RGB(0, 255, 100));
+        WriteMatchLog(msg);
+    }
+
+    m_ocrExePath = runningPath;
+    if (persistToIni) {
+        ::WritePrivateProfileString(L"Settings", L"OcrExePath", m_ocrExePath, m_iniPath);
+    }
+    return true;
+}
+
+void CDNFGameCaptureDlg::SetOcrStartupPendingUI(bool pending)
+{
+    if (pending) {
+        if (m_btnStart.m_hWnd) {
+            m_btnStart.SetWindowText(L"启动中...");
+            m_btnStart.EnableWindow(FALSE);
+        }
+        if (m_status.m_hWnd) {
+            m_status.SetWindowText(L"正在启动OCR...");
+        }
+    }
+    else {
+        if (m_btnStart.m_hWnd) {
+            m_btnStart.EnableWindow(TRUE);
+            if (!m_bIsRunning) {
+                m_btnStart.SetWindowText(L"开始监控");
+            }
+        }
+        if (m_status.m_hWnd && !m_bIsRunning) {
+            m_status.SetWindowText(L"就绪");
+        }
+    }
+}
+
+void CDNFGameCaptureDlg::StartMonitoringAfterOcrReady()
+{
+    if (m_bIsRunning) return;
+
+    EnsureBackgroundTimersStarted();
+
+    m_bIsRunning = TRUE;
+    m_btnStart.EnableWindow(TRUE);
+    m_btnStart.SetWindowText(L"停止监控");
+    // 【身份融合补丁】开始监控时清空上一段录像/上一局残留缓存。
+    NotifyIdentityRoundReset(L"开始监控，清空上一段身份缓存");
+
+    HWND hGame = ::FindWindow(NULL, DNF_WINDOW_NAME);
+
+    // 如果引擎还没就绪，主动尝试激活一次
+    bool shouldTryWGC = (m_nCaptureEngineChoice == 0 || m_nCaptureEngineChoice == 1);
+    if (hGame && shouldTryWGC && !m_bUseWGC) {
+        try {
+            // 🚨 缓存支持状态，防止每次都去调用底层
+            static int s_wgcSupported = -1;
+            if (s_wgcSupported == -1) {
+                s_wgcSupported = WGCCapture::IsSupported() ? 1 : 0;
+            }
+
+            if (s_wgcSupported == 1) {
+                if (!m_pWGC) m_pWGC = new WGCCapture();
+                if (m_pWGC->Initialize(hGame) && m_pWGC->StartCapture()) {
+                    m_bUseWGC = true;
+                }
+            }
+        }
+        catch (...) {
+            SafeDeleteWGC();
+        }
+    }
+
+    m_nBlankFrameCount = 0;
+    m_bAlreadyPrompted = false;
+    ResetDeathXStableState();
+
+    if (m_bUseWGC) {
+        AppLog(L"✅ [监控已启动] 已启用 WGC 硬件加速捕获 (零闪屏)", RGB(0, 255, 100));
+    }
+    else if (!hGame) {
+        AppLog(L"⚠️ [监控已启动] 未检测到游戏窗口，待命中...", RGB(255, 165, 0));
+    }
+    else {
+        SafeDeleteWGC();
+
+        if (m_nCaptureEngineChoice == 1) {
+            AppLog(L"❌ [监控已启动] WGC 初始化失败，自动降级为 PrintWindow", RGB(255, 80, 80));
+        }
+        else if (m_nCaptureEngineChoice == 2) {
+            AppLog(L"✅ [监控已启动] 用户选择 PrintWindow 兼容模式", RGB(0, 255, 100));
+        }
+        else {
+            AppLog(L"⚠️ [监控已启动] WGC 不可用，已降级为 PrintWindow", RGB(255, 165, 0));
+        }
+    }
+
+    SetTimer(1, 100, NULL);
+    SetTimer(3, HISTORY_INTERVAL_MS, NULL);
+    m_status.SetWindowText(L"监控中...");
+    BroadcastStateToWeb();
+}
+
+void CDNFGameCaptureDlg::EnsureBackgroundTimersStarted()
+{
+    static std::atomic<bool> s_timer7Started{ false };
+    bool expected = false;
+    if (!s_timer7Started.compare_exchange_strong(expected, true)) {
+        return;
+    }
+
+    if (!GetSafeHwnd()) {
+        s_timer7Started = false;
+        return;
+    }
+
+    if (SetTimer(7, 1000, NULL) == 0) {
+        s_timer7Started = false;
+        WriteMatchLog(L"[后台轮询] 启动 Timer 7 失败。");
+    }
+    else {
+        WriteMatchLog(L"[后台轮询] Timer 7 已启动。");
+    }
+}
+
+void CDNFGameCaptureDlg::BeginOcrServiceBootstrap()
+{
+    if (m_bOcrStartPending.exchange(true)) {
+        return;
+    }
+
+    DWORD requestId = m_ocrStartRequestId.fetch_add(1) + 1;
+    SetOcrStartupPendingUI(true);
+
+    AppLog(L"🔄 [Umi-OCR] 正在启动 OCR 服务，请稍候...", RGB(255, 200, 0));
+    WriteMatchLog(L"[Umi-OCR] 正在启动 OCR 服务，请稍候...");
+    BroadcastStateToWeb();
+
+    HWND hWnd = GetSafeHwnd();
+    std::thread([this, hWnd, requestId]() {
+        bool ok = EnsureOcrRunning(false);
+        if (!::IsWindow(hWnd)) return;
+        if (!m_bOcrStartPending.load() || requestId != m_ocrStartRequestId.load()) return;
+        ::PostMessage(hWnd, WM_OCR_START_RESULT, (WPARAM)requestId, ok ? 1 : 0);
+        }).detach();
+}
+
+LRESULT CDNFGameCaptureDlg::OnOcrStartResult(WPARAM wParam, LPARAM lParam)
+{
+    DWORD requestId = (DWORD)wParam;
+    bool success = (lParam != 0);
+    if (!m_bOcrStartPending.load() || requestId != m_ocrStartRequestId.load()) {
+        return 0;
+    }
+
+    m_bOcrStartPending = false;
+    SetOcrStartupPendingUI(false);
+
+    if (success) {
+        StartMonitoringAfterOcrReady();
+        return 0;
+    }
+
+    m_bIsRunning = FALSE;
+    m_btnStart.EnableWindow(TRUE);
+    m_btnStart.SetWindowText(L"开始监控");
+    m_status.SetWindowText(L"OCR未运行");
+
+    CString msg = L"❌ 未检测到 Umi-OCR 服务，已尝试自动启动但没有恢复成功。\r\n\r\n请手动打开软件同目录下的 Umi-OCR.exe，等待 OCR 服务启动完成后，再点击【开始监控】。\r\n\r\n为避免大X触发后 OCR 原文为空，本次不会继续监控。";
+    AppLog(L"❌ [开始监控拦截] Umi-OCR 未运行或恢复失败，已取消启动监控。", RGB(255, 80, 80));
+    if (!IsWindowVisible() && m_pWebDlg) {
+        json reply; reply["action"] = "start_guard"; reply["success"] = false;
+        reply["message"] = std::string(CW2A(msg, CP_UTF8));
+        CString jsonStr = CA2W(reply.dump().c_str(), CP_UTF8);
+        m_pWebDlg->SendStateToWeb(jsonStr);
+    }
+    else {
+        ShowCenteredMsgBox(msg, L"Umi-OCR 未运行", MB_ICONWARNING);
+    }
+    BroadcastStateToWeb();
+    return 0;
+}
+
+void CDNFGameCaptureDlg::BeginOcrServiceRecovery(bool probeBeforePending)
+{
+    if (!m_bIsRunning || m_bOcrStartPending.load()) {
+        return;
+    }
+    if (probeBeforePending) {
+        if (m_bOcrRecoveryPending.load() || m_bOcrHealthCheckPending.exchange(true)) {
+            return;
+        }
+
+        HWND hWnd = GetSafeHwnd();
+        std::thread([this, hWnd]() {
+            bool processRunning = DnfIsProcessRunningByName(L"Umi-OCR.exe");
+            bool ready = ProbeOcrServiceReady();
+            if (!::IsWindow(hWnd)) return;
+            m_bOcrHealthCheckPending = false;
+            if (m_bIsRunning && !m_bOcrStartPending.load() && (!ready || !processRunning)) {
+                if (!processRunning) {
+                    AppLog(L"🔄 [Umi-OCR] 检测到主进程已退出，正在后台重新拉起...", RGB(255, 200, 0));
+                    WriteMatchLog(L"[Umi-OCR] 检测到主进程已退出，正在后台重新拉起。");
+                }
+                BeginOcrServiceRecovery(false);
+            }
+        }).detach();
+        return;
+    }
+    if (m_bOcrRecoveryPending.exchange(true)) {
+        return;
+    }
+
+    DWORD requestId = m_ocrRecoveryRequestId.fetch_add(1) + 1;
+    HWND hWnd = GetSafeHwnd();
+
+    std::thread([this, hWnd, requestId]() {
+        bool ok = false;
+        bool processRunning = DnfIsProcessRunningByName(L"Umi-OCR.exe");
+        bool alreadyReady = ProbeOcrServiceReady();
+        if (alreadyReady && processRunning) {
+            ok = true;
+        }
+        else {
+            if (!processRunning) {
+                AppLog(L"🔄 [Umi-OCR] 检测到主进程已退出，正在后台尝试恢复...", RGB(255, 200, 0));
+                WriteMatchLog(L"[Umi-OCR] 检测到主进程已退出，正在后台尝试恢复。");
+            }
+            else {
+                AppLog(L"🔄 [Umi-OCR] 运行中检测到服务离线，正在后台尝试恢复...", RGB(255, 200, 0));
+                WriteMatchLog(L"[Umi-OCR] 运行中检测到服务离线，正在后台尝试恢复。");
+            }
+            ok = EnsureOcrRunning(!processRunning);
+        }
+
+        if (!::IsWindow(hWnd)) return;
+        if (!m_bOcrRecoveryPending.load() || requestId != m_ocrRecoveryRequestId.load()) return;
+        ::PostMessage(hWnd, WM_OCR_RECOVER_RESULT, (WPARAM)requestId, ok ? 1 : 0);
+        }).detach();
+}
+
+LRESULT CDNFGameCaptureDlg::OnOcrRecoverResult(WPARAM wParam, LPARAM lParam)
+{
+    DWORD requestId = (DWORD)wParam;
+    bool success = (lParam != 0);
+    if (!m_bOcrRecoveryPending.load() || requestId != m_ocrRecoveryRequestId.load()) {
+        return 0;
+    }
+
+    m_bOcrRecoveryPending = false;
+
+    if (success) {
+        if (m_bIsRunning) {
+            m_status.SetWindowText(L"监控中...");
+        }
+        BroadcastStateToWeb();
+        return 0;
+    }
+
+    if (m_bIsRunning) {
+        AppLog(L"⚠️ [Umi-OCR] 后台恢复暂时失败，将继续保持监控并等待下次重试。", RGB(255, 180, 0));
+        WriteMatchLog(L"[Umi-OCR] 后台恢复暂时失败，等待下次重试。");
+    }
+    BroadcastStateToWeb();
+    return 0;
+}
+
 // ============================================================================
 // 【修复清单】
 //
@@ -3458,8 +3885,20 @@ OcrResultData CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaI
 {
     OcrResultData result = { L"", NULL };
 
-    if (!m_hHttpConnect)
+    if (!m_hHttpConnect) {
+        if (m_bIsRunning) {
+            BeginOcrServiceRecovery();
+        }
         return result;
+    }
+    if (m_bOcrRecoveryPending.load())
+        return result;
+
+    auto requestOcrRecovery = [&]() {
+        if (m_bIsRunning) {
+            BeginOcrServiceRecovery();
+        }
+    };
 
     // 关键修复：RunOCR_Internal 会被左右框并行调用。
     // Windows GDI 的同一个 HBITMAP 不能同时被选入多个 DC；如果左右 OCR 线程同时 SelectObject 同一张快照，
@@ -3615,16 +4054,12 @@ OcrResultData CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaI
             }
         }
         else {
-            if (!EnsureOcrRunning() && m_bIsRunning) {
-                PostMessage(WM_OCR_SERVICE_FAIL, 0, 0);
-            }
+            requestOcrRecovery();
         }
         WinHttpCloseHandle(hRequest);
     }
     else {
-        if (!EnsureOcrRunning() && m_bIsRunning) {
-            PostMessage(WM_OCR_SERVICE_FAIL, 0, 0);
-        }
+        requestOcrRecovery();
     }
 
     // ---- 10. 清洗 OCR 结果中的转义字符 ----
@@ -6060,6 +6495,11 @@ LRESULT CDNFGameCaptureDlg::OnTrayMessage(WPARAM wParam, LPARAM lParam) {
 
 void CDNFGameCaptureDlg::DoRealExit() {
     m_bIsRunning = FALSE;
+    m_bOcrStartPending = false;
+    m_ocrStartRequestId.fetch_add(1);
+    m_bOcrHealthCheckPending = false;
+    m_bOcrRecoveryPending = false;
+    m_ocrRecoveryRequestId.fetch_add(1);
     KillTimer(1); KillTimer(2); KillTimer(3); KillTimer(4);
     ResetDeathXStableState();
 
@@ -6110,6 +6550,15 @@ void CDNFGameCaptureDlg::OnBnClickedStart()
     }
 
     if (!m_bIsRunning) {
+        if (m_bOcrStartPending.load()) {
+            BroadcastStateToWeb();
+            return;
+        }
+
+        m_bOcrHealthCheckPending = false;
+        m_bOcrRecoveryPending = false;
+        m_ocrRecoveryRequestId.fetch_add(1);
+
         CString missingAliasPlayers;
         CString shortAliasPlayers;
         {
@@ -6151,114 +6600,40 @@ void CDNFGameCaptureDlg::OnBnClickedStart()
             BroadcastStateToWeb();
             return;
         }
-    }
 
-    static bool once;
-    if (!once) {
-        if (m_bIsTrial && !m_bIsRunning) {
-            once = true;
-            if (IsWindowVisible()) { // 隐藏状态下不弹试用说明(网页上已经写了)
-                CString trialMsg;
-                trialMsg.Format(L"【欢迎试用 DNF 击杀统计工具】\r\n\r\n您当前处于免费试用阶段,试用结束时间:\r\n%s\r\n\r\n点击确定后将开启监控功能。", (LPCTSTR)FormatTimeStamp(m_trialEnd));
-                ShowCenteredMsgBox(trialMsg, L"试用阶段", MB_ICONINFORMATION);
+        static bool once;
+        if (!once) {
+            if (m_bIsTrial && !m_bIsRunning) {
+                once = true;
+                if (IsWindowVisible()) { // 隐藏状态下不弹试用说明(网页上已经写了)
+                    CString trialMsg;
+                    trialMsg.Format(L"【欢迎试用 DNF 击杀统计工具】\r\n\r\n您当前处于免费试用阶段,试用结束时间:\r\n%s\r\n\r\n点击确定后将开启监控功能。", (LPCTSTR)FormatTimeStamp(m_trialEnd));
+                    ShowCenteredMsgBox(trialMsg, L"试用阶段", MB_ICONINFORMATION);
+                }
             }
         }
-    }
 
-    if (!m_bIsRunning) {
         if (m_nDeathAlgorithmChoice == DEATH_X_ALGO_PATCH && !EnsureDeathPatchInstalled()) {
             BroadcastStateToWeb();
             return;
         }
 
-        // ==========================================
-        // 【新增】：开始监控前必须确认 Umi-OCR 可用。
-        // 如果未运行，先自动拉起；恢复失败则提醒用户并拒绝继续监控，避免 OCR 原文一直为空。
-        // ==========================================
-        if (!EnsureOcrRunning()) {
-            m_bIsRunning = FALSE;
-            m_btnStart.SetWindowText(L"开始监控");
-            m_status.SetWindowText(L"OCR未运行");
-            CString msg = L"❌ 未检测到 Umi-OCR 服务，已尝试自动启动但没有恢复成功。\r\n\r\n请手动打开软件同目录下的 Umi-OCR.exe，等待 OCR 服务启动完成后，再点击【开始监控】。\r\n\r\n为避免大X触发后 OCR 原文为空，本次不会继续监控。";
-            AppLog(L"❌ [开始监控拦截] Umi-OCR 未运行或恢复失败，已取消启动监控。", RGB(255, 80, 80));
-            if (!IsWindowVisible() && m_pWebDlg) {
-                json reply; reply["action"] = "start_guard"; reply["success"] = false;
-                reply["message"] = std::string(CW2A(msg, CP_UTF8));
-                CString jsonStr = CA2W(reply.dump().c_str(), CP_UTF8);
-                m_pWebDlg->SendStateToWeb(jsonStr);
-            }
-            else {
-                ShowCenteredMsgBox(msg, L"Umi-OCR 未运行", MB_ICONWARNING);
-            }
-            BroadcastStateToWeb();
-            return;
-        }
-
-        m_bIsRunning = TRUE;
-        m_btnStart.SetWindowText(L"停止监控");
-        // 【身份融合补丁】开始监控时清空上一段录像/上一局残留缓存。
-        NotifyIdentityRoundReset(L"开始监控，清空上一段身份缓存");
-
-        HWND hGame = ::FindWindow(NULL, DNF_WINDOW_NAME);
-
-        // 如果引擎还没就绪，主动尝试激活一次
-        bool shouldTryWGC = (m_nCaptureEngineChoice == 0 || m_nCaptureEngineChoice == 1);
-        if (hGame && shouldTryWGC && !m_bUseWGC) {
-            try {
-                // 🚨 缓存支持状态，防止每次都去调用底层
-                static int s_wgcSupported = -1;
-                if (s_wgcSupported == -1) {
-                    s_wgcSupported = WGCCapture::IsSupported() ? 1 : 0;
-                }
-
-                if (s_wgcSupported == 1) {
-                    if (!m_pWGC) m_pWGC = new WGCCapture();
-                    if (m_pWGC->Initialize(hGame) && m_pWGC->StartCapture()) {
-                        m_bUseWGC = true;
-                    }
-                }
-            }
-            catch (...) {
-                SafeDeleteWGC();
-            }
-        }
-
-        m_nBlankFrameCount = 0;
-        m_bAlreadyPrompted = false;
-        ResetDeathXStableState();
-
-        // 打印相应的状态日志
-        if (m_bUseWGC) {
-            AppLog(L"✅ [监控已启动] 已启用 WGC 硬件加速捕获 (零闪屏)", RGB(0, 255, 100));
-        }
-        else if (!hGame) {
-            // ★ 游戏没开，不管选了什么引擎，都只提示待命，不要说"降级"
-            AppLog(L"⚠️ [监控已启动] 未检测到游戏窗口，待命中...", RGB(255, 165, 0));
+        if (ProbeOcrServiceReady()) {
+            StartMonitoringAfterOcrReady();
         }
         else {
-            // 游戏已开但 WGC 失败的情况，才算真正降级
-            SafeDeleteWGC(); // 🚨 换成安全销毁
-
-            if (m_nCaptureEngineChoice == 1) {
-                AppLog(L"❌ [监控已启动] WGC 初始化失败，自动降级为 PrintWindow", RGB(255, 80, 80));
-            }
-            else if (m_nCaptureEngineChoice == 2) {
-                AppLog(L"✅ [监控已启动] 用户选择 PrintWindow 兼容模式", RGB(0, 255, 100));
-            }
-            else {
-                AppLog(L"⚠️ [监控已启动] WGC 不可用，已降级为 PrintWindow", RGB(255, 165, 0));
-            }
+            BeginOcrServiceBootstrap();
         }
-
-        SetTimer(1, 100, NULL);
-        SetTimer(3, HISTORY_INTERVAL_MS, NULL);
-        m_status.SetWindowText(L"监控中...");
+        return;
     }
+
     else {
         m_bIsRunning = FALSE;
         KillTimer(1);
         KillTimer(3);
         ResetDeathXStableState();
+        m_bOcrRecoveryPending = false;
+        m_ocrRecoveryRequestId.fetch_add(1);
 
         // ==========================================
         // 【关键修复】：停止监控时，绝不能销毁 m_pWGC！
@@ -6289,6 +6664,8 @@ LRESULT CDNFGameCaptureDlg::OnOcrServiceFail(WPARAM wParam, LPARAM lParam) {
         m_btnStart.SetWindowText(L"开始监控");
         m_status.SetWindowText(L"OCR已停止");
     }
+    m_bOcrHealthCheckPending = false;
+    m_bOcrRecoveryPending = false;
 
     CString msg = L"❌ Umi-OCR 已关闭或服务无响应。\r\n\r\n软件已经尝试自动恢复，但 OCR 服务仍不可用，所以已自动停止监控。\r\n\r\n请手动打开软件同目录下的 Umi-OCR.exe，确认 OCR 服务启动后，再重新开始监控。";
     AppLog(L"❌ [Umi-OCR] 服务离线且自动恢复失败，已停止监控，避免继续产生 OCR 空结果。", RGB(255, 80, 80));
@@ -6495,6 +6872,125 @@ LRESULT CDNFGameCaptureDlg::OnUpdateOcrDropdowns(WPARAM wParam, LPARAM lParam) {
 void CDNFGameCaptureDlg::OnCbnSelchangeLeft() { m_viewIndexLeft = (m_cmbLeft.GetCurSel() == 0) ? -1 : (m_cmbLeft.GetCurSel() - 1); InvalidateRect(&m_previewRect, FALSE); }
 void CDNFGameCaptureDlg::OnCbnSelchangeRight() { m_viewIndexRight = (m_cmbRight.GetCurSel() == 0) ? -1 : (m_cmbRight.GetCurSel() - 1); InvalidateRect(&m_previewRect, FALSE); }
 
+void CDNFGameCaptureDlg::ResetFrameHistory()
+{
+    for (int i = 0; i < MAX_HISTORY_FRAMES; i++) {
+        if (m_historyBmps[i]) {
+            ::DeleteObject(m_historyBmps[i]);
+            m_historyBmps[i] = nullptr;
+        }
+    }
+    m_historyIdx = 0;
+}
+
+bool CDNFGameCaptureDlg::TryAutoCropBlackBars(HBITMAP& hBmp, int& w, int& h, const wchar_t* sourceTag)
+{
+    if (!hBmp || w <= 0 || h <= 0) return false;
+    if (!m_chkAutoCropBlackBars.m_hWnd || m_chkAutoCropBlackBars.GetCheck() != BST_CHECKED) return false;
+
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = w;
+    bmi.bmiHeader.biHeight = -h;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    std::vector<BYTE> pixels((size_t)w * h * 4);
+    HDC hdc = ::GetDC(NULL);
+    if (!hdc) return false;
+    int got = ::GetDIBits(hdc, hBmp, 0, h, pixels.data(), &bmi, DIB_RGB_COLORS);
+    if (got != h) {
+        ::ReleaseDC(NULL, hdc);
+        return false;
+    }
+
+    int top = 0;
+    while (top < h && DnfIsBlackBarRow(pixels, w, h, top)) ++top;
+
+    int bottom = h - 1;
+    while (bottom >= top && DnfIsBlackBarRow(pixels, w, h, bottom)) --bottom;
+
+    int left = 0;
+    while (left < w && DnfIsBlackBarColumn(pixels, w, h, left)) ++left;
+
+    int right = w - 1;
+    while (right >= left && DnfIsBlackBarColumn(pixels, w, h, right)) --right;
+
+    int cropTop = max(0, top);
+    int cropBottom = max(0, h - 1 - bottom);
+    int cropLeft = max(0, left);
+    int cropRight = max(0, w - 1 - right);
+
+    if (cropTop < DNF_BLACK_BAR_MIN_EDGE) cropTop = 0;
+    if (cropBottom < DNF_BLACK_BAR_MIN_EDGE) cropBottom = 0;
+    if (cropLeft < DNF_BLACK_BAR_MIN_EDGE) cropLeft = 0;
+    if (cropRight < DNF_BLACK_BAR_MIN_EDGE) cropRight = 0;
+
+    if (cropTop == 0 && cropBottom == 0 && cropLeft == 0 && cropRight == 0) {
+        ::ReleaseDC(NULL, hdc);
+        return false;
+    }
+
+    int newW = w - cropLeft - cropRight;
+    int newH = h - cropTop - cropBottom;
+    if (newW < 320 || newH < 180 || newW < (int)(w * 0.50) || newH < (int)(h * 0.50)) {
+        ::ReleaseDC(NULL, hdc);
+        return false;
+    }
+
+    HBITMAP hCropped = ::CreateCompatibleBitmap(hdc, newW, newH);
+    if (!hCropped) {
+        ::ReleaseDC(NULL, hdc);
+        return false;
+    }
+
+    HDC hSrcDC = ::CreateCompatibleDC(hdc);
+    HDC hDstDC = ::CreateCompatibleDC(hdc);
+    if (!hSrcDC || !hDstDC) {
+        if (hSrcDC) ::DeleteDC(hSrcDC);
+        if (hDstDC) ::DeleteDC(hDstDC);
+        ::DeleteObject(hCropped);
+        ::ReleaseDC(NULL, hdc);
+        return false;
+    }
+
+    HGDIOBJ oldSrc = ::SelectObject(hSrcDC, hBmp);
+    HGDIOBJ oldDst = ::SelectObject(hDstDC, hCropped);
+    BOOL ok = ::BitBlt(hDstDC, 0, 0, newW, newH, hSrcDC, cropLeft, cropTop, SRCCOPY);
+    ::SelectObject(hSrcDC, oldSrc);
+    ::SelectObject(hDstDC, oldDst);
+    ::DeleteDC(hSrcDC);
+    ::DeleteDC(hDstDC);
+    ::ReleaseDC(NULL, hdc);
+
+    if (!ok) {
+        ::DeleteObject(hCropped);
+        return false;
+    }
+
+    CString logKey;
+    logKey.Format(L"%s|%dx%d|%d,%d,%d,%d|%dx%d",
+        sourceTag ? sourceTag : L"未知", w, h, cropLeft, cropTop, cropRight, cropBottom, newW, newH);
+    static CString s_lastAutoCropLogKey;
+    static DWORD s_lastAutoCropLogTick = 0;
+    DWORD nowTick = ::GetTickCount();
+    if (logKey != s_lastAutoCropLogKey || nowTick - s_lastAutoCropLogTick >= 10000) {
+        CString logLine;
+        logLine.Format(L"[自动裁黑边] 来源=%s；原始=%dx%d；裁剪=左%d 上%d 右%d 下%d；结果=%dx%d。",
+            sourceTag ? sourceTag : L"未知", w, h, cropLeft, cropTop, cropRight, cropBottom, newW, newH);
+        WriteMatchLog(logLine);
+        s_lastAutoCropLogKey = logKey;
+        s_lastAutoCropLogTick = nowTick;
+    }
+
+    ::DeleteObject(hBmp);
+    hBmp = hCropped;
+    w = newW;
+    h = newH;
+    return true;
+}
+
 // ============================================================================
 // 手动测试与核心截图逻辑
 // ============================================================================
@@ -6596,6 +7092,9 @@ void CDNFGameCaptureDlg::Capture() {
             hGame = ::GetDesktopWindow();
 #else
             hGame = ::FindWindow(NULL, DNF_WINDOW_NAME);
+            if (!hGame && m_cachedGameHwnd && ::IsWindow(m_cachedGameHwnd)) {
+                hGame = m_cachedGameHwnd;
+            }
 #endif
         }
         else {
@@ -6613,6 +7112,8 @@ void CDNFGameCaptureDlg::Capture() {
             }
             return;
         }
+
+        m_cachedGameHwnd = hGame;
 
         // ==========================================
         // 2. 同步安全 WGC 初始化 (防假死装甲护体)
@@ -6718,12 +7219,11 @@ void CDNFGameCaptureDlg::Capture() {
                 //    m_nBlankFrameCount = 0;
                 //}
 
+                TryAutoCropBlackBars(hFrame, w, h, L"WGC");
+
                 std::lock_guard<std::mutex> lock(g_bmpMutex);
                 if (w != m_w || h != m_h) {
-                    for (int i = 0; i < MAX_HISTORY_FRAMES; i++) {
-                        if (m_historyBmps[i]) { ::DeleteObject(m_historyBmps[i]); m_historyBmps[i] = nullptr; }
-                    }
-                    m_historyIdx = 0;
+                    ResetFrameHistory();
                 }
 
                 if (m_bmp) DeleteObject(m_bmp);
@@ -6776,15 +7276,15 @@ void CDNFGameCaptureDlg::Capture() {
                 }
 
                 if (newW > 0 && newH > 0) {
-                    if (!m_bmp || newW != m_w || newH != m_h) {
-                        if (m_bmp) { ::DeleteObject(m_bmp); m_bmp = nullptr; }
-                        HDC hdc = ::GetDC(hGame); m_bmp = ::CreateCompatibleBitmap(hdc, newW, newH); ::ReleaseDC(hGame, hdc);
-                    }
-                    m_w = newW; m_h = newH;
-
                     HDC hGameDC = ::GetDC(hGame);
+                    HBITMAP hFrame = ::CreateCompatibleBitmap(hGameDC, newW, newH);
+                    if (!hFrame) {
+                        ::ReleaseDC(hGame, hGameDC);
+                        return;
+                    }
+
                     HDC hMemDC = ::CreateCompatibleDC(hGameDC);
-                    HGDIOBJ oldBmp = ::SelectObject(hMemDC, m_bmp);
+                    HGDIOBJ oldBmp = ::SelectObject(hMemDC, hFrame);
 
                     // ==========================================
                     // 【极度关键】：刷入纯黑底漆！
@@ -6804,6 +7304,18 @@ void CDNFGameCaptureDlg::Capture() {
                     }
 
                     ::SelectObject(hMemDC, oldBmp); ::DeleteDC(hMemDC); ::ReleaseDC(hGame, hGameDC);
+
+                    int frameW = newW;
+                    int frameH = newH;
+                    TryAutoCropBlackBars(hFrame, frameW, frameH, L"PrintWindow");
+
+                    if (frameW != m_w || frameH != m_h) {
+                        ResetFrameHistory();
+                    }
+                    if (m_bmp) { ::DeleteObject(m_bmp); m_bmp = nullptr; }
+                    m_bmp = hFrame;
+                    m_w = frameW;
+                    m_h = frameH;
                     capturedW = m_w; capturedH = m_h; hCapturedBmp = m_bmp; bNeedBlankCheck = !m_bAlreadyPrompted;
                 }
 #endif
@@ -6847,7 +7359,7 @@ void CDNFGameCaptureDlg::Capture() {
 
 
 
-bool CDNFGameCaptureDlg::EnsureOcrRunning() {
+bool CDNFGameCaptureDlg::EnsureOcrRunning(bool forceRestart) {
     std::lock_guard<std::mutex> lk(m_launchMutex);
 
     auto ensureHttpHandles = [&]() -> bool {
@@ -6875,7 +7387,15 @@ bool CDNFGameCaptureDlg::EnsureOcrRunning() {
     };
 
     // 先探测端口：Umi-OCR 已经在运行时，不重复启动。
-    if (probeOcr()) return true;
+    bool processRunning = DnfIsProcessRunningByName(L"Umi-OCR.exe");
+    if (!forceRestart && processRunning && probeOcr()) {
+        RefreshOcrExePathFromRunningProcess(true);
+        return true;
+    }
+
+    if (GetFileAttributes(m_ocrExePath) == INVALID_FILE_ATTRIBUTES) {
+        RefreshOcrExePathFromRunningProcess(true);
+    }
 
     if (GetFileAttributes(m_ocrExePath) == INVALID_FILE_ATTRIBUTES) {
         CString msg;
@@ -6886,7 +7406,7 @@ bool CDNFGameCaptureDlg::EnsureOcrRunning() {
     }
 
     DWORD now = GetTickCount();
-    if (now - m_lastLaunchOcrTime >= 10000) {
+    if (forceRestart || !processRunning || now - m_lastLaunchOcrTime >= 10000) {
         m_lastLaunchOcrTime = now;
         SHELLEXECUTEINFO sei = { sizeof(sei) };
         sei.fMask = SEE_MASK_FLAG_NO_UI;
@@ -6913,7 +7433,7 @@ bool CDNFGameCaptureDlg::EnsureOcrRunning() {
     }
 
     AppLog(L"❌ [Umi-OCR] 自动恢复失败，OCR 服务未响应。", RGB(255, 80, 80));
-    WriteMatchLog(L"[Umi-OCR] 自动恢复失败：127.0.0.1:1224 未响应。已阻止/停止监控，避免大X触发后 OCR 原文为空。" );
+    WriteMatchLog(L"[Umi-OCR] 自动恢复失败：127.0.0.1:1224 未响应，等待上层处理或下次后台重试。");
     return false;
 }
 
@@ -7017,9 +7537,6 @@ void CDNFGameCaptureDlg::RefreshDisplay() {
 // 绘制模块与 UI 排版
 // ============================================================================
 void CDNFGameCaptureDlg::OnPaint() {
-    static bool s_bTimer7Started = false;
-    if (!s_bTimer7Started) { SetTimer(7, 1000, NULL); s_bTimer7Started = true; }
-
     CPaintDC dc(this);
     CRect r; GetClientRect(&r);
     int splitY = max(100, r.bottom - (int)(390 * WINDOW_SCALE));
@@ -7161,6 +7678,10 @@ void CDNFGameCaptureDlg::UpdateAndRefreshRecentList() {
 
 void CDNFGameCaptureDlg::Draw(CDC& dc) {
     if (m_w <= 0) return;
+    const bool showCalFooter = m_bDeathXCalibrationMode && m_previewRect.Width() > 0 && m_previewRect.Height() > 0;
+    const int calFooterGap = 8;
+    const int calFooterH = 54;
+    const int calFooterTop = showCalFooter ? max(m_previewRect.top + 10, m_previewRect.bottom - calFooterGap - calFooterH) : 0;
 
     // 调试文字显示
     CString h;
@@ -7176,10 +7697,11 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
         CFont* of = dc.SelectObject(&f);
         CRect tR(0, 0, 0, 0);
         dc.DrawText(h, &tR, DT_LEFT | DT_TOP | DT_CALCRECT);
+        int debugBottom = showCalFooter ? (calFooterTop - 6) : (m_previewRect.bottom - 25);
         CRect cr(m_previewRect.left + 15,
-            m_previewRect.bottom - 25 - tR.Height(),
+            debugBottom - 8 - tR.Height(),
             m_previewRect.left + 15 + tR.Width(),
-            m_previewRect.bottom - 25);
+            debugBottom);
         cr.InflateRect(8, 8);
         dc.FillSolidRect(&cr, RGB(25, 25, 25));
         dc.DrawText(h, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -7201,7 +7723,7 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
             hR = m_ocrRecordsRight.back().hBmp;
     }
     HBITMAP arr[2] = { hL, hR };
-    int cY = m_previewRect.bottom - 20;
+    int cY = showCalFooter ? (calFooterTop - 12) : (m_previewRect.bottom - 20);
     int tW = max(180, m_previewRect.Width() / 4);
     for (int i = 1; i >= 0; i--) {
         if (arr[i]) {
@@ -7350,12 +7872,6 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
         CFont labelFont;
         labelFont.CreatePointFont(95, L"微软雅黑");
         CFont* oldFont = dc.SelectObject(&labelFont);
-
-        CString tip = L"X校准：拖动或方向键1像素微调；1-8选点，Shift+方向键10像素";
-        CRect tipRect(m_previewRect.left + 10, m_previewRect.top + 45, m_previewRect.left + 650, m_previewRect.top + 72);
-        dc.FillSolidRect(&tipRect, RGB(20, 20, 20));
-        dc.SetTextColor(RGB(0, 255, 255));
-        dc.DrawText(tip, &tipRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
         for (int i = 0; i < DEATH_POINT_COUNT; ++i) {
             CPoint p = DeathXPointToClient(m_deathXPoints[i]);
@@ -7685,6 +8201,20 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
             (float)(pt.y - m_previewRect.top) / (float)max(1, m_previewRect.Height()));
         dc.TextOut(drawX + 5, drawY + magH - 25, tip);
     }
+
+    if (showCalFooter) {
+        dc.SetBkMode(TRANSPARENT);
+        CRect footerRect(m_previewRect.left + 8, calFooterTop, m_previewRect.right - 8, calFooterTop + calFooterH);
+        dc.FillSolidRect(&footerRect, RGB(20, 20, 20));
+        CFont tipFont;
+        tipFont.CreatePointFont(88, L"微软雅黑");
+        CFont* oldFont = dc.SelectObject(&tipFont);
+        dc.SetTextColor(RGB(0, 255, 255));
+        CString tip = L"X校准：拖动或方向键1像素微调；1-8选点，Shift+方向键10像素";
+        CRect tipRect(footerRect.left + 10, footerRect.top + 2, footerRect.right - 10, footerRect.top + 20);
+        dc.DrawText(tip, &tipRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        dc.SelectObject(oldFont);
+    }
 }
 
 // 【修改】：点击说明按钮弹出的消息框，详细更新功能手册
@@ -7819,10 +8349,19 @@ void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
     else if (nID == 7) {
         static int s_idleSeconds = 0;          // 闲置秒数
         static bool s_hasFolded = true;        // 默认 true，防止刚开软件还没动就乱折叠
+        static DWORD s_lastOcrHealthKick = 0;  // OCR 健康检查节流
 
         // 1. 问系统：现在屏幕最前面的是不是咱们的软件？
         HWND hForeground = ::GetForegroundWindow();
         bool bIsOurAppFocused = (hForeground == m_hWnd || ::IsChild(m_hWnd, hForeground));
+
+        if (m_bIsRunning && !m_bOcrStartPending.load() && !m_bOcrRecoveryPending.load()) {
+            DWORD now = ::GetTickCount();
+            if (now - s_lastOcrHealthKick >= 8000) {
+                s_lastOcrHealthKick = now;
+                BeginOcrServiceRecovery(true);
+            }
+        }
 
         // 2. 问系统：用户最近一次摸鼠标或【敲键盘】距离现在多少毫秒？
         LASTINPUTINFO lii;
@@ -9169,6 +9708,7 @@ void CDNFGameCaptureDlg::BroadcastStateToWeb()
 
         // 🚨 【新增 1】：同步监控运行状态
         j["data"]["isMonitoring"] = (m_bIsRunning == TRUE);
+        j["data"]["isStartPending"] = (m_bOcrStartPending.load() == true);
         j["data"]["isFlipped"] = (m_bFlipSides == true);         // 👈 新增
         j["data"]["isMfcVisible"] = (IsWindowVisible() == TRUE); // 👈 新增
         j["data"]["deathXAlgorithm"] = m_nDeathAlgorithmChoice;
@@ -10444,6 +10984,15 @@ void CDNFGameCaptureDlg::OnCbnSelchangeCaptureEngine() {
 
     m_nBlankFrameCount = 0;
     m_bAlreadyPrompted = false;
+}
+
+void CDNFGameCaptureDlg::OnBnClickedAutoCropBlackBars()
+{
+    bool enabled = (m_chkAutoCropBlackBars.GetCheck() == BST_CHECKED);
+    ::WritePrivateProfileString(L"Settings", L"AutoCropBlackBars", enabled ? L"1" : L"0", m_iniPath);
+    AppLog(enabled ? L"⚙️ [设置] 已开启自动裁黑边" : L"⚙️ [设置] 已关闭自动裁黑边", RGB(0, 255, 255));
+
+    ClearPreview();
 }
 
 

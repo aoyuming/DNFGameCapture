@@ -348,6 +348,7 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 .btn-sync-db { background: #235b74; }
 .btn-push-db { background: #126047; }
 .btn-monitor-start { background: #00e5ff; color: #000; box-shadow: 0 0 10px rgba(0, 229, 255, 0.4); }
+.btn-monitor-pending { background: #ffb000; color: #151522; box-shadow: 0 0 10px rgba(255, 176, 0, 0.35); }
 .btn-monitor-stop { background: #ff0055; box-shadow: 0 0 10px rgba(255, 0, 85, 0.4); }
 .btn-auth {
     background: transparent; border: 1px solid #ffaa00; color: #ffaa00;
@@ -1141,6 +1142,13 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     box-shadow: none !important;
     cursor: not-allowed !important;
     filter: grayscale(1) brightness(0.75) !important;
+}
+#btn-monitor.btn-monitor-pending,
+#btn-monitor.btn-monitor-pending:disabled {
+    background: #ffb000 !important;
+    color: #151522 !important;
+    box-shadow: 0 0 10px rgba(255, 176, 0, 0.35) !important;
+    filter: none !important;
 }
 
 /* 小号菜单恢复为横向常驻按钮布局：名称按剩余空间自动省略 */
