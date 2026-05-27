@@ -23,6 +23,7 @@ public:
 	void ResizeWindowForClientSize(int targetClientW, int targetClientH);
 	void WriteWebHostDiagnostics(const CString& reason);
 	bool CalibrateZoomFromWebMetrics(int innerWidth, int innerHeight, const CString& reason);
+	bool CopyWindowImageToClipboard(CString& errorMsg);
 
 	// 对话框数据
 #ifdef AFX_DESIGN_TIME

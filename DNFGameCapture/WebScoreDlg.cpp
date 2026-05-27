@@ -178,6 +178,75 @@ void CWebScoreDlg::SendStateToWeb(const CString& jsonStr)
 	}
 }
 
+bool CWebScoreDlg::CopyWindowImageToClipboard(CString& errorMsg)
+{
+    errorMsg.Empty();
+
+    HWND hwnd = GetSafeHwnd();
+    if (!hwnd || !::IsWindow(hwnd) || !::IsWindowVisible(hwnd) || ::IsIconic(hwnd)) {
+        errorMsg = L"截图复制失败，请确认 Web 计分窗口未最小化。";
+        return false;
+    }
+
+    RECT rc = {};
+    if (!::GetWindowRect(hwnd, &rc)) {
+        errorMsg = L"截图复制失败：无法读取 Web 计分窗口位置。";
+        return false;
+    }
+
+    int width = rc.right - rc.left;
+    int height = rc.bottom - rc.top;
+    if (width <= 0 || height <= 0) {
+        errorMsg = L"截图复制失败：Web 计分窗口尺寸异常。";
+        return false;
+    }
+
+    HDC hScreen = ::GetDC(NULL);
+    if (!hScreen) {
+        errorMsg = L"截图复制失败：无法获取屏幕画面。";
+        return false;
+    }
+
+    HDC hMem = ::CreateCompatibleDC(hScreen);
+    HBITMAP hBmp = hMem ? ::CreateCompatibleBitmap(hScreen, width, height) : NULL;
+    if (!hMem || !hBmp) {
+        if (hBmp) ::DeleteObject(hBmp);
+        if (hMem) ::DeleteDC(hMem);
+        ::ReleaseDC(NULL, hScreen);
+        errorMsg = L"截图复制失败：无法创建截图缓冲区。";
+        return false;
+    }
+
+    HGDIOBJ oldBmp = ::SelectObject(hMem, hBmp);
+    BOOL copied = ::BitBlt(hMem, 0, 0, width, height, hScreen, rc.left, rc.top, SRCCOPY | CAPTUREBLT);
+    ::SelectObject(hMem, oldBmp);
+    ::DeleteDC(hMem);
+    ::ReleaseDC(NULL, hScreen);
+
+    if (!copied) {
+        ::DeleteObject(hBmp);
+        errorMsg = L"截图复制失败：无法抓取 Web 计分窗口画面。";
+        return false;
+    }
+
+    if (!::OpenClipboard(hwnd)) {
+        ::DeleteObject(hBmp);
+        errorMsg = L"截图复制失败：系统剪贴板正被其他程序占用。";
+        return false;
+    }
+
+    ::EmptyClipboard();
+    if (!::SetClipboardData(CF_BITMAP, hBmp)) {
+        ::CloseClipboard();
+        ::DeleteObject(hBmp);
+        errorMsg = L"截图复制失败：无法写入系统剪贴板。";
+        return false;
+    }
+
+    ::CloseClipboard();
+    return true;
+}
+
 void CWebScoreDlg::ResizeWindowToSize(int targetWindowW, int targetWindowH)
 {
     if (!m_hWnd || targetWindowW <= 0 || targetWindowH <= 0) return;

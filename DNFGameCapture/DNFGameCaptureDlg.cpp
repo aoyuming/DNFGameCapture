@@ -9502,6 +9502,20 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
         else if (action == "cmd_resize_web") {
             // 旧前端可能还会上报内容高度；当前版本固定 Web 窗口尺寸，忽略动态 resize。
         }
+        else if (action == "cmd_copy_web_window_to_clipboard") {
+            CString errorMsg;
+            bool ok = (m_pWebDlg != nullptr) && m_pWebDlg->CopyWindowImageToClipboard(errorMsg);
+            if (ok) {
+                AppLog(L"📋 [随机工具] Web计分窗口截图已复制到剪贴板。", RGB(0, 255, 100));
+                WriteMatchLog(L"[随机工具] Web计分窗口截图已复制到剪贴板。");
+            }
+            else {
+                if (errorMsg.IsEmpty()) errorMsg = L"截图复制失败，请确认 Web 计分窗口未最小化。";
+                AppLog(L"⚠️ [随机工具] " + errorMsg, RGB(255, 180, 0));
+                WriteMatchLog(L"[随机工具] " + errorMsg);
+                if (m_pWebDlg) DnfSendWebToast(m_pWebDlg, L"copy_window_clipboard_result", errorMsg);
+            }
+        }
         else if (action == "cmd_auth") {
             std::string codeStr = j["code"].get<std::string>();
             CString newAuthCode = CA2W(codeStr.c_str(), CP_UTF8);

@@ -32,7 +32,7 @@ let pendingAliasPopoverName = '';
 let pendingAliasPopoverInput = null;
 let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
-const WEB_LAYOUT_VERSION = '20260517-random-group-count';
+const WEB_LAYOUT_VERSION = '20260527-random-copy-window';
 let lastLayoutFitScale = 1;
 let lastLayoutDiagSignature = '';
 let layoutDiagnosticsTimer = null;
@@ -515,7 +515,7 @@ if (window.chrome && window.chrome.webview) {
             else if (msg.action === 'web_zoom_calibrated') {
                 scheduleLayoutFit(true, 'zoom-calibrated');
             }
-            else if (msg.action === 'auth_result' || msg.action === 'start_guard' || msg.action === 'patch_result' || msg.action === 'alias_submit_result' || msg.action === 'alias_sync_result') { showAlert(msg.message); }
+            else if (msg.action === 'auth_result' || msg.action === 'start_guard' || msg.action === 'patch_result' || msg.action === 'alias_submit_result' || msg.action === 'alias_sync_result' || msg.action === 'copy_window_clipboard_result') { showAlert(msg.message); }
             else if (msg.action === 'alias_direct_sync_result') {
                 if (String(msg.message || '').includes('失败')) showAlert(msg.message);
                 else console.info('[alias direct sync]', msg.message);
@@ -1083,6 +1083,15 @@ function renderRandomResult(result) {
     box.innerHTML = groupsHtml + leftoverHtml;
 }
 
+function requestWebWindowClipboardShot() {
+    if (!window.chrome?.webview) return;
+    window.requestAnimationFrame(() => {
+        setTimeout(() => {
+            window.chrome.webview.postMessage({ action: 'cmd_copy_web_window_to_clipboard' });
+        }, 80);
+    });
+}
+
 function runRandomToolGrouping(options = {}) {
     const notify = options.notify !== false;
     const returnError = options.returnError === true;
@@ -1122,7 +1131,10 @@ function runRandomToolGrouping(options = {}) {
         const assignedCount = result.groups.reduce((sum, group) => sum + group.length, 0);
         const leftoverCount = result.leftover?.length || 0;
         const suffix = leftoverCount > 0 ? `，候补 ${leftoverCount} 人` : '';
-        showAlert(`随机分组成功：已分成 ${getRandomGroupCountFromSizes(result.sizes)} 组，已分配 ${assignedCount} 人${suffix}。`);
+        showAlert(
+            `随机分组成功：已分成 ${getRandomGroupCountFromSizes(result.sizes)} 组，已分配 ${assignedCount} 人${suffix}。`,
+            requestWebWindowClipboardShot
+        );
     }
     return result;
 }
@@ -1200,7 +1212,7 @@ function drawRandomParticipant() {
     const result = { type: 'draw', picks: pool.slice(0, parsed.count) };
     randomToolState.lastResult = result;
     renderRandomResult(result);
-    showAlert(`抽签成功：${result.picks.map(formatRandomParticipant).join('、')}。`);
+    showAlert(`抽签成功：${result.picks.map(formatRandomParticipant).join('、')}。`, requestWebWindowClipboardShot);
 }
 
 function copyRandomResult() {
@@ -1867,13 +1879,16 @@ function showPrompt(msg, callback, options = {}) {
     modalInput.focus();
     currentModalCallback = callback;
 }
-function showAlert(msg) {
+function showAlert(msg, onOk = null) {
     resetModalInputUi();
     modalMsg.innerHTML = msg.replace(/\n/g, '<br>');
     modalInput.style.display = 'none';
     modalCancel.style.display = 'none';
     customModal.classList.add('active');
-    currentModalCallback = () => { modalCancel.style.display = 'inline-block'; };
+    currentModalCallback = (res) => {
+        modalCancel.style.display = 'inline-block';
+        if (res === true && typeof onOk === 'function') onOk();
+    };
 }
 modalCancel.onclick = () => { customModal.classList.remove('active'); if (currentModalCallback) currentModalCallback(null); };
 // 对话框的键盘事件（原位置，只需增加 stopImmediatePropagation）
