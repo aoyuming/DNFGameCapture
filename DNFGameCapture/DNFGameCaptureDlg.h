@@ -28,7 +28,7 @@ struct ScorePointF {
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"3.6.4"    //当前版本号
+#define CURRENT_VERSION L"3.6.5"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -456,6 +456,7 @@ private:
     // 把下面这两行覆盖原来的声明
     bool VerifyKey(CString inputKey, CString machineID);
     CString CheckCloudBinding(CString key, CString hwid, long long duration, long long& outExpTime);
+    bool BeginLicenseCloudCheck(const CString& inputKey, bool manualCheck);
     CString SubmitAliasDbForReview(const std::string& aliasDbPayload, int mainCount, int pairCount);
     CString DirectSyncAliasDbToCloud(const std::string& aliasDbPayload, int mainCount, int pairCount);
     CString SyncAliasDbFromCloud();

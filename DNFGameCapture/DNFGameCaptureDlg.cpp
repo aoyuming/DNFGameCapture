@@ -21,6 +21,7 @@
 #include "json.hpp"
 using json = nlohmann::json;
 static CString s_backupAuthCode = L"";
+static CString s_pendingAuthCode = L"";
 using namespace Gdiplus;
 
 // ============================================================================
@@ -2427,17 +2428,24 @@ void CDNFGameCaptureDlg::KillProcessByName(const CString& processName) {
 LRESULT CDNFGameCaptureDlg::OnCloudAuthFail(WPARAM wParam, LPARAM lParam) {
     CString* pCloudResult = (CString*)lParam;
     if (pCloudResult) {
+        const bool wasManualAuthCheck = m_bIsManualAuthCheck;
         m_bIsAuthValid = false;
         m_cloudExpireTime = 0;
 
-        // 🚨 还原旧的卡密到双存储（注册表 + license.txt）
-        DnfWriteLocalLicenseKey(s_backupAuthCode);
+        if (wasManualAuthCheck) {
+            // 手动换卡失败时，才回滚到提交前的旧卡密。
+            DnfWriteLocalLicenseKey(s_backupAuthCode);
+            s_pendingAuthCode.Empty();
+        }
+        else {
+            WriteMatchLog(L"[授权备份] 云端校验失败（非手动授权），保留本地卡密，不覆盖授权存储。");
+        }
 
         if (m_editVisualLogs.m_hWnd) m_editVisualLogs.SetWindowText(L"");
         OutputDebugAuthInfo();
         if (m_bIsRunning) OnBnClickedStart();
 
-        if (m_bIsManualAuthCheck) { // 🚨 只有手动点授权，才弹失败提示！
+        if (wasManualAuthCheck) { // 🚨 只有手动点授权，才弹失败提示！
             json reply; reply["action"] = "auth_result"; reply["success"] = false;
             reply["message"] = std::string(CW2A(L"❌ 验证失败！\r\n卡密无效或已过期，已还原旧卡密。\r\n原因：" + *pCloudResult, CP_UTF8));
             CString jsonStr = CA2W(reply.dump().c_str(), CP_UTF8);
@@ -2445,7 +2453,11 @@ LRESULT CDNFGameCaptureDlg::OnCloudAuthFail(WPARAM wParam, LPARAM lParam) {
         }
         m_bIsManualAuthCheck = false; // 重置标记
 
-        CheckTrialAndLicense(); // 重新加载旧授权激活状态
+        if (wasManualAuthCheck) {
+            CheckTrialAndLicense(); // 重新加载旧授权激活状态
+            s_backupAuthCode.Empty();
+            s_pendingAuthCode.Empty();
+        }
         BroadcastStateToWeb();  // 通知网页刷新状态文字
         delete pCloudResult;
     }
@@ -2455,15 +2467,25 @@ LRESULT CDNFGameCaptureDlg::OnCloudAuthFail(WPARAM wParam, LPARAM lParam) {
 // 找到 LRESULT CDNFGameCaptureDlg::OnUpdateAuthTime
 LRESULT CDNFGameCaptureDlg::OnUpdateAuthTime(WPARAM wParam, LPARAM lParam) {
     long long cloudTime = (long long)lParam;
+    const bool wasManualAuthCheck = m_bIsManualAuthCheck;
     m_cloudExpireTime = cloudTime;
     m_bIsAuthValid = (cloudTime > 1 || cloudTime == 0xFFFFFFFF);
+
+    if (m_bIsAuthValid && wasManualAuthCheck) {
+        if (!s_pendingAuthCode.IsEmpty()) {
+            DnfWriteLocalLicenseKey(s_pendingAuthCode);
+        }
+        else {
+            WriteMatchLog(L"[授权备份] 手动授权云端验证成功，但没有待提交卡密，已跳过写入。");
+        }
+    }
 
     if (m_editVisualLogs.m_hWnd) m_editVisualLogs.SetWindowText(L"");
     OutputDebugAuthInfo();
     if (m_bIsAuthValid) AppLog(L"✅ [云端验证] 授权已激活，欢迎使用！", RGB(0, 255, 100));
 
     if (m_bIsAuthValid) {
-        if (m_bIsManualAuthCheck) { // 🚨 只有手动点授权，才弹成功提示！
+        if (wasManualAuthCheck) { // 🚨 只有手动点授权，才弹成功提示！
             json reply; reply["action"] = "auth_result"; reply["success"] = true;
             reply["message"] = std::string(CW2A(L"✅ 授权验证成功！\r\n您已激活专业版。", CP_UTF8));
             CString jsonStr = CA2W(reply.dump().c_str(), CP_UTF8);
@@ -2471,6 +2493,10 @@ LRESULT CDNFGameCaptureDlg::OnUpdateAuthTime(WPARAM wParam, LPARAM lParam) {
         }
     }
     m_bIsManualAuthCheck = false; // 重置标记
+    if (wasManualAuthCheck) {
+        s_backupAuthCode.Empty();
+        s_pendingAuthCode.Empty();
+    }
     BroadcastStateToWeb();
     return 0;
 }
@@ -2482,15 +2508,23 @@ bool CDNFGameCaptureDlg::VerifyKey(CString inputKey, CString machineID) {
     if (inputKey.Left(4) == L"CDK-") {
         int firstDash = 3;
         int secondDash = inputKey.Find(L'-', firstDash + 1);
+        if (secondDash <= firstDash + 1) return false;
         int thirdDash = inputKey.Find(L'-', secondDash + 1);
 
-        if (thirdDash != -1) {
+        if (thirdDash > secondDash + 1 && thirdDash < inputKey.GetLength() - 1) {
             CString durStr = inputKey.Mid(firstDash + 1, secondDash - firstDash - 1);
             CString nonceStr = inputKey.Mid(secondDash + 1, thirdDash - secondDash - 1);
             CString sigStr = inputKey.Mid(thirdDash + 1);
 
-            long long duration = wcstoll(durStr, NULL, 16);
-            unsigned int sig = wcstoul(sigStr, NULL, 16);
+            wchar_t* durEnd = nullptr;
+            const wchar_t* durStart = durStr.GetString();
+            long long duration = wcstoll(durStart, &durEnd, 16);
+            if (durEnd == durStart || *durEnd != L'\0') return false;
+
+            wchar_t* sigEnd = nullptr;
+            const wchar_t* sigStart = sigStr.GetString();
+            unsigned int sig = (unsigned int)wcstoul(sigStart, &sigEnd, 16);
+            if (sigEnd == sigStart || *sigEnd != L'\0') return false;
 
             CString signData; signData.Format(L"%llX-%s-MySuperSecretKey2026", duration, (LPCTSTR)nonceStr);
             if (sig != CustomSimpleHash(std::string(CW2A(signData, CP_UTF8)))) return false;
@@ -2741,6 +2775,38 @@ static CString DnfReadLocalLicenseKey()
 
     g_lastLicenseSource = L"无";
     return L"";
+}
+
+bool CDNFGameCaptureDlg::BeginLicenseCloudCheck(const CString& inputKey, bool manualCheck)
+{
+    CString normalized = DnfNormalizeLicenseKey(inputKey);
+    CString hwid = GetMachineID();
+    if (normalized.IsEmpty() || !VerifyKey(normalized, hwid)) {
+        if (manualCheck) {
+            m_bIsManualAuthCheck = false;
+        }
+        return false;
+    }
+
+    m_bIsManualAuthCheck = manualCheck;
+    m_bIsTrial = false;
+    long long duration = m_keyDuration;
+    HWND hWnd = GetSafeHwnd();
+
+    std::thread([this, hWnd, normalized, hwid, duration]() {
+        long long cloudExpTime = 0;
+        CString cloudResult = CheckCloudBinding(normalized, hwid, duration, cloudExpTime);
+
+        if (cloudResult != L"OK" && ::IsWindow(hWnd)) {
+            CString* pResult = new CString(cloudResult);
+            ::PostMessage(hWnd, WM_CLOUD_AUTH_FAIL, 0, (LPARAM)pResult);
+        }
+        else if (cloudResult == L"OK" && ::IsWindow(hWnd)) {
+            ::PostMessage(hWnd, WM_UPDATE_AUTH_TIME, 0, (LPARAM)cloudExpTime);
+        }
+        }).detach();
+
+    return true;
 }
 
 static bool DnfPostCloudJson(const std::string& jsonUtf8, std::string& responseUtf8, CString& errorMsg, int timeoutMs)
@@ -3172,31 +3238,11 @@ void CDNFGameCaptureDlg::CheckTrialAndLicense() {
     m_bIsTrial = false;
     m_trialEnd = 0;
 
-    // 获取机器码
-    CString hwid = GetMachineID();
-
     // --- 第一阶段：尝试读取本地卡密（注册表优先，license.txt 互补备份） ---
     CString inputKey = DnfReadLocalLicenseKey();
-    if (!inputKey.IsEmpty() && VerifyKey(inputKey, hwid)) {
+    if (!inputKey.IsEmpty() && BeginLicenseCloudCheck(inputKey, false)) {
         // 【关键修复 2】：删掉 m_bIsAuthValid = true;
         // 离线格式对了也没用，必须设为 false，等待云端判决！
-        m_bIsTrial = false;
-        long long duration = m_keyDuration;
-        HWND hWnd = GetSafeHwnd();
-
-        std::thread([this, hWnd, inputKey, hwid, duration]() {
-            long long cloudExpTime = 0;
-            CString cloudResult = CheckCloudBinding(inputKey, hwid, duration, cloudExpTime);
-
-            if (cloudResult != L"OK" && ::IsWindow(hWnd)) {
-                CString* pResult = new CString(cloudResult);
-                ::PostMessage(hWnd, WM_CLOUD_AUTH_FAIL, 0, (LPARAM)pResult);
-            }
-            else if (cloudResult == L"OK" && ::IsWindow(hWnd)) {
-                ::PostMessage(hWnd, WM_UPDATE_AUTH_TIME, 0, (LPARAM)cloudExpTime);
-            }
-            }).detach();
-
         return;
     }
 
@@ -6686,6 +6732,11 @@ LRESULT CDNFGameCaptureDlg::OnOcrServiceFail(WPARAM wParam, LPARAM lParam) {
 }
 
 void CDNFGameCaptureDlg::OnBnClickedInputKey() {
+    if (m_bIsManualAuthCheck && m_cloudExpireTime == -1) {
+        MessageBox(L"上一条授权卡密正在云端验证中，请稍后再试。", L"授权验证中", MB_ICONINFORMATION);
+        return;
+    }
+
     CString currentText;
     m_btnInputKey.GetWindowText(currentText);
 
@@ -6713,14 +6764,29 @@ void CDNFGameCaptureDlg::OnBnClickedInputKey() {
     // 阶段二：点击“应用授权码”，校验卡密，并将按钮还原
     // ==========================================
     else {
-        // 1. 以用户刚保存的 license.txt 为输入来源，覆盖注册表旧值后再验证
+        // 1. 读取用户刚保存的 license.txt，但先恢复旧授权，避免无效输入污染正式存储。
         CString fileKey = DnfReadLicenseFromFile();
-        if (!fileKey.IsEmpty()) {
-            DnfWriteLocalLicenseKey(fileKey);
+        DnfWriteLocalLicenseKey(s_backupAuthCode);
+        s_pendingAuthCode = DnfNormalizeLicenseKey(fileKey);
+
+        if (s_pendingAuthCode.IsEmpty() || !BeginLicenseCloudCheck(s_pendingAuthCode, true)) {
+            s_pendingAuthCode.Empty();
+            s_backupAuthCode.Empty();
+
+            if (m_editVisualLogs.m_hWnd) {
+                m_editVisualLogs.SetWindowText(L"");
+            }
+            OutputDebugAuthInfo();
+
+            m_status.SetWindowText(L"授权码格式无效，已保留旧授权");
+            m_btnInputKey.SetWindowText(L"输入授权码");
+            MessageBox(L"授权卡密格式无效，已丢弃本次输入并保留旧授权。", L"授权失败", MB_ICONWARNING);
+            BroadcastStateToWeb();
+            return;
         }
 
         // 2. 重新读取卡密并执行静默检查
-        CheckTrialAndLicense();
+        // 新卡密已作为候选值提交云端，验证成功后才会写入 license.txt 和注册表。
 
         // 3. 清空旧面板，强制打印最新的状态
         if (m_editVisualLogs.m_hWnd) {
@@ -9519,13 +9585,30 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
         else if (action == "cmd_auth") {
             std::string codeStr = j["code"].get<std::string>();
             CString newAuthCode = CA2W(codeStr.c_str(), CP_UTF8);
-            // 🚨 【新增】：标记本次云端校验是用户手动触发的！
-            m_bIsManualAuthCheck = true;
+
+            if (m_bIsManualAuthCheck && m_cloudExpireTime == -1) {
+                json reply; reply["action"] = "auth_result"; reply["success"] = false;
+                reply["message"] = std::string(CW2A(L"上一条授权卡密正在云端验证中，请稍后再试。", CP_UTF8));
+                CString jsonStr = CA2W(reply.dump().c_str(), CP_UTF8);
+                if (m_pWebDlg) m_pWebDlg->SendStateToWeb(jsonStr);
+                return 0;
+            }
 
             s_backupAuthCode = DnfReadLocalLicenseKey();
-            DnfWriteLocalLicenseKey(newAuthCode);
+            s_pendingAuthCode = DnfNormalizeLicenseKey(newAuthCode);
 
-            CheckTrialAndLicense();
+            if (s_pendingAuthCode.IsEmpty() || !BeginLicenseCloudCheck(s_pendingAuthCode, true)) {
+                DnfWriteLocalLicenseKey(s_backupAuthCode);
+                s_pendingAuthCode.Empty();
+                s_backupAuthCode.Empty();
+
+                json reply; reply["action"] = "auth_result"; reply["success"] = false;
+                reply["message"] = std::string(CW2A(L"授权卡密格式无效，已丢弃本次输入并保留旧授权。", CP_UTF8));
+                CString jsonStr = CA2W(reply.dump().c_str(), CP_UTF8);
+                if (m_pWebDlg) m_pWebDlg->SendStateToWeb(jsonStr);
+                BroadcastStateToWeb();
+                return 0;
+            }
 
             json reply; reply["action"] = "auth_result"; reply["success"] = true;
             // 🚨【关键防崩溃修复】：必须强制转为 UTF-8！
