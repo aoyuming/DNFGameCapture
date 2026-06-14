@@ -17,51 +17,63 @@ body {
     color: var(--text-main);
     font-family: 'Microsoft YaHei', sans-serif;
     margin: 0;
-    padding: 20px 18px 18px;
+    padding: 6px 6px 8px;
     display: flex;
     flex-direction: column;
-    align-items: center;
+    align-items: stretch;
     overflow: hidden;
+    box-sizing: border-box;
+    min-height: 100vh;
 }
 
 .app-shell {
     display: flex;
     align-items: stretch;
-    justify-content: center;
-    gap: 15px;
-    width: fit-content;
+    justify-content: stretch;
+    gap: 10px;
+    width: 100%;
+    max-width: none;
+    min-height: calc(100vh - 14px);
     margin-left: 0;
     transform: scale(var(--layout-fit-scale));
     transform-origin: top center;
+    box-sizing: border-box;
 }
 
 .left-stack {
     display: flex;
     flex-direction: column;
-    align-items: center;
+    align-items: stretch;
+    width: 100%;
+    min-width: 0;
+    min-height: 0;
 }
 
 /* 🚨 核心修复 1：强行拔高主体战绩区的层级，让它盖过底部的按钮区！ */
 .main-container {
     display: block;
-    width: fit-content;
+    width: 100%;
     position: relative;
     z-index: 10;
+    box-sizing: border-box;
 }
 
 .teams-wrap {
     display: flex;
-    gap: 15px; 
-    width: fit-content;
+    gap: 10px;
+    width: 100%;
     transition: all 0.5s ease; 
+    box-sizing: border-box;
 }
 
 .team-panel {
     background: var(--panel-bg);
     border-radius: 12px; 
-    padding: 12px 16px; 
+    padding: 12px 14px;
     box-shadow: 0 10px 25px rgba(0,0,0,0.5);
-    width: max-content; 
+    flex: 1 1 0;
+    min-width: 0;
+    box-sizing: border-box;
 }
 
 .team-blue { border-top: 4px solid var(--blue-team); }
@@ -137,15 +149,15 @@ body {
     border-radius: 6px;
 }
 
-.name-wrapper { position: relative; display: flex; align-items: center; width: 124px; gap: 4px; }
+.name-wrapper { position: relative; display: flex; align-items: center; width: 140px; gap: 4px; }
 .seat-number {
-    flex: 0 0 22px;
-    width: 22px;
-    height: 22px;
+    flex: 0 0 38px;
+    width: 38px;
+    height: 24px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    border-radius: 4px;
+    border-radius: 5px;
     background: rgba(255, 255, 255, 0.035);
     border: 1px solid rgba(255, 255, 255, 0.10);
     color: #8d91a3;
@@ -154,6 +166,39 @@ body {
     line-height: 1;
     text-shadow: none;
     user-select: none;
+    box-sizing: border-box;
+    text-align: center;
+    outline: none;
+}
+.seat-number[hidden] {
+    display: none !important;
+}
+.seat-label-input,
+.seat-label-toggle {
+    padding: 0;
+    font-family: 'Microsoft YaHei', sans-serif;
+}
+.seat-label-input[readonly] {
+    cursor: default;
+}
+.seat-label-toggle {
+    border-color: rgba(255, 211, 106, 0.52);
+    background: linear-gradient(180deg, rgba(255, 211, 106, 0.18), rgba(255, 211, 106, 0.05));
+    color: #ffd36a;
+    cursor: pointer;
+    box-shadow: 0 0 9px rgba(255, 211, 106, 0.18), inset 0 0 8px rgba(255, 255, 255, 0.04);
+    transition: background 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
+}
+.seat-label-toggle:hover,
+.seat-label-toggle:focus-visible {
+    color: #fff1bf;
+    border-color: rgba(255, 211, 106, 0.82);
+    background: linear-gradient(180deg, rgba(255, 211, 106, 0.26), rgba(255, 211, 106, 0.10));
+    box-shadow: 0 0 13px rgba(255, 211, 106, 0.34), inset 0 0 8px rgba(255, 255, 255, 0.07);
+    cursor: pointer;
+}
+.seat-label-toggle:active {
+    transform: translateY(1px);
 }
 .name-input, .stat-item input {
     background: transparent; border: 1px solid transparent; border-radius: 4px; 
@@ -297,38 +342,44 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 
 /* ================= 底部控制区 ================= */
 .control-panel {
-    margin-top: 15px;
+    margin-top: 8px;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    gap: 10px;
-    background: rgba(255,255,255,0.05); padding: 16px 18px; border-radius: 12px;
-    width: 100%; max-width: min(900px, calc(100vw - 36px)); box-sizing: border-box;
+    align-items: stretch;
+    justify-content: space-evenly;
+    flex: 1 1 auto;
+    gap: 12px;
+    background: rgba(255,255,255,0.05); padding: 18px 16px; border-radius: 12px;
+    width: 100%; max-width: none; box-sizing: border-box;
     position: relative; z-index: 1; /* 🚨 降低底部控制区的层级，给上面的弹窗让路 */
 }
 .control-row {
     display: flex;
     justify-content: center;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
     width: 100%;
     flex-wrap: wrap;
 }
-.control-row-main { max-width: 560px; }
-.control-row-runtime { max-width: 560px; }
-.control-row-tools { max-width: 860px; }
+.control-row-main,
+.control-row-runtime,
+.control-row-cloud,
+.control-row-tools { max-width: 100%; }
 .ctrl-btn { 
     min-width: 0;
-    max-width: 170px;
-    padding: 9px 12px !important; font-size: 13px !important; font-weight: bold;
+    max-width: none;
+    padding: 10px 14px !important; font-size: 14px !important; font-weight: bold;
     border: none; border-radius: 6px; cursor: pointer; transition: 0.2s; color: white; white-space: nowrap !important;
     display: inline-flex; align-items: center; justify-content: center; gap: 4px;
-    flex: 1 1 118px;
+    flex: 1 1 0;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 .algo-select-wrap {
     display: flex; align-items: center; gap: 6px;
+    justify-content: center;
+    flex: 1 1 0;
+    min-width: 0;
     padding: 8px 10px; border-radius: 6px;
     background: rgba(0,0,0,0.22); border: 1px solid rgba(0,229,255,0.35);
     color: #00e5ff; font-size: 13px; font-weight: bold;
@@ -341,7 +392,7 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 }
 .algo-select:focus { border-color: #00e5ff; box-shadow: 0 0 8px rgba(0,229,255,0.35); }
 .ctrl-btn:hover { filter: brightness(1.2); }
-#btn-monitor { font-size: 15px !important; padding: 9px 18px !important; letter-spacing: 1px; }
+#btn-monitor { font-size: 16px !important; padding: 10px 22px !important; letter-spacing: 1px; }
 
 .btn-swap { background: #4a4a60; }
 .btn-random { background: #6a3d8f; border: 1px solid rgba(215, 178, 255, 0.55); }
@@ -352,8 +403,7 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 .btn-monitor-stop { background: #ff0055; box-shadow: 0 0 10px rgba(255, 0, 85, 0.4); }
 .btn-auth {
     background: transparent; border: 1px solid #ffaa00; color: #ffaa00;
-    width: 190px; max-width: 190px;
-    flex-shrink: 0;
+    width: auto; max-width: none;
     position: relative;
     overflow: visible;
     display: inline-flex;
@@ -411,6 +461,30 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 .btn-clear-teams { background: #43333c; border: 1px solid rgba(255, 180, 180, 0.65); }
 .btn-reset { background: #8a6508; border: 1px solid #ffd700; }
 .btn-pro { background: #5a2a82; border: 1px solid #9d4edd; }
+.output-seat-label-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 38px;
+    padding: 0 14px;
+    border-radius: 6px;
+    background: #2f3444;
+    border: 1px solid rgba(255, 211, 106, 0.58);
+    color: #ffe3a3;
+    font-size: 14px;
+    font-weight: 800;
+    white-space: nowrap;
+    box-sizing: border-box;
+}
+.output-seat-label-toggle input {
+    width: 16px;
+    height: 16px;
+    accent-color: #ffd36a;
+    margin: 0;
+}
 .btn-sync-db { background: #173f34; border: 1px solid #45d49a; color: #b9ffe0; }
 .btn-review-toggle {
     background: #123847;

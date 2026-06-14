@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DNF 赛事计分板 - WebView2 版</title>
-    <meta name="dnf-web-layout-version" content="20260527-random-copy-window">
-    <link rel="stylesheet" href="style.css?v=20260527-random-copy-window">
+    <meta name="dnf-web-layout-version" content="20260615-random-seat-placeholder">
+    <link rel="stylesheet" href="style.css?v=20260615-random-seat-placeholder">
 </head>
 <body>
 
@@ -69,6 +69,10 @@
                 <div class="control-row control-row-tools">
                     <button class="ctrl-btn btn-auth" id="btn-auth">🔑 授权</button>
                     <button class="ctrl-btn btn-pro" id="btn-pro">👑 专业模式</button>
+                    <label class="output-seat-label-toggle" title="开启后，仅在 击杀.txt 的名字前输出选人顺序">
+                        <input type="checkbox" id="output-seat-label-toggle">
+                        <span>选人顺序</span>
+                    </label>
                     <button class="ctrl-btn btn-clear-teams" id="btn-clear-teams">🗑️ 清空</button>
                     <button class="ctrl-btn btn-reset" id="btn-reset">✨ 重置战绩</button>
                 </div>
@@ -163,6 +167,6 @@
         </div>
     </div>
 
-    <script src="main.js?v=20260527-random-copy-window" defer></script>
+    <script src="main.js?v=20260615-random-seat-placeholder" defer></script>
 </body>
 </html>

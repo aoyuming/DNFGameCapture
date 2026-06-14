@@ -10,6 +10,8 @@ let isStartPending = false;
 let isProMode = false;
 let deathXAlgorithm = 0;
 let deathPatchInstalled = false;
+let outputSeatLabelToKillFile = false;
+let redPickMode = 'first';
 let recentEvents = [];
 let isReviewPanelOpen = false;
 let cxxConsoleLogs = [];
@@ -32,7 +34,7 @@ let pendingAliasPopoverName = '';
 let pendingAliasPopoverInput = null;
 let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
-const WEB_LAYOUT_VERSION = '20260527-random-copy-window';
+const WEB_LAYOUT_VERSION = '20260615-random-seat-placeholder';
 let lastLayoutFitScale = 1;
 let lastLayoutDiagSignature = '';
 let layoutDiagnosticsTimer = null;
@@ -604,6 +606,7 @@ function pushStateToServer() {
     let state = {
         blueScore: parseInt(document.querySelector('#team-blue .team-score-input').value) || 0,
         redScore: parseInt(document.querySelector('#team-red .team-score-input').value) || 0,
+        redPickMode,
         players: [],
         fullAliasDB: formattedDB
     };
@@ -630,11 +633,157 @@ function getRowData(row, teamId) {
     };
 }
 
+const PICK_LABEL_SEQUENCES = {
+    first: {
+        red: ['x选', '1选', '4选', '6选'],
+        blue: ['h选', '2选', '3选', '5选']
+    },
+    second: {
+        red: ['h选', '2选', '4选', '5选'],
+        blue: ['x选', '1选', '3选', '6选']
+    }
+};
+
+function getSeatLabelInput(row) {
+    return row?.querySelector('.seat-label-input') || row?.querySelector('.seat-number');
+}
+
+function getSeatLabelToggle(row) {
+    return row?.querySelector('.seat-label-toggle');
+}
+
+function getTeamRows(teamId) {
+    const selector = teamId === 0 ? '#team-red .player-row' : '#team-blue .player-row';
+    return Array.from(document.querySelectorAll(selector));
+}
+
+function getSeatTeamId(row) {
+    if (row?.closest('#team-red')) return 0;
+    if (row?.closest('#team-blue')) return 1;
+    return -1;
+}
+
+function getSeatRowIndex(row) {
+    const teamId = getSeatTeamId(row);
+    return teamId >= 0 ? getTeamRows(teamId).indexOf(row) : -1;
+}
+
+function normalizeRedPickMode(value) {
+    return String(value || '').toLowerCase() === 'second' ? 'second' : 'first';
+}
+
+function cleanSeatLabel(value) {
+    return String(value || '').replace(/[|\r\n]/g, '').trim().slice(0, 16);
+}
+
+function normalizePickChoice(value) {
+    const raw = cleanSeatLabel(value).toLowerCase();
+    if (!raw) return '';
+    if (raw.startsWith('x') || raw.includes('先')) return 'x选';
+    if (raw.startsWith('h') || raw.includes('后')) return 'h选';
+    return '';
+}
+
+function displayPickChoiceLabel(value) {
+    const normalized = normalizePickChoice(value);
+    if (normalized === 'x选') return '先选';
+    if (normalized === 'h选') return '后选';
+    return value || '';
+}
+
+function getPickLabelsForTeam(teamId) {
+    const mode = normalizeRedPickMode(redPickMode);
+    const side = teamId === 0 ? 'red' : 'blue';
+    return PICK_LABEL_SEQUENCES[mode][side];
+}
+
+function getPickLabelForRow(row) {
+    const teamId = getSeatTeamId(row);
+    const idx = getSeatRowIndex(row);
+    if (teamId < 0 || idx < 0) return '';
+    return getPickLabelsForTeam(teamId)[idx] || '';
+}
+
+function getRedPickModeFromTeamChoice(teamId, choice) {
+    const normalized = normalizePickChoice(choice);
+    if (normalized === 'x选') return teamId === 0 ? 'first' : 'second';
+    if (normalized === 'h选') return teamId === 0 ? 'second' : 'first';
+    return redPickMode;
+}
+
+function refreshPickLabels() {
+    [0, 1].forEach(teamId => {
+        const rows = getTeamRows(teamId);
+        const labels = getPickLabelsForTeam(teamId);
+        rows.forEach((row, idx) => {
+            const input = getSeatLabelInput(row);
+            const toggle = getSeatLabelToggle(row);
+            if (!input && !toggle) return;
+            const isTop = idx === 0;
+            const label = labels[idx] || '';
+            if (input) {
+                if ('value' in input) input.value = label;
+                else input.textContent = label;
+                input.readOnly = true;
+                input.hidden = isTop;
+                input.setAttribute('aria-readonly', 'true');
+                input.tabIndex = -1;
+                input.title = '按先后手自动生成';
+            }
+            if (toggle) {
+                toggle.textContent = displayPickChoiceLabel(label);
+                toggle.value = label;
+                toggle.dataset.pickLabel = label;
+                toggle.hidden = !isTop;
+                toggle.disabled = !isTop;
+                toggle.tabIndex = isTop ? 0 : -1;
+                toggle.title = '点击切换先选 / 后选';
+                toggle.setAttribute('aria-label', `当前${displayPickChoiceLabel(label)}，点击切换`);
+            }
+        });
+    });
+}
+
+function postRedPickModeToServer() {
+    if (window.chrome?.webview) {
+        window.chrome.webview.postMessage({ action: 'cmd_set_red_pick_mode', mode: redPickMode });
+    }
+}
+
+function setRedPickMode(mode, sync = false) {
+    const next = normalizeRedPickMode(mode);
+    const changed = redPickMode !== next;
+    redPickMode = next;
+    refreshPickLabels();
+    if (sync && !isSyncingFromServer) {
+        if (changed) postRedPickModeToServer();
+        triggerSync();
+    }
+}
+
+function setPickModeFromInput(row, value, sync = true) {
+    const teamId = getSeatTeamId(row);
+    if (teamId < 0) {
+        refreshPickLabels();
+        return;
+    }
+    setRedPickMode(getRedPickModeFromTeamChoice(teamId, value), sync);
+}
+
+function togglePickModeForRow(row, sync = true) {
+    const current = normalizePickChoice(getPickLabelForRow(row));
+    const next = current === 'x选' ? 'h选' : 'x选';
+    setPickModeFromInput(row, next, sync);
+}
+
+function resetSeatLabelsToDefault() {
+    setRedPickMode('first', false);
+}
+
 function getRandomGroupRowData(row) {
     const nameElem = row.querySelector('.name-input');
     const name = (nameElem?.value || '').trim();
     return {
-        seatNumber: row.querySelector('.seat-number')?.textContent || '',
         name,
         inputError: !!nameElem?.classList.contains('input-error'),
         errorMsg: nameElem?.getAttribute('data-error-msg') || '',
@@ -645,9 +794,6 @@ function getRandomGroupRowData(row) {
 }
 
 function setRandomGroupRowData(row, data) {
-    const seatElem = row.querySelector('.seat-number');
-    if (seatElem) seatElem.textContent = data?.seatNumber || '';
-
     const nameElem = row.querySelector('.name-input');
     if (nameElem) {
         nameElem.value = data?.name || '';
@@ -735,13 +881,21 @@ function getRandomRosterLines() {
 }
 
 function getRandomSeatLabel(row, fallbackIndex) {
-    const text = (row?.querySelector('.seat-number')?.textContent || '').trim();
-    return text || String(fallbackIndex + 1);
+    return getPickLabelForRow(row) || String(fallbackIndex + 1);
 }
 
 function getRandomSeatSortValue(seatLabel, fallbackIndex) {
     const n = Number.parseInt(seatLabel, 10);
     return Number.isFinite(n) ? n : fallbackIndex + 1;
+}
+
+function getRandomPlaceholderSeatNumber(seatLabel, fallbackIndex) {
+    const normalized = normalizePickChoice(seatLabel);
+    if (normalized === 'x选') return '7';
+    if (normalized === 'h选') return '8';
+
+    const n = Number.parseInt(seatLabel, 10);
+    return Number.isFinite(n) ? String(n) : String(fallbackIndex + 1);
 }
 
 function makeRandomSeatPlaceholder(seatNumber) {
@@ -786,7 +940,7 @@ function buildUniqueRandomRosterItems(rawItems) {
 
 function buildDefaultRandomRosterLinesFromSeats() {
     const rows = Array.from(document.querySelectorAll('.player-row')).map((row, idx) => {
-        const seatNumber = getRandomSeatLabel(row, idx);
+        const seatNumber = getRandomPlaceholderSeatNumber(getRandomSeatLabel(row, idx), idx);
         const name = normalizeRandomRosterSourceName(row.querySelector('.name-input')?.value || '');
         return {
             name,
@@ -1172,6 +1326,7 @@ function applyRandomResultToTeams() {
 
     redRows.forEach((row, idx) => setRandomGroupRowData(row, redPlayers[idx]?.rowData || null));
     blueRows.forEach((row, idx) => setRandomGroupRowData(row, bluePlayers[idx]?.rowData || null));
+    refreshPickLabels();
 
     triggerSync();
     showAlert(`应用成功：已写入红蓝座位，共 ${redPlayers.length + bluePlayers.length} 人。`);
@@ -1327,6 +1482,12 @@ function applyStateFromServer(state) {
     const teamsWrap = document.getElementById('teams-wrap') || document.getElementById('main-container');
     teamsWrap.style.flexDirection = state.isFlipped ? 'row-reverse' : 'row';
 
+    setRedPickMode(state.redPickMode || (state.redPickFirst === false ? 'second' : 'first'), false);
+
+    outputSeatLabelToKillFile = !!state.outputSeatLabelToKillFile;
+    const outputSeatToggle = document.getElementById('output-seat-label-toggle');
+    if (outputSeatToggle) outputSeatToggle.checked = outputSeatLabelToKillFile;
+
     deathXAlgorithm = Number(state.deathXAlgorithm || 0);
     deathPatchInstalled = !!state.deathPatchInstalled;
     const algoSelect = document.getElementById('death-algo-select');
@@ -1374,6 +1535,7 @@ function applyStateFromServer(state) {
             row.querySelector('.stat-death').value = '0';
             row.querySelector('.stat-ak').value = '-';
         });
+        resetSeatLabelsToDefault();
         isSyncingFromServer = false;
         updateStartButtonGuard();
         return;
@@ -1397,6 +1559,7 @@ function applyStateFromServer(state) {
         row.querySelector('.stat-death').value = p.deaths;
         row.querySelector('.stat-ak').value = p.akCount === 0 ? '-' : p.akCount;
     });
+    refreshPickLabels();
     isSyncingFromServer = false;
     updateStartButtonGuard();
 }
@@ -2010,7 +2173,8 @@ function createPlayerRow(seatNumber = '') {
     // 🚨 1. HTML 结构：把拖拽柄放回 name-wrapper 里面（原来齿轮的位置）
     row.innerHTML = `
         <div class="name-wrapper">
-            <span class="seat-number">${seatNumber}</span>
+            <input type="text" class="seat-number seat-label-input" value="" autocomplete="off" title="按先后手自动生成" readonly>
+            <button type="button" class="seat-number seat-label-toggle" title="点击切换先选 / 后选" hidden></button>
             <input type="text" class="name-input" placeholder="" autocomplete="off">
             <div class="drag-handle" title="按住拖动以交换位置">⋮⋮</div>
             <div class="popover autocomplete-popover"></div>
@@ -2030,6 +2194,15 @@ function createPlayerRow(seatNumber = '') {
     bindProNumberControls(row.querySelector('.stat-kill'));
     bindProNumberControls(row.querySelector('.stat-death'));
     bindProNumberControls(row.querySelector('.stat-ak'), true);
+
+    const seatInput = row.querySelector('.seat-label-input');
+    seatInput.addEventListener('focus', function () {
+        nameInput.focus();
+    });
+    const seatToggle = row.querySelector('.seat-label-toggle');
+    seatToggle.addEventListener('click', function () {
+        togglePickModeForRow(row, true);
+    });
 
     // ==========================================
     // 🚨 2. 精确拖拽控制 (只在按住柄时开启)
@@ -2069,6 +2242,7 @@ function createPlayerRow(seatNumber = '') {
         this.classList.remove('drag-over');
         if (draggedRow !== this && draggedRow) {
             swapDOMNodes(draggedRow, this); // 调用前面写的 DOM 互换函数
+            refreshPickLabels();
             triggerSync();
         }
         return false;
@@ -2699,6 +2873,7 @@ for (let i = 0; i < 4; i++) {
     redTeam.querySelector('.rows-container').appendChild(createPlayerRow(i + 1));
     blueTeam.querySelector('.rows-container').appendChild(createPlayerRow(i + 5));
 }
+refreshPickLabels();
 
 document.querySelectorAll('.team-score-input').forEach(input => { input.type = 'text'; bindProNumberControls(input); });
 updateStartButtonGuard();
@@ -2782,6 +2957,12 @@ document.getElementById('btn-push-alias-db')?.addEventListener('click', () => {
     });
 });
 document.getElementById('btn-pro').addEventListener('click', () => window.chrome.webview.postMessage({ action: "cmd_toggle_mfc", show: !isProMode }));
+document.getElementById('output-seat-label-toggle')?.addEventListener('change', function () {
+    outputSeatLabelToKillFile = !!this.checked;
+    if (window.chrome?.webview) {
+        window.chrome.webview.postMessage({ action: 'cmd_set_output_seat_label', enabled: outputSeatLabelToKillFile });
+    }
+});
 
 function normalizeFunctionKey(e) {
     if (e.key === 'F1' || e.code === 'F1') return 'F1';
@@ -2869,10 +3050,7 @@ document.getElementById('btn-random-copy')?.addEventListener('click', copyRandom
 document.getElementById('btn-random-reset')?.addEventListener('click', resetRandomToolToInitialState);
 
 function resetSeatNumbers() {
-    document.querySelectorAll('.player-row').forEach((row, idx) => {
-        const seat = row.querySelector('.seat-number');
-        if (seat) seat.textContent = String(idx + 1);
-    });
+    resetSeatLabelsToDefault();
 }
 
 function clearAllTeamsData() {
@@ -2919,6 +3097,7 @@ document.getElementById('btn-reset').addEventListener('click', () => {
             document.querySelectorAll('.stat-kill, .stat-death').forEach(i => i.value = '0');
             document.querySelectorAll('.stat-ak').forEach(i => i.value = '-');
             document.querySelectorAll('.team-score-input').forEach(i => i.value = '0');
+            resetSeatLabelsToDefault();
             recentEvents = [];
             renderReviewEvents();
             if (window.chrome?.webview) {
@@ -3010,6 +3189,7 @@ document.addEventListener('keyup', function (e) {
         // 执行交换
         if (ctrlSwapState.targetRow && ctrlSwapState.sourceRow !== ctrlSwapState.targetRow) {
             swapDOMNodes(ctrlSwapState.sourceRow, ctrlSwapState.targetRow);
+            refreshPickLabels();
             triggerSync();
         }
         // 清理高亮样式

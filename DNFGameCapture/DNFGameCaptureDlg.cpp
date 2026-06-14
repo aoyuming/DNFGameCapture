@@ -3395,6 +3395,8 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
 
     m_configPath = appDir + L"players_config.txt";
     m_iniPath = appDir + L"config.ini";
+    m_bOutputSeatLabelToKillFile = GetPrivateProfileInt(L"Settings", L"OutputSeatLabelToKillFile", 0, m_iniPath) != 0;
+    m_bRedPickFirst = GetPrivateProfileInt(L"Settings", L"RedPickFirst", 1, m_iniPath) != 0;
     wchar_t ocrPathBuf[MAX_PATH];
     ::GetPrivateProfileString(L"Settings", L"OcrExePath", L"", ocrPathBuf, MAX_PATH, m_iniPath);
     m_ocrExePath = ocrPathBuf;
@@ -7530,21 +7532,47 @@ void CDNFGameCaptureDlg::FilterLivePlatformPrefixes() {
     }
 }
 
+static bool DnfIsLegacySeatToken(CString token)
+{
+    token.Trim();
+    return token.Left(5).CompareNoCase(L"SEAT=") == 0;
+}
+
+CString CDNFGameCaptureDlg::GetPickSeatLabelForIndex(int index) const
+{
+    static const wchar_t* redFirstRed[] = { L"x选", L"1选", L"4选", L"6选" };
+    static const wchar_t* redFirstBlue[] = { L"h选", L"2选", L"3选", L"5选" };
+    static const wchar_t* redSecondRed[] = { L"h选", L"2选", L"4选", L"5选" };
+    static const wchar_t* redSecondBlue[] = { L"x选", L"1选", L"3选", L"6选" };
+    if (index < 0 || index >= 8) return L"";
+    const int row = index % 4;
+    if (index < 4) return m_bRedPickFirst ? redFirstRed[row] : redSecondRed[row];
+    return m_bRedPickFirst ? redFirstBlue[row] : redSecondBlue[row];
+}
+
 void CDNFGameCaptureDlg::WriteScoreToFile() {
-    std::vector<PlayerData> r, b;
-    for (int i = 0; i < 8; i++) {
-        if (m_players[i].name.IsEmpty()) continue;
-        if (m_players[i].team == 0) r.push_back(m_players[i]); else b.push_back(m_players[i]);
+    struct ScoreFileRow {
+        PlayerData player;
+        CString pickLabel;
+    };
+
+    std::vector<ScoreFileRow> r, b;
+    r.reserve(4);
+    b.reserve(4);
+    for (int i = 0; i < 4; i++) {
+        r.push_back({ m_players[i], GetPickSeatLabelForIndex(i) });
     }
-    while (r.size() < 4) r.push_back({ L"",0,{},0,0,0,0 });
-    while (b.size() < 4) b.push_back({ L"",1,{},0,0,0,0 });
-    std::vector<PlayerData>& lT = m_bFlipSides ? b : r; std::vector<PlayerData>& rT = m_bFlipSides ? r : b;
+    for (int i = 4; i < 8; i++) {
+        b.push_back({ m_players[i], GetPickSeatLabelForIndex(i) });
+    }
+    std::vector<ScoreFileRow>& lT = m_bFlipSides ? b : r; std::vector<ScoreFileRow>& rT = m_bFlipSides ? r : b;
 
     CString pathScore = m_outputDir + L"\\比分.txt"; CString pathLeft = m_outputDir + L"\\左侧人头.txt"; CString pathRight = m_outputDir + L"\\右侧人头.txt"; CString pathKill = m_outputDir + L"\\击杀.txt";
     FILE* fS = NULL;
     if (_wfopen_s(&fS, pathScore, L"wt, ccs=UTF-8") == 0 && fS) { fwprintf(fS, L"%d-%d\n", m_bFlipSides ? m_totalScoreBlue : m_totalScoreRed, m_bFlipSides ? m_totalScoreRed : m_totalScoreBlue); fclose(fS); }
 
-    auto gs_full = [](PlayerData& p) {
+    auto gs_full = [](ScoreFileRow& row) {
+        PlayerData& p = row.player;
         if (p.name.IsEmpty()) return CString(L""); CString s; s.Format(L"%s%02d/%02d", p.name.GetString(), p.kills, p.deaths);
         if (p.akCount == 1) s += L" A"; else if (p.akCount > 1) s.AppendFormat(L" A%d", p.akCount);else  s += L" -"; return s;
         };
@@ -7552,8 +7580,15 @@ void CDNFGameCaptureDlg::WriteScoreToFile() {
     FILE* fKL = NULL; if (_wfopen_s(&fKL, pathLeft, L"wt, ccs=UTF-8") == 0 && fKL) { for (int i = 0; i < 4; i++) { CString ls = gs_full(lT[i]); if (!ls.IsEmpty()) fwprintf(fKL, L"%s\n", ls.GetString()); } fclose(fKL); }
     FILE* fKR = NULL; if (_wfopen_s(&fKR, pathRight, L"wt, ccs=UTF-8") == 0 && fKR) { for (int i = 0; i < 4; i++) { CString rs = gs_full(rT[i]); if (!rs.IsEmpty()) fwprintf(fKR, L"%s\n", rs.GetString()); } fclose(fKR); }
 
-    auto gs_kill_only = [](PlayerData& p) {
-        if (p.name.IsEmpty()) return CString(L""); CString s; s.Format(L"%s %02d", p.name.GetString(), p.kills);
+    auto gs_kill_only = [this](ScoreFileRow& row) {
+        PlayerData& p = row.player;
+        if (p.name.IsEmpty()) return CString(L""); CString s;
+        if (m_bOutputSeatLabelToKillFile && !row.pickLabel.IsEmpty()) {
+            s.Format(L"%s %s %02d", row.pickLabel.GetString(), p.name.GetString(), p.kills);
+        }
+        else {
+            s.Format(L"%s %02d", p.name.GetString(), p.kills);
+        }
         if (p.akCount == 1) s += L" A"; else if (p.akCount > 1) s.AppendFormat(L"A%d", p.akCount);else  s += L" -"; return s;
         };
     FILE* fKill = NULL;
@@ -7561,7 +7596,9 @@ void CDNFGameCaptureDlg::WriteScoreToFile() {
         for (int i = 0; i < 4; i++) {
             CString ls = gs_kill_only(lT[i]); CString rs = gs_kill_only(rT[i]);
             if (ls.IsEmpty() && rs.IsEmpty()) continue;
-            int pad = max(1, 11 - GetVisualWidth(ls)); CString spaces(L' ', pad); fwprintf(fKill, L"%s%s%s\n", ls.GetString(), spaces.GetString(), rs.GetString());
+            if (ls.IsEmpty()) fwprintf(fKill, L"%s\n", rs.GetString());
+            else if (rs.IsEmpty()) fwprintf(fKill, L"%s\n", ls.GetString());
+            else fwprintf(fKill, L"%s %s\n", ls.GetString(), rs.GetString());
         }
         fclose(fKill);
     }
@@ -9445,6 +9482,11 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
 
             m_totalScoreBlue = data["blueScore"].get<int>();
             m_totalScoreRed = data["redScore"].get<int>();
+            if (data.contains("redPickMode")) {
+                std::string mode = data["redPickMode"].get<std::string>();
+                m_bRedPickFirst = (mode != "second");
+                ::WritePrivateProfileString(L"Settings", L"RedPickFirst", m_bRedPickFirst ? L"1" : L"0", m_iniPath);
+            }
 
             // Web 端会把永久小号库 fullAliasDB 一起传回来。
             // 这里必须同步到 C++ 的 m_aliasDB，否则 Web 里改完小号名后，下一次 C++ 广播会用旧库把它刷回去。
@@ -9563,6 +9605,21 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
 
             CString names[] = { L"大X颜色个数判断", L"打补丁红蓝判断" };
             AppLog(L"⚙️ [设置] 死亡X算法已切换为: " + names[m_nDeathAlgorithmChoice], RGB(0, 255, 255));
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_set_output_seat_label") {
+            m_bOutputSeatLabelToKillFile = j.value("enabled", false);
+            ::WritePrivateProfileString(L"Settings", L"OutputSeatLabelToKillFile", m_bOutputSeatLabelToKillFile ? L"1" : L"0", m_iniPath);
+            WriteScoreToFile();
+            AppLog(m_bOutputSeatLabelToKillFile ? L"📝 [TXT输出] 击杀.txt 已开启编号前缀。" : L"📝 [TXT输出] 击杀.txt 已关闭编号前缀。", RGB(255, 210, 106));
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_set_red_pick_mode") {
+            std::string mode = j.value("mode", "first");
+            m_bRedPickFirst = (mode != "second");
+            ::WritePrivateProfileString(L"Settings", L"RedPickFirst", m_bRedPickFirst ? L"1" : L"0", m_iniPath);
+            WriteScoreToFile();
+            AppLog(m_bRedPickFirst ? L"🎯 [选人顺序] 红队先选，编号已切换为 x/1/4/6。" : L"🎯 [选人顺序] 红队后选，编号已切换为 h/2/4/5。", RGB(255, 210, 106));
             BroadcastStateToWeb();
         }
         else if (action == "cmd_resize_web") {
@@ -9763,6 +9820,8 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 m_totalScoreBlue = 0;
                 m_recentEvents.clear();
                 ResetMatchCooldownState(L"Web重置");
+                m_bRedPickFirst = true;
+                ::WritePrivateProfileString(L"Settings", L"RedPickFirst", L"1", m_iniPath);
                 for (int i = 0; i < 8; i++) {
                     if (clearPlayers) {
                         m_players[i].name.Empty();
@@ -9809,6 +9868,9 @@ void CDNFGameCaptureDlg::BroadcastStateToWeb()
         j["data"]["isFlipped"] = (m_bFlipSides == true);         // 👈 新增
         j["data"]["isMfcVisible"] = (IsWindowVisible() == TRUE); // 👈 新增
         j["data"]["deathXAlgorithm"] = m_nDeathAlgorithmChoice;
+        j["data"]["outputSeatLabelToKillFile"] = m_bOutputSeatLabelToKillFile;
+        j["data"]["redPickMode"] = m_bRedPickFirst ? "first" : "second";
+        j["data"]["redPickFirst"] = m_bRedPickFirst;
 
         bool deathPatchInstalled = false;
         wchar_t cachedImagePacks2[MAX_PATH] = { 0 };
@@ -9848,6 +9910,7 @@ void CDNFGameCaptureDlg::BroadcastStateToWeb()
             p["kills"] = m_players[i].kills;
             p["deaths"] = m_players[i].deaths;
             p["akCount"] = m_players[i].akCount;
+            p["seatLabel"] = std::string(CW2A(GetPickSeatLabelForIndex(i), CP_UTF8));
             json aliases = json::array();
             for (auto& a : m_players[i].aliases) {
                 aliases.push_back(std::string(CW2A(a.name, CP_UTF8)));
@@ -9864,6 +9927,7 @@ void CDNFGameCaptureDlg::BroadcastStateToWeb()
             p["kills"] = m_players[i].kills;
             p["deaths"] = m_players[i].deaths;
             p["akCount"] = m_players[i].akCount;
+            p["seatLabel"] = std::string(CW2A(GetPickSeatLabelForIndex(i), CP_UTF8));
             json aliases = json::array();
             for (auto& a : m_players[i].aliases) {
                 aliases.push_back(std::string(CW2A(a.name, CP_UTF8)));
@@ -10398,6 +10462,9 @@ void CDNFGameCaptureDlg::LoadConfigFromFile() {
 
             for (size_t i = aliasStartIndex; i < tokens.size(); i++) {
                 CString aName = tokens[i]; aName.Trim();
+                if (DnfIsLegacySeatToken(aName)) {
+                    continue;
+                }
                 bool aDup = false;
                 for (int k = 0; k < 8; k++) {
                     if (m_players[k].name == aName && k != targetIdx) { aDup = true; break; }
