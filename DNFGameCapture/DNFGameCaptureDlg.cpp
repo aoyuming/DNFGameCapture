@@ -12,6 +12,7 @@
 #include <wininet.h>
 #include <tlhelp32.h> // 【新增】：用于遍历和杀掉后台残留进程
 #include <cwctype>
+#include <set>
 
 #pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "winhttp.lib")
@@ -77,8 +78,275 @@ static bool DnfPostCloudJson(const std::string& jsonUtf8, std::string& responseU
 static CString DnfReadLocalLicenseKey();
 static bool DnfWriteLocalLicenseKey(const CString& key);
 static CString DnfReadLicenseFromFile();
+static json DnfBuildScoreboardTextStylesJson(const CString& iniPath);
+static void DnfSaveScoreboardTextStylesJson(const CString& iniPath, const json& styles);
+static json DnfBuildInstalledFontListJson();
 void WriteMatchLog(const CString& logLine);
 void AppLog(const CString& msg, COLORREF color);
+
+static const wchar_t* SCOREBOARD_STYLE_SECTION = L"ScoreboardTextStyles";
+
+struct DnfScoreboardStyleDefault {
+    const char* key;
+    const wchar_t* fontFamily;
+    int fontSize;
+    const wchar_t* colorMode;
+    const wchar_t* color;
+    const wchar_t* strokeColor;
+    int strokeWidth;
+    int glow;
+    bool allowTeamColor;
+};
+
+static const DnfScoreboardStyleDefault SCOREBOARD_STYLE_DEFAULTS[] = {
+    { "teamName", L"Microsoft YaHei", 38, L"team",   L"#ffffff", L"#000000", 0, 8,  true },
+    { "score",    L"Arial Black",     39, L"team",   L"#ffffff", L"#000000", 0, 12, true },
+    { "header",   L"Microsoft YaHei", 22, L"custom", L"#8b8b9f", L"#000000", 0, 0,  false },
+    { "pickLabel",L"Microsoft YaHei", 18, L"custom", L"#a6b7bf", L"#000000", 1, 0,  false },
+    { "playerName",L"Arial Black",    22, L"custom", L"#ffffff", L"#000000", 1, 2,  false },
+    { "statNumber",L"Microsoft YaHei",25, L"custom", L"#ffffff", L"#000000", 1, 0,  false },
+};
+
+static CString DnfMakeScoreboardStyleIniKey(const char* styleKey, const char* field)
+{
+    CString key = CA2W(styleKey, CP_UTF8);
+    key += L".";
+    key += CA2W(field, CP_UTF8);
+    return key;
+}
+
+static int DnfClampScoreboardInt(int value, int minValue, int maxValue)
+{
+    if (value < minValue) return minValue;
+    if (value > maxValue) return maxValue;
+    return value;
+}
+
+static bool DnfIsHexColorChar(wchar_t ch)
+{
+    return (ch >= L'0' && ch <= L'9') ||
+        (ch >= L'a' && ch <= L'f') ||
+        (ch >= L'A' && ch <= L'F');
+}
+
+static CString DnfNormalizeScoreboardColor(CString value, const wchar_t* fallback)
+{
+    value.Trim();
+    if ((value.GetLength() == 4 || value.GetLength() == 7) && value[0] == L'#') {
+        bool valid = true;
+        for (int i = 1; i < value.GetLength(); ++i) {
+            if (!DnfIsHexColorChar(value[i])) {
+                valid = false;
+                break;
+            }
+        }
+        if (valid) {
+            value.MakeLower();
+            return value;
+        }
+    }
+    return CString(fallback);
+}
+
+static CString DnfNormalizeScoreboardFontFamily(CString value, const wchar_t* fallback)
+{
+    value.Replace(L"\r", L"");
+    value.Replace(L"\n", L"");
+    value.Replace(L"\"", L"");
+    value.Replace(L"'", L"");
+    value.Trim();
+    if (value.GetLength() > 80) value = value.Left(80);
+    if (value.IsEmpty()) value = fallback;
+    return value;
+}
+
+static CString DnfNormalizeScoreboardColorMode(CString value, const DnfScoreboardStyleDefault& def)
+{
+    value.Trim();
+    value.MakeLower();
+    if (def.allowTeamColor && value == L"team") return L"team";
+    if (value == L"custom") return L"custom";
+    return CString(def.colorMode);
+}
+
+static CString DnfReadScoreboardStyleString(const CString& iniPath, const DnfScoreboardStyleDefault& def, const char* field, const wchar_t* fallback)
+{
+    if (iniPath.IsEmpty()) return CString(fallback);
+    CString key = DnfMakeScoreboardStyleIniKey(def.key, field);
+    wchar_t buf[256] = { 0 };
+    ::GetPrivateProfileString(SCOREBOARD_STYLE_SECTION, key, fallback, buf, 256, iniPath);
+    return CString(buf);
+}
+
+static std::string DnfJsonUtf8(const CString& value)
+{
+    return std::string(CW2A(value, CP_UTF8));
+}
+
+static json DnfBuildScoreboardStyleJson(const CString& iniPath, const DnfScoreboardStyleDefault& def)
+{
+    CString fontFamily = DnfNormalizeScoreboardFontFamily(
+        DnfReadScoreboardStyleString(iniPath, def, "fontFamily", def.fontFamily),
+        def.fontFamily);
+    CString colorMode = DnfNormalizeScoreboardColorMode(
+        DnfReadScoreboardStyleString(iniPath, def, "colorMode", def.colorMode),
+        def);
+    CString color = DnfNormalizeScoreboardColor(
+        DnfReadScoreboardStyleString(iniPath, def, "color", def.color),
+        def.color);
+    CString strokeColor = DnfNormalizeScoreboardColor(
+        DnfReadScoreboardStyleString(iniPath, def, "strokeColor", def.strokeColor),
+        def.strokeColor);
+
+    int fontSize = def.fontSize;
+    int strokeWidth = def.strokeWidth;
+    int glow = def.glow;
+    if (!iniPath.IsEmpty()) {
+        CString fontSizeKey = DnfMakeScoreboardStyleIniKey(def.key, "fontSize");
+        CString strokeWidthKey = DnfMakeScoreboardStyleIniKey(def.key, "strokeWidth");
+        CString glowKey = DnfMakeScoreboardStyleIniKey(def.key, "glow");
+        fontSize = ::GetPrivateProfileInt(SCOREBOARD_STYLE_SECTION, fontSizeKey, def.fontSize, iniPath);
+        strokeWidth = ::GetPrivateProfileInt(SCOREBOARD_STYLE_SECTION, strokeWidthKey, def.strokeWidth, iniPath);
+        glow = ::GetPrivateProfileInt(SCOREBOARD_STYLE_SECTION, glowKey, def.glow, iniPath);
+    }
+
+    json style;
+    style["fontFamily"] = DnfJsonUtf8(fontFamily);
+    style["fontSize"] = DnfClampScoreboardInt(fontSize, 10, 48);
+    style["colorMode"] = DnfJsonUtf8(colorMode);
+    style["color"] = DnfJsonUtf8(color);
+    style["strokeColor"] = DnfJsonUtf8(strokeColor);
+    style["strokeWidth"] = DnfClampScoreboardInt(strokeWidth, 0, 4);
+    style["glow"] = DnfClampScoreboardInt(glow, 0, 24);
+    return style;
+}
+
+static json DnfBuildScoreboardTextStylesJson(const CString& iniPath)
+{
+    json styles = json::object();
+    for (const auto& def : SCOREBOARD_STYLE_DEFAULTS) {
+        styles[def.key] = DnfBuildScoreboardStyleJson(iniPath, def);
+    }
+    return styles;
+}
+
+static CString DnfJsonScoreboardString(const json& style, const char* field, const wchar_t* fallback)
+{
+    if (style.is_object() && style.contains(field) && style[field].is_string()) {
+        CString converted;
+        converted = CA2W(style[field].get<std::string>().c_str(), CP_UTF8);
+        return converted;
+    }
+    return CString(fallback);
+}
+
+static int DnfJsonScoreboardInt(const json& style, const char* field, int fallback)
+{
+    if (style.is_object() && style.contains(field) && style[field].is_number_integer()) {
+        return style[field].get<int>();
+    }
+    if (style.is_object() && style.contains(field) && style[field].is_number()) {
+        return (int)style[field].get<double>();
+    }
+    return fallback;
+}
+
+static void DnfWriteScoreboardStyleString(const CString& iniPath, const DnfScoreboardStyleDefault& def, const char* field, const CString& value)
+{
+    CString key = DnfMakeScoreboardStyleIniKey(def.key, field);
+    ::WritePrivateProfileString(SCOREBOARD_STYLE_SECTION, key, value, iniPath);
+}
+
+static void DnfWriteScoreboardStyleInt(const CString& iniPath, const DnfScoreboardStyleDefault& def, const char* field, int value)
+{
+    CString text;
+    text.Format(L"%d", value);
+    DnfWriteScoreboardStyleString(iniPath, def, field, text);
+}
+
+static void DnfSaveScoreboardTextStylesJson(const CString& iniPath, const json& styles)
+{
+    if (iniPath.IsEmpty() || !styles.is_object()) return;
+
+    for (const auto& def : SCOREBOARD_STYLE_DEFAULTS) {
+        json style = json::object();
+        if (styles.contains(def.key) && styles[def.key].is_object()) {
+            style = styles[def.key];
+        }
+
+        CString fontFamily = DnfNormalizeScoreboardFontFamily(
+            DnfJsonScoreboardString(style, "fontFamily", def.fontFamily),
+            def.fontFamily);
+        CString colorMode = DnfNormalizeScoreboardColorMode(
+            DnfJsonScoreboardString(style, "colorMode", def.colorMode),
+            def);
+        CString color = DnfNormalizeScoreboardColor(
+            DnfJsonScoreboardString(style, "color", def.color),
+            def.color);
+        CString strokeColor = DnfNormalizeScoreboardColor(
+            DnfJsonScoreboardString(style, "strokeColor", def.strokeColor),
+            def.strokeColor);
+        int fontSize = DnfClampScoreboardInt(DnfJsonScoreboardInt(style, "fontSize", def.fontSize), 10, 48);
+        int strokeWidth = DnfClampScoreboardInt(DnfJsonScoreboardInt(style, "strokeWidth", def.strokeWidth), 0, 4);
+        int glow = DnfClampScoreboardInt(DnfJsonScoreboardInt(style, "glow", def.glow), 0, 24);
+
+        DnfWriteScoreboardStyleString(iniPath, def, "fontFamily", fontFamily);
+        DnfWriteScoreboardStyleInt(iniPath, def, "fontSize", fontSize);
+        DnfWriteScoreboardStyleString(iniPath, def, "colorMode", colorMode);
+        DnfWriteScoreboardStyleString(iniPath, def, "color", color);
+        DnfWriteScoreboardStyleString(iniPath, def, "strokeColor", strokeColor);
+        DnfWriteScoreboardStyleInt(iniPath, def, "strokeWidth", strokeWidth);
+        DnfWriteScoreboardStyleInt(iniPath, def, "glow", glow);
+    }
+}
+
+struct DnfFontEnumContext {
+    std::set<std::wstring> names;
+};
+
+static void DnfAppendFontName(DnfFontEnumContext& ctx, const wchar_t* name)
+{
+    CString fontName = name ? name : L"";
+    fontName.Trim();
+    if (fontName.IsEmpty() || fontName[0] == L'@') return;
+    ctx.names.insert(std::wstring(fontName.GetString()));
+}
+
+static int CALLBACK DnfEnumFontFamExProc(const LOGFONTW* lpelfe, const TEXTMETRICW*, DWORD, LPARAM lParam)
+{
+    DnfFontEnumContext* ctx = reinterpret_cast<DnfFontEnumContext*>(lParam);
+    if (ctx && lpelfe) DnfAppendFontName(*ctx, lpelfe->lfFaceName);
+    return 1;
+}
+
+static json DnfBuildInstalledFontListJson()
+{
+    static json s_cachedFonts;
+    static bool s_loaded = false;
+    if (s_loaded) return s_cachedFonts;
+
+    DnfFontEnumContext ctx;
+    HDC hdc = ::GetDC(NULL);
+    if (hdc) {
+        LOGFONTW lf = {};
+        lf.lfCharSet = DEFAULT_CHARSET;
+        ::EnumFontFamiliesExW(hdc, &lf, DnfEnumFontFamExProc, reinterpret_cast<LPARAM>(&ctx), 0);
+        ::ReleaseDC(NULL, hdc);
+    }
+
+    DnfAppendFontName(ctx, L"Microsoft YaHei");
+    DnfAppendFontName(ctx, L"SimHei");
+    DnfAppendFontName(ctx, L"Arial");
+    DnfAppendFontName(ctx, L"Arial Black");
+
+    s_cachedFonts = json::array();
+    for (const auto& name : ctx.names) {
+        CString fontName(name.c_str());
+        s_cachedFonts.push_back(DnfJsonUtf8(fontName));
+    }
+    s_loaded = true;
+    return s_cachedFonts;
+}
 
 static bool DnfIsProcessRunningByName(const CString& processName)
 {
@@ -9622,6 +9890,13 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             AppLog(m_bRedPickFirst ? L"🎯 [选人顺序] 红队先选，编号已切换为 x/1/4/6。" : L"🎯 [选人顺序] 红队后选，编号已切换为 h/2/4/5。", RGB(255, 210, 106));
             BroadcastStateToWeb();
         }
+        else if (action == "cmd_set_scoreboard_text_styles") {
+            if (j.contains("styles") && j["styles"].is_object()) {
+                DnfSaveScoreboardTextStylesJson(m_iniPath, j["styles"]);
+                AppLog(L"🎨 [外观] 记分板文字样式已保存。", RGB(255, 210, 106));
+                BroadcastStateToWeb();
+            }
+        }
         else if (action == "cmd_resize_web") {
             // 旧前端可能还会上报内容高度；当前版本固定 Web 窗口尺寸，忽略动态 resize。
         }
@@ -9871,6 +10146,8 @@ void CDNFGameCaptureDlg::BroadcastStateToWeb()
         j["data"]["outputSeatLabelToKillFile"] = m_bOutputSeatLabelToKillFile;
         j["data"]["redPickMode"] = m_bRedPickFirst ? "first" : "second";
         j["data"]["redPickFirst"] = m_bRedPickFirst;
+        j["data"]["scoreboardTextStyles"] = DnfBuildScoreboardTextStylesJson(m_iniPath);
+        j["data"]["systemFonts"] = DnfBuildInstalledFontListJson();
 
         bool deathPatchInstalled = false;
         wchar_t cachedImagePacks2[MAX_PATH] = { 0 };

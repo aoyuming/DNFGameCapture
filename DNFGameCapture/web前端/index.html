@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DNF 赛事计分板 - WebView2 版</title>
-    <meta name="dnf-web-layout-version" content="20260615-random-seat-placeholder">
-    <link rel="stylesheet" href="style.css?v=20260615-random-seat-placeholder">
+    <meta name="dnf-web-layout-version" content="20260616-scoreboard-style">
+    <link rel="stylesheet" href="style.css?v=20260616-scoreboard-style">
 </head>
 <body>
 
@@ -15,7 +15,7 @@
                 <div class="teams-wrap" id="teams-wrap">
                     <div class="team-panel team-red" id="team-red">
                         <div class="stats-header">
-                            <div class="team-name">红队 <input type="text" class="team-score-input" value="0"></div>
+                            <div class="team-name"><span class="team-name-label">红队</span> <input type="text" class="team-score-input" value="0"></div>
                             <div class="stats-labels">
                                 <span>击杀</span>
                                 <span>死亡</span>
@@ -27,7 +27,7 @@
 
                     <div class="team-panel team-blue" id="team-blue">
                         <div class="stats-header">
-                            <div class="team-name">蓝队 <input type="text" class="team-score-input" value="0"></div>
+                            <div class="team-name"><span class="team-name-label">蓝队</span> <input type="text" class="team-score-input" value="0"></div>
                             <div class="stats-labels">
                                 <span>击杀</span>
                                 <span>死亡</span>
@@ -69,6 +69,7 @@
                 <div class="control-row control-row-tools">
                     <button class="ctrl-btn btn-auth" id="btn-auth">🔑 授权</button>
                     <button class="ctrl-btn btn-pro" id="btn-pro">👑 专业模式</button>
+                    <button class="ctrl-btn btn-appearance" id="btn-appearance">🎨 外观</button>
                     <label class="output-seat-label-toggle" title="开启后，仅在 击杀.txt 的名字前输出选人顺序">
                         <input type="checkbox" id="output-seat-label-toggle">
                         <span>选人顺序</span>
@@ -155,6 +156,73 @@
         </div>
     </div>
 
+    <div class="appearance-overlay" id="appearance-overlay" aria-hidden="true">
+        <div class="appearance-panel" role="dialog" aria-modal="true" aria-labelledby="appearance-title">
+            <div class="appearance-header">
+                <div>
+                    <div class="appearance-title" id="appearance-title">记分板外观</div>
+                    <div class="appearance-subtitle">只影响上方红蓝记分板文字</div>
+                </div>
+                <button class="appearance-close" id="btn-appearance-close" title="关闭">&times;</button>
+            </div>
+            <div class="appearance-body">
+                <div class="appearance-style-list" id="appearance-style-list"></div>
+                <div class="appearance-editor">
+                    <label class="style-field">
+                        <span>字体</span>
+                        <select id="style-font-family"></select>
+                    </label>
+                    <label class="style-field">
+                        <span>字号</span>
+                        <div class="style-range-row">
+                            <input id="style-font-size" type="range" min="10" max="48" step="1">
+                            <input id="style-font-size-value" type="number" min="10" max="48" step="1">
+                        </div>
+                    </label>
+                    <label class="style-field style-color-mode-row">
+                        <span>颜色模式</span>
+                        <select id="style-color-mode">
+                            <option value="team">跟随队伍色</option>
+                            <option value="custom">自定义颜色</option>
+                        </select>
+                    </label>
+                    <label class="style-field">
+                        <span>颜色</span>
+                        <div class="style-color-row">
+                            <input id="style-color" type="color">
+                            <input id="style-color-text" type="text" maxlength="7">
+                        </div>
+                    </label>
+                    <label class="style-field">
+                        <span>描边颜色</span>
+                        <div class="style-color-row">
+                            <input id="style-stroke-color" type="color">
+                            <input id="style-stroke-color-text" type="text" maxlength="7">
+                        </div>
+                    </label>
+                    <label class="style-field">
+                        <span>描边宽度</span>
+                        <div class="style-range-row">
+                            <input id="style-stroke-width" type="range" min="0" max="4" step="1">
+                            <input id="style-stroke-width-value" type="number" min="0" max="4" step="1">
+                        </div>
+                    </label>
+                    <label class="style-field">
+                        <span>发光强度</span>
+                        <div class="style-range-row">
+                            <input id="style-glow" type="range" min="0" max="24" step="1">
+                            <input id="style-glow-value" type="number" min="0" max="24" step="1">
+                        </div>
+                    </label>
+                </div>
+            </div>
+            <div class="appearance-actions">
+                <button class="appearance-action" id="btn-style-reset-current">恢复当前默认</button>
+                <button class="appearance-action danger" id="btn-style-reset-all">恢复全部默认</button>
+            </div>
+        </div>
+    </div>
+
     <div class="modal-overlay" id="custom-modal">
         <div class="modal-box">
             <div class="modal-msg" id="modal-msg">提示信息</div>
@@ -167,6 +235,6 @@
         </div>
     </div>
 
-    <script src="main.js?v=20260615-random-seat-placeholder" defer></script>
+    <script src="main.js?v=20260616-scoreboard-style" defer></script>
 </body>
 </html>

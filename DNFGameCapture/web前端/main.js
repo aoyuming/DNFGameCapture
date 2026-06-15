@@ -12,6 +12,10 @@ let deathXAlgorithm = 0;
 let deathPatchInstalled = false;
 let outputSeatLabelToKillFile = false;
 let redPickMode = 'first';
+let scoreboardTextStyles = {};
+let systemFonts = [];
+let activeScoreboardStyleKey = 'teamName';
+let scoreboardStyleSyncTimer = null;
 let recentEvents = [];
 let isReviewPanelOpen = false;
 let cxxConsoleLogs = [];
@@ -34,7 +38,7 @@ let pendingAliasPopoverName = '';
 let pendingAliasPopoverInput = null;
 let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
-const WEB_LAYOUT_VERSION = '20260615-random-seat-placeholder';
+const WEB_LAYOUT_VERSION = '20260616-scoreboard-style';
 let lastLayoutFitScale = 1;
 let lastLayoutDiagSignature = '';
 let layoutDiagnosticsTimer = null;
@@ -362,7 +366,9 @@ function getLayoutDiagnostics() {
     const previousScale = lastLayoutFitScale || 1;
 
     if (shell) shell.style.setProperty('--layout-fit-scale', '1');
-    const shellRect = shell ? shell.getBoundingClientRect() : { width: 0, height: 0 };
+    const shellRect = withDefaultScoreboardLayoutMeasurement(() =>
+        shell ? shell.getBoundingClientRect() : { width: 0, height: 0 }
+    );
     const viewportW = window.innerWidth || html.clientWidth || 0;
     const viewportH = window.innerHeight || html.clientHeight || 0;
     const bodyStyle = window.getComputedStyle(body);
@@ -374,8 +380,9 @@ function getLayoutDiagnostics() {
     const usableH = Math.max(1, viewportH - padTop - padBottom);
     const naturalW = Math.ceil(shellRect.width || body.scrollWidth || 0);
     const naturalH = Math.ceil(shellRect.height || body.scrollHeight || 0);
+    const appearanceOpen = isAppearancePanelOpen();
     const widthScale = naturalW > usableW ? usableW / naturalW : 1;
-    const heightScale = naturalH > usableH ? usableH / naturalH : 1;
+    const heightScale = !appearanceOpen && naturalH > usableH ? usableH / naturalH : 1;
     const fitScale = Math.max(0.5, Math.min(1, widthScale, heightScale));
 
     if (shell) shell.style.setProperty('--layout-fit-scale', String(fitScale));
@@ -397,7 +404,8 @@ function getLayoutDiagnostics() {
         usableWidth: Math.round(usableW),
         usableHeight: Math.round(usableH),
         fitScale,
-        previousScale
+        previousScale,
+        appearanceOpen
     };
 }
 
@@ -779,6 +787,406 @@ function togglePickModeForRow(row, sync = true) {
 function resetSeatLabelsToDefault() {
     setRedPickMode('first', false);
 }
+
+const SCOREBOARD_TEXT_STYLE_TYPES = [
+    {
+        key: 'teamName',
+        cssKey: 'team-name',
+        label: '队名',
+        allowTeamColor: true,
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 38, colorMode: 'team', color: '#ffffff', strokeColor: '#000000', strokeWidth: 0, glow: 8 }
+    },
+    {
+        key: 'score',
+        cssKey: 'score',
+        label: '比分',
+        allowTeamColor: true,
+        defaults: { fontFamily: 'Arial Black', fontSize: 39, colorMode: 'team', color: '#ffffff', strokeColor: '#000000', strokeWidth: 0, glow: 12 }
+    },
+    {
+        key: 'header',
+        cssKey: 'header',
+        label: '表头',
+        allowTeamColor: false,
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 22, colorMode: 'custom', color: '#8b8b9f', strokeColor: '#000000', strokeWidth: 0, glow: 0 }
+    },
+    {
+        key: 'pickLabel',
+        cssKey: 'pick-label',
+        label: '选人顺序',
+        allowTeamColor: false,
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 18, colorMode: 'custom', color: '#a6b7bf', strokeColor: '#000000', strokeWidth: 1, glow: 0 }
+    },
+    {
+        key: 'playerName',
+        cssKey: 'player-name',
+        label: '主号名',
+        allowTeamColor: false,
+        defaults: { fontFamily: 'Arial Black', fontSize: 22, colorMode: 'custom', color: '#ffffff', strokeColor: '#000000', strokeWidth: 1, glow: 2 }
+    },
+    {
+        key: 'statNumber',
+        cssKey: 'stat-number',
+        label: '战绩数字',
+        allowTeamColor: false,
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 25, colorMode: 'custom', color: '#ffffff', strokeColor: '#000000', strokeWidth: 1, glow: 0 }
+    }
+];
+
+function getScoreboardStyleType(key) {
+    return SCOREBOARD_TEXT_STYLE_TYPES.find(t => t.key === key) || SCOREBOARD_TEXT_STYLE_TYPES[0];
+}
+
+function cloneScoreboardStyle(style) {
+    return { ...style };
+}
+
+function clampNumber(value, min, max, fallback) {
+    const n = Number.parseInt(value, 10);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(min, Math.min(max, n));
+}
+
+function normalizeHexColor(value, fallback = '#ffffff') {
+    let raw = String(value || '').trim().toLowerCase();
+    if (/^#[0-9a-f]{3}$/.test(raw)) {
+        raw = `#${raw[1]}${raw[1]}${raw[2]}${raw[2]}${raw[3]}${raw[3]}`;
+    }
+    return /^#[0-9a-f]{6}$/.test(raw) ? raw : fallback;
+}
+
+function hexToRgbParts(hex) {
+    const color = normalizeHexColor(hex, '#ffffff');
+    return [
+        Number.parseInt(color.slice(1, 3), 16),
+        Number.parseInt(color.slice(3, 5), 16),
+        Number.parseInt(color.slice(5, 7), 16)
+    ].join(', ');
+}
+
+function cleanFontFamilyName(value, fallback = 'Microsoft YaHei') {
+    const cleaned = String(value || '')
+        .replace(/["'\\\r\n]/g, '')
+        .trim()
+        .slice(0, 80);
+    return cleaned || fallback;
+}
+
+function cssFontFamily(value) {
+    const font = cleanFontFamilyName(value);
+    return `"${font}", "Microsoft YaHei", sans-serif`;
+}
+
+function getDefaultScoreboardTextStyles() {
+    return SCOREBOARD_TEXT_STYLE_TYPES.reduce((acc, type) => {
+        acc[type.key] = cloneScoreboardStyle(type.defaults);
+        return acc;
+    }, {});
+}
+
+function normalizeScoreboardTextStyle(key, value = {}) {
+    const type = getScoreboardStyleType(key);
+    const defaults = type.defaults;
+    const style = value && typeof value === 'object' ? value : {};
+    const requestedColorMode = String(style.colorMode || defaults.colorMode);
+    const colorMode = type.allowTeamColor && requestedColorMode === 'team' ? 'team' : 'custom';
+    return {
+        fontFamily: cleanFontFamilyName(style.fontFamily, defaults.fontFamily),
+        fontSize: clampNumber(style.fontSize, 10, 48, defaults.fontSize),
+        colorMode: type.allowTeamColor ? (requestedColorMode === 'custom' ? 'custom' : colorMode) : 'custom',
+        color: normalizeHexColor(style.color, defaults.color),
+        strokeColor: normalizeHexColor(style.strokeColor, defaults.strokeColor),
+        strokeWidth: clampNumber(style.strokeWidth, 0, 4, defaults.strokeWidth),
+        glow: clampNumber(style.glow, 0, 24, defaults.glow)
+    };
+}
+
+function normalizeScoreboardTextStyles(styles = {}) {
+    const normalized = {};
+    SCOREBOARD_TEXT_STYLE_TYPES.forEach(type => {
+        normalized[type.key] = normalizeScoreboardTextStyle(type.key, styles?.[type.key]);
+    });
+    return normalized;
+}
+
+function normalizeSystemFonts(fonts = []) {
+    const seen = new Set();
+    const result = [];
+    [...(Array.isArray(fonts) ? fonts : []), 'Microsoft YaHei', 'SimHei', 'Arial', 'Arial Black'].forEach(name => {
+        const cleaned = cleanFontFamilyName(name, '');
+        const key = cleaned.toLowerCase();
+        if (!cleaned || seen.has(key)) return;
+        seen.add(key);
+        result.push(cleaned);
+    });
+    return result;
+}
+
+function getStyleColorForSide(type, style, side) {
+    if (type.allowTeamColor && style.colorMode === 'team') {
+        return side === 'red' ? '#ff0055' : '#00e5ff';
+    }
+    return style.color;
+}
+
+function setScoreboardStyleVars(type, style) {
+    const root = document.documentElement;
+    const base = `--sb-${type.cssKey}`;
+    root.style.setProperty(`${base}-font-family`, cssFontFamily(style.fontFamily));
+    root.style.setProperty(`${base}-font-size`, `${style.fontSize}px`);
+    root.style.setProperty(`${base}-stroke-color`, style.strokeColor);
+    root.style.setProperty(`${base}-stroke-width`, `${style.strokeWidth}px`);
+    root.style.setProperty(`${base}-glow`, `${style.glow}px`);
+
+    if (type.allowTeamColor) {
+        const redColor = getStyleColorForSide(type, style, 'red');
+        const blueColor = getStyleColorForSide(type, style, 'blue');
+        root.style.setProperty(`${base}-red-color`, redColor);
+        root.style.setProperty(`${base}-blue-color`, blueColor);
+        root.style.setProperty(`${base}-red-glow-rgb`, hexToRgbParts(redColor));
+        root.style.setProperty(`${base}-blue-glow-rgb`, hexToRgbParts(blueColor));
+    } else {
+        root.style.setProperty(`${base}-color`, style.color);
+        root.style.setProperty(`${base}-glow-rgb`, hexToRgbParts(style.color));
+    }
+}
+
+function getScoreboardStyleVarNames(type) {
+    const base = `--sb-${type.cssKey}`;
+    const names = [
+        `${base}-font-family`,
+        `${base}-font-size`,
+        `${base}-stroke-color`,
+        `${base}-stroke-width`,
+        `${base}-glow`
+    ];
+    if (type.allowTeamColor) {
+        names.push(
+            `${base}-red-color`,
+            `${base}-blue-color`,
+            `${base}-red-glow-rgb`,
+            `${base}-blue-glow-rgb`
+        );
+    } else {
+        names.push(`${base}-color`, `${base}-glow-rgb`);
+    }
+    return names;
+}
+
+function withDefaultScoreboardLayoutMeasurement(callback) {
+    const root = document.documentElement;
+    const previousVars = new Map();
+
+    SCOREBOARD_TEXT_STYLE_TYPES.forEach(type => {
+        getScoreboardStyleVarNames(type).forEach(name => {
+            if (!previousVars.has(name)) {
+                previousVars.set(name, {
+                    value: root.style.getPropertyValue(name),
+                    priority: root.style.getPropertyPriority(name)
+                });
+            }
+        });
+    });
+
+    root.classList.add('layout-fit-measure-defaults');
+    SCOREBOARD_TEXT_STYLE_TYPES.forEach(type => {
+        setScoreboardStyleVars(type, type.defaults);
+    });
+
+    try {
+        return callback();
+    } finally {
+        previousVars.forEach((prev, name) => {
+            if (prev.value) root.style.setProperty(name, prev.value, prev.priority);
+            else root.style.removeProperty(name);
+        });
+        root.classList.remove('layout-fit-measure-defaults');
+    }
+}
+
+function applyScoreboardTextStyles(styles = scoreboardTextStyles) {
+    scoreboardTextStyles = normalizeScoreboardTextStyles(styles);
+    SCOREBOARD_TEXT_STYLE_TYPES.forEach(type => {
+        setScoreboardStyleVars(type, scoreboardTextStyles[type.key]);
+    });
+}
+
+function isAppearancePanelOpen() {
+    return !!document.getElementById('appearance-overlay')?.classList.contains('active');
+}
+
+function fillAppearanceFontOptions(selectedFont) {
+    const select = document.getElementById('style-font-family');
+    if (!select) return;
+    const fonts = normalizeSystemFonts(systemFonts);
+    select.innerHTML = '';
+    fonts.forEach(font => {
+        const option = document.createElement('option');
+        option.value = font;
+        option.textContent = font;
+        option.style.fontFamily = cssFontFamily(font);
+        select.appendChild(option);
+    });
+    const cleaned = cleanFontFamilyName(selectedFont);
+    if (!fonts.some(font => font.toLowerCase() === cleaned.toLowerCase())) {
+        const option = document.createElement('option');
+        option.value = cleaned;
+        option.textContent = cleaned;
+        select.appendChild(option);
+    }
+    select.value = cleaned;
+}
+
+function renderAppearanceStyleList() {
+    const list = document.getElementById('appearance-style-list');
+    if (!list) return;
+    list.innerHTML = '';
+    SCOREBOARD_TEXT_STYLE_TYPES.forEach(type => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `appearance-style-item${type.key === activeScoreboardStyleKey ? ' active' : ''}`;
+        btn.textContent = type.label;
+        btn.addEventListener('click', () => {
+            activeScoreboardStyleKey = type.key;
+            renderAppearanceStyleList();
+            syncAppearanceEditorFromActiveStyle();
+        });
+        list.appendChild(btn);
+    });
+}
+
+function setPairedInputValue(primaryId, valueId, value) {
+    const primary = document.getElementById(primaryId);
+    const mirror = document.getElementById(valueId);
+    if (primary) primary.value = value;
+    if (mirror) mirror.value = value;
+}
+
+function setPairedColorValue(colorId, textId, value) {
+    const color = normalizeHexColor(value);
+    const colorInput = document.getElementById(colorId);
+    const textInput = document.getElementById(textId);
+    if (colorInput) colorInput.value = color;
+    if (textInput) textInput.value = color;
+}
+
+function syncAppearanceEditorFromActiveStyle() {
+    const type = getScoreboardStyleType(activeScoreboardStyleKey);
+    const style = normalizeScoreboardTextStyle(type.key, scoreboardTextStyles[type.key]);
+    fillAppearanceFontOptions(style.fontFamily);
+
+    setPairedInputValue('style-font-size', 'style-font-size-value', style.fontSize);
+    setPairedInputValue('style-stroke-width', 'style-stroke-width-value', style.strokeWidth);
+    setPairedInputValue('style-glow', 'style-glow-value', style.glow);
+    setPairedColorValue('style-color', 'style-color-text', style.color);
+    setPairedColorValue('style-stroke-color', 'style-stroke-color-text', style.strokeColor);
+
+    const colorMode = document.getElementById('style-color-mode');
+    const colorModeRow = colorMode?.closest('.style-field');
+    if (colorMode) {
+        colorMode.value = type.allowTeamColor ? style.colorMode : 'custom';
+        colorMode.disabled = !type.allowTeamColor;
+    }
+    colorModeRow?.classList.toggle('disabled', !type.allowTeamColor);
+
+    const colorDisabled = type.allowTeamColor && style.colorMode === 'team';
+    const colorRow = document.getElementById('style-color')?.closest('.style-field');
+    colorRow?.classList.toggle('disabled', colorDisabled);
+    document.getElementById('style-color')?.toggleAttribute('disabled', colorDisabled);
+    document.getElementById('style-color-text')?.toggleAttribute('disabled', colorDisabled);
+}
+
+function readAppearanceNumber(rangeId, inputId, min, max, fallback) {
+    const textValue = document.getElementById(inputId)?.value;
+    const rangeValue = document.getElementById(rangeId)?.value;
+    return clampNumber(textValue !== '' ? textValue : rangeValue, min, max, fallback);
+}
+
+function readAppearanceColor(colorId, textId, fallback) {
+    const textValue = document.getElementById(textId)?.value;
+    const colorValue = document.getElementById(colorId)?.value;
+    return normalizeHexColor(textValue || colorValue, fallback);
+}
+
+function updateActiveStyleFromEditor(changedId = '') {
+    const type = getScoreboardStyleType(activeScoreboardStyleKey);
+    const current = normalizeScoreboardTextStyle(type.key, scoreboardTextStyles[type.key]);
+    if (changedId === 'style-color') {
+        const text = document.getElementById('style-color-text');
+        if (text) text.value = normalizeHexColor(document.getElementById('style-color')?.value, current.color);
+    }
+    if (changedId === 'style-stroke-color') {
+        const text = document.getElementById('style-stroke-color-text');
+        if (text) text.value = normalizeHexColor(document.getElementById('style-stroke-color')?.value, current.strokeColor);
+    }
+
+    const next = {
+        fontFamily: cleanFontFamilyName(document.getElementById('style-font-family')?.value, current.fontFamily),
+        fontSize: readAppearanceNumber('style-font-size', 'style-font-size-value', 10, 48, current.fontSize),
+        colorMode: type.allowTeamColor ? (document.getElementById('style-color-mode')?.value === 'team' ? 'team' : 'custom') : 'custom',
+        color: readAppearanceColor('style-color', 'style-color-text', current.color),
+        strokeColor: readAppearanceColor('style-stroke-color', 'style-stroke-color-text', current.strokeColor),
+        strokeWidth: readAppearanceNumber('style-stroke-width', 'style-stroke-width-value', 0, 4, current.strokeWidth),
+        glow: readAppearanceNumber('style-glow', 'style-glow-value', 0, 24, current.glow)
+    };
+    scoreboardTextStyles[type.key] = normalizeScoreboardTextStyle(type.key, next);
+    applyScoreboardTextStyles(scoreboardTextStyles);
+    syncAppearanceEditorFromActiveStyle();
+    queueScoreboardTextStyleSync();
+}
+
+function queueScoreboardTextStyleSync() {
+    if (isSyncingFromServer) return;
+    clearTimeout(scoreboardStyleSyncTimer);
+    scoreboardStyleSyncTimer = setTimeout(() => {
+        if (window.chrome?.webview) {
+            window.chrome.webview.postMessage({
+                action: 'cmd_set_scoreboard_text_styles',
+                styles: scoreboardTextStyles
+            });
+        }
+    }, 160);
+}
+
+function resetCurrentScoreboardStyle() {
+    const type = getScoreboardStyleType(activeScoreboardStyleKey);
+    scoreboardTextStyles[type.key] = cloneScoreboardStyle(type.defaults);
+    applyScoreboardTextStyles(scoreboardTextStyles);
+    syncAppearanceEditorFromActiveStyle();
+    queueScoreboardTextStyleSync();
+}
+
+function resetAllScoreboardStyles() {
+    scoreboardTextStyles = getDefaultScoreboardTextStyles();
+    applyScoreboardTextStyles(scoreboardTextStyles);
+    renderAppearanceStyleList();
+    syncAppearanceEditorFromActiveStyle();
+    queueScoreboardTextStyleSync();
+}
+
+function openAppearancePanel() {
+    const overlay = document.getElementById('appearance-overlay');
+    if (!overlay) return;
+    renderAppearanceStyleList();
+    syncAppearanceEditorFromActiveStyle();
+    overlay.classList.add('active');
+    overlay.setAttribute('aria-hidden', 'false');
+    document.documentElement.classList.add('appearance-open');
+    scheduleLayoutFit(false, 'appearance-open');
+}
+
+function closeAppearancePanel() {
+    const overlay = document.getElementById('appearance-overlay');
+    if (!overlay) return;
+    overlay.classList.remove('active');
+    overlay.setAttribute('aria-hidden', 'true');
+    document.documentElement.classList.remove('appearance-open');
+    scheduleLayoutFit(false, 'appearance-close');
+}
+
+scoreboardTextStyles = getDefaultScoreboardTextStyles();
+systemFonts = normalizeSystemFonts(systemFonts);
+applyScoreboardTextStyles(scoreboardTextStyles);
 
 function getRandomGroupRowData(row) {
     const nameElem = row.querySelector('.name-input');
@@ -1487,6 +1895,14 @@ function applyStateFromServer(state) {
     outputSeatLabelToKillFile = !!state.outputSeatLabelToKillFile;
     const outputSeatToggle = document.getElementById('output-seat-label-toggle');
     if (outputSeatToggle) outputSeatToggle.checked = outputSeatLabelToKillFile;
+
+    systemFonts = normalizeSystemFonts(state.systemFonts);
+    scoreboardTextStyles = normalizeScoreboardTextStyles(state.scoreboardTextStyles);
+    applyScoreboardTextStyles(scoreboardTextStyles);
+    if (isAppearancePanelOpen()) {
+        renderAppearanceStyleList();
+        syncAppearanceEditorFromActiveStyle();
+    }
 
     deathXAlgorithm = Number(state.deathXAlgorithm || 0);
     deathPatchInstalled = !!state.deathPatchInstalled;
@@ -2957,6 +3373,32 @@ document.getElementById('btn-push-alias-db')?.addEventListener('click', () => {
     });
 });
 document.getElementById('btn-pro').addEventListener('click', () => window.chrome.webview.postMessage({ action: "cmd_toggle_mfc", show: !isProMode }));
+document.getElementById('btn-appearance')?.addEventListener('click', openAppearancePanel);
+document.getElementById('btn-appearance-close')?.addEventListener('click', closeAppearancePanel);
+document.getElementById('appearance-overlay')?.addEventListener('click', (e) => {
+    if (e.target?.id === 'appearance-overlay') closeAppearancePanel();
+});
+document.getElementById('btn-style-reset-current')?.addEventListener('click', resetCurrentScoreboardStyle);
+document.getElementById('btn-style-reset-all')?.addEventListener('click', resetAllScoreboardStyles);
+[
+    'style-font-family',
+    'style-font-size',
+    'style-font-size-value',
+    'style-color-mode',
+    'style-color',
+    'style-color-text',
+    'style-stroke-color',
+    'style-stroke-color-text',
+    'style-stroke-width',
+    'style-stroke-width-value',
+    'style-glow',
+    'style-glow-value'
+].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const eventName = el.type === 'range' || el.type === 'color' ? 'input' : 'change';
+    el.addEventListener(eventName, () => updateActiveStyleFromEditor(id));
+});
 document.getElementById('output-seat-label-toggle')?.addEventListener('change', function () {
     outputSeatLabelToKillFile = !!this.checked;
     if (window.chrome?.webview) {
@@ -2974,6 +3416,7 @@ function normalizeFunctionKey(e) {
 document.addEventListener('keydown', (e) => {
     const key = normalizeFunctionKey(e);
     if (!key) return;
+    if (isAppearancePanelOpen()) return;
     cloudDirectPressedKeys.add(key);
 
     if (key === 'F1' || key === 'F12') {
@@ -3115,6 +3558,13 @@ document.querySelectorAll('.stat-kill, .stat-death, .stat-ak').forEach(inp => {
 });
 
 document.addEventListener('keydown', function (e) {
+    if (isAppearancePanelOpen()) {
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            closeAppearancePanel();
+        }
+        return;
+    }
     // ==========================================
     // 1. Tab：名字输入框之间循环切换
     // ==========================================
@@ -3185,6 +3635,7 @@ document.addEventListener('keydown', function (e) {
 });
 
 document.addEventListener('keyup', function (e) {
+    if (isAppearancePanelOpen()) return;
     if (e.key === 'Control' && ctrlSwapState.active) {
         // 执行交换
         if (ctrlSwapState.targetRow && ctrlSwapState.sourceRow !== ctrlSwapState.targetRow) {
