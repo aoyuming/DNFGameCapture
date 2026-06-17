@@ -1,0 +1,333 @@
+:root {
+    --kill-bg-alpha: 0;
+    --kill-panel-alpha: 0.49;
+    --kill-row-alpha: 0;
+    --kill-canvas-padding: 0px;
+    --kill-panel-padding: 14px;
+    --kill-team-gap: 0px;
+    --kill-row-gap: 0px;
+    --kill-row-height: 48px;
+    --kill-panel-radius: 0px;
+    --kill-row-radius: 0px;
+    --kill-border-width: 0px;
+    --kill-shadow: 0px;
+    --kill-pick-width: 54px;
+    --kill-stat-width: 61px;
+    --kill-ak-width: 24px;
+
+    --kill-team-name-font-family: "Microsoft YaHei", sans-serif;
+    --kill-team-name-font-size: 49px;
+    --kill-team-name-stroke-color: #000000;
+    --kill-team-name-stroke-width: 4px;
+    --kill-team-name-glow: 0px;
+    --kill-team-name-red-color: #ff1264;
+    --kill-team-name-blue-color: #00e6ff;
+    --kill-team-name-red-glow-rgb: 255, 18, 100;
+    --kill-team-name-blue-glow-rgb: 0, 230, 255;
+
+    --kill-score-font-family: "Arial Black", "Microsoft YaHei", sans-serif;
+    --kill-score-font-size: 70px;
+    --kill-score-stroke-color: #000000;
+    --kill-score-stroke-width: 3px;
+    --kill-score-glow: 2px;
+    --kill-score-red-color: #ff1264;
+    --kill-score-blue-color: #00e6ff;
+    --kill-score-red-glow-rgb: 255, 18, 100;
+    --kill-score-blue-glow-rgb: 0, 230, 255;
+
+    --kill-header-font-family: "Microsoft YaHei", sans-serif;
+    --kill-header-font-size: 31px;
+    --kill-header-color: #a9abb9;
+    --kill-header-stroke-color: #000000;
+    --kill-header-stroke-width: 2px;
+    --kill-header-glow: 0px;
+    --kill-header-glow-rgb: 169, 171, 185;
+
+    --kill-pick-label-font-family: "Microsoft YaHei", sans-serif;
+    --kill-pick-label-font-size: 27px;
+    --kill-pick-label-color: #a1a1a1;
+    --kill-pick-label-stroke-color: #000000;
+    --kill-pick-label-stroke-width: 2px;
+    --kill-pick-label-glow: 0px;
+    --kill-pick-label-glow-rgb: 161, 161, 161;
+
+    --kill-player-name-font-family: "Arial Black", "Microsoft YaHei", sans-serif;
+    --kill-player-name-font-size: 43px;
+    --kill-player-name-color: #f7ca69;
+    --kill-player-name-stroke-color: #000000;
+    --kill-player-name-stroke-width: 5px;
+    --kill-player-name-glow: 2px;
+    --kill-player-name-glow-rgb: 255, 255, 255;
+
+    --kill-stat-number-font-family: "Microsoft YaHei", sans-serif;
+    --kill-stat-number-font-size: 50px;
+    --kill-stat-number-color: #f7ca69;
+    --kill-stat-number-stroke-color: #000000;
+    --kill-stat-number-stroke-width: 4px;
+    --kill-stat-number-glow: 0px;
+    --kill-stat-number-glow-rgb: 255, 255, 255;
+
+    --kill-ak-mark-font-family: "Microsoft YaHei", sans-serif;
+    --kill-ak-mark-font-size: 40px;
+    --kill-ak-mark-color: #f7ca69;
+    --kill-ak-mark-stroke-color: #000000;
+    --kill-ak-mark-stroke-width: 1px;
+    --kill-ak-mark-glow: 0px;
+    --kill-ak-mark-glow-rgb: 255, 255, 255;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+    background: transparent;
+}
+
+body {
+    font-family: "Microsoft YaHei", sans-serif;
+}
+
+.kill-display-root {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+    min-width: 1px;
+    min-height: 1px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--kill-canvas-padding);
+    background: transparent;
+    cursor: move;
+    user-select: none;
+}
+
+.kill-board {
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: var(--kill-team-gap);
+    padding: var(--kill-canvas-padding);
+    border-radius: calc(var(--kill-panel-radius) + 4px);
+    border: var(--kill-border-width) solid rgba(255, 255, 255, 0.14);
+    background: rgba(64, 64, 72, var(--kill-bg-alpha));
+    box-shadow: 0 0 var(--kill-shadow) rgba(0, 0, 0, 0.55);
+    color: #ffffff;
+}
+
+.kill-team {
+    min-width: 0;
+    min-height: 0;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 4px;
+    padding: var(--kill-panel-padding);
+    border-radius: var(--kill-panel-radius);
+    background: rgba(32, 34, 51, var(--kill-panel-alpha));
+    overflow: hidden;
+}
+
+.kill-team-red {
+    border-left: 4px solid #ff1264;
+}
+
+.kill-team-blue {
+    border-left: 4px solid #00e6ff;
+}
+
+.kill-team-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: 8px;
+    min-width: 0;
+}
+
+.kill-team-title {
+    min-width: 0;
+    display: inline-flex;
+    align-items: baseline;
+    gap: 12px;
+    white-space: nowrap;
+}
+
+.kill-team-name,
+.kill-team-score,
+.kill-stat-header,
+.kill-pick-label,
+.kill-player-name,
+.kill-stat-number,
+.kill-ak-mark {
+    paint-order: stroke fill;
+    text-rendering: geometricPrecision;
+}
+
+.kill-team-name {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-family: var(--kill-team-name-font-family);
+    font-size: var(--kill-team-name-font-size);
+    font-weight: 950;
+    line-height: 0.98;
+    -webkit-text-stroke: var(--kill-team-name-stroke-width) var(--kill-team-name-stroke-color);
+}
+
+.kill-team-score {
+    font-family: var(--kill-score-font-family);
+    font-size: var(--kill-score-font-size);
+    font-weight: 950;
+    line-height: 0.95;
+    -webkit-text-stroke: var(--kill-score-stroke-width) var(--kill-score-stroke-color);
+}
+
+.kill-team-red .kill-team-name {
+    color: var(--kill-team-name-red-color);
+    text-shadow: 0 0 var(--kill-team-name-glow) rgba(var(--kill-team-name-red-glow-rgb), 0.86);
+}
+
+.kill-team-blue .kill-team-name {
+    color: var(--kill-team-name-blue-color);
+    text-shadow: 0 0 var(--kill-team-name-glow) rgba(var(--kill-team-name-blue-glow-rgb), 0.86);
+}
+
+.kill-team-red .kill-team-score {
+    color: var(--kill-score-red-color);
+    text-shadow: 0 0 var(--kill-score-glow) rgba(var(--kill-score-red-glow-rgb), 0.86);
+}
+
+.kill-team-blue .kill-team-score {
+    color: var(--kill-score-blue-color);
+    text-shadow: 0 0 var(--kill-score-glow) rgba(var(--kill-score-blue-glow-rgb), 0.86);
+}
+
+.kill-stat-header {
+    display: grid;
+    grid-template-columns: var(--kill-stat-width) var(--kill-stat-width) var(--kill-ak-width);
+    gap: 6px;
+    align-items: center;
+    justify-items: center;
+    color: var(--kill-header-color);
+    font-family: var(--kill-header-font-family);
+    font-size: var(--kill-header-font-size);
+    font-weight: 900;
+    line-height: 1;
+    -webkit-text-stroke: var(--kill-header-stroke-width) var(--kill-header-stroke-color);
+    text-shadow: 0 0 var(--kill-header-glow) rgba(var(--kill-header-glow-rgb), 0.72);
+}
+
+.kill-rows {
+    min-width: 0;
+    min-height: 0;
+    display: grid;
+    grid-template-rows: repeat(4, minmax(0, 1fr));
+    gap: var(--kill-row-gap);
+}
+
+.kill-row {
+    min-width: 0;
+    min-height: 0;
+    height: var(--kill-row-height);
+    max-height: 100%;
+    display: grid;
+    grid-template-columns: var(--kill-pick-width) minmax(0, 1fr) var(--kill-stat-width) var(--kill-stat-width) var(--kill-ak-width);
+    align-items: center;
+    gap: 0;
+    padding: 0 6px;
+    border-radius: var(--kill-row-radius);
+    background: rgba(255, 255, 255, var(--kill-row-alpha));
+}
+
+.kill-resize-grip {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    width: 30px;
+    height: 30px;
+    cursor: nwse-resize;
+    z-index: 20;
+}
+
+.kill-pick-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--kill-pick-label-color);
+    font-family: var(--kill-pick-label-font-family);
+    font-size: var(--kill-pick-label-font-size);
+    font-weight: 850;
+    line-height: 1;
+    -webkit-text-stroke: var(--kill-pick-label-stroke-width) var(--kill-pick-label-stroke-color);
+    text-shadow: 0 0 var(--kill-pick-label-glow) rgba(var(--kill-pick-label-glow-rgb), 0.72), 0 1px 2px rgba(0, 0, 0, 0.88);
+}
+
+.kill-player-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--kill-player-name-color);
+    font-family: var(--kill-player-name-font-family);
+    font-size: var(--kill-player-name-font-size);
+    font-weight: 950;
+    line-height: 1;
+    -webkit-text-stroke: var(--kill-player-name-stroke-width) var(--kill-player-name-stroke-color);
+    text-shadow: 0 0 var(--kill-player-name-glow) rgba(var(--kill-player-name-glow-rgb), 0.72), 0 2px 3px rgba(0, 0, 0, 0.95);
+}
+
+.kill-stat-number,
+.kill-ak-mark {
+    min-width: 0;
+    text-align: center;
+    color: var(--kill-stat-number-color);
+    font-family: var(--kill-stat-number-font-family);
+    font-size: var(--kill-stat-number-font-size);
+    font-weight: 930;
+    line-height: 1;
+    -webkit-text-stroke: var(--kill-stat-number-stroke-width) var(--kill-stat-number-stroke-color);
+    text-shadow: 0 0 var(--kill-stat-number-glow) rgba(var(--kill-stat-number-glow-rgb), 0.72), 0 2px 3px rgba(0, 0, 0, 0.95);
+}
+
+.kill-ak-mark {
+    color: var(--kill-ak-mark-color);
+    font-family: var(--kill-ak-mark-font-family);
+    font-size: var(--kill-ak-mark-font-size);
+    -webkit-text-stroke: var(--kill-ak-mark-stroke-width) var(--kill-ak-mark-stroke-color);
+    text-shadow: 0 0 var(--kill-ak-mark-glow) rgba(var(--kill-ak-mark-glow-rgb), 0.72), 0 2px 3px rgba(0, 0, 0, 0.95);
+}
+
+.kill-status {
+    position: fixed;
+    right: 10px;
+    bottom: 8px;
+    max-width: 52vw;
+    padding: 5px 8px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.55);
+    color: #e8f8ff;
+    font: 12px/1.3 "Microsoft YaHei", sans-serif;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.18s ease;
+}
+
+.kill-status.active {
+    opacity: 1;
+}
+
+@media (max-width: 620px) {
+    .kill-board {
+        grid-template-columns: 1fr;
+        grid-template-rows: 1fr 1fr;
+    }
+}

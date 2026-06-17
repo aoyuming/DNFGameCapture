@@ -51,6 +51,9 @@
     <ClInclude Include="TemporalIdentityMatcher.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="KillDisplayDlg.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="DNFGameCapture.cpp">
@@ -72,6 +75,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="DNFGameCaptureDlg_IdentityPatch.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="KillDisplayDlg.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

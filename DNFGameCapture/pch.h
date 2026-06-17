@@ -8,6 +8,8 @@
 #define PCH_H
 
 // 添加要在此处预编译的标头
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include "framework.h"
 
 #endif //PCH_H

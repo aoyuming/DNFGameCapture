@@ -11,11 +11,15 @@ let isProMode = false;
 let deathXAlgorithm = 0;
 let deathPatchInstalled = false;
 let outputSeatLabelToKillFile = false;
-let redPickMode = 'first';
+let redPickMode = 'second';
 let scoreboardTextStyles = {};
+let killDisplaySettings = {};
 let systemFonts = [];
+let appearanceScope = 'scoreboard';
 let activeScoreboardStyleKey = 'teamName';
+let activeKillDisplayStyleKey = 'teamName';
 let scoreboardStyleSyncTimer = null;
+let killDisplaySettingsSyncTimer = null;
 let recentEvents = [];
 let isReviewPanelOpen = false;
 let cxxConsoleLogs = [];
@@ -525,7 +529,7 @@ if (window.chrome && window.chrome.webview) {
             else if (msg.action === 'web_zoom_calibrated') {
                 scheduleLayoutFit(true, 'zoom-calibrated');
             }
-            else if (msg.action === 'auth_result' || msg.action === 'start_guard' || msg.action === 'patch_result' || msg.action === 'alias_submit_result' || msg.action === 'alias_sync_result' || msg.action === 'copy_window_clipboard_result') { showAlert(msg.message); }
+            else if (msg.action === 'auth_result' || msg.action === 'start_guard' || msg.action === 'patch_result' || msg.action === 'alias_submit_result' || msg.action === 'alias_sync_result' || msg.action === 'copy_window_clipboard_result' || msg.action === 'kill_obs_url_result') { showAlert(msg.message); }
             else if (msg.action === 'alias_direct_sync_result') {
                 if (String(msg.message || '').includes('失败')) showAlert(msg.message);
                 else console.info('[alias direct sync]', msg.message);
@@ -785,7 +789,7 @@ function togglePickModeForRow(row, sync = true) {
 }
 
 function resetSeatLabelsToDefault() {
-    setRedPickMode('first', false);
+    setRedPickMode('second', false);
 }
 
 const SCOREBOARD_TEXT_STYLE_TYPES = [
@@ -833,8 +837,121 @@ const SCOREBOARD_TEXT_STYLE_TYPES = [
     }
 ];
 
+const KILL_DISPLAY_LAYOUT_DEFAULTS = {
+    bgAlpha: 0,
+    panelAlpha: 49,
+    rowAlpha: 0,
+    canvasPadding: 0,
+    panelPadding: 14,
+    teamGap: 0,
+    rowGap: 0,
+    rowHeight: 48,
+    panelRadius: 0,
+    rowRadius: 0,
+    boardBorder: 0,
+    shadow: 0,
+    pickColumnWidth: 54,
+    statColumnWidth: 61,
+    akColumnWidth: 24
+};
+
+const KILL_DISPLAY_LAYOUT_FIELDS = [
+    { key: 'bgAlpha', label: '背景透明度', min: 0, max: 100, unit: '%' },
+    { key: 'panelAlpha', label: '面板透明度', min: 0, max: 100, unit: '%' },
+    { key: 'rowAlpha', label: '行背景透明度', min: 0, max: 100, unit: '%' },
+    { key: 'canvasPadding', label: '整体留边', min: 0, max: 40, unit: 'px' },
+    { key: 'panelPadding', label: '面板内边距', min: 0, max: 40, unit: 'px' },
+    { key: 'teamGap', label: '队伍间距', min: 0, max: 40, unit: 'px' },
+    { key: 'rowGap', label: '行距', min: 0, max: 20, unit: 'px' },
+    { key: 'rowHeight', label: '行高', min: 32, max: 90, unit: 'px' },
+    { key: 'panelRadius', label: '面板圆角', min: 0, max: 28, unit: 'px' },
+    { key: 'rowRadius', label: '行圆角', min: 0, max: 22, unit: 'px' },
+    { key: 'boardBorder', label: '边框宽度', min: 0, max: 6, unit: 'px' },
+    { key: 'shadow', label: '整体阴影', min: 0, max: 48, unit: 'px' },
+    { key: 'pickColumnWidth', label: '选人列宽', min: 36, max: 110, unit: 'px' },
+    { key: 'statColumnWidth', label: '战绩列宽', min: 28, max: 90, unit: 'px' },
+    { key: 'akColumnWidth', label: 'AK列宽', min: 24, max: 80, unit: 'px' }
+];
+
+const KILL_DISPLAY_TEXT_STYLE_TYPES = [
+    {
+        key: 'teamName',
+        cssKey: 'team-name',
+        label: '队名',
+        allowTeamColor: true,
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 49, colorMode: 'team', color: '#ffffff', strokeColor: '#000000', strokeWidth: 4, glow: 0 }
+    },
+    {
+        key: 'score',
+        cssKey: 'score',
+        label: '比分',
+        allowTeamColor: true,
+        defaults: { fontFamily: 'Arial Black', fontSize: 70, colorMode: 'team', color: '#ffffff', strokeColor: '#000000', strokeWidth: 3, glow: 2 }
+    },
+    {
+        key: 'header',
+        cssKey: 'header',
+        label: '表头',
+        allowTeamColor: false,
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 31, colorMode: 'custom', color: '#a9abb9', strokeColor: '#000000', strokeWidth: 2, glow: 0 }
+    },
+    {
+        key: 'pickLabel',
+        cssKey: 'pick-label',
+        label: '选人顺序',
+        allowTeamColor: false,
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 27, colorMode: 'custom', color: '#a1a1a1', strokeColor: '#000000', strokeWidth: 2, glow: 0 }
+    },
+    {
+        key: 'playerName',
+        cssKey: 'player-name',
+        label: '主号名',
+        allowTeamColor: false,
+        defaults: { fontFamily: 'Arial Black', fontSize: 43, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 5, glow: 2 }
+    },
+    {
+        key: 'statNumber',
+        cssKey: 'stat-number',
+        label: '击杀/死亡',
+        allowTeamColor: false,
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 50, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 4, glow: 0 }
+    },
+    {
+        key: 'akMark',
+        cssKey: 'ak-mark',
+        label: 'AK标记',
+        allowTeamColor: false,
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 40, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 1, glow: 0 }
+    }
+];
+
 function getScoreboardStyleType(key) {
     return SCOREBOARD_TEXT_STYLE_TYPES.find(t => t.key === key) || SCOREBOARD_TEXT_STYLE_TYPES[0];
+}
+
+function getKillDisplayStyleType(key) {
+    return KILL_DISPLAY_TEXT_STYLE_TYPES.find(t => t.key === key) || KILL_DISPLAY_TEXT_STYLE_TYPES[0];
+}
+
+function getCurrentAppearanceStyleTypes() {
+    return appearanceScope === 'kill' ? KILL_DISPLAY_TEXT_STYLE_TYPES : SCOREBOARD_TEXT_STYLE_TYPES;
+}
+
+function getCurrentAppearanceStyleType(key) {
+    return appearanceScope === 'kill' ? getKillDisplayStyleType(key) : getScoreboardStyleType(key);
+}
+
+function getCurrentAppearanceStyleKey() {
+    return appearanceScope === 'kill' ? activeKillDisplayStyleKey : activeScoreboardStyleKey;
+}
+
+function setCurrentAppearanceStyleKey(key) {
+    if (appearanceScope === 'kill') activeKillDisplayStyleKey = key;
+    else activeScoreboardStyleKey = key;
+}
+
+function getCurrentAppearanceStyles() {
+    return appearanceScope === 'kill' ? (killDisplaySettings.textStyles || {}) : scoreboardTextStyles;
 }
 
 function cloneScoreboardStyle(style) {
@@ -907,6 +1024,70 @@ function normalizeScoreboardTextStyles(styles = {}) {
         normalized[type.key] = normalizeScoreboardTextStyle(type.key, styles?.[type.key]);
     });
     return normalized;
+}
+
+function getDefaultKillDisplayLayout() {
+    return { ...KILL_DISPLAY_LAYOUT_DEFAULTS };
+}
+
+function getDefaultKillDisplayTextStyles() {
+    return KILL_DISPLAY_TEXT_STYLE_TYPES.reduce((acc, type) => {
+        acc[type.key] = cloneScoreboardStyle(type.defaults);
+        return acc;
+    }, {});
+}
+
+function getDefaultKillDisplaySettings() {
+    return {
+        obsUrl: 'http://127.0.0.1:18777/kill.html',
+        layout: getDefaultKillDisplayLayout(),
+        textStyles: getDefaultKillDisplayTextStyles()
+    };
+}
+
+function normalizeKillDisplayLayout(layout = {}) {
+    const normalized = {};
+    KILL_DISPLAY_LAYOUT_FIELDS.forEach(field => {
+        normalized[field.key] = clampNumber(layout?.[field.key], field.min, field.max, KILL_DISPLAY_LAYOUT_DEFAULTS[field.key]);
+    });
+    return normalized;
+}
+
+function normalizeKillDisplayTextStyle(key, value = {}) {
+    const type = getKillDisplayStyleType(key);
+    const defaults = type.defaults;
+    const style = value && typeof value === 'object' ? value : {};
+    const requestedColorMode = String(style.colorMode || defaults.colorMode);
+    return {
+        fontFamily: cleanFontFamilyName(style.fontFamily, defaults.fontFamily),
+        fontSize: clampNumber(style.fontSize, 10, 76, defaults.fontSize),
+        colorMode: type.allowTeamColor ? (requestedColorMode === 'custom' ? 'custom' : 'team') : 'custom',
+        color: normalizeHexColor(style.color, defaults.color),
+        strokeColor: normalizeHexColor(style.strokeColor, defaults.strokeColor),
+        strokeWidth: clampNumber(style.strokeWidth, 0, 8, defaults.strokeWidth),
+        glow: clampNumber(style.glow, 0, 36, defaults.glow)
+    };
+}
+
+function normalizeKillDisplayTextStyles(styles = {}) {
+    const normalized = {};
+    KILL_DISPLAY_TEXT_STYLE_TYPES.forEach(type => {
+        normalized[type.key] = normalizeKillDisplayTextStyle(type.key, styles?.[type.key]);
+    });
+    return normalized;
+}
+
+function normalizeKillDisplaySettings(settings = {}) {
+    const defaults = getDefaultKillDisplaySettings();
+    return {
+        obsUrl: String(settings?.obsUrl || defaults.obsUrl),
+        layout: normalizeKillDisplayLayout(settings?.layout || defaults.layout),
+        textStyles: normalizeKillDisplayTextStyles(settings?.textStyles || defaults.textStyles)
+    };
+}
+
+function applyKillDisplaySettings(settings = killDisplaySettings) {
+    killDisplaySettings = normalizeKillDisplaySettings(settings);
 }
 
 function normalizeSystemFonts(fonts = []) {
@@ -1037,21 +1218,100 @@ function fillAppearanceFontOptions(selectedFont) {
     select.value = cleaned;
 }
 
+function renderAppearanceScopeTabs() {
+    const title = document.getElementById('appearance-title');
+    const subtitle = document.querySelector('.appearance-subtitle');
+    if (title) title.textContent = appearanceScope === 'kill' ? '击杀展示页外观' : '记分板外观';
+    if (subtitle) subtitle.textContent = appearanceScope === 'kill'
+        ? '只影响 OBS/直播伴侣展示页'
+        : '只影响上方红蓝记分板文字';
+
+    const tabs = document.getElementById('appearance-scope-tabs');
+    if (!tabs) return;
+    const scopes = [
+        { key: 'scoreboard', label: '主计分板' },
+        { key: 'kill', label: '击杀展示页' }
+    ];
+    tabs.innerHTML = '';
+    scopes.forEach(scope => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.id = scope.key === 'kill' ? 'appearance-scope-kill' : 'appearance-scope-scoreboard';
+        btn.className = `appearance-scope-tab${appearanceScope === scope.key ? ' active' : ''}`;
+        btn.textContent = scope.label;
+        btn.addEventListener('click', () => {
+            appearanceScope = scope.key;
+            renderAppearanceScopeTabs();
+            renderAppearanceStyleList();
+            renderKillLayoutEditor();
+            syncAppearanceEditorFromActiveStyle();
+        });
+        tabs.appendChild(btn);
+    });
+}
+
 function renderAppearanceStyleList() {
     const list = document.getElementById('appearance-style-list');
     if (!list) return;
     list.innerHTML = '';
-    SCOREBOARD_TEXT_STYLE_TYPES.forEach(type => {
+    const activeKey = getCurrentAppearanceStyleKey();
+    getCurrentAppearanceStyleTypes().forEach(type => {
         const btn = document.createElement('button');
         btn.type = 'button';
-        btn.className = `appearance-style-item${type.key === activeScoreboardStyleKey ? ' active' : ''}`;
+        btn.className = `appearance-style-item${type.key === activeKey ? ' active' : ''}`;
         btn.textContent = type.label;
         btn.addEventListener('click', () => {
-            activeScoreboardStyleKey = type.key;
+            setCurrentAppearanceStyleKey(type.key);
             renderAppearanceStyleList();
             syncAppearanceEditorFromActiveStyle();
         });
         list.appendChild(btn);
+    });
+}
+
+function renderKillLayoutEditor() {
+    const section = document.getElementById('kill-layout-section');
+    if (!section) return;
+    section.hidden = appearanceScope !== 'kill';
+    section.innerHTML = '';
+    if (appearanceScope !== 'kill') return;
+
+    const layout = normalizeKillDisplayLayout(killDisplaySettings.layout);
+    const title = document.createElement('div');
+    title.className = 'kill-layout-title';
+    title.textContent = '展示页空间参数';
+    section.appendChild(title);
+
+    const grid = document.createElement('div');
+    grid.className = 'kill-layout-grid';
+    KILL_DISPLAY_LAYOUT_FIELDS.forEach(field => {
+        const value = layout[field.key];
+        const item = document.createElement('label');
+        item.className = 'kill-layout-field';
+        item.innerHTML = `
+            <span>${field.label}</span>
+            <div class="style-range-row">
+                <input id="kill-layout-${field.key}" type="range" min="${field.min}" max="${field.max}" step="1" value="${value}">
+                <input id="kill-layout-${field.key}-value" type="number" min="${field.min}" max="${field.max}" step="1" value="${value}">
+                <em>${field.unit}</em>
+            </div>
+        `;
+        grid.appendChild(item);
+    });
+    section.appendChild(grid);
+
+    KILL_DISPLAY_LAYOUT_FIELDS.forEach(field => {
+        const range = document.getElementById(`kill-layout-${field.key}`);
+        const input = document.getElementById(`kill-layout-${field.key}-value`);
+        const handle = (source) => {
+            const value = clampNumber(source.value, field.min, field.max, KILL_DISPLAY_LAYOUT_DEFAULTS[field.key]);
+            if (range) range.value = value;
+            if (input) input.value = value;
+            killDisplaySettings.layout[field.key] = value;
+            queueKillDisplaySettingsSync();
+        };
+        range?.addEventListener('input', () => handle(range));
+        input?.addEventListener('change', () => handle(input));
     });
 }
 
@@ -1071,9 +1331,19 @@ function setPairedColorValue(colorId, textId, value) {
 }
 
 function syncAppearanceEditorFromActiveStyle() {
-    const type = getScoreboardStyleType(activeScoreboardStyleKey);
-    const style = normalizeScoreboardTextStyle(type.key, scoreboardTextStyles[type.key]);
+    const type = getCurrentAppearanceStyleType(getCurrentAppearanceStyleKey());
+    const styles = getCurrentAppearanceStyles();
+    const style = appearanceScope === 'kill'
+        ? normalizeKillDisplayTextStyle(type.key, styles[type.key])
+        : normalizeScoreboardTextStyle(type.key, styles[type.key]);
     fillAppearanceFontOptions(style.fontFamily);
+
+    const fontMax = appearanceScope === 'kill' ? 76 : 48;
+    const strokeMax = appearanceScope === 'kill' ? 8 : 4;
+    const glowMax = appearanceScope === 'kill' ? 36 : 24;
+    ['style-font-size', 'style-font-size-value'].forEach(id => document.getElementById(id)?.setAttribute('max', String(fontMax)));
+    ['style-stroke-width', 'style-stroke-width-value'].forEach(id => document.getElementById(id)?.setAttribute('max', String(strokeMax)));
+    ['style-glow', 'style-glow-value'].forEach(id => document.getElementById(id)?.setAttribute('max', String(glowMax)));
 
     setPairedInputValue('style-font-size', 'style-font-size-value', style.fontSize);
     setPairedInputValue('style-stroke-width', 'style-stroke-width-value', style.strokeWidth);
@@ -1109,8 +1379,11 @@ function readAppearanceColor(colorId, textId, fallback) {
 }
 
 function updateActiveStyleFromEditor(changedId = '') {
-    const type = getScoreboardStyleType(activeScoreboardStyleKey);
-    const current = normalizeScoreboardTextStyle(type.key, scoreboardTextStyles[type.key]);
+    const type = getCurrentAppearanceStyleType(getCurrentAppearanceStyleKey());
+    const styles = getCurrentAppearanceStyles();
+    const current = appearanceScope === 'kill'
+        ? normalizeKillDisplayTextStyle(type.key, styles[type.key])
+        : normalizeScoreboardTextStyle(type.key, styles[type.key]);
     if (changedId === 'style-color') {
         const text = document.getElementById('style-color-text');
         if (text) text.value = normalizeHexColor(document.getElementById('style-color')?.value, current.color);
@@ -1122,17 +1395,23 @@ function updateActiveStyleFromEditor(changedId = '') {
 
     const next = {
         fontFamily: cleanFontFamilyName(document.getElementById('style-font-family')?.value, current.fontFamily),
-        fontSize: readAppearanceNumber('style-font-size', 'style-font-size-value', 10, 48, current.fontSize),
+        fontSize: readAppearanceNumber('style-font-size', 'style-font-size-value', 10, appearanceScope === 'kill' ? 76 : 48, current.fontSize),
         colorMode: type.allowTeamColor ? (document.getElementById('style-color-mode')?.value === 'team' ? 'team' : 'custom') : 'custom',
         color: readAppearanceColor('style-color', 'style-color-text', current.color),
         strokeColor: readAppearanceColor('style-stroke-color', 'style-stroke-color-text', current.strokeColor),
-        strokeWidth: readAppearanceNumber('style-stroke-width', 'style-stroke-width-value', 0, 4, current.strokeWidth),
-        glow: readAppearanceNumber('style-glow', 'style-glow-value', 0, 24, current.glow)
+        strokeWidth: readAppearanceNumber('style-stroke-width', 'style-stroke-width-value', 0, appearanceScope === 'kill' ? 8 : 4, current.strokeWidth),
+        glow: readAppearanceNumber('style-glow', 'style-glow-value', 0, appearanceScope === 'kill' ? 36 : 24, current.glow)
     };
-    scoreboardTextStyles[type.key] = normalizeScoreboardTextStyle(type.key, next);
-    applyScoreboardTextStyles(scoreboardTextStyles);
+    if (appearanceScope === 'kill') {
+        killDisplaySettings.textStyles[type.key] = normalizeKillDisplayTextStyle(type.key, next);
+        applyKillDisplaySettings(killDisplaySettings);
+    } else {
+        scoreboardTextStyles[type.key] = normalizeScoreboardTextStyle(type.key, next);
+        applyScoreboardTextStyles(scoreboardTextStyles);
+    }
     syncAppearanceEditorFromActiveStyle();
-    queueScoreboardTextStyleSync();
+    if (appearanceScope === 'kill') queueKillDisplaySettingsSync();
+    else queueScoreboardTextStyleSync();
 }
 
 function queueScoreboardTextStyleSync() {
@@ -1148,26 +1427,68 @@ function queueScoreboardTextStyleSync() {
     }, 160);
 }
 
-function resetCurrentScoreboardStyle() {
-    const type = getScoreboardStyleType(activeScoreboardStyleKey);
-    scoreboardTextStyles[type.key] = cloneScoreboardStyle(type.defaults);
-    applyScoreboardTextStyles(scoreboardTextStyles);
+function queueKillDisplaySettingsSync() {
+    if (isSyncingFromServer) return;
+    clearTimeout(killDisplaySettingsSyncTimer);
+    killDisplaySettingsSyncTimer = setTimeout(() => {
+        if (window.chrome?.webview) {
+            window.chrome.webview.postMessage({
+                action: 'cmd_set_kill_display_settings',
+                settings: killDisplaySettings
+            });
+        }
+    }, 160);
+}
+
+function resetCurrentAppearanceStyle() {
+    const type = getCurrentAppearanceStyleType(getCurrentAppearanceStyleKey());
+    if (appearanceScope === 'kill') {
+        killDisplaySettings.textStyles[type.key] = cloneScoreboardStyle(type.defaults);
+        applyKillDisplaySettings(killDisplaySettings);
+        queueKillDisplaySettingsSync();
+    } else {
+        scoreboardTextStyles[type.key] = cloneScoreboardStyle(type.defaults);
+        applyScoreboardTextStyles(scoreboardTextStyles);
+        queueScoreboardTextStyleSync();
+    }
     syncAppearanceEditorFromActiveStyle();
-    queueScoreboardTextStyleSync();
+}
+
+function resetAllAppearanceSettings() {
+    if (appearanceScope === 'kill') {
+        killDisplaySettings = getDefaultKillDisplaySettings();
+        applyKillDisplaySettings(killDisplaySettings);
+        renderKillLayoutEditor();
+        queueKillDisplaySettingsSync();
+    } else {
+        scoreboardTextStyles = getDefaultScoreboardTextStyles();
+        applyScoreboardTextStyles(scoreboardTextStyles);
+        queueScoreboardTextStyleSync();
+    }
+    renderAppearanceStyleList();
+    syncAppearanceEditorFromActiveStyle();
+}
+
+function resetCurrentScoreboardStyle() {
+    const previousScope = appearanceScope;
+    appearanceScope = 'scoreboard';
+    resetCurrentAppearanceStyle();
+    appearanceScope = previousScope;
 }
 
 function resetAllScoreboardStyles() {
-    scoreboardTextStyles = getDefaultScoreboardTextStyles();
-    applyScoreboardTextStyles(scoreboardTextStyles);
-    renderAppearanceStyleList();
-    syncAppearanceEditorFromActiveStyle();
-    queueScoreboardTextStyleSync();
+    const previousScope = appearanceScope;
+    appearanceScope = 'scoreboard';
+    resetAllAppearanceSettings();
+    appearanceScope = previousScope;
 }
 
 function openAppearancePanel() {
     const overlay = document.getElementById('appearance-overlay');
     if (!overlay) return;
+    renderAppearanceScopeTabs();
     renderAppearanceStyleList();
+    renderKillLayoutEditor();
     syncAppearanceEditorFromActiveStyle();
     overlay.classList.add('active');
     overlay.setAttribute('aria-hidden', 'false');
@@ -1185,8 +1506,10 @@ function closeAppearancePanel() {
 }
 
 scoreboardTextStyles = getDefaultScoreboardTextStyles();
+killDisplaySettings = getDefaultKillDisplaySettings();
 systemFonts = normalizeSystemFonts(systemFonts);
 applyScoreboardTextStyles(scoreboardTextStyles);
+applyKillDisplaySettings(killDisplaySettings);
 
 function getRandomGroupRowData(row) {
     const nameElem = row.querySelector('.name-input');
@@ -1898,9 +2221,13 @@ function applyStateFromServer(state) {
 
     systemFonts = normalizeSystemFonts(state.systemFonts);
     scoreboardTextStyles = normalizeScoreboardTextStyles(state.scoreboardTextStyles);
+    killDisplaySettings = normalizeKillDisplaySettings(state.killDisplaySettings);
     applyScoreboardTextStyles(scoreboardTextStyles);
+    applyKillDisplaySettings(killDisplaySettings);
     if (isAppearancePanelOpen()) {
+        renderAppearanceScopeTabs();
         renderAppearanceStyleList();
+        renderKillLayoutEditor();
         syncAppearanceEditorFromActiveStyle();
     }
 
@@ -3378,8 +3705,14 @@ document.getElementById('btn-appearance-close')?.addEventListener('click', close
 document.getElementById('appearance-overlay')?.addEventListener('click', (e) => {
     if (e.target?.id === 'appearance-overlay') closeAppearancePanel();
 });
-document.getElementById('btn-style-reset-current')?.addEventListener('click', resetCurrentScoreboardStyle);
-document.getElementById('btn-style-reset-all')?.addEventListener('click', resetAllScoreboardStyles);
+document.getElementById('btn-style-reset-current')?.addEventListener('click', resetCurrentAppearanceStyle);
+document.getElementById('btn-style-reset-all')?.addEventListener('click', resetAllAppearanceSettings);
+document.getElementById('btn-kill-display-open')?.addEventListener('click', () => {
+    if (window.chrome?.webview) window.chrome.webview.postMessage({ action: 'cmd_open_kill_display' });
+});
+document.getElementById('btn-kill-obs-copy')?.addEventListener('click', () => {
+    if (window.chrome?.webview) window.chrome.webview.postMessage({ action: 'cmd_copy_kill_obs_url' });
+});
 [
     'style-font-family',
     'style-font-size',

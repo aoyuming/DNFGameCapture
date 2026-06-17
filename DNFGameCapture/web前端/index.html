@@ -165,6 +165,7 @@
                 </div>
                 <button class="appearance-close" id="btn-appearance-close" title="关闭">&times;</button>
             </div>
+            <div class="appearance-scope-tabs" id="appearance-scope-tabs" data-kill-tab-id="appearance-scope-kill"></div>
             <div class="appearance-body">
                 <div class="appearance-style-list" id="appearance-style-list"></div>
                 <div class="appearance-editor">
@@ -214,9 +215,12 @@
                             <input id="style-glow-value" type="number" min="0" max="24" step="1">
                         </div>
                     </label>
+                    <div class="kill-layout-section" id="kill-layout-section" hidden></div>
                 </div>
             </div>
             <div class="appearance-actions">
+                <button class="appearance-action" id="btn-kill-obs-copy">复制OBS网址</button>
+                <button class="appearance-action" id="btn-kill-display-open">打开展示窗口</button>
                 <button class="appearance-action" id="btn-style-reset-current">恢复当前默认</button>
                 <button class="appearance-action danger" id="btn-style-reset-all">恢复全部默认</button>
             </div>

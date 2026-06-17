@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DNF 击杀展示页</title>
+    <link rel="stylesheet" href="kill.css?v=20260617-kill-display">
+</head>
+<body>
+    <main id="kill-display-root" class="kill-display-root" aria-live="polite">
+        <div class="kill-board" id="kill-board">
+            <section class="kill-team kill-team-red" data-team-color="red">
+                <header class="kill-team-header">
+                    <div class="kill-team-title">
+                        <span class="kill-team-name">红队</span>
+                        <span class="kill-team-score" id="kill-red-score">0</span>
+                    </div>
+                    <div class="kill-stat-header">
+                        <span>杀</span>
+                        <span>死</span>
+                        <span>AK</span>
+                    </div>
+                </header>
+                <div class="kill-rows" id="kill-red-rows"></div>
+            </section>
+
+            <section class="kill-team kill-team-blue" data-team-color="blue">
+                <header class="kill-team-header">
+                    <div class="kill-team-title">
+                        <span class="kill-team-name">蓝队</span>
+                        <span class="kill-team-score" id="kill-blue-score">0</span>
+                    </div>
+                    <div class="kill-stat-header">
+                        <span>杀</span>
+                        <span>死</span>
+                        <span>AK</span>
+                    </div>
+                </header>
+                <div class="kill-rows" id="kill-blue-rows"></div>
+            </section>
+        </div>
+        <div class="kill-status" id="kill-status">等待数据...</div>
+        <div class="kill-resize-grip" id="kill-resize-grip" aria-hidden="true"></div>
+    </main>
+    <script src="kill.js?v=20260617-kill-display" defer></script>
+</body>
+</html>

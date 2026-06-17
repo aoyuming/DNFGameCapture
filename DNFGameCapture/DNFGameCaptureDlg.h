@@ -17,6 +17,7 @@
 #include "CameraCapture.h" // 【新增】
 #include <deque>
 #include "WebScoreDlg.h"
+#include "KillDisplayDlg.h"
 #include "json.hpp"
 
 struct ScorePointF {
@@ -28,7 +29,7 @@ struct ScorePointF {
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"3.8.0"    //当前版本号
+#define CURRENT_VERSION L"3.8.5"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -160,6 +161,7 @@ public:
 public:
     // 将主窗口的数据广播给 Web
     void BroadcastStateToWeb();
+    std::string BuildKillDisplayStatePayload();
 
 protected:
     // 接收新窗口发来的 Web 指令
@@ -233,6 +235,9 @@ private:
 
     void FilterLivePlatformPrefixes();
     void WriteScoreToFile();
+    nlohmann::json DnfBuildSharedWebStateJson();
+    void OpenKillDisplayWindow();
+    CString GetKillDisplayObsUrl() const;
     CString GetPickSeatLabelForIndex(int index) const;
     void AppendResultText(const CString& t, COLORREF c);
     void RefreshDisplay();
@@ -341,6 +346,10 @@ private:
     void KillProcessByName(const CString& processName);
 
     CWebScoreDlg* m_pWebDlg; // 新窗口的指针
+    CKillDisplayDlg* m_pKillDisplayDlg = nullptr; // OBS/直播伴侣击杀展示窗口
+    CString m_webFrontDir;
+    bool m_bKillDisplayHttpReady = false;
+    CString m_killDisplayHttpError;
 
 
 private:
@@ -433,7 +442,7 @@ private:
     CString m_iniPath;
     CString m_outputDir;
     bool m_bOutputSeatLabelToKillFile = false;
-    bool m_bRedPickFirst = true;
+    bool m_bRedPickFirst = false;
 
     ULONG_PTR m_gdiplusToken;
     HINTERNET m_hHttpSession;

@@ -13,11 +13,14 @@
 #include <tlhelp32.h> // 【新增】：用于遍历和杀掉后台残留进程
 #include <cwctype>
 #include <set>
+#include <fstream>
+#include <sstream>
 
 #pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "Crypt32.lib")
 #pragma comment(lib, "Gdiplus.lib")
+#pragma comment(lib, "Ws2_32.lib")
 
 #include "json.hpp"
 using json = nlohmann::json;
@@ -80,11 +83,20 @@ static bool DnfWriteLocalLicenseKey(const CString& key);
 static CString DnfReadLicenseFromFile();
 static json DnfBuildScoreboardTextStylesJson(const CString& iniPath);
 static void DnfSaveScoreboardTextStylesJson(const CString& iniPath, const json& styles);
+static json DnfBuildKillDisplaySettingsJson(const CString& iniPath);
+static void DnfSaveKillDisplaySettingsJson(const CString& iniPath, const json& settings);
 static json DnfBuildInstalledFontListJson();
+static bool DnfStartKillDisplayHttpServer(CDNFGameCaptureDlg* host, const CString& webDir, CString& errorMsg);
+static void DnfStopKillDisplayHttpServer();
 void WriteMatchLog(const CString& logLine);
 void AppLog(const CString& msg, COLORREF color);
 
 static const wchar_t* SCOREBOARD_STYLE_SECTION = L"ScoreboardTextStyles";
+static const wchar_t* KILL_DISPLAY_LAYOUT_SECTION = L"KillDisplay";
+static const wchar_t* KILL_DISPLAY_STYLE_SECTION = L"KillDisplayTextStyles";
+static constexpr int KILL_DISPLAY_HTTP_PORT = 18777;
+static constexpr wchar_t KILL_DISPLAY_OBS_URL_W[] = L"http://127.0.0.1:18777/kill.html";
+static constexpr char KILL_DISPLAY_OBS_URL_UTF8[] = "http://127.0.0.1:18777/kill.html";
 
 struct DnfScoreboardStyleDefault {
     const char* key;
@@ -105,6 +117,41 @@ static const DnfScoreboardStyleDefault SCOREBOARD_STYLE_DEFAULTS[] = {
     { "pickLabel",L"Microsoft YaHei", 18, L"custom", L"#a6b7bf", L"#000000", 1, 0,  false },
     { "playerName",L"Arial Black",    22, L"custom", L"#ffffff", L"#000000", 1, 2,  false },
     { "statNumber",L"Microsoft YaHei",25, L"custom", L"#ffffff", L"#000000", 1, 0,  false },
+};
+
+struct DnfKillDisplayLayoutDefault {
+    const char* key;
+    int value;
+    int minValue;
+    int maxValue;
+};
+
+static const DnfKillDisplayLayoutDefault KILL_DISPLAY_LAYOUT_DEFAULTS[] = {
+    { "bgAlpha",          0, 0,   100 },
+    { "panelAlpha",      49, 0,   100 },
+    { "rowAlpha",         0, 0,   100 },
+    { "canvasPadding",    0, 0,    40 },
+    { "panelPadding",    14, 0,    40 },
+    { "teamGap",          0, 0,    40 },
+    { "rowGap",           0, 0,    20 },
+    { "rowHeight",       48, 32,   90 },
+    { "panelRadius",      0, 0,    28 },
+    { "rowRadius",        0, 0,    22 },
+    { "boardBorder",      0, 0,     6 },
+    { "shadow",           0, 0,    48 },
+    { "pickColumnWidth", 54, 36,  110 },
+    { "statColumnWidth", 61, 28,   90 },
+    { "akColumnWidth",   24, 24,   80 },
+};
+
+static const DnfScoreboardStyleDefault KILL_DISPLAY_TEXT_STYLE_DEFAULTS[] = {
+    { "teamName",   L"Microsoft YaHei", 49, L"team",   L"#ffffff", L"#000000", 4, 0, true },
+    { "score",      L"Arial Black",     70, L"team",   L"#ffffff", L"#000000", 3, 2, true },
+    { "header",     L"Microsoft YaHei", 31, L"custom", L"#a9abb9", L"#000000", 2, 0, false },
+    { "pickLabel",  L"Microsoft YaHei", 27, L"custom", L"#a1a1a1", L"#000000", 2, 0, false },
+    { "playerName", L"Arial Black",     43, L"custom", L"#f7ca69", L"#000000", 5, 2, false },
+    { "statNumber", L"Microsoft YaHei", 50, L"custom", L"#f7ca69", L"#000000", 4, 0, false },
+    { "akMark",     L"Microsoft YaHei", 40, L"custom", L"#f7ca69", L"#000000", 1, 0, false },
 };
 
 static CString DnfMakeScoreboardStyleIniKey(const char* styleKey, const char* field)
@@ -300,6 +347,151 @@ static void DnfSaveScoreboardTextStylesJson(const CString& iniPath, const json& 
     }
 }
 
+static CString DnfReadStyleStringFromSection(const CString& iniPath, const wchar_t* section, const DnfScoreboardStyleDefault& def, const char* field, const wchar_t* fallback)
+{
+    if (iniPath.IsEmpty()) return CString(fallback);
+    CString key = DnfMakeScoreboardStyleIniKey(def.key, field);
+    wchar_t buf[256] = { 0 };
+    ::GetPrivateProfileString(section, key, fallback, buf, 256, iniPath);
+    return CString(buf);
+}
+
+static void DnfWriteStyleStringToSection(const CString& iniPath, const wchar_t* section, const DnfScoreboardStyleDefault& def, const char* field, const CString& value)
+{
+    CString key = DnfMakeScoreboardStyleIniKey(def.key, field);
+    ::WritePrivateProfileString(section, key, value, iniPath);
+}
+
+static void DnfWriteStyleIntToSection(const CString& iniPath, const wchar_t* section, const DnfScoreboardStyleDefault& def, const char* field, int value)
+{
+    CString text;
+    text.Format(L"%d", value);
+    DnfWriteStyleStringToSection(iniPath, section, def, field, text);
+}
+
+static json DnfBuildKillDisplayStyleJson(const CString& iniPath, const DnfScoreboardStyleDefault& def)
+{
+    CString fontFamily = DnfNormalizeScoreboardFontFamily(
+        DnfReadStyleStringFromSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "fontFamily", def.fontFamily),
+        def.fontFamily);
+    CString colorMode = DnfNormalizeScoreboardColorMode(
+        DnfReadStyleStringFromSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "colorMode", def.colorMode),
+        def);
+    CString color = DnfNormalizeScoreboardColor(
+        DnfReadStyleStringFromSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "color", def.color),
+        def.color);
+    CString strokeColor = DnfNormalizeScoreboardColor(
+        DnfReadStyleStringFromSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "strokeColor", def.strokeColor),
+        def.strokeColor);
+
+    int fontSize = def.fontSize;
+    int strokeWidth = def.strokeWidth;
+    int glow = def.glow;
+    if (!iniPath.IsEmpty()) {
+        CString fontSizeKey = DnfMakeScoreboardStyleIniKey(def.key, "fontSize");
+        CString strokeWidthKey = DnfMakeScoreboardStyleIniKey(def.key, "strokeWidth");
+        CString glowKey = DnfMakeScoreboardStyleIniKey(def.key, "glow");
+        fontSize = ::GetPrivateProfileInt(KILL_DISPLAY_STYLE_SECTION, fontSizeKey, def.fontSize, iniPath);
+        strokeWidth = ::GetPrivateProfileInt(KILL_DISPLAY_STYLE_SECTION, strokeWidthKey, def.strokeWidth, iniPath);
+        glow = ::GetPrivateProfileInt(KILL_DISPLAY_STYLE_SECTION, glowKey, def.glow, iniPath);
+    }
+
+    json style;
+    style["fontFamily"] = DnfJsonUtf8(fontFamily);
+    style["fontSize"] = DnfClampScoreboardInt(fontSize, 10, 76);
+    style["colorMode"] = DnfJsonUtf8(colorMode);
+    style["color"] = DnfJsonUtf8(color);
+    style["strokeColor"] = DnfJsonUtf8(strokeColor);
+    style["strokeWidth"] = DnfClampScoreboardInt(strokeWidth, 0, 8);
+    style["glow"] = DnfClampScoreboardInt(glow, 0, 36);
+    return style;
+}
+
+static json DnfBuildKillDisplayTextStylesJson(const CString& iniPath)
+{
+    json styles = json::object();
+    for (const auto& def : KILL_DISPLAY_TEXT_STYLE_DEFAULTS) {
+        styles[def.key] = DnfBuildKillDisplayStyleJson(iniPath, def);
+    }
+    return styles;
+}
+
+static json DnfBuildKillDisplayLayoutJson(const CString& iniPath)
+{
+    json layout = json::object();
+    for (const auto& def : KILL_DISPLAY_LAYOUT_DEFAULTS) {
+        int value = def.value;
+        if (!iniPath.IsEmpty()) {
+            CString key = CA2W(def.key, CP_UTF8);
+            value = ::GetPrivateProfileInt(KILL_DISPLAY_LAYOUT_SECTION, key, def.value, iniPath);
+        }
+        layout[def.key] = DnfClampScoreboardInt(value, def.minValue, def.maxValue);
+    }
+    return layout;
+}
+
+static json DnfBuildKillDisplaySettingsJson(const CString& iniPath)
+{
+    json settings;
+    settings["obsUrl"] = KILL_DISPLAY_OBS_URL_UTF8;
+    settings["layout"] = DnfBuildKillDisplayLayoutJson(iniPath);
+    settings["textStyles"] = DnfBuildKillDisplayTextStylesJson(iniPath);
+    return settings;
+}
+
+static void DnfSaveKillDisplaySettingsJson(const CString& iniPath, const json& settings)
+{
+    if (iniPath.IsEmpty() || !settings.is_object()) return;
+
+    json layout = json::object();
+    if (settings.contains("layout") && settings["layout"].is_object()) {
+        layout = settings["layout"];
+    }
+    for (const auto& def : KILL_DISPLAY_LAYOUT_DEFAULTS) {
+        int value = DnfClampScoreboardInt(DnfJsonScoreboardInt(layout, def.key, def.value), def.minValue, def.maxValue);
+        CString key = CA2W(def.key, CP_UTF8);
+        CString text;
+        text.Format(L"%d", value);
+        ::WritePrivateProfileString(KILL_DISPLAY_LAYOUT_SECTION, key, text, iniPath);
+    }
+
+    json styles = json::object();
+    if (settings.contains("textStyles") && settings["textStyles"].is_object()) {
+        styles = settings["textStyles"];
+    }
+
+    for (const auto& def : KILL_DISPLAY_TEXT_STYLE_DEFAULTS) {
+        json style = json::object();
+        if (styles.contains(def.key) && styles[def.key].is_object()) {
+            style = styles[def.key];
+        }
+
+        CString fontFamily = DnfNormalizeScoreboardFontFamily(
+            DnfJsonScoreboardString(style, "fontFamily", def.fontFamily),
+            def.fontFamily);
+        CString colorMode = DnfNormalizeScoreboardColorMode(
+            DnfJsonScoreboardString(style, "colorMode", def.colorMode),
+            def);
+        CString color = DnfNormalizeScoreboardColor(
+            DnfJsonScoreboardString(style, "color", def.color),
+            def.color);
+        CString strokeColor = DnfNormalizeScoreboardColor(
+            DnfJsonScoreboardString(style, "strokeColor", def.strokeColor),
+            def.strokeColor);
+        int fontSize = DnfClampScoreboardInt(DnfJsonScoreboardInt(style, "fontSize", def.fontSize), 10, 76);
+        int strokeWidth = DnfClampScoreboardInt(DnfJsonScoreboardInt(style, "strokeWidth", def.strokeWidth), 0, 8);
+        int glow = DnfClampScoreboardInt(DnfJsonScoreboardInt(style, "glow", def.glow), 0, 36);
+
+        DnfWriteStyleStringToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "fontFamily", fontFamily);
+        DnfWriteStyleIntToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "fontSize", fontSize);
+        DnfWriteStyleStringToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "colorMode", colorMode);
+        DnfWriteStyleStringToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "color", color);
+        DnfWriteStyleStringToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "strokeColor", strokeColor);
+        DnfWriteStyleIntToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "strokeWidth", strokeWidth);
+        DnfWriteStyleIntToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "glow", glow);
+    }
+}
+
 struct DnfFontEnumContext {
     std::set<std::wstring> names;
 };
@@ -346,6 +538,300 @@ static json DnfBuildInstalledFontListJson()
     }
     s_loaded = true;
     return s_cachedFonts;
+}
+
+namespace {
+    struct DnfKillDisplayHttpServerState {
+        std::mutex mutex;
+        std::thread worker;
+        std::atomic<bool> stop{ false };
+        std::atomic<bool> running{ false };
+        SOCKET listenSocket = INVALID_SOCKET;
+        CDNFGameCaptureDlg* host = nullptr;
+        CString webDir;
+    };
+
+    DnfKillDisplayHttpServerState g_killDisplayHttpServer;
+}
+
+static bool DnfHttpSendAll(SOCKET client, const char* data, int len)
+{
+    int sent = 0;
+    while (sent < len) {
+        int n = ::send(client, data + sent, len - sent, 0);
+        if (n <= 0) return false;
+        sent += n;
+    }
+    return true;
+}
+
+static void DnfHttpSendResponse(SOCKET client, int status, const char* reason, const char* contentType, const std::string& body)
+{
+    std::ostringstream oss;
+    oss << "HTTP/1.1 " << status << " " << reason << "\r\n"
+        << "Content-Type: " << contentType << "\r\n"
+        << "Content-Length: " << body.size() << "\r\n"
+        << "Access-Control-Allow-Origin: *\r\n"
+        << "Cache-Control: no-store, no-cache, must-revalidate\r\n"
+        << "Connection: close\r\n\r\n";
+    const std::string header = oss.str();
+    DnfHttpSendAll(client, header.data(), (int)header.size());
+    if (!body.empty()) {
+        DnfHttpSendAll(client, body.data(), (int)body.size());
+    }
+}
+
+static std::string DnfHttpContentTypeForPath(const std::string& path)
+{
+    if (path.size() >= 5 && path.substr(path.size() - 5) == ".html") return "text/html; charset=utf-8";
+    if (path.size() >= 4 && path.substr(path.size() - 4) == ".css") return "text/css; charset=utf-8";
+    if (path.size() >= 3 && path.substr(path.size() - 3) == ".js") return "application/javascript; charset=utf-8";
+    return "application/octet-stream";
+}
+
+static bool DnfHttpReadStaticFile(const CString& path, std::string& body)
+{
+    CFile file;
+    if (!file.Open(path, CFile::modeRead | CFile::shareDenyNone)) return false;
+    ULONGLONG length = file.GetLength();
+    if (length > 8ull * 1024ull * 1024ull) return false;
+
+    body.resize((size_t)length);
+    if (length > 0) {
+        UINT read = file.Read(&body[0], (UINT)length);
+        if (read != (UINT)length) return false;
+    }
+    return true;
+}
+
+static std::string DnfHttpParsePath(const std::string& request)
+{
+    const size_t lineEnd = request.find("\r\n");
+    const std::string firstLine = request.substr(0, lineEnd == std::string::npos ? request.size() : lineEnd);
+    const size_t firstSpace = firstLine.find(' ');
+    if (firstSpace == std::string::npos) return "/";
+    const size_t secondSpace = firstLine.find(' ', firstSpace + 1);
+    std::string path = firstLine.substr(firstSpace + 1, secondSpace == std::string::npos ? std::string::npos : secondSpace - firstSpace - 1);
+    const size_t queryPos = path.find('?');
+    if (queryPos != std::string::npos) path = path.substr(0, queryPos);
+    if (path.empty()) path = "/";
+    return path;
+}
+
+static bool DnfKillDisplayStaticPathForRoute(const CString& webDir, const std::string& route, CString& outPath)
+{
+    std::string name;
+    if (route == "/" || route == "/kill.html") name = "kill.html";
+    else if (route == "/kill.css") name = "kill.css";
+    else if (route == "/kill.js") name = "kill.js";
+    else return false;
+
+    CString fileName = CA2W(name.c_str(), CP_UTF8);
+    outPath = DnfJoinPath(webDir, fileName);
+    return true;
+}
+
+static void DnfHandleKillDisplayHttpClient(SOCKET client)
+{
+    DWORD timeout = 900;
+    ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+    ::setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+
+    std::string request;
+    request.reserve(4096);
+    char buf[2048] = {};
+    while (request.find("\r\n\r\n") == std::string::npos && request.size() < 8192) {
+        int n = ::recv(client, buf, sizeof(buf), 0);
+        if (n <= 0) break;
+        request.append(buf, buf + n);
+    }
+
+    if (request.find("GET ") != 0) {
+        DnfHttpSendResponse(client, 405, "Method Not Allowed", "text/plain; charset=utf-8", "GET only");
+        return;
+    }
+
+    const std::string route = DnfHttpParsePath(request);
+    if (route == "/api/state") {
+        CDNFGameCaptureDlg* host = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_killDisplayHttpServer.mutex);
+            host = g_killDisplayHttpServer.host;
+        }
+        const std::string body = host ? host->BuildKillDisplayStatePayload() : "{\"action\":\"sync_state\",\"data\":{}}";
+        DnfHttpSendResponse(client, 200, "OK", "application/json; charset=utf-8", body);
+        return;
+    }
+
+    CString staticPath;
+    CString webDir;
+    {
+        std::lock_guard<std::mutex> lock(g_killDisplayHttpServer.mutex);
+        webDir = g_killDisplayHttpServer.webDir;
+    }
+    if (!DnfKillDisplayStaticPathForRoute(webDir, route, staticPath)) {
+        DnfHttpSendResponse(client, 404, "Not Found", "text/plain; charset=utf-8", "Not found");
+        return;
+    }
+
+    std::string body;
+    if (!DnfHttpReadStaticFile(staticPath, body)) {
+        DnfHttpSendResponse(client, 404, "Not Found", "text/plain; charset=utf-8", "Static file missing");
+        return;
+    }
+    DnfHttpSendResponse(client, 200, "OK", DnfHttpContentTypeForPath(route).c_str(), body);
+}
+
+static void DnfKillDisplayHttpWorker(SOCKET listenSocket)
+{
+    g_killDisplayHttpServer.running = true;
+    while (!g_killDisplayHttpServer.stop.load()) {
+        fd_set readSet;
+        FD_ZERO(&readSet);
+        FD_SET(listenSocket, &readSet);
+        timeval tv = {};
+        tv.tv_sec = 0;
+        tv.tv_usec = 250000;
+        int ready = ::select(0, &readSet, nullptr, nullptr, &tv);
+        if (ready <= 0) continue;
+
+        SOCKET client = ::accept(listenSocket, nullptr, nullptr);
+        if (client == INVALID_SOCKET) continue;
+        DnfHandleKillDisplayHttpClient(client);
+        ::shutdown(client, SD_BOTH);
+        ::closesocket(client);
+    }
+
+    ::closesocket(listenSocket);
+    {
+        std::lock_guard<std::mutex> lock(g_killDisplayHttpServer.mutex);
+        g_killDisplayHttpServer.listenSocket = INVALID_SOCKET;
+        g_killDisplayHttpServer.host = nullptr;
+    }
+    g_killDisplayHttpServer.running = false;
+    WSACleanup();
+}
+
+static bool DnfStartKillDisplayHttpServer(CDNFGameCaptureDlg* host, const CString& webDir, CString& errorMsg)
+{
+    errorMsg.Empty();
+
+    if (host == nullptr) {
+        errorMsg = L"展示页服务启动失败：主程序对象为空。";
+        return false;
+    }
+
+    if (!DnfFileExists(DnfJoinPath(webDir, L"kill.html")) ||
+        !DnfFileExists(DnfJoinPath(webDir, L"kill.css")) ||
+        !DnfFileExists(DnfJoinPath(webDir, L"kill.js"))) {
+        errorMsg = L"展示页服务启动失败：缺少 kill.html / kill.css / kill.js。";
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_killDisplayHttpServer.mutex);
+        if (g_killDisplayHttpServer.running.load()) {
+            g_killDisplayHttpServer.host = host;
+            g_killDisplayHttpServer.webDir = webDir;
+            return true;
+        }
+    }
+
+    WSADATA wsaData = {};
+    int wsa = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (wsa != 0) {
+        errorMsg.Format(L"展示页服务启动失败：WSAStartup=%d。", wsa);
+        return false;
+    }
+
+    SOCKET listenSocket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listenSocket == INVALID_SOCKET) {
+        int err = WSAGetLastError();
+        WSACleanup();
+        errorMsg.Format(L"展示页服务启动失败：socket=%d。", err);
+        return false;
+    }
+
+    BOOL reuseAddr = TRUE;
+    ::setsockopt(listenSocket, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuseAddr), sizeof(reuseAddr));
+
+    sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(KILL_DISPLAY_HTTP_PORT);
+    InetPtonA(AF_INET, "127.0.0.1", &addr.sin_addr);
+
+    if (::bind(listenSocket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
+        int err = WSAGetLastError();
+        ::closesocket(listenSocket);
+        WSACleanup();
+        errorMsg.Format(L"展示页服务启动失败：127.0.0.1:%d 被占用或不可用，错误=%d。", KILL_DISPLAY_HTTP_PORT, err);
+        return false;
+    }
+
+    if (::listen(listenSocket, SOMAXCONN) == SOCKET_ERROR) {
+        int err = WSAGetLastError();
+        ::closesocket(listenSocket);
+        WSACleanup();
+        errorMsg.Format(L"展示页服务启动失败：listen=%d。", err);
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_killDisplayHttpServer.mutex);
+        g_killDisplayHttpServer.stop = false;
+        g_killDisplayHttpServer.host = host;
+        g_killDisplayHttpServer.webDir = webDir;
+        g_killDisplayHttpServer.listenSocket = listenSocket;
+        g_killDisplayHttpServer.worker = std::thread(DnfKillDisplayHttpWorker, listenSocket);
+    }
+
+    return true;
+}
+
+static void DnfStopKillDisplayHttpServer()
+{
+    std::thread worker;
+    {
+        std::lock_guard<std::mutex> lock(g_killDisplayHttpServer.mutex);
+        g_killDisplayHttpServer.stop = true;
+        if (g_killDisplayHttpServer.worker.joinable()) {
+            worker = std::move(g_killDisplayHttpServer.worker);
+        }
+    }
+    if (worker.joinable()) {
+        worker.join();
+    }
+}
+
+static bool DnfCopyUnicodeTextToClipboard(HWND owner, const CString& text)
+{
+    if (!::OpenClipboard(owner)) return false;
+    ::EmptyClipboard();
+
+    const SIZE_T bytes = (text.GetLength() + 1) * sizeof(wchar_t);
+    HGLOBAL hMem = ::GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!hMem) {
+        ::CloseClipboard();
+        return false;
+    }
+
+    void* ptr = ::GlobalLock(hMem);
+    if (!ptr) {
+        ::GlobalFree(hMem);
+        ::CloseClipboard();
+        return false;
+    }
+    memcpy(ptr, text.GetString(), bytes);
+    ::GlobalUnlock(hMem);
+
+    if (!::SetClipboardData(CF_UNICODETEXT, hMem)) {
+        ::GlobalFree(hMem);
+        ::CloseClipboard();
+        return false;
+    }
+
+    ::CloseClipboard();
+    return true;
 }
 
 static bool DnfIsProcessRunningByName(const CString& processName)
@@ -3626,6 +4112,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     CoInitialize(NULL);
     m_bIsAuthValid = false;
     m_pWebDlg = nullptr;
+    m_pKillDisplayDlg = nullptr;
     m_bIsManualAuthCheck = false; // 初始设为 false
 
     m_hSingleInstanceMutex = CreateMutex(NULL, TRUE, L"Global\\DNFGameCapture_SingleInstance");
@@ -3663,8 +4150,13 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
 
     m_configPath = appDir + L"players_config.txt";
     m_iniPath = appDir + L"config.ini";
+    m_webFrontDir = appDir + L"web前端";
+    m_bKillDisplayHttpReady = DnfStartKillDisplayHttpServer(this, m_webFrontDir, m_killDisplayHttpError);
+    if (!m_bKillDisplayHttpReady && !m_killDisplayHttpError.IsEmpty()) {
+        WriteMatchLog(L"[击杀展示页] " + m_killDisplayHttpError);
+    }
     m_bOutputSeatLabelToKillFile = GetPrivateProfileInt(L"Settings", L"OutputSeatLabelToKillFile", 0, m_iniPath) != 0;
-    m_bRedPickFirst = GetPrivateProfileInt(L"Settings", L"RedPickFirst", 1, m_iniPath) != 0;
+    m_bRedPickFirst = GetPrivateProfileInt(L"Settings", L"RedPickFirst", 0, m_iniPath) != 0;
     wchar_t ocrPathBuf[MAX_PATH];
     ::GetPrivateProfileString(L"Settings", L"OcrExePath", L"", ocrPathBuf, MAX_PATH, m_iniPath);
     m_ocrExePath = ocrPathBuf;
@@ -3812,6 +4304,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
 CDNFGameCaptureDlg::~CDNFGameCaptureDlg() {
     ::UnregisterHotKey(m_hWnd, 8008);
     ::UnregisterHotKey(m_hWnd, 8009);
+    DnfStopKillDisplayHttpServer();
 
     if (m_hSingleInstanceMutex) CloseHandle(m_hSingleInstanceMutex);
     RemoveTrayIcon();
@@ -3828,6 +4321,11 @@ CDNFGameCaptureDlg::~CDNFGameCaptureDlg() {
         m_pWebDlg->DestroyWindow();
         delete m_pWebDlg;
         m_pWebDlg = nullptr;
+    }
+    if (m_pKillDisplayDlg) {
+        m_pKillDisplayDlg->DestroyWindow();
+        delete m_pKillDisplayDlg;
+        m_pKillDisplayDlg = nullptr;
     }
     CoUninitialize();
 }
@@ -9897,6 +10395,28 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 BroadcastStateToWeb();
             }
         }
+        else if (action == "cmd_set_kill_display_settings") {
+            if (j.contains("settings") && j["settings"].is_object()) {
+                DnfSaveKillDisplaySettingsJson(m_iniPath, j["settings"]);
+                AppLog(L"🎨 [击杀展示页] 外观样式已保存。", RGB(255, 210, 106));
+                BroadcastStateToWeb();
+            }
+        }
+        else if (action == "cmd_open_kill_display") {
+            OpenKillDisplayWindow();
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_copy_kill_obs_url") {
+            CString obsUrl = GetKillDisplayObsUrl();
+            bool ok = DnfCopyUnicodeTextToClipboard(GetSafeHwnd(), obsUrl);
+            CString msg;
+            if (ok) msg = L"OBS网址已复制：" + obsUrl;
+            else msg = L"OBS网址复制失败，请手动填写：http://127.0.0.1:18777/kill.html";
+            CString logMsg = ok ? L"🔗 [击杀展示页] " : L"⚠️ [击杀展示页] ";
+            logMsg += msg;
+            AppLog(logMsg, ok ? RGB(0, 255, 100) : RGB(255, 180, 0));
+            if (m_pWebDlg) DnfSendWebToast(m_pWebDlg, L"kill_obs_url_result", msg);
+        }
         else if (action == "cmd_resize_web") {
             // 旧前端可能还会上报内容高度；当前版本固定 Web 窗口尺寸，忽略动态 resize。
         }
@@ -10095,8 +10615,8 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 m_totalScoreBlue = 0;
                 m_recentEvents.clear();
                 ResetMatchCooldownState(L"Web重置");
-                m_bRedPickFirst = true;
-                ::WritePrivateProfileString(L"Settings", L"RedPickFirst", L"1", m_iniPath);
+                m_bRedPickFirst = false;
+                ::WritePrivateProfileString(L"Settings", L"RedPickFirst", L"0", m_iniPath);
                 for (int i = 0; i < 8; i++) {
                     if (clearPlayers) {
                         m_players[i].name.Empty();
@@ -10127,6 +10647,146 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
     return 0;
 }
 
+json CDNFGameCaptureDlg::DnfBuildSharedWebStateJson()
+{
+    json data;
+    data["blueScore"] = m_totalScoreBlue;
+    data["redScore"] = m_totalScoreRed;
+
+    data["isMonitoring"] = (m_bIsRunning == TRUE);
+    data["isStartPending"] = (m_bOcrStartPending.load() == true);
+    data["isFlipped"] = (m_bFlipSides == true);
+    data["isMfcVisible"] = (IsWindowVisible() == TRUE);
+    data["deathXAlgorithm"] = m_nDeathAlgorithmChoice;
+    data["outputSeatLabelToKillFile"] = m_bOutputSeatLabelToKillFile;
+    data["redPickMode"] = m_bRedPickFirst ? "first" : "second";
+    data["redPickFirst"] = m_bRedPickFirst;
+    data["scoreboardTextStyles"] = DnfBuildScoreboardTextStylesJson(m_iniPath);
+    data["killDisplaySettings"] = DnfBuildKillDisplaySettingsJson(m_iniPath);
+    data["killDisplayObsUrl"] = KILL_DISPLAY_OBS_URL_UTF8;
+    data["killDisplayHttpReady"] = m_bKillDisplayHttpReady;
+    data["killDisplayHttpError"] = DnfJsonUtf8(m_killDisplayHttpError);
+    data["systemFonts"] = DnfBuildInstalledFontListJson();
+
+    bool deathPatchInstalled = false;
+    wchar_t cachedImagePacks2[MAX_PATH] = { 0 };
+    ::GetPrivateProfileString(L"Settings", L"ImagePacks2Path", L"", cachedImagePacks2, MAX_PATH, m_iniPath);
+    CString cachedPatchDir = cachedImagePacks2;
+    cachedPatchDir.Trim();
+    if (!cachedPatchDir.IsEmpty()) {
+        deathPatchInstalled = DnfFileExists(DnfJoinPath(cachedPatchDir, DEATH_X_PATCH_FILE_NAME));
+    }
+    data["deathPatchInstalled"] = deathPatchInstalled;
+
+    data["isAuthValid"] = (m_bIsAuthValid == true);
+    CString expStr = L"";
+    if (m_bIsTrial) {
+        expStr.Format(L"试用至: %s", FormatTimeStamp(m_trialEnd));
+    }
+    else if (m_bIsAuthValid) {
+        if (m_cloudExpireTime == -1) expStr = L"验证中...";
+        else if (m_cloudExpireTime > 0) expStr.Format(L"到期: %s", FormatTimeStamp(m_cloudExpireTime));
+        else expStr = L"永久有效";
+    }
+    else {
+        expStr = L"未激活";
+    }
+    data["authText"] = std::string(CW2A(expStr, CP_UTF8));
+    data["outputDir"] = std::string(CW2A(m_outputDir, CP_UTF8));
+
+    json playersArray = json::array();
+    for (int i = 0; i < 4; i++) {
+        json p;
+        p["team"] = 0;
+        p["name"] = std::string(CW2A(m_players[i].name, CP_UTF8));
+        p["kills"] = m_players[i].kills;
+        p["deaths"] = m_players[i].deaths;
+        p["akCount"] = m_players[i].akCount;
+        p["seatLabel"] = std::string(CW2A(GetPickSeatLabelForIndex(i), CP_UTF8));
+        json aliases = json::array();
+        for (auto& a : m_players[i].aliases) {
+            aliases.push_back(std::string(CW2A(a.name, CP_UTF8)));
+        }
+        p["aliases"] = aliases;
+        playersArray.push_back(p);
+    }
+
+    for (int i = 4; i < 8; i++) {
+        json p;
+        p["team"] = 1;
+        p["name"] = std::string(CW2A(m_players[i].name, CP_UTF8));
+        p["kills"] = m_players[i].kills;
+        p["deaths"] = m_players[i].deaths;
+        p["akCount"] = m_players[i].akCount;
+        p["seatLabel"] = std::string(CW2A(GetPickSeatLabelForIndex(i), CP_UTF8));
+        json aliases = json::array();
+        for (auto& a : m_players[i].aliases) {
+            aliases.push_back(std::string(CW2A(a.name, CP_UTF8)));
+        }
+        p["aliases"] = aliases;
+        playersArray.push_back(p);
+    }
+    data["players"] = playersArray;
+
+    json recentJson = json::array();
+    for (auto it = m_recentEvents.rbegin(); it != m_recentEvents.rend(); ++it) {
+        const RecentEvent& ev = *it;
+        json e;
+        e["id"] = ev.id;
+        e["time"] = std::string(CW2A(ev.timeText, CP_UTF8));
+        e["triggerSide"] = std::string(CW2A(ev.triggerSide == 0 ? L"左侧死亡" : (ev.triggerSide == 1 ? L"右侧死亡" : L"未知"), CP_UTF8));
+        e["killer"] = std::string(CW2A(ev.killer, CP_UTF8));
+        e["dead"] = std::string(CW2A(ev.dead, CP_UTF8));
+        e["killerTeam"] = ev.killerTeam;
+        e["deadTeam"] = ev.deadTeam;
+        e["status"] = std::string(CW2A(ev.status, CP_UTF8));
+        e["statsApplied"] = ev.statsApplied;
+        e["undone"] = ev.undone;
+        e["algorithm"] = std::string(CW2A(ev.algorithmName, CP_UTF8));
+        e["ocrSummary"] = std::string(CW2A(ev.ocrSummary, CP_UTF8));
+        e["candidateSummary"] = std::string(CW2A(ev.candidateSummary, CP_UTF8));
+        e["snapshotPath"] = std::string(CW2A(ev.snapshotPath, CP_UTF8));
+        recentJson.push_back(e);
+    }
+    data["recentEvents"] = recentJson;
+
+    json dbJson = json::object();
+    for (auto const& [name, aliases] : m_aliasDB) {
+        std::string utf8Name = std::string(CW2A(name, CP_UTF8));
+        CString normalizedAliases = DnfNormalizeAliasListString(aliases);
+        std::string utf8Aliases = std::string(CW2A(normalizedAliases, CP_UTF8));
+        dbJson[utf8Name] = utf8Aliases;
+    }
+    data["fullAliasDB"] = dbJson;
+
+    return data;
+}
+
+std::string CDNFGameCaptureDlg::BuildKillDisplayStatePayload()
+{
+    try {
+        std::lock_guard<std::mutex> dataLock(m_dataMutex);
+        json j;
+        j["action"] = "sync_state";
+        j["data"] = DnfBuildSharedWebStateJson();
+        return j.dump();
+    }
+    catch (const std::exception& e) {
+        json err;
+        err["action"] = "sync_state";
+        err["error"] = e.what();
+        err["data"] = json::object();
+        return err.dump();
+    }
+    catch (...) {
+        json err;
+        err["action"] = "sync_state";
+        err["error"] = "unknown";
+        err["data"] = json::object();
+        return err.dump();
+    }
+}
+
 void CDNFGameCaptureDlg::BroadcastStateToWeb()
 {
     if (m_pWebDlg == nullptr) return;
@@ -10134,125 +10794,41 @@ void CDNFGameCaptureDlg::BroadcastStateToWeb()
     try {
         json j;
         j["action"] = "sync_state";
-        j["data"]["blueScore"] = m_totalScoreBlue;
-        j["data"]["redScore"] = m_totalScoreRed;
-
-        // 🚨 【新增 1】：同步监控运行状态
-        j["data"]["isMonitoring"] = (m_bIsRunning == TRUE);
-        j["data"]["isStartPending"] = (m_bOcrStartPending.load() == true);
-        j["data"]["isFlipped"] = (m_bFlipSides == true);         // 👈 新增
-        j["data"]["isMfcVisible"] = (IsWindowVisible() == TRUE); // 👈 新增
-        j["data"]["deathXAlgorithm"] = m_nDeathAlgorithmChoice;
-        j["data"]["outputSeatLabelToKillFile"] = m_bOutputSeatLabelToKillFile;
-        j["data"]["redPickMode"] = m_bRedPickFirst ? "first" : "second";
-        j["data"]["redPickFirst"] = m_bRedPickFirst;
-        j["data"]["scoreboardTextStyles"] = DnfBuildScoreboardTextStylesJson(m_iniPath);
-        j["data"]["systemFonts"] = DnfBuildInstalledFontListJson();
-
-        bool deathPatchInstalled = false;
-        wchar_t cachedImagePacks2[MAX_PATH] = { 0 };
-        ::GetPrivateProfileString(L"Settings", L"ImagePacks2Path", L"", cachedImagePacks2, MAX_PATH, m_iniPath);
-        CString cachedPatchDir = cachedImagePacks2;
-        cachedPatchDir.Trim();
-        if (!cachedPatchDir.IsEmpty()) {
-            deathPatchInstalled = DnfFileExists(DnfJoinPath(cachedPatchDir, DEATH_X_PATCH_FILE_NAME));
-        }
-        j["data"]["deathPatchInstalled"] = deathPatchInstalled;
-
-        // 🚨 【新增 2】：计算并同步授权时间文字
-        j["data"]["isAuthValid"] = (m_bIsAuthValid == true);
-        CString expStr = L"";
-        if (m_bIsTrial) {
-            expStr.Format(L"试用至: %s", FormatTimeStamp(m_trialEnd));
-        }
-        else if (m_bIsAuthValid) {
-            if (m_cloudExpireTime == -1) expStr = L"验证中...";
-            else if (m_cloudExpireTime > 0) expStr.Format(L"到期: %s", FormatTimeStamp(m_cloudExpireTime));
-            else expStr = L"永久有效";
-        }
-        else {
-            expStr = L"未激活";
-        }
-        j["data"]["authText"] = std::string(CW2A(expStr, CP_UTF8));
-        // 🚨【新增】：同步当前输出目录给网页
-        j["data"]["outputDir"] = std::string(CW2A(m_outputDir, CP_UTF8));
-
-        json playersArray = json::array();
-
-        // 🚨 先打包：红队 (MFC 0-3)
-        for (int i = 0; i < 4; i++) {
-            json p;
-            p["team"] = 0;
-            p["name"] = std::string(CW2A(m_players[i].name, CP_UTF8));
-            p["kills"] = m_players[i].kills;
-            p["deaths"] = m_players[i].deaths;
-            p["akCount"] = m_players[i].akCount;
-            p["seatLabel"] = std::string(CW2A(GetPickSeatLabelForIndex(i), CP_UTF8));
-            json aliases = json::array();
-            for (auto& a : m_players[i].aliases) {
-                aliases.push_back(std::string(CW2A(a.name, CP_UTF8)));
-            }
-            p["aliases"] = aliases;
-            playersArray.push_back(p);
-        }
-
-        // 🚨 后打包：蓝队 (MFC 4-7)
-        for (int i = 4; i < 8; i++) {
-            json p;
-            p["team"] = 1;
-            p["name"] = std::string(CW2A(m_players[i].name, CP_UTF8));
-            p["kills"] = m_players[i].kills;
-            p["deaths"] = m_players[i].deaths;
-            p["akCount"] = m_players[i].akCount;
-            p["seatLabel"] = std::string(CW2A(GetPickSeatLabelForIndex(i), CP_UTF8));
-            json aliases = json::array();
-            for (auto& a : m_players[i].aliases) {
-                aliases.push_back(std::string(CW2A(a.name, CP_UTF8)));
-            }
-            p["aliases"] = aliases;
-            playersArray.push_back(p);
-        }
-
-        j["data"]["players"] = playersArray;
-
-        json recentJson = json::array();
-        for (auto it = m_recentEvents.rbegin(); it != m_recentEvents.rend(); ++it) {
-            const RecentEvent& ev = *it;
-            json e;
-            e["id"] = ev.id;
-            e["time"] = std::string(CW2A(ev.timeText, CP_UTF8));
-            e["triggerSide"] = std::string(CW2A(ev.triggerSide == 0 ? L"左侧死亡" : (ev.triggerSide == 1 ? L"右侧死亡" : L"未知"), CP_UTF8));
-            e["killer"] = std::string(CW2A(ev.killer, CP_UTF8));
-            e["dead"] = std::string(CW2A(ev.dead, CP_UTF8));
-            e["killerTeam"] = ev.killerTeam;
-            e["deadTeam"] = ev.deadTeam;
-            e["status"] = std::string(CW2A(ev.status, CP_UTF8));
-            e["statsApplied"] = ev.statsApplied;
-            e["undone"] = ev.undone;
-            e["algorithm"] = std::string(CW2A(ev.algorithmName, CP_UTF8));
-            e["ocrSummary"] = std::string(CW2A(ev.ocrSummary, CP_UTF8));
-            e["candidateSummary"] = std::string(CW2A(ev.candidateSummary, CP_UTF8));
-            e["snapshotPath"] = std::string(CW2A(ev.snapshotPath, CP_UTF8));
-            recentJson.push_back(e);
-        }
-        j["data"]["recentEvents"] = recentJson;
-
-        // --- 2. 打包整个小号库，供前端补全使用 ---
-        json dbJson = json::object();
-        for (auto const& [name, aliases] : m_aliasDB) {
-            // 🚨 必须显式套上一层 std::string()，否则 JSON 库会因为类型不匹配而报错！
-            std::string utf8Name = std::string(CW2A(name, CP_UTF8));
-            CString normalizedAliases = DnfNormalizeAliasListString(aliases);
-            std::string utf8Aliases = std::string(CW2A(normalizedAliases, CP_UTF8));
-            dbJson[utf8Name] = utf8Aliases;
-        }
-        j["data"]["fullAliasDB"] = dbJson;
+        j["data"] = DnfBuildSharedWebStateJson();
 
         CString jsonStr = CA2W(j.dump().c_str(), CP_UTF8);
         m_pWebDlg->SendStateToWeb(jsonStr);
         m_pWebDlg->ApplyFixedWindowHeight();
     }
     catch (...) {}
+}
+
+CString CDNFGameCaptureDlg::GetKillDisplayObsUrl() const
+{
+    return CString(KILL_DISPLAY_OBS_URL_W);
+}
+
+void CDNFGameCaptureDlg::OpenKillDisplayWindow()
+{
+    if (!m_bKillDisplayHttpReady) {
+        CString msg = m_killDisplayHttpError;
+        if (msg.IsEmpty()) msg = L"击杀展示页本地服务未启动。";
+        AppLog(L"⚠️ [击杀展示页] " + msg, RGB(255, 180, 0));
+        ShowCenteredMsgBox(msg, L"击杀展示页", MB_ICONWARNING | MB_OK);
+        return;
+    }
+
+    if (m_pKillDisplayDlg == nullptr) {
+        m_pKillDisplayDlg = new CKillDisplayDlg(nullptr);
+        m_pKillDisplayDlg->Create(IDD_WEB_SCORE_DIALOG, nullptr);
+    }
+
+    if (m_pKillDisplayDlg) {
+        m_pKillDisplayDlg->ShowWindow(SW_SHOW);
+        m_pKillDisplayDlg->ShowWindow(SW_RESTORE);
+        m_pKillDisplayDlg->SetWindowPos(nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW);
+        m_pKillDisplayDlg->SetForegroundWindow();
+    }
 }
 
 // 将数据同步到树状控件（带视觉状态记忆）
