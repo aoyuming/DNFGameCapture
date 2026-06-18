@@ -852,7 +852,20 @@ const KILL_DISPLAY_LAYOUT_DEFAULTS = {
     shadow: 0,
     pickColumnWidth: 54,
     statColumnWidth: 61,
-    akColumnWidth: 24
+    akColumnWidth: 24,
+    pageScale: 100,
+    teamNameOffsetX: -9,
+    teamNameOffsetY: -9,
+    pickLabelOffsetX: -7,
+    pickLabelOffsetY: 0,
+    playerNameOffsetX: 0,
+    playerNameOffsetY: 0,
+    killNumberOffsetX: -21,
+    killNumberOffsetY: 0,
+    deathNumberOffsetX: -11,
+    deathNumberOffsetY: 0,
+    akMarkOffsetX: 5,
+    akMarkOffsetY: 0
 };
 
 const KILL_DISPLAY_LAYOUT_FIELDS = [
@@ -870,7 +883,27 @@ const KILL_DISPLAY_LAYOUT_FIELDS = [
     { key: 'shadow', label: '整体阴影', min: 0, max: 48, unit: 'px' },
     { key: 'pickColumnWidth', label: '选人列宽', min: 36, max: 110, unit: 'px' },
     { key: 'statColumnWidth', label: '战绩列宽', min: 28, max: 90, unit: 'px' },
-    { key: 'akColumnWidth', label: 'AK列宽', min: 24, max: 80, unit: 'px' }
+    { key: 'akColumnWidth', label: 'AK列宽', min: 24, max: 80, unit: 'px' },
+    { key: 'pageScale', label: '整体缩放', min: 60, max: 180, unit: '%' },
+    { key: 'teamNameOffsetX', label: '队名横移', min: -180, max: 180, unit: 'px', hidden: true },
+    { key: 'teamNameOffsetY', label: '队名纵移', min: -120, max: 120, unit: 'px', hidden: true },
+    { key: 'pickLabelOffsetX', label: '选人横移', min: -180, max: 180, unit: 'px', hidden: true },
+    { key: 'pickLabelOffsetY', label: '选人纵移', min: -120, max: 120, unit: 'px', hidden: true },
+    { key: 'playerNameOffsetX', label: '主号横移', min: -180, max: 180, unit: 'px', hidden: true },
+    { key: 'playerNameOffsetY', label: '主号纵移', min: -120, max: 120, unit: 'px', hidden: true },
+    { key: 'killNumberOffsetX', label: '杀横移', min: -180, max: 180, unit: 'px', hidden: true },
+    { key: 'killNumberOffsetY', label: '杀纵移', min: -120, max: 120, unit: 'px', hidden: true },
+    { key: 'deathNumberOffsetX', label: '死横移', min: -180, max: 180, unit: 'px', hidden: true },
+    { key: 'deathNumberOffsetY', label: '死纵移', min: -120, max: 120, unit: 'px', hidden: true },
+    { key: 'akMarkOffsetX', label: 'AK横移', min: -180, max: 180, unit: 'px', hidden: true },
+    { key: 'akMarkOffsetY', label: 'AK纵移', min: -120, max: 120, unit: 'px', hidden: true }
+];
+const KILL_HORIZONTAL_ONLY_OFFSET_Y_KEYS = [
+    'pickLabelOffsetY',
+    'playerNameOffsetY',
+    'killNumberOffsetY',
+    'deathNumberOffsetY',
+    'akMarkOffsetY'
 ];
 
 const KILL_DISPLAY_TEXT_STYLE_TYPES = [
@@ -879,49 +912,56 @@ const KILL_DISPLAY_TEXT_STYLE_TYPES = [
         cssKey: 'team-name',
         label: '队名',
         allowTeamColor: true,
-        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 49, colorMode: 'team', color: '#ffffff', strokeColor: '#000000', strokeWidth: 4, glow: 0 }
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 54, colorMode: 'team', color: '#ffffff', strokeColor: '#000000', strokeWidth: 4, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'score',
         cssKey: 'score',
         label: '比分',
         allowTeamColor: true,
-        defaults: { fontFamily: 'Arial Black', fontSize: 70, colorMode: 'team', color: '#ffffff', strokeColor: '#000000', strokeWidth: 3, glow: 2 }
+        defaults: { fontFamily: 'Arial Black', fontSize: 70, colorMode: 'team', color: '#ffffff', strokeColor: '#000000', strokeWidth: 3, glow: 2, letterSpacing: 0 }
     },
     {
         key: 'header',
         cssKey: 'header',
         label: '表头',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 31, colorMode: 'custom', color: '#a9abb9', strokeColor: '#000000', strokeWidth: 2, glow: 0 }
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 31, colorMode: 'custom', color: '#a9abb9', strokeColor: '#000000', strokeWidth: 2, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'pickLabel',
         cssKey: 'pick-label',
         label: '选人顺序',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 27, colorMode: 'custom', color: '#a1a1a1', strokeColor: '#000000', strokeWidth: 2, glow: 0 }
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 27, colorMode: 'custom', color: '#6fc8b9', strokeColor: '#000000', strokeWidth: 3, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'playerName',
         cssKey: 'player-name',
         label: '主号名',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Arial Black', fontSize: 43, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 5, glow: 2 }
+        defaults: { fontFamily: 'Arial Black', fontSize: 43, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 5, glow: 2, letterSpacing: 0 }
     },
     {
-        key: 'statNumber',
-        cssKey: 'stat-number',
-        label: '击杀/死亡',
+        key: 'killNumber',
+        cssKey: 'kill-number',
+        label: '杀',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 50, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 4, glow: 0 }
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 50, colorMode: 'custom', color: '#ab986d', strokeColor: '#000000', strokeWidth: 4, glow: 0, letterSpacing: 0 }
+    },
+    {
+        key: 'deathNumber',
+        cssKey: 'death-number',
+        label: '死',
+        allowTeamColor: false,
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 50, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 4, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'akMark',
         cssKey: 'ak-mark',
         label: 'AK标记',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 40, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 1, glow: 0 }
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 40, colorMode: 'custom', color: '#f7d67e', strokeColor: '#000000', strokeWidth: 1, glow: 0, letterSpacing: 0 }
     }
 ];
 
@@ -1048,7 +1088,9 @@ function getDefaultKillDisplaySettings() {
 function normalizeKillDisplayLayout(layout = {}) {
     const normalized = {};
     KILL_DISPLAY_LAYOUT_FIELDS.forEach(field => {
-        normalized[field.key] = clampNumber(layout?.[field.key], field.min, field.max, KILL_DISPLAY_LAYOUT_DEFAULTS[field.key]);
+        normalized[field.key] = KILL_HORIZONTAL_ONLY_OFFSET_Y_KEYS.includes(field.key)
+            ? 0
+            : clampNumber(layout?.[field.key], field.min, field.max, KILL_DISPLAY_LAYOUT_DEFAULTS[field.key]);
     });
     return normalized;
 }
@@ -1065,14 +1107,16 @@ function normalizeKillDisplayTextStyle(key, value = {}) {
         color: normalizeHexColor(style.color, defaults.color),
         strokeColor: normalizeHexColor(style.strokeColor, defaults.strokeColor),
         strokeWidth: clampNumber(style.strokeWidth, 0, 8, defaults.strokeWidth),
-        glow: clampNumber(style.glow, 0, 36, defaults.glow)
+        glow: clampNumber(style.glow, 0, 36, defaults.glow),
+        letterSpacing: clampNumber(style.letterSpacing, -4, 16, defaults.letterSpacing || 0)
     };
 }
 
 function normalizeKillDisplayTextStyles(styles = {}) {
     const normalized = {};
     KILL_DISPLAY_TEXT_STYLE_TYPES.forEach(type => {
-        normalized[type.key] = normalizeKillDisplayTextStyle(type.key, styles?.[type.key]);
+        const legacyStatStyle = (type.key === 'killNumber' || type.key === 'deathNumber') ? styles?.statNumber : null;
+        normalized[type.key] = normalizeKillDisplayTextStyle(type.key, styles?.[type.key] || legacyStatStyle);
     });
     return normalized;
 }
@@ -1284,7 +1328,7 @@ function renderKillLayoutEditor() {
 
     const grid = document.createElement('div');
     grid.className = 'kill-layout-grid';
-    KILL_DISPLAY_LAYOUT_FIELDS.forEach(field => {
+    KILL_DISPLAY_LAYOUT_FIELDS.filter(field => !field.hidden).forEach(field => {
         const value = layout[field.key];
         const item = document.createElement('label');
         item.className = 'kill-layout-field';
@@ -1402,6 +1446,9 @@ function updateActiveStyleFromEditor(changedId = '') {
         strokeWidth: readAppearanceNumber('style-stroke-width', 'style-stroke-width-value', 0, appearanceScope === 'kill' ? 8 : 4, current.strokeWidth),
         glow: readAppearanceNumber('style-glow', 'style-glow-value', 0, appearanceScope === 'kill' ? 36 : 24, current.glow)
     };
+    if (appearanceScope === 'kill') {
+        next.letterSpacing = clampNumber(current.letterSpacing, -4, 16, 0);
+    }
     if (appearanceScope === 'kill') {
         killDisplaySettings.textStyles[type.key] = normalizeKillDisplayTextStyle(type.key, next);
         applyKillDisplaySettings(killDisplaySettings);

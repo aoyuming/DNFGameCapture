@@ -162,6 +162,7 @@ public:
     // 将主窗口的数据广播给 Web
     void BroadcastStateToWeb();
     std::string BuildKillDisplayStatePayload();
+    bool SaveKillDisplaySettingsPayload(const std::string& requestBody, std::string& responseBody);
 
 protected:
     // 接收新窗口发来的 Web 指令

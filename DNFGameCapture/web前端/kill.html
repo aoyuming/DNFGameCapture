@@ -16,9 +16,9 @@
                         <span class="kill-team-score" id="kill-red-score">0</span>
                     </div>
                     <div class="kill-stat-header">
-                        <span>杀</span>
-                        <span>死</span>
-                        <span>AK</span>
+                        <span data-style-key="killNumber" data-fit-text>杀</span>
+                        <span data-style-key="deathNumber" data-fit-text>死</span>
+                        <span data-style-key="akMark" data-fit-text>AK</span>
                     </div>
                 </header>
                 <div class="kill-rows" id="kill-red-rows"></div>
@@ -31,15 +31,47 @@
                         <span class="kill-team-score" id="kill-blue-score">0</span>
                     </div>
                     <div class="kill-stat-header">
-                        <span>杀</span>
-                        <span>死</span>
-                        <span>AK</span>
+                        <span data-style-key="killNumber" data-fit-text>杀</span>
+                        <span data-style-key="deathNumber" data-fit-text>死</span>
+                        <span data-style-key="akMark" data-fit-text>AK</span>
                     </div>
                 </header>
                 <div class="kill-rows" id="kill-blue-rows"></div>
             </section>
         </div>
         <div class="kill-status" id="kill-status">等待数据...</div>
+        <section class="kill-edit-toolbar" id="kill-edit-toolbar" hidden aria-label="kill display appearance editor">
+            <div class="kill-edit-head">
+                <strong>外观编辑</strong>
+                <span>F2/双击隐藏</span>
+            </div>
+            <label>
+                <span>对象</span>
+                <select id="kill-edit-target">
+                    <option value="page">整体页面</option>
+                    <option value="teamName">队伍名</option>
+                    <option value="pickLabel">选人顺序</option>
+                    <option value="playerName">主号</option>
+                    <option value="killNumber">杀</option>
+                    <option value="deathNumber">死</option>
+                    <option value="akMark">AK</option>
+                </select>
+            </label>
+            <label>
+                <span>字体</span>
+                <input id="kill-edit-font" list="kill-edit-font-list" autocomplete="off">
+                <datalist id="kill-edit-font-list"></datalist>
+            </label>
+            <div class="kill-edit-grid">
+                <label><span>字号</span><input id="kill-edit-size" type="number" min="10" max="76" step="1"></label>
+                <label><span>颜色</span><input id="kill-edit-color" type="color"></label>
+                <label><span>描边</span><input id="kill-edit-stroke" type="number" min="0" max="8" step="1"></label>
+                <label><span>字距</span><input id="kill-edit-letter" type="number" min="-4" max="16" step="1"></label>
+                <label><span>发光</span><input id="kill-edit-glow" type="number" min="0" max="36" step="1"></label>
+                <label><span id="kill-edit-width-label">列宽</span><input id="kill-edit-width" type="number" min="0" max="120" step="1"></label>
+            </div>
+            <div class="kill-edit-hint">拖文字移动整列；空白滚轮缩放整页；滚轮改字号，Shift+滚轮改列宽/间距，Ctrl+滚轮改描边。</div>
+        </section>
         <div class="kill-resize-grip" id="kill-resize-grip" aria-hidden="true"></div>
     </main>
     <script src="kill.js?v=20260617-kill-display" defer></script>

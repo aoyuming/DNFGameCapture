@@ -15,6 +15,9 @@
 #include <set>
 #include <fstream>
 #include <sstream>
+#include <climits>
+#include <cstdlib>
+#include <cstring>
 
 #pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "winhttp.lib")
@@ -107,16 +110,17 @@ struct DnfScoreboardStyleDefault {
     const wchar_t* strokeColor;
     int strokeWidth;
     int glow;
+    int letterSpacing;
     bool allowTeamColor;
 };
 
 static const DnfScoreboardStyleDefault SCOREBOARD_STYLE_DEFAULTS[] = {
-    { "teamName", L"Microsoft YaHei", 38, L"team",   L"#ffffff", L"#000000", 0, 8,  true },
-    { "score",    L"Arial Black",     39, L"team",   L"#ffffff", L"#000000", 0, 12, true },
-    { "header",   L"Microsoft YaHei", 22, L"custom", L"#8b8b9f", L"#000000", 0, 0,  false },
-    { "pickLabel",L"Microsoft YaHei", 18, L"custom", L"#a6b7bf", L"#000000", 1, 0,  false },
-    { "playerName",L"Arial Black",    22, L"custom", L"#ffffff", L"#000000", 1, 2,  false },
-    { "statNumber",L"Microsoft YaHei",25, L"custom", L"#ffffff", L"#000000", 1, 0,  false },
+    { "teamName", L"Microsoft YaHei", 38, L"team",   L"#ffffff", L"#000000", 0, 8,  0, true },
+    { "score",    L"Arial Black",     39, L"team",   L"#ffffff", L"#000000", 0, 12, 0, true },
+    { "header",   L"Microsoft YaHei", 22, L"custom", L"#8b8b9f", L"#000000", 0, 0,  0, false },
+    { "pickLabel",L"Microsoft YaHei", 18, L"custom", L"#a6b7bf", L"#000000", 1, 0,  0, false },
+    { "playerName",L"Arial Black",    22, L"custom", L"#ffffff", L"#000000", 1, 2,  0, false },
+    { "statNumber",L"Microsoft YaHei",25, L"custom", L"#ffffff", L"#000000", 1, 0,  0, false },
 };
 
 struct DnfKillDisplayLayoutDefault {
@@ -142,16 +146,30 @@ static const DnfKillDisplayLayoutDefault KILL_DISPLAY_LAYOUT_DEFAULTS[] = {
     { "pickColumnWidth", 54, 36,  110 },
     { "statColumnWidth", 61, 28,   90 },
     { "akColumnWidth",   24, 24,   80 },
+    { "pageScale",      100, 60,  180 },
+    { "teamNameOffsetX", -9, -180, 180 },
+    { "teamNameOffsetY", -9, -120, 120 },
+    { "pickLabelOffsetX",-7, -180, 180 },
+    { "pickLabelOffsetY", 0, -120, 120 },
+    { "playerNameOffsetX",0, -180, 180 },
+    { "playerNameOffsetY",0, -120, 120 },
+    { "killNumberOffsetX",-21, -180, 180 },
+    { "killNumberOffsetY",0, -120, 120 },
+    { "deathNumberOffsetX",-11, -180, 180 },
+    { "deathNumberOffsetY",0, -120, 120 },
+    { "akMarkOffsetX",    5, -180, 180 },
+    { "akMarkOffsetY",    0, -120, 120 },
 };
 
 static const DnfScoreboardStyleDefault KILL_DISPLAY_TEXT_STYLE_DEFAULTS[] = {
-    { "teamName",   L"Microsoft YaHei", 49, L"team",   L"#ffffff", L"#000000", 4, 0, true },
-    { "score",      L"Arial Black",     70, L"team",   L"#ffffff", L"#000000", 3, 2, true },
-    { "header",     L"Microsoft YaHei", 31, L"custom", L"#a9abb9", L"#000000", 2, 0, false },
-    { "pickLabel",  L"Microsoft YaHei", 27, L"custom", L"#a1a1a1", L"#000000", 2, 0, false },
-    { "playerName", L"Arial Black",     43, L"custom", L"#f7ca69", L"#000000", 5, 2, false },
-    { "statNumber", L"Microsoft YaHei", 50, L"custom", L"#f7ca69", L"#000000", 4, 0, false },
-    { "akMark",     L"Microsoft YaHei", 40, L"custom", L"#f7ca69", L"#000000", 1, 0, false },
+    { "teamName",    L"Microsoft YaHei", 54, L"team",   L"#ffffff", L"#000000", 4, 0, 0, true },
+    { "score",       L"Arial Black",     70, L"team",   L"#ffffff", L"#000000", 3, 2, 0, true },
+    { "header",      L"Microsoft YaHei", 31, L"custom", L"#a9abb9", L"#000000", 2, 0, 0, false },
+    { "pickLabel",   L"Microsoft YaHei", 27, L"custom", L"#6fc8b9", L"#000000", 3, 0, 0, false },
+    { "playerName",  L"Arial Black",     43, L"custom", L"#f7ca69", L"#000000", 5, 2, 0, false },
+    { "killNumber",  L"Microsoft YaHei", 50, L"custom", L"#f7ca69", L"#000000", 4, 0, 0, false },
+    { "deathNumber", L"Microsoft YaHei", 50, L"custom", L"#ab986d", L"#000000", 4, 0, 0, false },
+    { "akMark",      L"Microsoft YaHei", 40, L"custom", L"#f7d67e", L"#000000", 1, 0, 0, false },
 };
 
 static CString DnfMakeScoreboardStyleIniKey(const char* styleKey, const char* field)
@@ -356,6 +374,45 @@ static CString DnfReadStyleStringFromSection(const CString& iniPath, const wchar
     return CString(buf);
 }
 
+static bool DnfIsSplitKillStatStyle(const char* key)
+{
+    return strcmp(key, "killNumber") == 0 || strcmp(key, "deathNumber") == 0;
+}
+
+static CString DnfReadKillDisplayStyleString(const CString& iniPath, const DnfScoreboardStyleDefault& def, const char* field, const wchar_t* fallback)
+{
+    if (iniPath.IsEmpty()) return CString(fallback);
+
+    static const wchar_t* missing = L"__DNF_MISSING_STYLE__";
+    CString key = DnfMakeScoreboardStyleIniKey(def.key, field);
+    wchar_t buf[256] = { 0 };
+    ::GetPrivateProfileString(KILL_DISPLAY_STYLE_SECTION, key, missing, buf, 256, iniPath);
+    CString value(buf);
+    if (value != missing) return value;
+
+    if (DnfIsSplitKillStatStyle(def.key)) {
+        CString legacyKey = DnfMakeScoreboardStyleIniKey("statNumber", field);
+        ::GetPrivateProfileString(KILL_DISPLAY_STYLE_SECTION, legacyKey, fallback, buf, 256, iniPath);
+        return CString(buf);
+    }
+    return CString(fallback);
+}
+
+static int DnfReadKillDisplayStyleInt(const CString& iniPath, const DnfScoreboardStyleDefault& def, const char* field, int fallback)
+{
+    if (iniPath.IsEmpty()) return fallback;
+
+    CString key = DnfMakeScoreboardStyleIniKey(def.key, field);
+    int value = ::GetPrivateProfileInt(KILL_DISPLAY_STYLE_SECTION, key, INT_MIN, iniPath);
+    if (value != INT_MIN) return value;
+
+    if (DnfIsSplitKillStatStyle(def.key)) {
+        CString legacyKey = DnfMakeScoreboardStyleIniKey("statNumber", field);
+        return ::GetPrivateProfileInt(KILL_DISPLAY_STYLE_SECTION, legacyKey, fallback, iniPath);
+    }
+    return fallback;
+}
+
 static void DnfWriteStyleStringToSection(const CString& iniPath, const wchar_t* section, const DnfScoreboardStyleDefault& def, const char* field, const CString& value)
 {
     CString key = DnfMakeScoreboardStyleIniKey(def.key, field);
@@ -372,28 +429,27 @@ static void DnfWriteStyleIntToSection(const CString& iniPath, const wchar_t* sec
 static json DnfBuildKillDisplayStyleJson(const CString& iniPath, const DnfScoreboardStyleDefault& def)
 {
     CString fontFamily = DnfNormalizeScoreboardFontFamily(
-        DnfReadStyleStringFromSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "fontFamily", def.fontFamily),
+        DnfReadKillDisplayStyleString(iniPath, def, "fontFamily", def.fontFamily),
         def.fontFamily);
     CString colorMode = DnfNormalizeScoreboardColorMode(
-        DnfReadStyleStringFromSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "colorMode", def.colorMode),
+        DnfReadKillDisplayStyleString(iniPath, def, "colorMode", def.colorMode),
         def);
     CString color = DnfNormalizeScoreboardColor(
-        DnfReadStyleStringFromSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "color", def.color),
+        DnfReadKillDisplayStyleString(iniPath, def, "color", def.color),
         def.color);
     CString strokeColor = DnfNormalizeScoreboardColor(
-        DnfReadStyleStringFromSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "strokeColor", def.strokeColor),
+        DnfReadKillDisplayStyleString(iniPath, def, "strokeColor", def.strokeColor),
         def.strokeColor);
 
     int fontSize = def.fontSize;
     int strokeWidth = def.strokeWidth;
     int glow = def.glow;
+    int letterSpacing = def.letterSpacing;
     if (!iniPath.IsEmpty()) {
-        CString fontSizeKey = DnfMakeScoreboardStyleIniKey(def.key, "fontSize");
-        CString strokeWidthKey = DnfMakeScoreboardStyleIniKey(def.key, "strokeWidth");
-        CString glowKey = DnfMakeScoreboardStyleIniKey(def.key, "glow");
-        fontSize = ::GetPrivateProfileInt(KILL_DISPLAY_STYLE_SECTION, fontSizeKey, def.fontSize, iniPath);
-        strokeWidth = ::GetPrivateProfileInt(KILL_DISPLAY_STYLE_SECTION, strokeWidthKey, def.strokeWidth, iniPath);
-        glow = ::GetPrivateProfileInt(KILL_DISPLAY_STYLE_SECTION, glowKey, def.glow, iniPath);
+        fontSize = DnfReadKillDisplayStyleInt(iniPath, def, "fontSize", def.fontSize);
+        strokeWidth = DnfReadKillDisplayStyleInt(iniPath, def, "strokeWidth", def.strokeWidth);
+        glow = DnfReadKillDisplayStyleInt(iniPath, def, "glow", def.glow);
+        letterSpacing = DnfReadKillDisplayStyleInt(iniPath, def, "letterSpacing", def.letterSpacing);
     }
 
     json style;
@@ -404,6 +460,7 @@ static json DnfBuildKillDisplayStyleJson(const CString& iniPath, const DnfScoreb
     style["strokeColor"] = DnfJsonUtf8(strokeColor);
     style["strokeWidth"] = DnfClampScoreboardInt(strokeWidth, 0, 8);
     style["glow"] = DnfClampScoreboardInt(glow, 0, 36);
+    style["letterSpacing"] = DnfClampScoreboardInt(letterSpacing, -4, 16);
     return style;
 }
 
@@ -481,6 +538,7 @@ static void DnfSaveKillDisplaySettingsJson(const CString& iniPath, const json& s
         int fontSize = DnfClampScoreboardInt(DnfJsonScoreboardInt(style, "fontSize", def.fontSize), 10, 76);
         int strokeWidth = DnfClampScoreboardInt(DnfJsonScoreboardInt(style, "strokeWidth", def.strokeWidth), 0, 8);
         int glow = DnfClampScoreboardInt(DnfJsonScoreboardInt(style, "glow", def.glow), 0, 36);
+        int letterSpacing = DnfClampScoreboardInt(DnfJsonScoreboardInt(style, "letterSpacing", def.letterSpacing), -4, 16);
 
         DnfWriteStyleStringToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "fontFamily", fontFamily);
         DnfWriteStyleIntToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "fontSize", fontSize);
@@ -489,6 +547,7 @@ static void DnfSaveKillDisplaySettingsJson(const CString& iniPath, const json& s
         DnfWriteStyleStringToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "strokeColor", strokeColor);
         DnfWriteStyleIntToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "strokeWidth", strokeWidth);
         DnfWriteStyleIntToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "glow", glow);
+        DnfWriteStyleIntToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "letterSpacing", letterSpacing);
     }
 }
 
@@ -572,6 +631,8 @@ static void DnfHttpSendResponse(SOCKET client, int status, const char* reason, c
         << "Content-Type: " << contentType << "\r\n"
         << "Content-Length: " << body.size() << "\r\n"
         << "Access-Control-Allow-Origin: *\r\n"
+        << "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+        << "Access-Control-Allow-Headers: Content-Type\r\n"
         << "Cache-Control: no-store, no-cache, must-revalidate\r\n"
         << "Connection: close\r\n\r\n";
     const std::string header = oss.str();
@@ -618,6 +679,64 @@ static std::string DnfHttpParsePath(const std::string& request)
     return path;
 }
 
+static std::string DnfHttpParseMethod(const std::string& request)
+{
+    const size_t firstSpace = request.find(' ');
+    if (firstSpace == std::string::npos) return "";
+    return request.substr(0, firstSpace);
+}
+
+static size_t DnfHttpHeaderEnd(const std::string& request)
+{
+    const size_t headerEnd = request.find("\r\n\r\n");
+    return headerEnd == std::string::npos ? std::string::npos : headerEnd + 4;
+}
+
+static int DnfHttpContentLength(const std::string& request)
+{
+    const std::string needle = "\r\nContent-Length:";
+    size_t pos = request.find(needle);
+    if (pos == std::string::npos) {
+        const std::string lowerNeedle = "\r\ncontent-length:";
+        pos = request.find(lowerNeedle);
+        if (pos == std::string::npos) return 0;
+    }
+
+    pos = request.find(':', pos);
+    if (pos == std::string::npos) return 0;
+    const size_t end = request.find("\r\n", pos);
+    const std::string raw = request.substr(pos + 1, end == std::string::npos ? std::string::npos : end - pos - 1);
+    int value = atoi(raw.c_str());
+    return value > 0 && value < 1024 * 1024 ? value : 0;
+}
+
+static void DnfHttpReadBodyIfNeeded(SOCKET client, std::string& request)
+{
+    const size_t headerEnd = DnfHttpHeaderEnd(request);
+    if (headerEnd == std::string::npos) return;
+
+    const int contentLength = DnfHttpContentLength(request);
+    if (contentLength <= 0) return;
+
+    while ((int)(request.size() - headerEnd) < contentLength && request.size() < headerEnd + (size_t)contentLength) {
+        char buf[2048] = {};
+        int n = ::recv(client, buf, sizeof(buf), 0);
+        if (n <= 0) break;
+        request.append(buf, buf + n);
+    }
+}
+
+static std::string DnfHttpRequestBody(const std::string& request)
+{
+    const size_t headerEnd = DnfHttpHeaderEnd(request);
+    if (headerEnd == std::string::npos || headerEnd >= request.size()) return "";
+    const int contentLength = DnfHttpContentLength(request);
+    if (contentLength <= 0) return "";
+    const size_t available = request.size() - headerEnd;
+    const size_t bodyLength = available < (size_t)contentLength ? available : (size_t)contentLength;
+    return request.substr(headerEnd, bodyLength);
+}
+
 static bool DnfKillDisplayStaticPathForRoute(const CString& webDir, const std::string& route, CString& outPath)
 {
     std::string name;
@@ -645,14 +764,24 @@ static void DnfHandleKillDisplayHttpClient(SOCKET client)
         if (n <= 0) break;
         request.append(buf, buf + n);
     }
+    DnfHttpReadBodyIfNeeded(client, request);
 
-    if (request.find("GET ") != 0) {
-        DnfHttpSendResponse(client, 405, "Method Not Allowed", "text/plain; charset=utf-8", "GET only");
+    const std::string method = DnfHttpParseMethod(request);
+    if (method == "OPTIONS") {
+        DnfHttpSendResponse(client, 204, "No Content", "text/plain; charset=utf-8", "");
+        return;
+    }
+    if (method != "GET" && method != "POST") {
+        DnfHttpSendResponse(client, 405, "Method Not Allowed", "text/plain; charset=utf-8", "GET/POST only");
         return;
     }
 
     const std::string route = DnfHttpParsePath(request);
     if (route == "/api/state") {
+        if (method != "GET") {
+            DnfHttpSendResponse(client, 405, "Method Not Allowed", "text/plain; charset=utf-8", "GET only");
+            return;
+        }
         CDNFGameCaptureDlg* host = nullptr;
         {
             std::lock_guard<std::mutex> lock(g_killDisplayHttpServer.mutex);
@@ -660,6 +789,26 @@ static void DnfHandleKillDisplayHttpClient(SOCKET client)
         }
         const std::string body = host ? host->BuildKillDisplayStatePayload() : "{\"action\":\"sync_state\",\"data\":{}}";
         DnfHttpSendResponse(client, 200, "OK", "application/json; charset=utf-8", body);
+        return;
+    }
+
+    if (route == "/api/kill-display-settings") {
+        if (method != "POST") {
+            DnfHttpSendResponse(client, 405, "Method Not Allowed", "text/plain; charset=utf-8", "POST only");
+            return;
+        }
+        CDNFGameCaptureDlg* host = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_killDisplayHttpServer.mutex);
+            host = g_killDisplayHttpServer.host;
+        }
+        std::string responseBody;
+        if (!host || !host->SaveKillDisplaySettingsPayload(DnfHttpRequestBody(request), responseBody)) {
+            if (responseBody.empty()) responseBody = "{\"ok\":false}";
+            DnfHttpSendResponse(client, 400, "Bad Request", "application/json; charset=utf-8", responseBody);
+            return;
+        }
+        DnfHttpSendResponse(client, 200, "OK", "application/json; charset=utf-8", responseBody);
         return;
     }
 
@@ -10784,6 +10933,36 @@ std::string CDNFGameCaptureDlg::BuildKillDisplayStatePayload()
         err["error"] = "unknown";
         err["data"] = json::object();
         return err.dump();
+    }
+}
+
+bool CDNFGameCaptureDlg::SaveKillDisplaySettingsPayload(const std::string& requestBody, std::string& responseBody)
+{
+    try {
+        json incoming = json::parse(requestBody.empty() ? "{}" : requestBody);
+        if (!incoming.is_object() || !incoming.contains("settings") || !incoming["settings"].is_object()) {
+            responseBody = "{\"ok\":false,\"error\":\"missing settings\"}";
+            return false;
+        }
+
+        DnfSaveKillDisplaySettingsJson(m_iniPath, incoming["settings"]);
+
+        json response;
+        response["ok"] = true;
+        response["settings"] = DnfBuildKillDisplaySettingsJson(m_iniPath);
+        responseBody = response.dump();
+        return true;
+    }
+    catch (const std::exception& e) {
+        json response;
+        response["ok"] = false;
+        response["error"] = e.what();
+        responseBody = response.dump();
+        return false;
+    }
+    catch (...) {
+        responseBody = "{\"ok\":false,\"error\":\"unknown\"}";
+        return false;
     }
 }
 
