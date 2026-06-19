@@ -25,8 +25,10 @@
     --kill-kill-number-offset-y: 0px;
     --kill-death-number-offset-x: -11px;
     --kill-death-number-offset-y: 0px;
-    --kill-ak-mark-offset-x: 5px;
+    --kill-ak-mark-offset-x: 2px;
     --kill-ak-mark-offset-y: 0px;
+    --kill-ak-count-offset-x: 8px;
+    --kill-ak-count-offset-y: -25px;
 
     --kill-team-name-font-family: "Microsoft YaHei", sans-serif;
     --kill-team-name-font-size: 54px;
@@ -59,7 +61,7 @@
     --kill-header-letter-spacing: 0px;
     --kill-header-glow-rgb: 169, 171, 185;
 
-    --kill-pick-label-font-family: "Microsoft YaHei", sans-serif;
+    --kill-pick-label-font-family: "Arial Black", "Microsoft YaHei", sans-serif;
     --kill-pick-label-font-size: 27px;
     --kill-pick-label-color: #6fc8b9;
     --kill-pick-label-stroke-color: #000000;
@@ -68,7 +70,7 @@
     --kill-pick-label-letter-spacing: 0px;
     --kill-pick-label-glow-rgb: 111, 200, 185;
 
-    --kill-player-name-font-family: "Arial Black", "Microsoft YaHei", sans-serif;
+    --kill-player-name-font-family: "Arial", "Microsoft YaHei", sans-serif;
     --kill-player-name-font-size: 43px;
     --kill-player-name-color: #f7ca69;
     --kill-player-name-stroke-color: #000000;
@@ -77,7 +79,7 @@
     --kill-player-name-letter-spacing: 0px;
     --kill-player-name-glow-rgb: 255, 255, 255;
 
-    --kill-kill-number-font-family: "Microsoft YaHei", sans-serif;
+    --kill-kill-number-font-family: "FZXS24", "Microsoft YaHei", sans-serif;
     --kill-kill-number-font-size: 50px;
     --kill-kill-number-color: #f7ca69;
     --kill-kill-number-stroke-color: #000000;
@@ -86,7 +88,7 @@
     --kill-kill-number-letter-spacing: 0px;
     --kill-kill-number-glow-rgb: 247, 202, 105;
 
-    --kill-death-number-font-family: "Microsoft YaHei", sans-serif;
+    --kill-death-number-font-family: "FZXS24", "Microsoft YaHei", sans-serif;
     --kill-death-number-font-size: 50px;
     --kill-death-number-color: #ab986d;
     --kill-death-number-stroke-color: #000000;
@@ -95,14 +97,23 @@
     --kill-death-number-letter-spacing: 0px;
     --kill-death-number-glow-rgb: 171, 152, 109;
 
-    --kill-ak-mark-font-family: "Microsoft YaHei", sans-serif;
+    --kill-ak-mark-font-family: "FZXS24", "Microsoft YaHei", sans-serif;
     --kill-ak-mark-font-size: 40px;
     --kill-ak-mark-color: #f7d67e;
     --kill-ak-mark-stroke-color: #000000;
-    --kill-ak-mark-stroke-width: 1px;
+    --kill-ak-mark-stroke-width: 3px;
     --kill-ak-mark-glow: 0px;
     --kill-ak-mark-letter-spacing: 0px;
     --kill-ak-mark-glow-rgb: 247, 214, 126;
+
+    --kill-ak-count-font-family: "Microsoft YaHei", sans-serif;
+    --kill-ak-count-font-size: 30px;
+    --kill-ak-count-color: #f7d67e;
+    --kill-ak-count-stroke-color: #000000;
+    --kill-ak-count-stroke-width: 1px;
+    --kill-ak-count-glow: 0px;
+    --kill-ak-count-letter-spacing: 0px;
+    --kill-ak-count-glow-rgb: 247, 214, 126;
 }
 
 * {
@@ -199,7 +210,8 @@ body {
 .kill-player-name,
 .kill-kill-number,
 .kill-death-number,
-.kill-ak-mark {
+.kill-ak-mark,
+.kill-ak-count {
     paint-order: stroke fill;
     text-rendering: geometricPrecision;
     transform-origin: left center;
@@ -355,12 +367,42 @@ body {
 }
 
 .kill-ak-mark {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    overflow: visible;
     color: var(--kill-ak-mark-color);
     font-family: var(--kill-ak-mark-font-family);
     font-size: var(--kill-ak-mark-font-size);
     letter-spacing: var(--kill-ak-mark-letter-spacing);
     -webkit-text-stroke: var(--kill-ak-mark-stroke-width) var(--kill-ak-mark-stroke-color);
     text-shadow: 0 0 var(--kill-ak-mark-glow) rgba(var(--kill-ak-mark-glow-rgb), 0.72), 0 2px 3px rgba(0, 0, 0, 0.95);
+}
+
+.kill-ak-symbol {
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+    -webkit-text-stroke: inherit;
+    text-shadow: inherit;
+}
+
+.kill-ak-count {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(var(--kill-ak-count-offset-x), var(--kill-ak-count-offset-y));
+    min-width: 0;
+    color: var(--kill-ak-count-color);
+    font-family: var(--kill-ak-count-font-family);
+    font-size: var(--kill-ak-count-font-size);
+    font-weight: 930;
+    line-height: 1;
+    letter-spacing: var(--kill-ak-count-letter-spacing);
+    -webkit-text-stroke: var(--kill-ak-count-stroke-width) var(--kill-ak-count-stroke-color);
+    text-shadow: 0 0 var(--kill-ak-count-glow) rgba(var(--kill-ak-count-glow-rgb), 0.72), 0 1px 2px rgba(0, 0, 0, 0.95);
+    pointer-events: auto;
 }
 
 .kill-status {

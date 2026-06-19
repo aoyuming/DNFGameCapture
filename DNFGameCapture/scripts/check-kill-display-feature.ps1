@@ -50,6 +50,7 @@ if ($missing.Count -eq 0) {
         @{ File = "DNFGameCaptureDlg.cpp"; Needle = "/api/kill-display-settings" },
         @{ File = "DNFGameCaptureDlg.cpp"; Needle = "killNumber" },
         @{ File = "DNFGameCaptureDlg.cpp"; Needle = "deathNumber" },
+        @{ File = "DNFGameCaptureDlg.cpp"; Needle = "akCountBadge" },
         @{ File = "DNFGameCaptureDlg.cpp"; Needle = "pageScale" },
         @{ File = "DNFGameCaptureDlg.cpp"; Needle = "playerNameOffsetX" },
         @{ File = "DNFGameCaptureDlg.cpp"; Needle = "cmd_set_kill_display_settings" },
@@ -74,14 +75,18 @@ if ($missing.Count -eq 0) {
         @{ File = "DNFGameCapture.vcxproj"; Needle = "KillDisplayDlg.h" },
         @{ File = "web/kill.html"; Needle = "kill-display-root" },
         @{ File = "web/kill.html"; Needle = "kill-edit-toolbar" },
+        @{ File = "web/kill.html"; Needle = "<select id=`"kill-edit-font`">" },
         @{ File = "web/kill.html"; Needle = "data-style-key=`"killNumber`"" },
         @{ File = "web/kill.html"; Needle = "data-style-key=`"deathNumber`"" },
         @{ File = "web/kill.html"; Needle = "data-style-key=`"akMark`"" },
+        @{ File = "web/kill.html"; Needle = "value=`"akCountBadge`"" },
         @{ File = "web/kill.html"; Needle = "kill.css" },
         @{ File = "web/kill.html"; Needle = "kill.js" },
         @{ File = "web/kill.js"; Needle = "http://127.0.0.1:18777/api/state" },
         @{ File = "web/kill.js"; Needle = "/api/kill-display-settings" },
         @{ File = "web/kill.js"; Needle = "formatAkMark" },
+        @{ File = "web/kill.js"; Needle = "renderAkMark" },
+        @{ File = "web/kill.js"; Needle = "getFitTextNeededWidth" },
         @{ File = "web/kill.js"; Needle = "compact-death" },
         @{ File = "web/kill.js"; Needle = "fitKillTextElements" },
         @{ File = "web/kill.js"; Needle = "toggleKillEditMode" },
@@ -93,6 +98,7 @@ if ($missing.Count -eq 0) {
         @{ File = "web/kill.js"; Needle = "pageScale" },
         @{ File = "web/kill.js"; Needle = "killNumber" },
         @{ File = "web/kill.js"; Needle = "deathNumber" },
+        @{ File = "web/kill.js"; Needle = "akCountBadge" },
         @{ File = "web/kill.js"; Needle = "applyKillDisplaySettings" },
         @{ File = "web/kill.js"; Needle = "renderKillDisplay" },
         @{ File = "web/kill.js"; Needle = "postKillHostCommand" },
@@ -106,6 +112,9 @@ if ($missing.Count -eq 0) {
         @{ File = "web/kill.css"; Needle = "--kill-kill-number-font-size" },
         @{ File = "web/kill.css"; Needle = "--kill-death-number-font-size" },
         @{ File = "web/kill.css"; Needle = "--kill-ak-mark-letter-spacing" },
+        @{ File = "web/kill.css"; Needle = "--kill-ak-count-font-size" },
+        @{ File = "web/kill.css"; Needle = ".kill-ak-symbol" },
+        @{ File = "web/kill.css"; Needle = ".kill-ak-count" },
         @{ File = "web/kill.css"; Needle = "--kill-page-scale" },
         @{ File = "web/kill.css"; Needle = "--kill-player-name-offset-x" },
         @{ File = "web/kill.css"; Needle = ".kill-edit-toolbar" },
@@ -121,6 +130,7 @@ if ($missing.Count -eq 0) {
         @{ File = "web/main.js"; Needle = "KILL_DISPLAY_TEXT_STYLE_TYPES" },
         @{ File = "web/main.js"; Needle = "killNumber" },
         @{ File = "web/main.js"; Needle = "deathNumber" },
+        @{ File = "web/main.js"; Needle = "akCountBadge" },
         @{ File = "web/main.js"; Needle = "pageScale" },
         @{ File = "web/main.js"; Needle = "playerNameOffsetX" },
         @{ File = "web/main.js"; Needle = "cmd_set_kill_display_settings" },
@@ -159,6 +169,45 @@ if ($missing.Count -eq 0) {
     foreach ($item in $forbidden) {
         if ($text[$item.File].IndexOf($item.Needle, [System.StringComparison]::Ordinal) -ge 0) {
             $missing.Add("Forbidden capture-hidden window pattern '$($item.Needle)' remains in $($item.File)")
+        }
+    }
+
+    $regexChecks = @(
+        @{
+            File = "web/kill.js"
+            Pattern = "key:\s*'killNumber'(?:(?!\r?\n\s*key:\s*')[\s\S])*?color:\s*'#f7ca69'"
+            Message = "web/kill.js killNumber default color must be #f7ca69"
+        },
+        @{
+            File = "web/kill.js"
+            Pattern = "key:\s*'deathNumber'(?:(?!\r?\n\s*key:\s*')[\s\S])*?color:\s*'#ab986d'"
+            Message = "web/kill.js deathNumber default color must be #ab986d"
+        },
+        @{
+            File = "web/main.js"
+            Pattern = "key:\s*'killNumber'(?:(?!\r?\n\s*key:\s*')[\s\S])*?color:\s*'#f7ca69'"
+            Message = "web/main.js killNumber default color must be #f7ca69"
+        },
+        @{
+            File = "web/main.js"
+            Pattern = "key:\s*'deathNumber'(?:(?!\r?\n\s*key:\s*')[\s\S])*?color:\s*'#ab986d'"
+            Message = "web/main.js deathNumber default color must be #ab986d"
+        },
+        @{
+            File = "web/kill.js"
+            Pattern = "suppressRemoteKillSettingsUntil"
+            Message = "web/kill.js must keep local font/style edits from being overwritten by state polling"
+        },
+        @{
+            File = "DNFGameCaptureDlg.cpp"
+            Pattern = "DnfSaveKillDisplaySettingsJson\(m_iniPath,\s*incoming\[`"settings`"\]\);(?:(?!json\s+response;)[\s\S])*?PostMessage\(WM_UPDATE_ALL_UI,\s*0,\s*0\)"
+            Message = "SaveKillDisplaySettingsPayload must notify the main UI thread after saving kill display settings"
+        }
+    )
+
+    foreach ($item in $regexChecks) {
+        if (-not [regex]::IsMatch($text[$item.File], $item.Pattern)) {
+            $missing.Add($item.Message)
         }
     }
 }

@@ -864,8 +864,10 @@ const KILL_DISPLAY_LAYOUT_DEFAULTS = {
     killNumberOffsetY: 0,
     deathNumberOffsetX: -11,
     deathNumberOffsetY: 0,
-    akMarkOffsetX: 5,
-    akMarkOffsetY: 0
+    akMarkOffsetX: 2,
+    akMarkOffsetY: 0,
+    akCountBadgeOffsetX: 8,
+    akCountBadgeOffsetY: -25
 };
 
 const KILL_DISPLAY_LAYOUT_FIELDS = [
@@ -896,7 +898,9 @@ const KILL_DISPLAY_LAYOUT_FIELDS = [
     { key: 'deathNumberOffsetX', label: '死横移', min: -180, max: 180, unit: 'px', hidden: true },
     { key: 'deathNumberOffsetY', label: '死纵移', min: -120, max: 120, unit: 'px', hidden: true },
     { key: 'akMarkOffsetX', label: 'AK横移', min: -180, max: 180, unit: 'px', hidden: true },
-    { key: 'akMarkOffsetY', label: 'AK纵移', min: -120, max: 120, unit: 'px', hidden: true }
+    { key: 'akMarkOffsetY', label: 'AK纵移', min: -120, max: 120, unit: 'px', hidden: true },
+    { key: 'akCountBadgeOffsetX', label: 'AK次数横移', min: -80, max: 80, unit: 'px', hidden: true },
+    { key: 'akCountBadgeOffsetY', label: 'AK次数纵移', min: -80, max: 80, unit: 'px', hidden: true }
 ];
 const KILL_HORIZONTAL_ONLY_OFFSET_Y_KEYS = [
     'pickLabelOffsetY',
@@ -933,35 +937,42 @@ const KILL_DISPLAY_TEXT_STYLE_TYPES = [
         cssKey: 'pick-label',
         label: '选人顺序',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 27, colorMode: 'custom', color: '#6fc8b9', strokeColor: '#000000', strokeWidth: 3, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'Arial Black', fontSize: 27, colorMode: 'custom', color: '#6fc8b9', strokeColor: '#000000', strokeWidth: 3, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'playerName',
         cssKey: 'player-name',
         label: '主号名',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Arial Black', fontSize: 43, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 5, glow: 2, letterSpacing: 0 }
+        defaults: { fontFamily: 'Arial', fontSize: 43, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 5, glow: 2, letterSpacing: 0 }
     },
     {
         key: 'killNumber',
         cssKey: 'kill-number',
         label: '杀',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 50, colorMode: 'custom', color: '#ab986d', strokeColor: '#000000', strokeWidth: 4, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'FZXS24', fontSize: 50, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 4, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'deathNumber',
         cssKey: 'death-number',
         label: '死',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 50, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 4, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'FZXS24', fontSize: 50, colorMode: 'custom', color: '#ab986d', strokeColor: '#000000', strokeWidth: 4, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'akMark',
         cssKey: 'ak-mark',
         label: 'AK标记',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 40, colorMode: 'custom', color: '#f7d67e', strokeColor: '#000000', strokeWidth: 1, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'FZXS24', fontSize: 40, colorMode: 'custom', color: '#f7d67e', strokeColor: '#000000', strokeWidth: 3, glow: 0, letterSpacing: 0 }
+    },
+    {
+        key: 'akCountBadge',
+        cssKey: 'ak-count',
+        label: 'AK次数',
+        allowTeamColor: false,
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 30, colorMode: 'custom', color: '#f7d67e', strokeColor: '#000000', strokeWidth: 1, glow: 0, letterSpacing: 0 }
     }
 ];
 

@@ -157,19 +157,22 @@ static const DnfKillDisplayLayoutDefault KILL_DISPLAY_LAYOUT_DEFAULTS[] = {
     { "killNumberOffsetY",0, -120, 120 },
     { "deathNumberOffsetX",-11, -180, 180 },
     { "deathNumberOffsetY",0, -120, 120 },
-    { "akMarkOffsetX",    5, -180, 180 },
+    { "akMarkOffsetX",    2, -180, 180 },
     { "akMarkOffsetY",    0, -120, 120 },
+    { "akCountBadgeOffsetX",  8, -80, 80 },
+    { "akCountBadgeOffsetY",-25, -80, 80 },
 };
 
 static const DnfScoreboardStyleDefault KILL_DISPLAY_TEXT_STYLE_DEFAULTS[] = {
     { "teamName",    L"Microsoft YaHei", 54, L"team",   L"#ffffff", L"#000000", 4, 0, 0, true },
     { "score",       L"Arial Black",     70, L"team",   L"#ffffff", L"#000000", 3, 2, 0, true },
     { "header",      L"Microsoft YaHei", 31, L"custom", L"#a9abb9", L"#000000", 2, 0, 0, false },
-    { "pickLabel",   L"Microsoft YaHei", 27, L"custom", L"#6fc8b9", L"#000000", 3, 0, 0, false },
-    { "playerName",  L"Arial Black",     43, L"custom", L"#f7ca69", L"#000000", 5, 2, 0, false },
-    { "killNumber",  L"Microsoft YaHei", 50, L"custom", L"#f7ca69", L"#000000", 4, 0, 0, false },
-    { "deathNumber", L"Microsoft YaHei", 50, L"custom", L"#ab986d", L"#000000", 4, 0, 0, false },
-    { "akMark",      L"Microsoft YaHei", 40, L"custom", L"#f7d67e", L"#000000", 1, 0, 0, false },
+    { "pickLabel",   L"Arial Black",     27, L"custom", L"#6fc8b9", L"#000000", 3, 0, 0, false },
+    { "playerName",  L"Arial",           43, L"custom", L"#f7ca69", L"#000000", 5, 2, 0, false },
+    { "killNumber",  L"FZXS24",          50, L"custom", L"#f7ca69", L"#000000", 4, 0, 0, false },
+    { "deathNumber", L"FZXS24",          50, L"custom", L"#ab986d", L"#000000", 4, 0, 0, false },
+    { "akMark",      L"FZXS24",          40, L"custom", L"#f7d67e", L"#000000", 3, 0, 0, false },
+    { "akCountBadge",L"Microsoft YaHei", 30, L"custom", L"#f7d67e", L"#000000", 1, 0, 0, false },
 };
 
 static CString DnfMakeScoreboardStyleIniKey(const char* styleKey, const char* field)
@@ -10946,6 +10949,7 @@ bool CDNFGameCaptureDlg::SaveKillDisplaySettingsPayload(const std::string& reque
         }
 
         DnfSaveKillDisplaySettingsJson(m_iniPath, incoming["settings"]);
+        PostMessage(WM_UPDATE_ALL_UI, 0, 0);
 
         json response;
         response["ok"] = true;

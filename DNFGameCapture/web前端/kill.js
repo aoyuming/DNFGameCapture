@@ -28,8 +28,10 @@ const KILL_DISPLAY_LAYOUT_DEFAULTS = {
     killNumberOffsetY: 0,
     deathNumberOffsetX: -11,
     deathNumberOffsetY: 0,
-    akMarkOffsetX: 5,
-    akMarkOffsetY: 0
+    akMarkOffsetX: 2,
+    akMarkOffsetY: 0,
+    akCountBadgeOffsetX: 8,
+    akCountBadgeOffsetY: -25
 };
 
 const KILL_DISPLAY_LAYOUT_LIMITS = {
@@ -60,7 +62,9 @@ const KILL_DISPLAY_LAYOUT_LIMITS = {
     deathNumberOffsetX: [-180, 180],
     deathNumberOffsetY: [-120, 120],
     akMarkOffsetX: [-180, 180],
-    akMarkOffsetY: [-120, 120]
+    akMarkOffsetY: [-120, 120],
+    akCountBadgeOffsetX: [-80, 80],
+    akCountBadgeOffsetY: [-80, 80]
 };
 
 const KILL_DISPLAY_TEXT_STYLE_TYPES = [
@@ -90,39 +94,46 @@ const KILL_DISPLAY_TEXT_STYLE_TYPES = [
         cssKey: 'pick-label',
         label: '选人顺序',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 27, colorMode: 'custom', color: '#6fc8b9', strokeColor: '#000000', strokeWidth: 3, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'Arial Black', fontSize: 27, colorMode: 'custom', color: '#6fc8b9', strokeColor: '#000000', strokeWidth: 3, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'playerName',
         cssKey: 'player-name',
         label: '主号',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Arial Black', fontSize: 43, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 5, glow: 2, letterSpacing: 0 }
+        defaults: { fontFamily: 'Arial', fontSize: 43, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 5, glow: 2, letterSpacing: 0 }
     },
     {
         key: 'killNumber',
         cssKey: 'kill-number',
         label: '杀',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 50, colorMode: 'custom', color: '#ab986d', strokeColor: '#000000', strokeWidth: 4, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'FZXS24', fontSize: 50, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 4, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'deathNumber',
         cssKey: 'death-number',
         label: '死',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 50, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 4, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'FZXS24', fontSize: 50, colorMode: 'custom', color: '#ab986d', strokeColor: '#000000', strokeWidth: 4, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'akMark',
         cssKey: 'ak-mark',
         label: 'AK',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 40, colorMode: 'custom', color: '#f7d67e', strokeColor: '#000000', strokeWidth: 1, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'FZXS24', fontSize: 40, colorMode: 'custom', color: '#f7d67e', strokeColor: '#000000', strokeWidth: 3, glow: 0, letterSpacing: 0 }
+    },
+    {
+        key: 'akCountBadge',
+        cssKey: 'ak-count',
+        label: 'AK次数',
+        allowTeamColor: false,
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 30, colorMode: 'custom', color: '#f7d67e', strokeColor: '#000000', strokeWidth: 1, glow: 0, letterSpacing: 0 }
     }
 ];
 
-const EDITABLE_STYLE_KEYS = ['teamName', 'pickLabel', 'playerName', 'killNumber', 'deathNumber', 'akMark'];
+const EDITABLE_STYLE_KEYS = ['teamName', 'pickLabel', 'playerName', 'killNumber', 'deathNumber', 'akMark', 'akCountBadge'];
 const PAGE_EDIT_KEY = 'page';
 const KILL_STYLE_OFFSET_KEYS = {
     teamName: ['teamNameOffsetX', 'teamNameOffsetY'],
@@ -130,7 +141,8 @@ const KILL_STYLE_OFFSET_KEYS = {
     playerName: ['playerNameOffsetX', 'playerNameOffsetY'],
     killNumber: ['killNumberOffsetX', 'killNumberOffsetY'],
     deathNumber: ['deathNumberOffsetX', 'deathNumberOffsetY'],
-    akMark: ['akMarkOffsetX', 'akMarkOffsetY']
+    akMark: ['akMarkOffsetX', 'akMarkOffsetY'],
+    akCountBadge: ['akCountBadgeOffsetX', 'akCountBadgeOffsetY']
 };
 const KILL_HORIZONTAL_ONLY_OFFSET_Y_KEYS = [
     'pickLabelOffsetY',
@@ -150,6 +162,8 @@ let killEditMode = false;
 let selectedKillStyleKey = 'playerName';
 let dragLayoutState = null;
 let suppressClickAfterDrag = false;
+let suppressRemoteKillSettingsUntil = 0;
+let isSavingKillSettings = false;
 
 function clampNumber(value, min, max, fallback) {
     const n = Number.parseInt(value, 10);
@@ -266,7 +280,7 @@ function getStyleOffsetForKey(styleKey) {
 }
 
 function isVerticalLayoutDragAllowed(styleKey) {
-    return styleKey === 'teamName';
+    return styleKey === 'teamName' || styleKey === 'akCountBadge';
 }
 
 function setOffsetVars(styleKey) {
@@ -370,8 +384,28 @@ function getTeamPlayers(players, team) {
 function formatAkMark(akCount) {
     const value = clampNumber(akCount, 0, 999, 0);
     if (value === 0) return '-';
-    if (value === 1) return 'A';
-    return String(value);
+    return 'A';
+}
+
+function renderAkMark(container, akCount) {
+    if (!container) return;
+    const value = clampNumber(akCount, 0, 999, 0);
+    container.classList.toggle('has-ak-count', value > 1);
+    container.innerHTML = '';
+
+    const mark = document.createElement('span');
+    mark.className = 'kill-ak-symbol';
+    mark.dataset.styleKey = 'akMark';
+    mark.textContent = formatAkMark(value);
+    container.appendChild(mark);
+
+    if (value > 1) {
+        const badge = document.createElement('span');
+        badge.className = 'kill-ak-count';
+        badge.dataset.styleKey = 'akCountBadge';
+        badge.textContent = String(value);
+        container.appendChild(badge);
+    }
 }
 
 function renderRows(container, players) {
@@ -393,7 +427,7 @@ function renderRows(container, players) {
         cells[2].textContent = String(player.kills);
         cells[3].textContent = String(player.deaths);
         cells[3].classList.toggle('compact-death', player.deaths >= 10);
-        cells[4].textContent = formatAkMark(player.akCount);
+        renderAkMark(cells[4], player.akCount);
         container.appendChild(row);
     });
     refreshSelectedStyleMarker();
@@ -451,13 +485,21 @@ function renderKillDisplay(data = {}) {
 function fitKillTextElements() {
     document.querySelectorAll('[data-fit-text]').forEach(item => {
         const available = item.clientWidth;
-        const needed = item.scrollWidth;
+        const needed = getFitTextNeededWidth(item);
         let scale = 1;
         if (available > 2 && needed > available + 1) {
             scale = Math.max(0.46, Math.min(1, (available - 1) / needed));
         }
         applyFitTextTransform(item, scale);
     });
+}
+
+function getFitTextNeededWidth(item) {
+    if (item?.classList?.contains('kill-ak-mark')) {
+        const symbol = item.querySelector('.kill-ak-symbol');
+        if (symbol) return symbol.scrollWidth || symbol.getBoundingClientRect().width || item.scrollWidth;
+    }
+    return item?.scrollWidth || 0;
 }
 
 function applyFitTextTransform(item, scale = 1) {
@@ -483,6 +525,7 @@ function getLayoutControlForStyle(styleKey) {
     if (styleKey === 'pickLabel') return { key: 'pickColumnWidth', label: '选人列宽' };
     if (styleKey === 'killNumber' || styleKey === 'deathNumber') return { key: 'statColumnWidth', label: '战绩列宽' };
     if (styleKey === 'akMark') return { key: 'akColumnWidth', label: 'AK列宽' };
+    if (styleKey === 'akCountBadge') return { key: 'akCountBadgeOffsetX', label: '次数横移' };
     if (styleKey === 'teamName') return { key: 'teamGap', label: '队伍间距' };
     return { key: 'rowGap', label: '行距' };
 }
@@ -509,23 +552,30 @@ function refreshSelectedStyleMarker() {
     });
 }
 
-function populateFontList() {
-    const list = document.getElementById('kill-edit-font-list');
-    if (!list) return;
-    list.innerHTML = '';
-    normalizeSystemFonts(systemFonts).forEach(font => {
+function populateFontList(selectedFont = '') {
+    const select = document.getElementById('kill-edit-font');
+    if (!select) return;
+
+    const currentStyle = selectedStyle();
+    const cleaned = cleanFontFamilyName(selectedFont || currentStyle?.fontFamily || '', 'Microsoft YaHei');
+    const fonts = normalizeSystemFonts([...systemFonts, cleaned]);
+    select.innerHTML = '';
+    fonts.forEach(font => {
         const option = document.createElement('option');
         option.value = font;
-        list.appendChild(option);
+        option.textContent = font;
+        option.style.fontFamily = cssFontFamily(font);
+        select.appendChild(option);
     });
+    select.value = cleaned;
 }
 
 function syncKillEditToolbar() {
     const toolbar = document.getElementById('kill-edit-toolbar');
     if (!toolbar) return;
 
-    populateFontList();
     const style = selectedStyle();
+    populateFontList(style?.fontFamily || '');
     const isPageTarget = selectedKillStyleKey === PAGE_EDIT_KEY;
     const target = document.getElementById('kill-edit-target');
     const font = document.getElementById('kill-edit-font');
@@ -606,11 +656,14 @@ function bindKillEditToolbar() {
 }
 
 function queueKillDisplaySettingsSave() {
+    suppressRemoteKillSettingsUntil = Date.now() + 2000;
     clearTimeout(saveSettingsTimer);
     saveSettingsTimer = setTimeout(saveKillDisplaySettings, 180);
 }
 
 async function saveKillDisplaySettings() {
+    isSavingKillSettings = true;
+    suppressRemoteKillSettingsUntil = Date.now() + 2000;
     try {
         const response = await fetch(KILL_SETTINGS_URL, {
             method: 'POST',
@@ -625,6 +678,9 @@ async function saveKillDisplaySettings() {
         showStatus('外观已保存', false);
     } catch (err) {
         showStatus('外观保存失败，请确认主程序仍在运行', true);
+    } finally {
+        isSavingKillSettings = false;
+        suppressRemoteKillSettingsUntil = Date.now() + 500;
     }
 }
 
@@ -800,7 +856,11 @@ async function fetchKillDisplayState() {
         if (signature !== lastStateSignature) {
             lastStateSignature = signature;
             systemFonts = normalizeSystemFonts(data.systemFonts);
-            applyKillDisplaySettings(data.killDisplaySettings || getDefaultKillDisplaySettings());
+            if (!isSavingKillSettings && Date.now() >= suppressRemoteKillSettingsUntil) {
+                applyKillDisplaySettings(data.killDisplaySettings || getDefaultKillDisplaySettings());
+            } else {
+                populateFontList(selectedStyle()?.fontFamily || '');
+            }
             renderKillDisplay(data);
         }
         if (lastStatusText && lastStatusText.includes('等待')) showStatus('', false);
