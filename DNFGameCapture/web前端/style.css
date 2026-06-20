@@ -811,6 +811,25 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     font-size: 12px;
     font-weight: 900;
 }
+.kill-layout-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    width: fit-content;
+    min-height: 28px;
+    padding: 5px 9px;
+    border-radius: 7px;
+    background: rgba(0,0,0,0.16);
+    border: 1px solid rgba(255,255,255,0.08);
+    color: #dbe9ec;
+    font-size: 12px;
+    font-weight: 900;
+}
+.kill-layout-toggle input {
+    width: 16px;
+    height: 16px;
+    accent-color: #00e5ff;
+}
 .kill-layout-grid {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));

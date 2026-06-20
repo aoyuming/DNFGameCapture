@@ -167,6 +167,10 @@ body {
     will-change: transform;
 }
 
+.kill-display-root.hide-death-number .kill-board {
+    width: calc(100% - (var(--kill-ak-width) + 34px) * 2);
+}
+
 .kill-team {
     min-width: 0;
     min-height: 0;
@@ -274,6 +278,14 @@ body {
     text-shadow: 0 0 var(--kill-header-glow) rgba(var(--kill-header-glow-rgb), 0.72);
 }
 
+.hide-death-number .kill-stat-header {
+    grid-template-columns: var(--kill-stat-width) var(--kill-stat-width);
+}
+
+.hide-death-number .kill-stat-header [data-style-key="deathNumber"] {
+    display: none;
+}
+
 .kill-rows {
     min-width: 0;
     min-height: 0;
@@ -294,6 +306,14 @@ body {
     padding: 0 6px;
     border-radius: var(--kill-row-radius);
     background: rgba(255, 255, 255, var(--kill-row-alpha));
+}
+
+.hide-death-number .kill-row {
+    grid-template-columns: var(--kill-pick-width) minmax(0, 1fr) var(--kill-stat-width) var(--kill-stat-width);
+}
+
+.hide-death-number .kill-death-number {
+    display: none;
 }
 
 .kill-resize-grip {
@@ -405,6 +425,10 @@ body {
     pointer-events: auto;
 }
 
+.hide-death-number .kill-ak-count {
+    transform: translate(calc(var(--kill-ak-count-offset-x) - 4px), var(--kill-ak-count-offset-y));
+}
+
 .kill-status {
     position: fixed;
     right: 10px;
@@ -489,6 +513,17 @@ body {
     align-items: center;
     gap: 6px;
     margin: 5px 0;
+}
+
+.kill-edit-toolbar .kill-edit-check {
+    grid-template-columns: 44px auto;
+    justify-content: start;
+}
+
+.kill-edit-check input {
+    width: 18px;
+    height: 18px;
+    accent-color: #ffd36a;
 }
 
 .kill-edit-toolbar input,

@@ -131,6 +131,7 @@ struct DnfKillDisplayLayoutDefault {
 };
 
 static const DnfKillDisplayLayoutDefault KILL_DISPLAY_LAYOUT_DEFAULTS[] = {
+    { "showDeathNumber", 0, 0,     1 },
     { "bgAlpha",          0, 0,   100 },
     { "panelAlpha",      49, 0,   100 },
     { "rowAlpha",         0, 0,   100 },
@@ -153,14 +154,14 @@ static const DnfKillDisplayLayoutDefault KILL_DISPLAY_LAYOUT_DEFAULTS[] = {
     { "pickLabelOffsetY", 0, -120, 120 },
     { "playerNameOffsetX",0, -180, 180 },
     { "playerNameOffsetY",0, -120, 120 },
-    { "killNumberOffsetX",-21, -180, 180 },
+    { "killNumberOffsetX",-7, -180, 180 },
     { "killNumberOffsetY",0, -120, 120 },
     { "deathNumberOffsetX",-11, -180, 180 },
     { "deathNumberOffsetY",0, -120, 120 },
     { "akMarkOffsetX",    2, -180, 180 },
     { "akMarkOffsetY",    0, -120, 120 },
-    { "akCountBadgeOffsetX",  8, -80, 80 },
-    { "akCountBadgeOffsetY",-25, -80, 80 },
+    { "akCountBadgeOffsetX", 12, -80, 80 },
+    { "akCountBadgeOffsetY",-26, -80, 80 },
 };
 
 static const DnfScoreboardStyleDefault KILL_DISPLAY_TEXT_STYLE_DEFAULTS[] = {

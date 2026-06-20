@@ -51,6 +51,7 @@ if ($missing.Count -eq 0) {
         @{ File = "DNFGameCaptureDlg.cpp"; Needle = "killNumber" },
         @{ File = "DNFGameCaptureDlg.cpp"; Needle = "deathNumber" },
         @{ File = "DNFGameCaptureDlg.cpp"; Needle = "akCountBadge" },
+        @{ File = "DNFGameCaptureDlg.cpp"; Needle = "showDeathNumber" },
         @{ File = "DNFGameCaptureDlg.cpp"; Needle = "pageScale" },
         @{ File = "DNFGameCaptureDlg.cpp"; Needle = "playerNameOffsetX" },
         @{ File = "DNFGameCaptureDlg.cpp"; Needle = "cmd_set_kill_display_settings" },
@@ -80,6 +81,7 @@ if ($missing.Count -eq 0) {
         @{ File = "web/kill.html"; Needle = "data-style-key=`"deathNumber`"" },
         @{ File = "web/kill.html"; Needle = "data-style-key=`"akMark`"" },
         @{ File = "web/kill.html"; Needle = "value=`"akCountBadge`"" },
+        @{ File = "web/kill.html"; Needle = "kill-edit-show-death" },
         @{ File = "web/kill.html"; Needle = "kill.css" },
         @{ File = "web/kill.html"; Needle = "kill.js" },
         @{ File = "web/kill.js"; Needle = "http://127.0.0.1:18777/api/state" },
@@ -99,6 +101,9 @@ if ($missing.Count -eq 0) {
         @{ File = "web/kill.js"; Needle = "killNumber" },
         @{ File = "web/kill.js"; Needle = "deathNumber" },
         @{ File = "web/kill.js"; Needle = "akCountBadge" },
+        @{ File = "web/kill.js"; Needle = "showDeathNumber" },
+        @{ File = "web/kill.js"; Needle = "hide-death-number" },
+        @{ File = "web/kill.js"; Needle = "getHiddenDeathStyleOffsetDelta" },
         @{ File = "web/kill.js"; Needle = "applyKillDisplaySettings" },
         @{ File = "web/kill.js"; Needle = "renderKillDisplay" },
         @{ File = "web/kill.js"; Needle = "postKillHostCommand" },
@@ -119,6 +124,10 @@ if ($missing.Count -eq 0) {
         @{ File = "web/kill.css"; Needle = "--kill-player-name-offset-x" },
         @{ File = "web/kill.css"; Needle = ".kill-edit-toolbar" },
         @{ File = "web/kill.css"; Needle = ".compact-death" },
+        @{ File = "web/kill.css"; Needle = ".hide-death-number" },
+        @{ File = "web/kill.css"; Needle = "calc(100% - (var(--kill-ak-width) + 34px) * 2)" },
+        @{ File = "web/kill.css"; Needle = "var(--kill-stat-width) var(--kill-stat-width)" },
+        @{ File = "web/kill.css"; Needle = ".hide-death-number .kill-ak-count" },
         @{ File = "web/kill.css"; Needle = ".kill-resize-grip" },
         @{ File = "web/kill.css"; Needle = "cursor: move" },
         @{ File = "web/kill.css"; Needle = "cursor: nwse-resize" },
@@ -131,6 +140,8 @@ if ($missing.Count -eq 0) {
         @{ File = "web/main.js"; Needle = "killNumber" },
         @{ File = "web/main.js"; Needle = "deathNumber" },
         @{ File = "web/main.js"; Needle = "akCountBadge" },
+        @{ File = "web/main.js"; Needle = "showDeathNumber" },
+        @{ File = "web/main.js"; Needle = "kill-layout-showDeathNumber" },
         @{ File = "web/main.js"; Needle = "pageScale" },
         @{ File = "web/main.js"; Needle = "playerNameOffsetX" },
         @{ File = "web/main.js"; Needle = "cmd_set_kill_display_settings" },
@@ -197,6 +208,31 @@ if ($missing.Count -eq 0) {
             File = "web/kill.js"
             Pattern = "suppressRemoteKillSettingsUntil"
             Message = "web/kill.js must keep local font/style edits from being overwritten by state polling"
+        },
+        @{
+            File = "web/kill.js"
+            Pattern = "styleKey\s*===\s*'killNumber'\)\s*return\s*\{\s*x:\s*14,\s*y:\s*0\s*\}"
+            Message = "web/kill.js must move kill numbers slightly right when death column is hidden"
+        },
+        @{
+            File = "web/kill.js"
+            Pattern = "styleKey\s*===\s*'akMark'\)\s*return\s*\{\s*x:\s*-8,\s*y:\s*0\s*\}"
+            Message = "web/kill.js must move AK marks slightly left when death column is hidden"
+        },
+        @{
+            File = "DNFGameCaptureDlg.cpp"
+            Pattern = "\{\s*`"showDeathNumber`"\s*,\s*0,\s*0,\s*1\s*\}"
+            Message = "C++ kill display default must hide death numbers"
+        },
+        @{
+            File = "web/kill.js"
+            Pattern = "showDeathNumber:\s*0"
+            Message = "web/kill.js kill display default must hide death numbers"
+        },
+        @{
+            File = "web/main.js"
+            Pattern = "showDeathNumber:\s*0"
+            Message = "web/main.js kill display default must hide death numbers"
         },
         @{
             File = "DNFGameCaptureDlg.cpp"

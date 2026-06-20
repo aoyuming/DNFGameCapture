@@ -838,6 +838,7 @@ const SCOREBOARD_TEXT_STYLE_TYPES = [
 ];
 
 const KILL_DISPLAY_LAYOUT_DEFAULTS = {
+    showDeathNumber: 0,
     bgAlpha: 0,
     panelAlpha: 49,
     rowAlpha: 0,
@@ -860,14 +861,14 @@ const KILL_DISPLAY_LAYOUT_DEFAULTS = {
     pickLabelOffsetY: 0,
     playerNameOffsetX: 0,
     playerNameOffsetY: 0,
-    killNumberOffsetX: -21,
+    killNumberOffsetX: -7,
     killNumberOffsetY: 0,
     deathNumberOffsetX: -11,
     deathNumberOffsetY: 0,
     akMarkOffsetX: 2,
     akMarkOffsetY: 0,
-    akCountBadgeOffsetX: 8,
-    akCountBadgeOffsetY: -25
+    akCountBadgeOffsetX: 12,
+    akCountBadgeOffsetY: -26
 };
 
 const KILL_DISPLAY_LAYOUT_FIELDS = [
@@ -1103,6 +1104,7 @@ function normalizeKillDisplayLayout(layout = {}) {
             ? 0
             : clampNumber(layout?.[field.key], field.min, field.max, KILL_DISPLAY_LAYOUT_DEFAULTS[field.key]);
     });
+    normalized.showDeathNumber = clampNumber(layout?.showDeathNumber, 0, 1, KILL_DISPLAY_LAYOUT_DEFAULTS.showDeathNumber) ? 1 : 0;
     return normalized;
 }
 
@@ -1337,6 +1339,14 @@ function renderKillLayoutEditor() {
     title.textContent = '展示页空间参数';
     section.appendChild(title);
 
+    const showDeathToggle = document.createElement('label');
+    showDeathToggle.className = 'kill-layout-toggle';
+    showDeathToggle.innerHTML = `
+        <input id="kill-layout-showDeathNumber" type="checkbox" ${layout.showDeathNumber === 1 ? 'checked' : ''}>
+        <span>显示死亡次数</span>
+    `;
+    section.appendChild(showDeathToggle);
+
     const grid = document.createElement('div');
     grid.className = 'kill-layout-grid';
     KILL_DISPLAY_LAYOUT_FIELDS.filter(field => !field.hidden).forEach(field => {
@@ -1354,6 +1364,11 @@ function renderKillLayoutEditor() {
         grid.appendChild(item);
     });
     section.appendChild(grid);
+
+    document.getElementById('kill-layout-showDeathNumber')?.addEventListener('change', (event) => {
+        killDisplaySettings.layout.showDeathNumber = event.target.checked ? 1 : 0;
+        queueKillDisplaySettingsSync();
+    });
 
     KILL_DISPLAY_LAYOUT_FIELDS.forEach(field => {
         const range = document.getElementById(`kill-layout-${field.key}`);

@@ -2,6 +2,7 @@ const KILL_STATE_URL = 'http://127.0.0.1:18777/api/state';
 const KILL_SETTINGS_URL = 'http://127.0.0.1:18777/api/kill-display-settings';
 
 const KILL_DISPLAY_LAYOUT_DEFAULTS = {
+    showDeathNumber: 0,
     bgAlpha: 0,
     panelAlpha: 49,
     rowAlpha: 0,
@@ -24,17 +25,18 @@ const KILL_DISPLAY_LAYOUT_DEFAULTS = {
     pickLabelOffsetY: 0,
     playerNameOffsetX: 0,
     playerNameOffsetY: 0,
-    killNumberOffsetX: -21,
+    killNumberOffsetX: -7,
     killNumberOffsetY: 0,
     deathNumberOffsetX: -11,
     deathNumberOffsetY: 0,
     akMarkOffsetX: 2,
     akMarkOffsetY: 0,
-    akCountBadgeOffsetX: 8,
-    akCountBadgeOffsetY: -25
+    akCountBadgeOffsetX: 12,
+    akCountBadgeOffsetY: -26
 };
 
 const KILL_DISPLAY_LAYOUT_LIMITS = {
+    showDeathNumber: [0, 1],
     bgAlpha: [0, 100],
     panelAlpha: [0, 100],
     rowAlpha: [0, 100],
@@ -248,7 +250,9 @@ function normalizeKillDisplayLayout(layout = {}) {
     const normalized = {};
     Object.entries(KILL_DISPLAY_LAYOUT_DEFAULTS).forEach(([key, fallback]) => {
         const [min, max] = KILL_DISPLAY_LAYOUT_LIMITS[key];
-        normalized[key] = KILL_HORIZONTAL_ONLY_OFFSET_Y_KEYS.includes(key)
+        normalized[key] = key === 'showDeathNumber'
+            ? (clampNumber(layout?.[key], min, max, fallback) ? 1 : 0)
+            : KILL_HORIZONTAL_ONLY_OFFSET_Y_KEYS.includes(key)
             ? 0
             : clampNumber(layout?.[key], min, max, fallback);
     });
@@ -277,6 +281,13 @@ function getStyleOffsetForKey(styleKey) {
         x: killDisplaySettings.layout?.[keys[0]] || 0,
         y: killDisplaySettings.layout?.[keys[1]] || 0
     };
+}
+
+function getHiddenDeathStyleOffsetDelta(styleKey) {
+    if (killDisplaySettings.layout?.showDeathNumber === 1) return { x: 0, y: 0 };
+    if (styleKey === 'killNumber') return { x: 14, y: 0 };
+    if (styleKey === 'akMark') return { x: -8, y: 0 };
+    return { x: 0, y: 0 };
 }
 
 function isVerticalLayoutDragAllowed(styleKey) {
@@ -328,6 +339,7 @@ function applyKillDisplaySettings(settings = getDefaultKillDisplaySettings()) {
 
     const root = document.documentElement;
     const layout = normalized.layout;
+    document.getElementById('kill-display-root')?.classList.toggle('hide-death-number', layout.showDeathNumber !== 1);
     root.style.setProperty('--kill-bg-alpha', String(layout.bgAlpha / 100));
     root.style.setProperty('--kill-panel-alpha', String(layout.panelAlpha / 100));
     root.style.setProperty('--kill-row-alpha', String(layout.rowAlpha / 100));
@@ -505,9 +517,12 @@ function getFitTextNeededWidth(item) {
 function applyFitTextTransform(item, scale = 1) {
     const styleKey = item?.dataset?.styleKey || '';
     const offset = getStyleOffsetForKey(styleKey);
+    const hiddenDeathDelta = getHiddenDeathStyleOffsetDelta(styleKey);
+    const x = offset.x + hiddenDeathDelta.x;
+    const y = offset.y + hiddenDeathDelta.y;
     const parts = [];
-    if (offset.x !== 0 || offset.y !== 0) {
-        parts.push(`translate(${offset.x}px, ${offset.y}px)`);
+    if (x !== 0 || y !== 0) {
+        parts.push(`translate(${x}px, ${y}px)`);
     }
     if (scale < 1) {
         parts.push(`scaleX(${scale})`);
@@ -586,6 +601,7 @@ function syncKillEditToolbar() {
     const glow = document.getElementById('kill-edit-glow');
     const width = document.getElementById('kill-edit-width');
     const widthLabel = document.getElementById('kill-edit-width-label');
+    const showDeath = document.getElementById('kill-edit-show-death');
     const layoutControl = getLayoutControlForStyle(selectedKillStyleKey);
     const [layoutMin, layoutMax] = KILL_DISPLAY_LAYOUT_LIMITS[layoutControl.key];
 
@@ -605,6 +621,7 @@ function syncKillEditToolbar() {
         width.value = killDisplaySettings.layout[layoutControl.key];
     }
     if (widthLabel) widthLabel.textContent = layoutControl.label;
+    if (showDeath) showDeath.checked = killDisplaySettings.layout.showDeathNumber === 1;
 }
 
 function updateSelectedStyle(patch, save = true) {
@@ -635,6 +652,12 @@ function updateKillLayoutOffset(styleKey, x, y, save = true) {
     if (save) queueKillDisplaySettingsSave();
 }
 
+function setShowDeathNumber(enabled, save = true) {
+    killDisplaySettings.layout.showDeathNumber = enabled ? 1 : 0;
+    applyKillDisplaySettings(killDisplaySettings);
+    if (save) queueKillDisplaySettingsSave();
+}
+
 function bindKillEditToolbar() {
     const target = document.getElementById('kill-edit-target');
     const font = document.getElementById('kill-edit-font');
@@ -644,6 +667,7 @@ function bindKillEditToolbar() {
     const letter = document.getElementById('kill-edit-letter');
     const glow = document.getElementById('kill-edit-glow');
     const width = document.getElementById('kill-edit-width');
+    const showDeath = document.getElementById('kill-edit-show-death');
 
     target?.addEventListener('change', () => setSelectedKillStyleKey(target.value));
     font?.addEventListener('change', () => updateSelectedStyle({ fontFamily: font.value }));
@@ -653,6 +677,7 @@ function bindKillEditToolbar() {
     letter?.addEventListener('input', () => updateSelectedStyle({ letterSpacing: letter.value }));
     glow?.addEventListener('input', () => updateSelectedStyle({ glow: glow.value }));
     width?.addEventListener('input', () => updateSelectedLayout(width.value));
+    showDeath?.addEventListener('change', () => setShowDeathNumber(showDeath.checked));
 }
 
 function queueKillDisplaySettingsSave() {
