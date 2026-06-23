@@ -9,7 +9,8 @@ void WriteMatchLog(const CString& logLine);
 namespace {
     // 参考图1的紧凑 CSS 视口尺寸。窗口外框会按当前系统边框自动反推。
     constexpr int kReferenceClientWidth = 720;
-    constexpr int kReferenceClientHeight = 590;
+    constexpr int kReferenceClientHeight = 480;
+    constexpr int kAppearanceExtraClientHeight = 300;
     constexpr double kTargetVisualScale = 1.25;
 
     double GetDpiScaleForWindow(HWND hwnd)
@@ -389,6 +390,21 @@ void CWebScoreDlg::ApplyFixedWindowHeight()
     // 窗口按目标视觉基准缩放一次即可；WebView2 Zoom 已经负责抵消系统 DPI。
     ResizeWindowForClientSize(
         ScaleCssSizeToNativePixels(kReferenceClientWidth, kTargetVisualScale),
-        ScaleCssSizeToNativePixels(kReferenceClientHeight, kTargetVisualScale));
+        ScaleCssSizeToNativePixels(
+            kReferenceClientHeight + (m_appearanceExpanded ? kAppearanceExtraClientHeight : 0),
+            kTargetVisualScale));
     WriteWebHostDiagnostics(L"固定Web窗口尺寸已应用");
+}
+
+void CWebScoreDlg::SetAppearancePanelExpanded(bool expanded)
+{
+    if (m_appearanceExpanded == expanded) return;
+    m_appearanceExpanded = expanded;
+
+    ResizeWindowForClientSize(
+        ScaleCssSizeToNativePixels(kReferenceClientWidth, kTargetVisualScale),
+        ScaleCssSizeToNativePixels(
+            kReferenceClientHeight + (m_appearanceExpanded ? kAppearanceExtraClientHeight : 0),
+            kTargetVisualScale));
+    WriteWebHostDiagnostics(m_appearanceExpanded ? L"外观面板打开扩高" : L"外观面板关闭还原");
 }

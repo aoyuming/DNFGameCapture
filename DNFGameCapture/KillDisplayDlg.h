@@ -32,10 +32,13 @@ protected:
 private:
     Microsoft::WRL::ComPtr<ICoreWebView2Controller> m_webviewController;
     Microsoft::WRL::ComPtr<ICoreWebView2> m_webview;
+    CRect m_windowRectBeforeEdit;
+    bool m_editModeExpanded = false;
 
     void InitWebView2();
     void ResizeWindowForClientSize(int targetClientW, int targetClientH);
     void HandleWebMessage(const CString& message);
+    void SetEditModeWindowExpanded(bool expanded);
     void BeginWindowDrag();
     void BeginWindowResize();
 };

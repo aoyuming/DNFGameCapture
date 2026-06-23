@@ -19,6 +19,7 @@ public:
 	// 暴露给主窗口的方法：主窗口调用它，把数据发给网页
 	void SendStateToWeb(const CString& jsonStr);
 	void ApplyFixedWindowHeight();
+	void SetAppearancePanelExpanded(bool expanded);
 	void ResizeWindowToSize(int targetWindowW, int targetWindowH);
 	void ResizeWindowForClientSize(int targetClientW, int targetClientH);
 	void WriteWebHostDiagnostics(const CString& reason);
@@ -48,6 +49,7 @@ private:
 	Microsoft::WRL::ComPtr<ICoreWebView2> m_webview;
 	int m_baseWindowWidth = 0;
 	int m_baseWindowHeight = 0;
+	bool m_appearanceExpanded = false;
 	bool m_initialWindowSizeApplied = false;
 	double m_currentWebZoom = 0.0;
 	bool m_webZoomCalibrated = false;

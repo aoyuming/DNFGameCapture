@@ -6,12 +6,23 @@
 namespace {
     constexpr int kKillDisplayClientWidth = 900;
     constexpr int kKillDisplayClientHeight = 360;
+    constexpr int kKillDisplayEditExtraHeight = 250;
+    constexpr int kKillDisplayEditMinHeight = 590;
     constexpr int kKillDisplayMinWidth = 460;
     constexpr int kKillDisplayMinHeight = 180;
     constexpr COLORREF kKillDisplayTransparentKey = RGB(1, 2, 3);
     constexpr BYTE kKillDisplayLayeredAlpha = 245;
     constexpr wchar_t kKillDisplayWindowTitle[] = L"DNF Kill Display - DNF\u51FB\u6740\u5C55\u793A\u7A97\u53E3";
     constexpr wchar_t kKillDisplayUrl[] = L"http://127.0.0.1:18777/kill.html";
+
+    void NotifyKillDisplayVisibilityChanged(CWnd* wnd)
+    {
+        CWnd* parent = wnd ? wnd->GetParent() : nullptr;
+        if (!parent) parent = AfxGetMainWnd();
+        if (parent && ::IsWindow(parent->GetSafeHwnd())) {
+            parent->PostMessage(WM_KILL_DISPLAY_VISIBILITY_CHANGED, 0, 0);
+        }
+    }
 }
 
 IMPLEMENT_DYNAMIC(CKillDisplayDlg, CDialogEx)
@@ -62,12 +73,16 @@ BOOL CKillDisplayDlg::OnInitDialog()
 
 void CKillDisplayDlg::OnClose()
 {
+    SetEditModeWindowExpanded(false);
     ShowWindow(SW_HIDE);
+    NotifyKillDisplayVisibilityChanged(this);
 }
 
 void CKillDisplayDlg::OnCancel()
 {
+    SetEditModeWindowExpanded(false);
     ShowWindow(SW_HIDE);
+    NotifyKillDisplayVisibilityChanged(this);
 }
 
 void CKillDisplayDlg::OnOK()
@@ -171,6 +186,16 @@ void CKillDisplayDlg::ResizeWindowForClientSize(int targetClientW, int targetCli
 
 void CKillDisplayDlg::HandleWebMessage(const CString& message)
 {
+    if (message.Find(L"cmd_kill_window_close") >= 0) {
+        SetEditModeWindowExpanded(false);
+        ShowWindow(SW_HIDE);
+        NotifyKillDisplayVisibilityChanged(this);
+        return;
+    }
+    if (message.Find(L"cmd_kill_window_edit_mode") >= 0) {
+        SetEditModeWindowExpanded(message.Find(L"\"enabled\":true") >= 0);
+        return;
+    }
     if (message.Find(L"cmd_kill_window_resize") >= 0) {
         BeginWindowResize();
         return;
@@ -179,6 +204,26 @@ void CKillDisplayDlg::HandleWebMessage(const CString& message)
         BeginWindowDrag();
         return;
     }
+}
+
+void CKillDisplayDlg::SetEditModeWindowExpanded(bool expanded)
+{
+    if (!m_hWnd || expanded == m_editModeExpanded) return;
+
+    if (expanded) {
+        GetWindowRect(&m_windowRectBeforeEdit);
+        const int targetHeight = max(m_windowRectBeforeEdit.Height() + kKillDisplayEditExtraHeight, kKillDisplayEditMinHeight);
+        SetWindowPos(nullptr, m_windowRectBeforeEdit.left, m_windowRectBeforeEdit.top,
+            m_windowRectBeforeEdit.Width(), targetHeight,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    }
+    else if (!m_windowRectBeforeEdit.IsRectEmpty()) {
+        SetWindowPos(nullptr, m_windowRectBeforeEdit.left, m_windowRectBeforeEdit.top,
+            m_windowRectBeforeEdit.Width(), m_windowRectBeforeEdit.Height(),
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    }
+
+    m_editModeExpanded = expanded;
 }
 
 void CKillDisplayDlg::BeginWindowDrag()

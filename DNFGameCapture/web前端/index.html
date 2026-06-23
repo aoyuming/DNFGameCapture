@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DNF 赛事计分板 - WebView2 版</title>
-    <meta name="dnf-web-layout-version" content="20260616-scoreboard-style">
-    <link rel="stylesheet" href="style.css?v=20260616-scoreboard-style">
+    <meta name="dnf-web-layout-version" content="20260622-kill-display-toggle">
+    <link rel="stylesheet" href="style.css?v=20260622-kill-display-toggle">
 </head>
 <body>
 
@@ -40,42 +40,60 @@
             </div>
 
             <div class="control-panel">
-                <div class="control-row control-row-main">
+                <div class="control-row control-row-match">
                     <button class="ctrl-btn btn-swap" id="btn-swap">🔄 翻转红蓝</button>
                     <button class="ctrl-btn btn-monitor-start" id="btn-monitor">▶ 运行</button>
-                    <button class="ctrl-btn btn-random" id="btn-random-teams">🎲 分组和抽签</button>
+                    <button class="ctrl-btn btn-reset" id="btn-reset">✨ 重置战绩</button>
+                    <button class="ctrl-btn btn-pro" id="btn-pro">👑 专业模式</button>
+                    <button class="ctrl-btn btn-kill-display-toggle" id="btn-kill-display-toggle" aria-pressed="false">🖥 展示页面</button>
                 </div>
-                <div class="control-row control-row-runtime">
-                    <label class="algo-select-wrap" title="选择死亡X检测算法">
-                        <span>死亡X</span>
-                        <select id="death-algo-select" class="algo-select">
-                            <option value="0">大X颜色个数判断</option>
-                            <option value="1">打补丁红蓝判断</option>
-                        </select>
-                    </label>
+                <div class="control-row control-row-aux">
                     <button class="ctrl-btn btn-review-toggle" id="btn-review-toggle" aria-expanded="false">
                         <span>&#26368;&#36817;&#35782;&#21035;</span>
                         <span class="review-toggle-count" id="review-toggle-count">0</span>
                     </button>
-                </div>
-                <div class="control-row control-row-cloud">
-                    <button class="ctrl-btn btn-sync-db" id="btn-sync-alias-db">☁ 同步云端库</button>
-                    <button class="ctrl-btn btn-push-db" id="btn-push-alias-db">⬆ 推送本地库</button>
-                    <button class="ctrl-btn btn-console-toggle" id="btn-console-toggle" aria-expanded="false">
-                        <span>C++日志</span>
-                        <span class="console-toggle-count" id="console-toggle-count">0</span>
-                    </button>
-                </div>
-                <div class="control-row control-row-tools">
                     <button class="ctrl-btn btn-auth" id="btn-auth">🔑 授权</button>
-                    <button class="ctrl-btn btn-pro" id="btn-pro">👑 专业模式</button>
                     <button class="ctrl-btn btn-appearance" id="btn-appearance">🎨 外观</button>
                     <label class="output-seat-label-toggle" title="开启后，仅在 击杀.txt 的名字前输出选人顺序">
                         <input type="checkbox" id="output-seat-label-toggle">
                         <span>选人顺序</span>
                     </label>
-                    <button class="ctrl-btn btn-clear-teams" id="btn-clear-teams">🗑️ 清空</button>
-                    <button class="ctrl-btn btn-reset" id="btn-reset">✨ 重置战绩</button>
+                    <label class="kill-show-death-toggle" title="控制击杀展示页是否显示死亡次数">
+                        <input type="checkbox" id="kill-show-death-toggle-main">
+                        <span>显示死亡</span>
+                    </label>
+                    <div class="more-controls-wrap" id="more-controls-wrap">
+                        <button class="ctrl-btn btn-more-controls" id="btn-more-controls" aria-expanded="false" aria-controls="more-controls-menu">☰ 更多</button>
+                        <div class="more-controls-menu" id="more-controls-menu" aria-hidden="true">
+                            <div class="more-controls-section">
+                                <div class="more-controls-title">工具</div>
+                                <button class="ctrl-btn btn-random" id="btn-random-teams">🎲 分组和抽签</button>
+                                <button class="ctrl-btn btn-console-toggle" id="btn-console-toggle" aria-expanded="false">
+                                    <span>C++日志</span>
+                                    <span class="console-toggle-count" id="console-toggle-count">0</span>
+                                </button>
+                            </div>
+                            <div class="more-controls-section">
+                                <div class="more-controls-title">数据</div>
+                                <button class="ctrl-btn btn-sync-db" id="btn-sync-alias-db">☁ 同步云端库</button>
+                                <button class="ctrl-btn btn-push-db" id="btn-push-alias-db">⬆ 推送本地库</button>
+                            </div>
+                            <div class="more-controls-section">
+                                <div class="more-controls-title">系统</div>
+                                <label class="algo-select-wrap" title="选择死亡X检测算法">
+                                    <span>死亡X</span>
+                                    <select id="death-algo-select" class="algo-select">
+                                        <option value="0">大X颜色个数判断</option>
+                                        <option value="1">打补丁红蓝判断</option>
+                                    </select>
+                                </label>
+                            </div>
+                            <div class="more-controls-section more-controls-danger">
+                                <div class="more-controls-title">危险操作</div>
+                                <button class="ctrl-btn btn-clear-teams" id="btn-clear-teams">🗑️ 清空场上</button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="dir-bar" id="dir-display" title="点击可更改 TXT 输出目录">📁 战绩输出目录：获取中...</div>
@@ -239,6 +257,6 @@
         </div>
     </div>
 
-    <script src="main.js?v=20260616-scoreboard-style" defer></script>
+    <script src="main.js?v=20260622-kill-display-toggle" defer></script>
 </body>
 </html>

@@ -330,11 +330,16 @@ function setStyleVars(type, style) {
 }
 
 function applyKillDisplaySettings(settings = getDefaultKillDisplaySettings()) {
+    const previousShowDeathNumber = killDisplaySettings?.layout?.showDeathNumber;
     const normalized = {
         obsUrl: String(settings?.obsUrl || 'http://127.0.0.1:18777/kill.html'),
         layout: normalizeKillDisplayLayout(settings?.layout || {}),
         textStyles: normalizeKillDisplayTextStyles(settings?.textStyles || {})
     };
+    const shouldRelockBoard = killEditMode &&
+        previousShowDeathNumber !== undefined &&
+        previousShowDeathNumber !== normalized.layout.showDeathNumber;
+    if (shouldRelockBoard) unlockKillBoardAfterEditMode();
     killDisplaySettings = normalized;
 
     const root = document.documentElement;
@@ -363,6 +368,7 @@ function applyKillDisplaySettings(settings = getDefaultKillDisplaySettings()) {
     });
     syncKillEditToolbar();
     scheduleFitKillTextElements();
+    if (shouldRelockBoard) relockKillBoardForEditMode();
 }
 
 function displaySeatLabel(label) {
@@ -654,7 +660,9 @@ function updateKillLayoutOffset(styleKey, x, y, save = true) {
 
 function setShowDeathNumber(enabled, save = true) {
     killDisplaySettings.layout.showDeathNumber = enabled ? 1 : 0;
+    if (killEditMode) unlockKillBoardAfterEditMode();
     applyKillDisplaySettings(killDisplaySettings);
+    if (killEditMode) relockKillBoardForEditMode();
     if (save) queueKillDisplaySettingsSave();
 }
 
@@ -668,6 +676,7 @@ function bindKillEditToolbar() {
     const glow = document.getElementById('kill-edit-glow');
     const width = document.getElementById('kill-edit-width');
     const showDeath = document.getElementById('kill-edit-show-death');
+    const exit = document.getElementById('kill-edit-exit');
 
     target?.addEventListener('change', () => setSelectedKillStyleKey(target.value));
     font?.addEventListener('change', () => updateSelectedStyle({ fontFamily: font.value }));
@@ -678,6 +687,7 @@ function bindKillEditToolbar() {
     glow?.addEventListener('input', () => updateSelectedStyle({ glow: glow.value }));
     width?.addEventListener('input', () => updateSelectedLayout(width.value));
     showDeath?.addEventListener('change', () => setShowDeathNumber(showDeath.checked));
+    exit?.addEventListener('click', () => toggleKillEditMode(false));
 }
 
 function queueKillDisplaySettingsSave() {
@@ -709,14 +719,48 @@ async function saveKillDisplaySettings() {
     }
 }
 
+function lockKillBoardForEditMode() {
+    const root = document.getElementById('kill-display-root');
+    const board = document.getElementById('kill-board');
+    if (!root || !board) return;
+    const rect = board.getBoundingClientRect();
+    root.style.setProperty('--kill-edit-board-left', `${Math.max(0, Math.round(rect.left))}px`);
+    root.style.setProperty('--kill-edit-board-top', `${Math.max(0, Math.round(rect.top))}px`);
+    root.style.setProperty('--kill-edit-board-width', `${Math.max(1, Math.round(board.offsetWidth || rect.width))}px`);
+    root.style.setProperty('--kill-edit-board-height', `${Math.max(1, Math.round(board.offsetHeight || rect.height))}px`);
+    root.style.setProperty('--kill-edit-toolbar-top', `${Math.max(0, Math.round(rect.bottom + 6))}px`);
+}
+
+function unlockKillBoardAfterEditMode() {
+    const root = document.getElementById('kill-display-root');
+    if (!root) return;
+    root.style.removeProperty('--kill-edit-board-left');
+    root.style.removeProperty('--kill-edit-board-top');
+    root.style.removeProperty('--kill-edit-board-width');
+    root.style.removeProperty('--kill-edit-board-height');
+    root.style.removeProperty('--kill-edit-toolbar-top');
+}
+
+function relockKillBoardForEditMode() {
+    if (!killEditMode) return;
+    unlockKillBoardAfterEditMode();
+    requestAnimationFrame(() => {
+        if (killEditMode) lockKillBoardForEditMode();
+    });
+}
+
 function toggleKillEditMode(force) {
-    killEditMode = typeof force === 'boolean' ? force : !killEditMode;
+    const nextMode = typeof force === 'boolean' ? force : !killEditMode;
+    if (nextMode && !killEditMode) lockKillBoardForEditMode();
+    killEditMode = nextMode;
     const root = document.getElementById('kill-display-root');
     const toolbar = document.getElementById('kill-edit-toolbar');
     root?.classList.toggle('edit-mode', killEditMode);
     if (toolbar) toolbar.hidden = !killEditMode;
+    syncKillEditWindowHeight();
     refreshSelectedStyleMarker();
     if (killEditMode) syncKillEditToolbar();
+    else unlockKillBoardAfterEditMode();
 }
 
 function beginKillLayoutDrag(event) {
@@ -804,9 +848,42 @@ function adjustSelectedByWheel(event) {
     updateSelectedStyle({ fontSize: selectedStyle().fontSize + delta });
 }
 
-function postKillHostCommand(action) {
+function postKillHostCommand(action, extra = {}) {
     if (!window.chrome?.webview) return;
-    window.chrome.webview.postMessage({ action });
+    window.chrome.webview.postMessage({ action, ...extra });
+}
+
+function syncKillEditWindowHeight() {
+    postKillHostCommand('cmd_kill_window_edit_mode', { enabled: killEditMode });
+}
+
+function isKillShellWindow() {
+    return !!window.chrome?.webview;
+}
+
+function initKillWindowControls() {
+    const root = document.getElementById('kill-display-root');
+    const closeBtn = document.getElementById('kill-window-close');
+    const settingsBtn = document.getElementById('kill-window-settings');
+    root?.classList.toggle('shell-window', isKillShellWindow());
+    closeBtn?.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+    });
+    closeBtn?.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        postKillHostCommand('cmd_kill_window_close');
+    });
+    settingsBtn?.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+    });
+    settingsBtn?.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleKillEditMode();
+    });
 }
 
 function bindWindowControls() {
@@ -817,19 +894,19 @@ function bindWindowControls() {
         root.addEventListener('mousedown', (event) => {
             if (event.button !== 0) return;
             if (killEditMode) return;
-            if (event.target?.closest?.('.kill-resize-grip, .kill-edit-toolbar')) return;
+            if (event.target?.closest?.('.kill-resize-grip, .kill-edit-toolbar, .kill-window-close, .kill-window-settings')) return;
             event.preventDefault();
             postKillHostCommand('cmd_kill_window_drag');
         });
         root.addEventListener('dblclick', (event) => {
-            if (event.target?.closest?.('.kill-edit-toolbar')) return;
+            if (event.target?.closest?.('.kill-edit-toolbar, .kill-window-close, .kill-window-settings')) return;
             if (event.target?.closest?.('[data-style-key]')) return;
             toggleKillEditMode();
         });
         root.addEventListener('click', (event) => {
             if (!killEditMode) return;
             if (suppressClickAfterDrag) return;
-            if (event.target?.closest?.('.kill-edit-toolbar, .kill-resize-grip')) return;
+            if (event.target?.closest?.('.kill-edit-toolbar, .kill-resize-grip, .kill-window-close, .kill-window-settings')) return;
             const target = event.target?.closest?.('[data-style-key]');
             if (target?.dataset?.styleKey) setSelectedKillStyleKey(target.dataset.styleKey);
             else setSelectedKillStyleKey(PAGE_EDIT_KEY);
@@ -899,6 +976,7 @@ document.fonts?.ready?.then(scheduleFitKillTextElements).catch(() => {});
 
 applyKillDisplaySettings(getDefaultKillDisplaySettings());
 renderKillDisplay({});
+initKillWindowControls();
 bindKillEditToolbar();
 bindWindowControls();
 fetchKillDisplayState();

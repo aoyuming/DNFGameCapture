@@ -8,6 +8,8 @@
 </head>
 <body>
     <main id="kill-display-root" class="kill-display-root" aria-live="polite">
+        <button class="kill-window-settings" id="kill-window-settings" type="button" title="打开外观设置" aria-label="打开外观设置">⚙</button>
+        <button class="kill-window-close" id="kill-window-close" type="button" title="关闭展示窗口" aria-label="关闭展示窗口">×</button>
         <div class="kill-board" id="kill-board">
             <section class="kill-team kill-team-red" data-team-color="red">
                 <header class="kill-team-header">
@@ -44,6 +46,7 @@
             <div class="kill-edit-head">
                 <strong>外观编辑</strong>
                 <span>F2/双击隐藏</span>
+                <button class="kill-edit-exit" id="kill-edit-exit" type="button">退出编辑</button>
             </div>
             <label>
                 <span>对象</span>
@@ -74,7 +77,7 @@
                 <label><span>发光</span><input id="kill-edit-glow" type="number" min="0" max="36" step="1"></label>
                 <label><span id="kill-edit-width-label">列宽</span><input id="kill-edit-width" type="number" min="0" max="120" step="1"></label>
             </div>
-            <div class="kill-edit-hint">拖文字移动整列；空白滚轮缩放整页；滚轮改字号，Shift+滚轮改列宽/间距，Ctrl+滚轮改描边。</div>
+            <div class="kill-edit-hint">拖文字移动整列；空白滚轮缩放整页；滚轮改字号，Shift改宽度，Ctrl改描边。</div>
         </section>
         <div class="kill-resize-grip" id="kill-resize-grip" aria-hidden="true"></div>
     </main>

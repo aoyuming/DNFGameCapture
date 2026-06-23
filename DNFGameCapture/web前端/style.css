@@ -85,7 +85,7 @@ body {
     align-items: stretch;
     overflow: hidden;
     box-sizing: border-box;
-    min-height: 100vh;
+    min-height: 0;
 }
 
 .app-shell {
@@ -95,7 +95,7 @@ body {
     gap: 10px;
     width: 100%;
     max-width: none;
-    min-height: calc(100vh - 14px);
+    min-height: 0;
     margin-left: 0;
     transform: scale(var(--layout-fit-scale));
     transform-origin: top center;
@@ -116,7 +116,7 @@ body {
     display: block;
     width: 100%;
     position: relative;
-    z-index: 10;
+    z-index: 40;
     box-sizing: border-box;
 }
 
@@ -453,29 +453,30 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     display: flex;
     flex-direction: column;
     align-items: stretch;
-    justify-content: space-evenly;
-    flex: 1 1 auto;
-    gap: 12px;
-    background: rgba(255,255,255,0.05); padding: 18px 16px; border-radius: 12px;
+    justify-content: center;
+    flex: 0 0 auto;
+    gap: 8px;
+    background: rgba(255,255,255,0.05); padding: 12px 16px; border-radius: 12px;
     width: 100%; max-width: none; box-sizing: border-box;
-    position: relative; z-index: 1; /* 🚨 降低底部控制区的层级，给上面的弹窗让路 */
+    position: relative; z-index: 10;
+}
+.control-panel.more-controls-open {
+    z-index: 120;
 }
 .control-row {
     display: flex;
     justify-content: center;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     width: 100%;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
 }
-.control-row-main,
-.control-row-runtime,
-.control-row-cloud,
-.control-row-tools { max-width: 100%; }
+.control-row-match,
+.control-row-aux { max-width: 100%; }
 .ctrl-btn { 
     min-width: 0;
     max-width: none;
-    padding: 10px 14px !important; font-size: 14px !important; font-weight: bold;
+    padding: 9px 12px !important; font-size: 14px !important; font-weight: bold;
     border: none; border-radius: 6px; cursor: pointer; transition: 0.2s; color: white; white-space: nowrap !important;
     display: inline-flex; align-items: center; justify-content: center; gap: 4px;
     flex: 1 1 0;
@@ -499,7 +500,13 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 }
 .algo-select:focus { border-color: #00e5ff; box-shadow: 0 0 8px rgba(0,229,255,0.35); }
 .ctrl-btn:hover { filter: brightness(1.2); }
-#btn-monitor { font-size: 16px !important; padding: 10px 22px !important; letter-spacing: 1px; }
+.control-row-match > .ctrl-btn,
+.control-row-aux > .ctrl-btn,
+.control-row-aux > .kill-show-death-toggle,
+.control-row-aux > .more-controls-wrap {
+    flex: 1 1 0;
+}
+#btn-monitor { font-size: 16px !important; padding: 9px 18px !important; letter-spacing: 1px; }
 
 .btn-swap { background: #4a4a60; }
 .btn-random { background: #6a3d8f; border: 1px solid rgba(215, 178, 255, 0.55); }
@@ -508,6 +515,17 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 .btn-monitor-start { background: #00e5ff; color: #000; box-shadow: 0 0 10px rgba(0, 229, 255, 0.4); }
 .btn-monitor-pending { background: #ffb000; color: #151522; box-shadow: 0 0 10px rgba(255, 176, 0, 0.35); }
 .btn-monitor-stop { background: #ff0055; box-shadow: 0 0 10px rgba(255, 0, 85, 0.4); }
+.btn-kill-display-toggle {
+    background: #263142;
+    border: 1px solid rgba(0, 229, 255, 0.38);
+    color: #bcefff;
+}
+.btn-kill-display-toggle.is-open {
+    background: #075565;
+    border-color: rgba(0, 229, 255, 0.82);
+    color: #eaffff;
+    box-shadow: 0 0 12px rgba(0, 229, 255, 0.32);
+}
 .btn-auth {
     background: transparent; border: 1px solid #ffaa00; color: #ffaa00;
     width: auto; max-width: none;
@@ -569,7 +587,8 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 .btn-reset { background: #8a6508; border: 1px solid #ffd700; }
 .btn-pro { background: #5a2a82; border: 1px solid #9d4edd; }
 .btn-appearance { background: #234250; border: 1px solid rgba(0, 229, 255, 0.58); color: #c8fbff; }
-.output-seat-label-toggle {
+.output-seat-label-toggle,
+.kill-show-death-toggle {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -587,11 +606,26 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     white-space: nowrap;
     box-sizing: border-box;
 }
-.output-seat-label-toggle input {
+.output-seat-label-toggle input,
+.kill-show-death-toggle input {
     width: 16px;
     height: 16px;
     accent-color: #ffd36a;
     margin: 0;
+}
+.kill-show-death-toggle {
+    background: #253746;
+    border-color: rgba(0, 229, 255, 0.6);
+    color: #bff8ff;
+    cursor: pointer;
+    transition: 0.2s;
+}
+.kill-show-death-toggle:hover {
+    filter: brightness(1.14);
+    box-shadow: 0 0 12px rgba(0, 229, 255, 0.18);
+}
+.kill-show-death-toggle input {
+    accent-color: #00e5ff;
 }
 .btn-sync-db { background: #173f34; border: 1px solid #45d49a; color: #b9ffe0; }
 .btn-review-toggle {
@@ -633,10 +667,82 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     line-height: 18px;
 }
 
+.more-controls-wrap {
+    position: relative;
+    min-width: 0;
+    z-index: 90;
+}
+.btn-more-controls {
+    width: 100%;
+    background: #2f3444;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    color: #f2f6ff;
+}
+.btn-more-controls.active {
+    border-color: rgba(0, 229, 255, 0.72);
+    box-shadow: 0 0 12px rgba(0, 229, 255, 0.22);
+}
+.more-controls-menu {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 10px);
+    width: min(520px, calc(100vw - 28px));
+    display: none;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    padding: 12px;
+    border-radius: 10px;
+    border: 1px solid rgba(0, 229, 255, 0.34);
+    background: rgba(13, 16, 28, 0.97);
+    box-shadow: 0 14px 34px rgba(0, 0, 0, 0.58);
+    z-index: 100;
+}
+.more-controls-menu.active {
+    display: grid;
+}
+.more-controls-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+    padding: 9px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.045);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.more-controls-title {
+    color: rgba(255, 255, 255, 0.58);
+    font-size: 12px;
+    font-weight: 800;
+    line-height: 1;
+}
+.more-controls-menu .ctrl-btn,
+.more-controls-menu .output-seat-label-toggle,
+.more-controls-menu .algo-select-wrap {
+    width: 100%;
+    min-height: 38px;
+    flex: 0 0 auto;
+}
+.more-controls-menu .algo-select-wrap {
+    padding: 7px 8px;
+}
+.more-controls-menu .algo-select {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+.more-controls-danger {
+    grid-column: 1 / -1;
+    background: rgba(255, 0, 85, 0.055);
+    border-color: rgba(255, 120, 150, 0.2);
+}
+.more-controls-danger .btn-clear-teams {
+    color: #ffd6de;
+}
+
 /* 🚨 新增：底部输出目录显示条 */
 .dir-bar {
-    width: 100%; text-align: center; margin-top: 5px; 
-    padding: 8px; background: rgba(0,0,0,0.3); border-radius: 6px;
+    width: 100%; text-align: center; margin-top: 2px;
+    padding: 6px 8px; background: rgba(0,0,0,0.3); border-radius: 6px;
     color: var(--text-muted); font-size: 13px; cursor: pointer;
     transition: 0.2s; border: 1px solid transparent;
 }
@@ -1463,13 +1569,6 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 .modal-btn { padding: 8px 25px; border-radius: 6px; border: none; cursor: pointer; font-weight: bold; font-size: 14px; color: white; }
 .btn-cancel { background: #4a4a60; }
 .btn-confirm { background: #00e5ff; color: #000; }
-.autocomplete-popover {
-    z-index: 5 !important;   /* 补全在下层 */
-}
-.alias-popover {
-    z-index: 10 !important;    /* 小号在上层 */
-}
-
 .player-row.drag-source {
     outline: 3px solid #00aaff;
     outline-offset: -3px;

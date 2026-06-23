@@ -29,7 +29,7 @@ struct ScorePointF {
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"3.8.5"    //当前版本号
+#define CURRENT_VERSION L"4.0.0"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -64,6 +64,7 @@ struct ScorePointF {
 #define WM_OCR_SERVICE_FAIL     (WM_USER + 108) // 【新增】：Umi-OCR 离线/恢复失败，停止监控
 #define WM_OCR_START_RESULT     (WM_USER + 109) // 【新增】：Umi-OCR 启动流程完成
 #define WM_OCR_RECOVER_RESULT   (WM_USER + 110) // 【新增】：Umi-OCR 运行中恢复完成
+#define WM_KILL_DISPLAY_VISIBILITY_CHANGED (WM_USER + 111) // 击杀展示窗口显示/隐藏后同步 Web 按钮状态
 
 // =========================================================
 // 【编译环境切换开关】
@@ -204,6 +205,7 @@ protected:
     afx_msg LRESULT OnOcrServiceFail(WPARAM wParam, LPARAM lParam); // 【新增】：OCR 服务恢复失败时停止监控并提醒
     afx_msg LRESULT OnOcrStartResult(WPARAM wParam, LPARAM lParam); // 【新增】：OCR 启动完成回调
     afx_msg LRESULT OnOcrRecoverResult(WPARAM wParam, LPARAM lParam); // 【新增】：OCR 运行中恢复完成回调
+    afx_msg LRESULT OnKillDisplayVisibilityChanged(WPARAM wParam, LPARAM lParam);
 
     std::vector<CString> m_autoExpandedNodes; // 【新增】：记忆刚才修改过，需要临时展开3秒的主号
 
@@ -238,6 +240,9 @@ private:
     void WriteScoreToFile();
     nlohmann::json DnfBuildSharedWebStateJson();
     void OpenKillDisplayWindow();
+    void HideKillDisplayWindow();
+    void ToggleKillDisplayWindow();
+    bool IsKillDisplayWindowVisible() const;
     CString GetKillDisplayObsUrl() const;
     CString GetPickSeatLabelForIndex(int index) const;
     void AppendResultText(const CString& t, COLORREF c);
@@ -295,6 +300,7 @@ private:
 
     const int ID_CMB_TARGET_WINDOW = 1031; // 【新增】：目标选择下拉框
     CComboBox m_cmbTargetWindow;
+    CString m_lastTargetWindowName;
     afx_msg void OnCbnDropdownTargetWindow(); // 下拉展开时刷新列表
     afx_msg void OnCbnCloseupTargetWindow();
     // 【新增】：去标题栏复选框
@@ -303,6 +309,8 @@ private:
     afx_msg void OnBnClickedAutoCropBlackBars();
 
     void RefreshTargetList(); // 刷新目标列表的方法
+    CString GetSelectedTargetWindowLabel();
+    void SaveSelectedTargetWindowName();
     static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam); // 遍历窗口的回调函数
     CameraCapture* m_pCamera = nullptr; // 摄像头引擎实例
     std::atomic<bool> m_bWGCInitPending{ false };  // WGC 正在后台初始化中

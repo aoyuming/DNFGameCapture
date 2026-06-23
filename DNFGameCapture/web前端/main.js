@@ -8,6 +8,7 @@ let hasReceivedInitialData = false;
 let isMonitoring = false;
 let isStartPending = false;
 let isProMode = false;
+let isKillDisplayWindowVisible = false;
 let deathXAlgorithm = 0;
 let deathPatchInstalled = false;
 let outputSeatLabelToKillFile = false;
@@ -97,6 +98,23 @@ function getAliasJobKey(aliasName) {
 
 function aliasHasDeclaredJob(aliasName) {
     return !!getAliasJobKey(aliasName);
+}
+
+function setMoreControlsOpen(open) {
+    const menu = document.getElementById('more-controls-menu');
+    const button = document.getElementById('btn-more-controls');
+    const panel = document.querySelector('.control-panel');
+    if (!menu || !button) return;
+    menu.classList.toggle('active', open);
+    menu.setAttribute('aria-hidden', open ? 'false' : 'true');
+    button.classList.toggle('active', open);
+    button.setAttribute('aria-expanded', open ? 'true' : 'false');
+    panel?.classList.toggle('more-controls-open', open);
+}
+
+function toggleMoreControlsMenu() {
+    const menu = document.getElementById('more-controls-menu');
+    setMoreControlsOpen(!menu?.classList.contains('active'));
 }
 
 function sameAliasStorageEntry(a, b) {
@@ -1145,6 +1163,15 @@ function normalizeKillDisplaySettings(settings = {}) {
 
 function applyKillDisplaySettings(settings = killDisplaySettings) {
     killDisplaySettings = normalizeKillDisplaySettings(settings);
+    syncMainShowDeathToggle();
+}
+
+function syncMainShowDeathToggle() {
+    const input = document.getElementById('kill-show-death-toggle-main');
+    if (!input) return;
+    const enabled = normalizeKillDisplayLayout(killDisplaySettings.layout).showDeathNumber === 1;
+    input.checked = enabled;
+    input.closest('.kill-show-death-toggle')?.classList.toggle('active', enabled);
 }
 
 function normalizeSystemFonts(fonts = []) {
@@ -1366,8 +1393,7 @@ function renderKillLayoutEditor() {
     section.appendChild(grid);
 
     document.getElementById('kill-layout-showDeathNumber')?.addEventListener('change', (event) => {
-        killDisplaySettings.layout.showDeathNumber = event.target.checked ? 1 : 0;
-        queueKillDisplaySettingsSync();
+        setKillDisplayShowDeathNumber(event.target.checked);
     });
 
     KILL_DISPLAY_LAYOUT_FIELDS.forEach(field => {
@@ -1513,6 +1539,21 @@ function queueKillDisplaySettingsSync() {
     }, 160);
 }
 
+function setKillDisplayShowDeathNumber(enabled) {
+    killDisplaySettings = normalizeKillDisplaySettings(killDisplaySettings);
+    const nextValue = enabled ? 1 : 0;
+    if (killDisplaySettings.layout.showDeathNumber === nextValue) {
+        syncMainShowDeathToggle();
+        return;
+    }
+    killDisplaySettings.layout.showDeathNumber = nextValue;
+    applyKillDisplaySettings(killDisplaySettings);
+    if (isAppearancePanelOpen() && appearanceScope === 'kill') {
+        renderKillLayoutEditor();
+    }
+    queueKillDisplaySettingsSync();
+}
+
 function resetCurrentAppearanceStyle() {
     const type = getCurrentAppearanceStyleType(getCurrentAppearanceStyleKey());
     if (appearanceScope === 'kill') {
@@ -1556,6 +1597,14 @@ function resetAllScoreboardStyles() {
     appearanceScope = previousScope;
 }
 
+function setAppearancePanelWindowExpanded(expanded) {
+    if (!window.chrome?.webview) return;
+    window.chrome.webview.postMessage({
+        action: 'cmd_set_appearance_panel_open',
+        open: !!expanded
+    });
+}
+
 function openAppearancePanel() {
     const overlay = document.getElementById('appearance-overlay');
     if (!overlay) return;
@@ -1566,6 +1615,7 @@ function openAppearancePanel() {
     overlay.classList.add('active');
     overlay.setAttribute('aria-hidden', 'false');
     document.documentElement.classList.add('appearance-open');
+    setAppearancePanelWindowExpanded(true);
     scheduleLayoutFit(false, 'appearance-open');
 }
 
@@ -1575,6 +1625,7 @@ function closeAppearancePanel() {
     overlay.classList.remove('active');
     overlay.setAttribute('aria-hidden', 'true');
     document.documentElement.classList.remove('appearance-open');
+    setAppearancePanelWindowExpanded(false);
     scheduleLayoutFit(false, 'appearance-close');
 }
 
@@ -2282,6 +2333,7 @@ function applyStateFromServer(state) {
         btnMonitor.innerHTML = '▶ 运行';
         btnMonitor.className = 'ctrl-btn btn-monitor-start';
     }
+    syncKillDisplayToggle(state);
 
     const teamsWrap = document.getElementById('teams-wrap') || document.getElementById('main-container');
     teamsWrap.style.flexDirection = state.isFlipped ? 'row-reverse' : 'row';
@@ -2484,6 +2536,20 @@ function setReviewPanelOpen(open) {
 
 function toggleReviewPanel() {
     setReviewPanelOpen(!isReviewPanelOpen);
+}
+
+function syncKillDisplayToggle(state = {}) {
+    const btn = document.getElementById('btn-kill-display-toggle');
+    if (!btn) return;
+
+    const ready = state.killDisplayHttpReady !== false;
+    isKillDisplayWindowVisible = !!state.killDisplayWindowVisible;
+    btn.classList.toggle('is-open', isKillDisplayWindowVisible);
+    btn.setAttribute('aria-pressed', isKillDisplayWindowVisible ? 'true' : 'false');
+    btn.disabled = !ready;
+    btn.title = ready
+        ? (isKillDisplayWindowVisible ? '点击关闭击杀展示页面' : '点击打开击杀展示页面')
+        : (state.killDisplayHttpError || '击杀展示页本地服务未启动');
 }
 
 // ==========================================
@@ -3699,9 +3765,11 @@ document.addEventListener('click', (e) => {
     if (
         e.target.closest('#custom-modal') ||
         e.target.closest('.popover') ||
+        e.target.closest('.more-controls-wrap') ||
         e.target.classList.contains('name-input') ||
         e.target.classList.contains('gear-btn')
     ) return;
+    setMoreControlsOpen(false);
     document.querySelectorAll('.popover').forEach(p => p.classList.remove('active'));
     clearPendingAliasPopoverLock();
     // 点击任意空白处，撤销所有选手的置顶层级
@@ -3716,6 +3784,14 @@ document.addEventListener('input', (e) => {
 
 document.getElementById('btn-swap').addEventListener('click', () => window.chrome.webview.postMessage({ action: "cmd_swap" }));
 document.getElementById('btn-random-teams')?.addEventListener('click', openRandomTool);
+document.getElementById('btn-more-controls')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleMoreControlsMenu();
+});
+document.getElementById('more-controls-menu')?.addEventListener('click', (e) => {
+    const actionButton = e.target.closest('button.ctrl-btn');
+    if (actionButton) setMoreControlsOpen(false);
+});
 document.getElementById('btn-monitor').addEventListener('click', () => {
     if (isStartPending && !isMonitoring) {
         showAlert('OCR 服务正在启动中，请稍候...');
@@ -3756,6 +3832,12 @@ if (deathAlgoSelect) {
 }
 
 document.getElementById('btn-auth').addEventListener('click', () => { showPrompt("请输入授权卡密 (CDK):", (c) => { if (c) window.chrome.webview.postMessage({ action: "cmd_auth", code: c.trim() }); }); });
+document.getElementById('btn-kill-display-toggle')?.addEventListener('click', () => {
+    if (window.chrome?.webview) window.chrome.webview.postMessage({ action: 'cmd_toggle_kill_display' });
+});
+document.getElementById('kill-show-death-toggle-main')?.addEventListener('change', function () {
+    setKillDisplayShowDeathNumber(this.checked);
+});
 document.getElementById('btn-sync-alias-db')?.addEventListener('click', () => {
     showConfirm('确定从云端公共库同步小号数据吗？<br><br>只会合并审核通过的数据，不会删除你本地已有的小号。', (ok) => {
         if (!ok || !window.chrome?.webview) return;
@@ -3820,6 +3902,10 @@ function normalizeFunctionKey(e) {
 }
 
 document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        setMoreControlsOpen(false);
+    }
+
     const key = normalizeFunctionKey(e);
     if (!key) return;
     if (isAppearancePanelOpen()) return;

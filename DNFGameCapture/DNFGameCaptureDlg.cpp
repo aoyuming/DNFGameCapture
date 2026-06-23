@@ -3124,6 +3124,7 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     ON_MESSAGE(WM_OCR_SERVICE_FAIL, &CDNFGameCaptureDlg::OnOcrServiceFail)
     ON_MESSAGE(WM_OCR_START_RESULT, &CDNFGameCaptureDlg::OnOcrStartResult)
     ON_MESSAGE(WM_OCR_RECOVER_RESULT, &CDNFGameCaptureDlg::OnOcrRecoverResult)
+    ON_MESSAGE(WM_KILL_DISPLAY_VISIBILITY_CHANGED, &CDNFGameCaptureDlg::OnKillDisplayVisibilityChanged)
     ON_CBN_DROPDOWN(1031, &CDNFGameCaptureDlg::OnCbnDropdownTargetWindow)
     ON_CBN_CLOSEUP(1031, &CDNFGameCaptureDlg::OnCbnCloseupTargetWindow)
     ON_BN_CLICKED(ID_CHK_AUTO_CROP_BLACK_BARS, &CDNFGameCaptureDlg::OnBnClickedAutoCropBlackBars)
@@ -4305,11 +4306,18 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_iniPath = appDir + L"config.ini";
     m_webFrontDir = appDir + L"web前端";
     m_bKillDisplayHttpReady = DnfStartKillDisplayHttpServer(this, m_webFrontDir, m_killDisplayHttpError);
+    if (m_bKillDisplayHttpReady) {
+        OpenKillDisplayWindow();
+    }
     if (!m_bKillDisplayHttpReady && !m_killDisplayHttpError.IsEmpty()) {
         WriteMatchLog(L"[击杀展示页] " + m_killDisplayHttpError);
     }
     m_bOutputSeatLabelToKillFile = GetPrivateProfileInt(L"Settings", L"OutputSeatLabelToKillFile", 0, m_iniPath) != 0;
     m_bRedPickFirst = GetPrivateProfileInt(L"Settings", L"RedPickFirst", 0, m_iniPath) != 0;
+    wchar_t lastTargetBuf[512];
+    ::GetPrivateProfileString(L"Settings", L"LastTargetWindowName", L"", lastTargetBuf, 512, m_iniPath);
+    m_lastTargetWindowName = lastTargetBuf;
+    m_lastTargetWindowName.Trim();
     wchar_t ocrPathBuf[MAX_PATH];
     ::GetPrivateProfileString(L"Settings", L"OcrExePath", L"", ocrPathBuf, MAX_PATH, m_iniPath);
     m_ocrExePath = ocrPathBuf;
@@ -10343,6 +10351,11 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             BroadcastStateToWeb();
             if (m_pWebDlg) m_pWebDlg->WriteWebHostDiagnostics(L"前端page_ready");
         }
+        else if (action == "cmd_set_appearance_panel_open") {
+            if (m_pWebDlg) {
+                m_pWebDlg->SetAppearancePanelExpanded(j.value("open", false));
+            }
+        }
         else if (action == "web_layout_diagnostics") {
             auto& data = j["data"];
             CString layoutVersion = data.contains("layoutVersion") ? CA2W(data["layoutVersion"].get<std::string>().c_str(), CP_UTF8) : L"";
@@ -10557,6 +10570,10 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
         }
         else if (action == "cmd_open_kill_display") {
             OpenKillDisplayWindow();
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_toggle_kill_display") {
+            ToggleKillDisplayWindow();
             BroadcastStateToWeb();
         }
         else if (action == "cmd_copy_kill_obs_url") {
@@ -10819,6 +10836,7 @@ json CDNFGameCaptureDlg::DnfBuildSharedWebStateJson()
     data["killDisplayObsUrl"] = KILL_DISPLAY_OBS_URL_UTF8;
     data["killDisplayHttpReady"] = m_bKillDisplayHttpReady;
     data["killDisplayHttpError"] = DnfJsonUtf8(m_killDisplayHttpError);
+    data["killDisplayWindowVisible"] = IsKillDisplayWindowVisible();
     data["systemFonts"] = DnfBuildInstalledFontListJson();
 
     bool deathPatchInstalled = false;
@@ -11013,6 +11031,30 @@ void CDNFGameCaptureDlg::OpenKillDisplayWindow()
         m_pKillDisplayDlg->SetWindowPos(nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW);
         m_pKillDisplayDlg->SetForegroundWindow();
     }
+}
+
+void CDNFGameCaptureDlg::HideKillDisplayWindow()
+{
+    if (m_pKillDisplayDlg && ::IsWindow(m_pKillDisplayDlg->GetSafeHwnd())) {
+        m_pKillDisplayDlg->ShowWindow(SW_HIDE);
+    }
+}
+
+void CDNFGameCaptureDlg::ToggleKillDisplayWindow()
+{
+    if (IsKillDisplayWindowVisible()) {
+        HideKillDisplayWindow();
+    }
+    else {
+        OpenKillDisplayWindow();
+    }
+}
+
+bool CDNFGameCaptureDlg::IsKillDisplayWindowVisible() const
+{
+    return m_pKillDisplayDlg &&
+        ::IsWindow(m_pKillDisplayDlg->GetSafeHwnd()) &&
+        m_pKillDisplayDlg->IsWindowVisible();
 }
 
 // 将数据同步到树状控件（带视觉状态记忆）
@@ -11864,6 +11906,12 @@ LRESULT CDNFGameCaptureDlg::OnUpdateAllUI(WPARAM wParam, LPARAM lParam) {
     return 0;
 }
 
+LRESULT CDNFGameCaptureDlg::OnKillDisplayVisibilityChanged(WPARAM wParam, LPARAM lParam)
+{
+    BroadcastStateToWeb();
+    return 0;
+}
+
 // ============================================================================
 // 系统版本与权限检测
 // ============================================================================
@@ -12240,9 +12288,12 @@ BOOL CALLBACK CDNFGameCaptureDlg::EnumWindowsProc(HWND hwnd, LPARAM lParam) {
 }
 
 void CDNFGameCaptureDlg::RefreshTargetList() {
-    int curSelData = -1;
+    DWORD_PTR curSelData = (DWORD_PTR)-1;
+    CString curSelLabel;
     if (m_cmbTargetWindow.GetCurSel() != -1) {
-        curSelData = (int)m_cmbTargetWindow.GetItemData(m_cmbTargetWindow.GetCurSel());
+        int curSel = m_cmbTargetWindow.GetCurSel();
+        curSelData = m_cmbTargetWindow.GetItemData(curSel);
+        m_cmbTargetWindow.GetLBText(curSel, curSelLabel);
     }
 
     m_cmbTargetWindow.ResetContent();
@@ -12265,12 +12316,51 @@ void CDNFGameCaptureDlg::RefreshTargetList() {
     // 尝试恢复之前的选择
     bool restored = false;
     for (int i = 0; i < m_cmbTargetWindow.GetCount(); i++) {
-        if ((int)m_cmbTargetWindow.GetItemData(i) == curSelData) {
+        if (m_cmbTargetWindow.GetItemData(i) == curSelData) {
             m_cmbTargetWindow.SetCurSel(i);
             restored = true; break;
         }
     }
+    if (!restored && !curSelLabel.IsEmpty()) {
+        for (int i = 0; i < m_cmbTargetWindow.GetCount(); i++) {
+            CString itemText;
+            m_cmbTargetWindow.GetLBText(i, itemText);
+            if (itemText == curSelLabel) {
+                m_cmbTargetWindow.SetCurSel(i);
+                restored = true; break;
+            }
+        }
+    }
+    if (!restored && !m_lastTargetWindowName.IsEmpty()) {
+        for (int i = 0; i < m_cmbTargetWindow.GetCount(); i++) {
+            CString itemText;
+            m_cmbTargetWindow.GetLBText(i, itemText);
+            if (itemText == m_lastTargetWindowName) {
+                m_cmbTargetWindow.SetCurSel(i);
+                restored = true; break;
+            }
+        }
+    }
     if (!restored) m_cmbTargetWindow.SetCurSel(0);
+}
+
+CString CDNFGameCaptureDlg::GetSelectedTargetWindowLabel()
+{
+    CString label;
+    if (m_cmbTargetWindow.m_hWnd && m_cmbTargetWindow.GetCurSel() != -1) {
+        m_cmbTargetWindow.GetLBText(m_cmbTargetWindow.GetCurSel(), label);
+    }
+    label.Trim();
+    return label;
+}
+
+void CDNFGameCaptureDlg::SaveSelectedTargetWindowName()
+{
+    CString label = GetSelectedTargetWindowLabel();
+    if (label.IsEmpty()) return;
+
+    m_lastTargetWindowName = label;
+    ::WritePrivateProfileString(L"Settings", L"LastTargetWindowName", m_lastTargetWindowName, m_iniPath);
 }
 
 void CDNFGameCaptureDlg::OnCbnDropdownTargetWindow() {
@@ -12280,6 +12370,8 @@ void CDNFGameCaptureDlg::OnCbnDropdownTargetWindow() {
 // 只在用户"确认选择并关闭下拉框"时触发，滚动期间不触发
 // =============================================================
 void CDNFGameCaptureDlg::OnCbnCloseupTargetWindow() {
+    SaveSelectedTargetWindowName();
+
     ClearPreview();
 
     // 🚨 换成安全销毁

@@ -1,4 +1,9 @@
 :root {
+    --kill-edit-board-width: auto;
+    --kill-edit-board-height: auto;
+    --kill-edit-board-left: 0px;
+    --kill-edit-board-top: 0px;
+    --kill-edit-toolbar-top: auto;
     --kill-bg-alpha: 0;
     --kill-panel-alpha: 0.49;
     --kill-row-alpha: 0;
@@ -146,6 +151,69 @@ body {
     background: transparent;
     cursor: move;
     user-select: none;
+}
+
+.kill-window-close,
+.kill-window-settings {
+    position: fixed;
+    top: 10px;
+    z-index: 30;
+    width: 32px;
+    height: 32px;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    border-radius: 7px;
+    background: rgba(12, 14, 24, 0.72);
+    color: rgba(255, 255, 255, 0.92);
+    font-size: 26px;
+    line-height: 1;
+    font-weight: 800;
+    cursor: pointer;
+    opacity: 0;
+    transform: translateY(-3px);
+    transition: opacity 0.16s ease, transform 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+}
+
+.kill-window-close {
+    right: 10px;
+}
+
+.kill-window-settings {
+    right: 48px;
+    font-size: 20px;
+    color: rgba(210, 246, 255, 0.96);
+}
+
+.kill-display-root.shell-window .kill-window-close,
+.kill-display-root.shell-window .kill-window-settings {
+    display: inline-flex;
+}
+
+.kill-display-root.shell-window:hover .kill-window-close,
+.kill-display-root.shell-window:hover .kill-window-settings {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.kill-window-close:focus-visible,
+.kill-window-settings:focus-visible {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.kill-window-close:hover,
+.kill-window-close:focus-visible {
+    border-color: rgba(255, 255, 255, 0.72);
+    background: rgba(255, 18, 100, 0.82);
+}
+
+.kill-window-settings:hover,
+.kill-window-settings:focus-visible {
+    border-color: rgba(0, 229, 255, 0.72);
+    background: rgba(0, 136, 160, 0.82);
+    box-shadow: 0 0 14px rgba(0, 229, 255, 0.25);
 }
 
 .kill-board {
@@ -452,6 +520,15 @@ body {
     cursor: default;
 }
 
+.kill-display-root.edit-mode .kill-board {
+    position: fixed;
+    left: var(--kill-edit-board-left);
+    top: var(--kill-edit-board-top);
+    width: var(--kill-edit-board-width);
+    height: var(--kill-edit-board-height);
+    flex: 0 0 auto;
+}
+
 .kill-display-root.edit-mode [data-style-key] {
     cursor: grab;
 }
@@ -471,11 +548,15 @@ body {
 
 .kill-edit-toolbar {
     position: fixed;
-    top: 10px;
-    right: 10px;
+    left: 12px;
+    right: 12px;
+    top: var(--kill-edit-toolbar-top);
+    bottom: auto;
     z-index: 40;
-    width: 260px;
-    padding: 10px;
+    width: auto;
+    min-height: 132px;
+    max-height: 156px;
+    padding: 8px 12px;
     border: 1px solid rgba(255, 211, 106, 0.38);
     border-radius: 8px;
     background: rgba(9, 10, 18, 0.86);
@@ -484,6 +565,11 @@ body {
     backdrop-filter: blur(10px);
     font: 12px/1.3 "Microsoft YaHei", sans-serif;
     user-select: none;
+    overflow: hidden;
+    display: grid;
+    grid-template-columns: 142px minmax(138px, 190px) 92px minmax(150px, 210px) minmax(260px, 1fr);
+    align-items: center;
+    gap: 4px 10px;
 }
 
 .kill-edit-toolbar[hidden] {
@@ -493,8 +579,11 @@ body {
 .kill-edit-head {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    margin-bottom: 8px;
+    justify-content: flex-start;
+    gap: 8px;
+    margin-bottom: 0;
+    min-width: 0;
+    align-self: stretch;
 }
 
 .kill-edit-head strong {
@@ -507,12 +596,30 @@ body {
     color: rgba(244, 244, 247, 0.64);
 }
 
+.kill-edit-exit {
+    min-width: 72px;
+    height: 26px;
+    border: 1px solid rgba(255, 211, 106, 0.52);
+    border-radius: 5px;
+    background: rgba(255, 211, 106, 0.12);
+    color: #ffe3a3;
+    font: inherit;
+    font-weight: 800;
+    cursor: pointer;
+}
+
+.kill-edit-exit:hover,
+.kill-edit-exit:focus-visible {
+    background: rgba(255, 211, 106, 0.24);
+    box-shadow: 0 0 12px rgba(255, 211, 106, 0.18);
+}
+
 .kill-edit-toolbar label {
     display: grid;
     grid-template-columns: 44px minmax(0, 1fr);
     align-items: center;
     gap: 6px;
-    margin: 5px 0;
+    margin: 3px 0;
 }
 
 .kill-edit-toolbar .kill-edit-check {
@@ -544,8 +651,9 @@ body {
 
 .kill-edit-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 2px 8px;
+    grid-template-columns: repeat(3, minmax(88px, 1fr));
+    gap: 3px 8px;
+    grid-column: span 2;
 }
 
 .kill-edit-grid label {
@@ -553,8 +661,11 @@ body {
 }
 
 .kill-edit-hint {
-    margin-top: 8px;
+    margin-top: 0;
     font-size: 11px;
+    min-width: 0;
+    line-height: 1.25;
+    white-space: normal;
 }
 
 @media (max-width: 620px) {
