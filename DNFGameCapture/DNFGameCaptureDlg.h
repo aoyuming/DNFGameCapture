@@ -29,7 +29,7 @@ struct ScorePointF {
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"4.0.0"    //当前版本号
+#define CURRENT_VERSION L"4.0.1"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -283,6 +283,7 @@ private:
     bool RelaunchAsAdmin(); // 权限检测与自动提权
     bool IsBitmapBlank(HBITMAP hBmp, int w, int h);
     bool TryAutoCropBlackBars(HBITMAP& hBmp, int& w, int& h, const wchar_t* sourceTag);
+    void RequestBlackBarCropDetection(const CString& reason);
     void ResetFrameHistory();
 
     int m_nBlankFrameCount = 0;
@@ -305,8 +306,17 @@ private:
     afx_msg void OnCbnCloseupTargetWindow();
     // 【新增】：去标题栏复选框
     CButton m_chkCropTitle;
-    CButton m_chkAutoCropBlackBars;
+    CButton m_btnCropBlackBars;
     afx_msg void OnBnClickedAutoCropBlackBars();
+    bool m_blackBarCropPending = true;
+    bool m_blackBarCropLocked = false;
+    int m_blackBarCropSourceW = 0;
+    int m_blackBarCropSourceH = 0;
+    int m_blackBarCropLeft = 0;
+    int m_blackBarCropTop = 0;
+    int m_blackBarCropRight = 0;
+    int m_blackBarCropBottom = 0;
+    CString m_blackBarCropRequestReason = L"首次捕获";
 
     void RefreshTargetList(); // 刷新目标列表的方法
     CString GetSelectedTargetWindowLabel();

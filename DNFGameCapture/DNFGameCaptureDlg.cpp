@@ -4395,8 +4395,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_cmbTargetWindow.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, CRect(670, row1_Y, r.right - 105, row1_Y + 400), this, 1031); m_cmbTargetWindow.SetFont(&m_font);
     RefreshTargetList();
     m_chkCropTitle.Create(L"去标题栏", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, CRect(r.right - 100, row1_Y, r.right - 10, row1_Y + 25), this, 1032); m_chkCropTitle.SetFont(&m_font); m_chkCropTitle.SetCheck(BST_CHECKED);
-    m_chkAutoCropBlackBars.Create(L"自动裁黑边", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, CRect(r.right - 125, row1_Y + 28, r.right - 10, row1_Y + 53), this, ID_CHK_AUTO_CROP_BLACK_BARS); m_chkAutoCropBlackBars.SetFont(&m_font);
-    m_chkAutoCropBlackBars.SetCheck(GetPrivateProfileInt(L"Settings", L"AutoCropBlackBars", 1, m_iniPath) ? BST_CHECKED : BST_UNCHECKED);
+    m_btnCropBlackBars.Create(L"重新裁剪", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(r.right - 125, row1_Y + 28, r.right - 10, row1_Y + 53), this, ID_CHK_AUTO_CROP_BLACK_BARS); m_btnCropBlackBars.SetFont(&m_font);
 
     m_btnDeathXSave.Create(L"保存X点位", WS_CHILD | BS_PUSHBUTTON, CRect(10, 10, 100, 38), this, ID_BTN_DEATH_X_SAVE); m_btnDeathXSave.SetFont(&m_font); m_btnDeathXSave.ShowWindow(SW_HIDE);
     m_btnDeathXCancel.Create(L"取消", WS_CHILD | BS_PUSHBUTTON, CRect(106, 10, 176, 38), this, ID_BTN_DEATH_X_CANCEL); m_btnDeathXCancel.SetFont(&m_font); m_btnDeathXCancel.ShowWindow(SW_HIDE);
@@ -7881,7 +7880,72 @@ void CDNFGameCaptureDlg::ResetFrameHistory()
 bool CDNFGameCaptureDlg::TryAutoCropBlackBars(HBITMAP& hBmp, int& w, int& h, const wchar_t* sourceTag)
 {
     if (!hBmp || w <= 0 || h <= 0) return false;
-    if (!m_chkAutoCropBlackBars.m_hWnd || m_chkAutoCropBlackBars.GetCheck() != BST_CHECKED) return false;
+
+    const int sourceW = w;
+    const int sourceH = h;
+
+    auto applyCrop = [&](int cropLeft, int cropTop, int cropRight, int cropBottom) -> bool {
+        if (cropLeft == 0 && cropTop == 0 && cropRight == 0 && cropBottom == 0) return false;
+
+        int newW = w - cropLeft - cropRight;
+        int newH = h - cropTop - cropBottom;
+        if (newW < 320 || newH < 180 || newW < (int)(w * 0.50) || newH < (int)(h * 0.50)) return false;
+
+        HDC hdc = ::GetDC(NULL);
+        if (!hdc) return false;
+
+        HBITMAP hCropped = ::CreateCompatibleBitmap(hdc, newW, newH);
+        if (!hCropped) {
+            ::ReleaseDC(NULL, hdc);
+            return false;
+        }
+
+        HDC hSrcDC = ::CreateCompatibleDC(hdc);
+        HDC hDstDC = ::CreateCompatibleDC(hdc);
+        if (!hSrcDC || !hDstDC) {
+            if (hSrcDC) ::DeleteDC(hSrcDC);
+            if (hDstDC) ::DeleteDC(hDstDC);
+            ::DeleteObject(hCropped);
+            ::ReleaseDC(NULL, hdc);
+            return false;
+        }
+
+        HGDIOBJ oldSrc = ::SelectObject(hSrcDC, hBmp);
+        HGDIOBJ oldDst = ::SelectObject(hDstDC, hCropped);
+        BOOL ok = ::BitBlt(hDstDC, 0, 0, newW, newH, hSrcDC, cropLeft, cropTop, SRCCOPY);
+        ::SelectObject(hSrcDC, oldSrc);
+        ::SelectObject(hDstDC, oldDst);
+        ::DeleteDC(hSrcDC);
+        ::DeleteDC(hDstDC);
+        ::ReleaseDC(NULL, hdc);
+
+        if (!ok) {
+            ::DeleteObject(hCropped);
+            return false;
+        }
+
+        ::DeleteObject(hBmp);
+        hBmp = hCropped;
+        w = newW;
+        h = newH;
+        return true;
+        };
+
+    if (!m_blackBarCropPending) {
+        if (!m_blackBarCropLocked) return false;
+
+        if (sourceW != m_blackBarCropSourceW || sourceH != m_blackBarCropSourceH) {
+            CString logLine;
+            logLine.Format(L"[裁剪锁定] 来源=%s；源尺寸由%d×%d变为%d×%d，已停止应用旧裁剪；请点击重新裁剪。",
+                sourceTag ? sourceTag : L"未知", m_blackBarCropSourceW, m_blackBarCropSourceH, sourceW, sourceH);
+            WriteMatchLog(logLine);
+            AppLog(logLine, RGB(255, 180, 0));
+            m_blackBarCropLocked = false;
+            return false;
+        }
+
+        return applyCrop(m_blackBarCropLeft, m_blackBarCropTop, m_blackBarCropRight, m_blackBarCropBottom);
+    }
 
     BITMAPINFO bmi = {};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -7899,6 +7963,8 @@ bool CDNFGameCaptureDlg::TryAutoCropBlackBars(HBITMAP& hBmp, int& w, int& h, con
         ::ReleaseDC(NULL, hdc);
         return false;
     }
+
+    m_blackBarCropPending = false;
 
     int top = 0;
     while (top < h && DnfIsBlackBarRow(pixels, w, h, top)) ++top;
@@ -7922,68 +7988,40 @@ bool CDNFGameCaptureDlg::TryAutoCropBlackBars(HBITMAP& hBmp, int& w, int& h, con
     if (cropLeft < DNF_BLACK_BAR_MIN_EDGE) cropLeft = 0;
     if (cropRight < DNF_BLACK_BAR_MIN_EDGE) cropRight = 0;
 
-    if (cropTop == 0 && cropBottom == 0 && cropLeft == 0 && cropRight == 0) {
-        ::ReleaseDC(NULL, hdc);
-        return false;
-    }
+    ::ReleaseDC(NULL, hdc);
 
     int newW = w - cropLeft - cropRight;
     int newH = h - cropTop - cropBottom;
-    if (newW < 320 || newH < 180 || newW < (int)(w * 0.50) || newH < (int)(h * 0.50)) {
-        ::ReleaseDC(NULL, hdc);
-        return false;
+    bool validCrop = newW >= 320 && newH >= 180 && newW >= (int)(w * 0.50) && newH >= (int)(h * 0.50);
+    if (!validCrop) {
+        cropLeft = cropTop = cropRight = cropBottom = 0;
+        newW = w;
+        newH = h;
     }
 
-    HBITMAP hCropped = ::CreateCompatibleBitmap(hdc, newW, newH);
-    if (!hCropped) {
-        ::ReleaseDC(NULL, hdc);
-        return false;
-    }
+    m_blackBarCropSourceW = sourceW;
+    m_blackBarCropSourceH = sourceH;
+    m_blackBarCropLeft = cropLeft;
+    m_blackBarCropTop = cropTop;
+    m_blackBarCropRight = cropRight;
+    m_blackBarCropBottom = cropBottom;
+    m_blackBarCropLocked = true;
 
-    HDC hSrcDC = ::CreateCompatibleDC(hdc);
-    HDC hDstDC = ::CreateCompatibleDC(hdc);
-    if (!hSrcDC || !hDstDC) {
-        if (hSrcDC) ::DeleteDC(hSrcDC);
-        if (hDstDC) ::DeleteDC(hDstDC);
-        ::DeleteObject(hCropped);
-        ::ReleaseDC(NULL, hdc);
-        return false;
-    }
+    CString logLine;
+    logLine.Format(L"[裁剪锁定] 来源=%s；触发=%s；原始=%dx%d；裁剪=左%d 上%d 右%d 下%d；结果=%dx%d；后续保持固定，直到手动重新裁剪。",
+        sourceTag ? sourceTag : L"未知", m_blackBarCropRequestReason.GetString(), sourceW, sourceH,
+        cropLeft, cropTop, cropRight, cropBottom, newW, newH);
+    WriteMatchLog(logLine);
+    AppLog(logLine, RGB(0, 220, 255));
 
-    HGDIOBJ oldSrc = ::SelectObject(hSrcDC, hBmp);
-    HGDIOBJ oldDst = ::SelectObject(hDstDC, hCropped);
-    BOOL ok = ::BitBlt(hDstDC, 0, 0, newW, newH, hSrcDC, cropLeft, cropTop, SRCCOPY);
-    ::SelectObject(hSrcDC, oldSrc);
-    ::SelectObject(hDstDC, oldDst);
-    ::DeleteDC(hSrcDC);
-    ::DeleteDC(hDstDC);
-    ::ReleaseDC(NULL, hdc);
+    return applyCrop(cropLeft, cropTop, cropRight, cropBottom);
+}
 
-    if (!ok) {
-        ::DeleteObject(hCropped);
-        return false;
-    }
-
-    CString logKey;
-    logKey.Format(L"%s|%dx%d|%d,%d,%d,%d|%dx%d",
-        sourceTag ? sourceTag : L"未知", w, h, cropLeft, cropTop, cropRight, cropBottom, newW, newH);
-    static CString s_lastAutoCropLogKey;
-    static DWORD s_lastAutoCropLogTick = 0;
-    DWORD nowTick = ::GetTickCount();
-    if (logKey != s_lastAutoCropLogKey || nowTick - s_lastAutoCropLogTick >= 10000) {
-        CString logLine;
-        logLine.Format(L"[自动裁黑边] 来源=%s；原始=%dx%d；裁剪=左%d 上%d 右%d 下%d；结果=%dx%d。",
-            sourceTag ? sourceTag : L"未知", w, h, cropLeft, cropTop, cropRight, cropBottom, newW, newH);
-        WriteMatchLog(logLine);
-        s_lastAutoCropLogKey = logKey;
-        s_lastAutoCropLogTick = nowTick;
-    }
-
-    ::DeleteObject(hBmp);
-    hBmp = hCropped;
-    w = newW;
-    h = newH;
-    return true;
+void CDNFGameCaptureDlg::RequestBlackBarCropDetection(const CString& reason)
+{
+    m_blackBarCropPending = true;
+    m_blackBarCropLocked = false;
+    m_blackBarCropRequestReason = reason;
 }
 
 // ============================================================================
@@ -8096,6 +8134,8 @@ void CDNFGameCaptureDlg::Capture() {
             hGame = (HWND)targetData;
             if (!::IsWindow(hGame)) {
                 m_cmbTargetWindow.SetCurSel(0);
+                SaveSelectedTargetWindowName();
+                RequestBlackBarCropDetection(L"目标窗口失效，回退默认窗口");
                 return;
             }
         }
@@ -12226,6 +12266,8 @@ void CDNFGameCaptureDlg::OnCbnSelchangeCaptureEngine() {
     CString engineNames[] = { L"自动选择", L"WGC 硬件加速", L"PrintWindow 兼容模式" };
     AppLog(L"⚙️ [设置] 捕获引擎已切换为: " + engineNames[m_nCaptureEngineChoice], RGB(0, 255, 255));
 
+    RequestBlackBarCropDetection(L"切换捕获引擎");
+
     ClearPreview();
 
     // 🚨 换成安全销毁
@@ -12237,11 +12279,9 @@ void CDNFGameCaptureDlg::OnCbnSelchangeCaptureEngine() {
 
 void CDNFGameCaptureDlg::OnBnClickedAutoCropBlackBars()
 {
-    bool enabled = (m_chkAutoCropBlackBars.GetCheck() == BST_CHECKED);
-    ::WritePrivateProfileString(L"Settings", L"AutoCropBlackBars", enabled ? L"1" : L"0", m_iniPath);
-    AppLog(enabled ? L"⚙️ [设置] 已开启自动裁黑边" : L"⚙️ [设置] 已关闭自动裁黑边", RGB(0, 255, 255));
-
-    ClearPreview();
+    RequestBlackBarCropDetection(L"用户手动重新裁剪");
+    AppLog(L"⚙️ [裁剪] 已请求重新检测黑边，将在下一张有效画面上裁剪一次并锁定。", RGB(0, 255, 255));
+    Capture();
 }
 
 
@@ -12371,6 +12411,8 @@ void CDNFGameCaptureDlg::OnCbnDropdownTargetWindow() {
 // =============================================================
 void CDNFGameCaptureDlg::OnCbnCloseupTargetWindow() {
     SaveSelectedTargetWindowName();
+
+    RequestBlackBarCropDetection(L"选择目标窗口");
 
     ClearPreview();
 
