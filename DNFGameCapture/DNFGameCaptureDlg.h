@@ -18,6 +18,7 @@
 #include <deque>
 #include "WebScoreDlg.h"
 #include "KillDisplayDlg.h"
+#include "KeyDisplayDlg.h"
 #include "json.hpp"
 
 struct ScorePointF {
@@ -65,6 +66,7 @@ struct ScorePointF {
 #define WM_OCR_START_RESULT     (WM_USER + 109) // 【新增】：Umi-OCR 启动流程完成
 #define WM_OCR_RECOVER_RESULT   (WM_USER + 110) // 【新增】：Umi-OCR 运行中恢复完成
 #define WM_KILL_DISPLAY_VISIBILITY_CHANGED (WM_USER + 111) // 击杀展示窗口显示/隐藏后同步 Web 按钮状态
+#define WM_KEY_DISPLAY_VISIBILITY_CHANGED (WM_USER + 113)
 
 // =========================================================
 // 【编译环境切换开关】
@@ -124,6 +126,15 @@ struct OcrRecord {
     CString displayText;
 };
 
+struct KeyMappingSlot {
+    UINT vk = 0;
+    CString label;
+    CString color = L"#00E5FF";
+    int opacity = 42;
+};
+
+inline constexpr int KEY_MAPPING_SLOT_COUNT = 14;
+
 // ==========================================
 // 【新增】：自定义编辑框类，底层暴力拦截按键
 // ==========================================
@@ -163,6 +174,7 @@ public:
     // 将主窗口的数据广播给 Web
     void BroadcastStateToWeb();
     std::string BuildKillDisplayStatePayload();
+    std::string BuildKeyMappingStatePayload();
     bool SaveKillDisplaySettingsPayload(const std::string& requestBody, std::string& responseBody);
 
 protected:
@@ -206,6 +218,7 @@ protected:
     afx_msg LRESULT OnOcrStartResult(WPARAM wParam, LPARAM lParam); // 【新增】：OCR 启动完成回调
     afx_msg LRESULT OnOcrRecoverResult(WPARAM wParam, LPARAM lParam); // 【新增】：OCR 运行中恢复完成回调
     afx_msg LRESULT OnKillDisplayVisibilityChanged(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnKeyDisplayVisibilityChanged(WPARAM wParam, LPARAM lParam);
 
     std::vector<CString> m_autoExpandedNodes; // 【新增】：记忆刚才修改过，需要临时展开3秒的主号
 
@@ -244,6 +257,14 @@ private:
     void ToggleKillDisplayWindow();
     bool IsKillDisplayWindowVisible() const;
     CString GetKillDisplayObsUrl() const;
+    nlohmann::json BuildKeyMappingSettingsJson();
+    void LoadKeyMappingSettings();
+    void SaveKeyMappingSettings();
+    void PollKeyMappingState();
+    void OpenKeyDisplayWindow();
+    void HideKeyDisplayWindow();
+    void ToggleKeyDisplayWindow();
+    bool IsKeyDisplayWindowVisible() const;
     CString GetPickSeatLabelForIndex(int index) const;
     void AppendResultText(const CString& t, COLORREF c);
     void RefreshDisplay();
@@ -366,6 +387,7 @@ private:
 
     CWebScoreDlg* m_pWebDlg; // 新窗口的指针
     CKillDisplayDlg* m_pKillDisplayDlg = nullptr; // OBS/直播伴侣击杀展示窗口
+    CKeyDisplayDlg* m_pKeyDisplayDlg = nullptr;
     CString m_webFrontDir;
     bool m_bKillDisplayHttpReady = false;
     CString m_killDisplayHttpError;
@@ -404,6 +426,11 @@ private:
     int m_selectedDeathXPoint = -1;
     int m_dragDeathXPoint = -1;
     bool m_bDraggingDeathXPoint = false;
+
+    KeyMappingSlot m_keyMappingSlots[KEY_MAPPING_SLOT_COUNT];
+    std::mutex m_keyMappingMutex;
+    std::atomic<unsigned int> m_keyMappingActiveMask{ 0 };
+    std::atomic<bool> m_keyMappingEnabled{ false };
 
     int m_totalScoreRed;
     int m_totalScoreBlue;

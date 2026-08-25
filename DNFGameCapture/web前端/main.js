@@ -15,6 +15,10 @@ let outputSeatLabelToKillFile = false;
 let redPickMode = 'second';
 let scoreboardTextStyles = {};
 let killDisplaySettings = {};
+let keyMappingSettings = null;
+let selectedKeyMappingSlot = 0;
+let keyMappingCaptureSlot = -1;
+let keyMappingSyncTimer = null;
 let systemFonts = [];
 let appearanceScope = 'scoreboard';
 let activeScoreboardStyleKey = 'teamName';
@@ -43,7 +47,10 @@ let pendingAliasPopoverName = '';
 let pendingAliasPopoverInput = null;
 let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
-const WEB_LAYOUT_VERSION = '20260616-scoreboard-style';
+const WEB_LAYOUT_VERSION = '20260826-key-mapping-2x7';
+const KEY_MAPPING_SLOT_COUNT = 14;
+const KEY_MAPPING_DEFAULT_LABELS = ['Q', 'W', 'E', 'R', 'T', 'Y', 'Ctrl', 'A', 'S', 'D', 'F', 'G', 'H', 'Alt'];
+const KEY_MAPPING_DEFAULT_VKS = [81, 87, 69, 82, 84, 89, 17, 65, 83, 68, 70, 71, 72, 18];
 let lastLayoutFitScale = 1;
 let lastLayoutDiagSignature = '';
 let layoutDiagnosticsTimer = null;
@@ -2312,6 +2319,202 @@ function shouldPreserveNoAliasInput(inputElem, serverName) {
     return aliases.length === 0;
 }
 
+function createDefaultKeyMappingSettings() {
+    return {
+        enabled: false,
+        windowVisible: false,
+        httpReady: false,
+        slots: Array.from({ length: KEY_MAPPING_SLOT_COUNT }, (_, index) => ({
+            index,
+            vk: KEY_MAPPING_DEFAULT_VKS[index],
+            label: KEY_MAPPING_DEFAULT_LABELS[index],
+            color: '#00E5FF',
+            opacity: 42
+        }))
+    };
+}
+
+function normalizeKeyColor(value) {
+    const text = String(value || '').trim().toUpperCase();
+    return /^#[0-9A-F]{6}$/.test(text) ? text : '#00E5FF';
+}
+
+function normalizeKeyMappingSettings(value = {}) {
+    const defaults = createDefaultKeyMappingSettings();
+    const incomingSlots = Array.isArray(value.slots) ? value.slots : [];
+    return {
+        enabled: value.enabled === true,
+        windowVisible: value.windowVisible === true,
+        httpReady: value.httpReady === true,
+        slots: defaults.slots.map((slot, index) => {
+            const incoming = incomingSlots[index];
+            if (!incoming || typeof incoming !== 'object') return { ...slot };
+            return {
+                index,
+                vk: Math.max(0, Math.min(254, Number(incoming.vk ?? slot.vk))),
+                label: String(incoming.label ?? slot.label).slice(0, 16),
+                color: normalizeKeyColor(incoming.color ?? slot.color),
+                opacity: Math.max(0, Math.min(100, Number(incoming.opacity ?? 42)))
+            };
+        })
+    };
+}
+
+function isKeyMappingPanelOpen() {
+    return document.getElementById('key-mapping-overlay')?.classList.contains('active') === true;
+}
+
+function openKeyMappingPanel() {
+    const overlay = document.getElementById('key-mapping-overlay');
+    if (!overlay) return;
+    keyMappingSettings = normalizeKeyMappingSettings(keyMappingSettings || {});
+    keyMappingCaptureSlot = -1;
+    setMoreControlsOpen(false);
+    overlay.classList.add('active');
+    overlay.setAttribute('aria-hidden', 'false');
+    renderKeyMappingPanel();
+    window.chrome?.webview?.postMessage({ action: 'cmd_set_appearance_panel_open', open: true });
+}
+
+function closeKeyMappingPanel() {
+    const overlay = document.getElementById('key-mapping-overlay');
+    if (!overlay) return;
+    keyMappingCaptureSlot = -1;
+    overlay.classList.remove('active');
+    overlay.setAttribute('aria-hidden', 'true');
+    window.chrome?.webview?.postMessage({ action: 'cmd_set_appearance_panel_open', open: false });
+}
+
+function sendKeyMappingSettings(immediate = false) {
+    if (!window.chrome?.webview || !keyMappingSettings) return;
+    if (keyMappingSyncTimer) clearTimeout(keyMappingSyncTimer);
+    const send = () => window.chrome.webview.postMessage({
+        action: 'cmd_set_key_mapping_settings',
+        settings: {
+            enabled: keyMappingSettings.enabled,
+            slots: keyMappingSettings.slots.map(slot => ({
+                vk: slot.vk,
+                label: slot.label,
+                color: slot.color,
+                opacity: slot.opacity
+            }))
+        }
+    });
+    if (immediate) send();
+    else keyMappingSyncTimer = setTimeout(send, 90);
+}
+
+function keyLabelFromEvent(event) {
+    const named = {
+        ' ': 'Space',
+        Spacebar: 'Space',
+        Control: 'Ctrl',
+        CapsLock: 'Caps',
+        ArrowUp: 'Up',
+        ArrowDown: 'Down',
+        ArrowLeft: 'Left',
+        ArrowRight: 'Right'
+    };
+    if (named[event.key]) return named[event.key];
+    if (String(event.key || '').length === 1) return String(event.key).toUpperCase();
+    return String(event.key || event.code || '').replace(/^Key/, '').replace(/^Digit/, '').slice(0, 16);
+}
+
+function beginKeyBindingCapture(index = selectedKeyMappingSlot) {
+    selectedKeyMappingSlot = Math.max(0, Math.min(KEY_MAPPING_SLOT_COUNT - 1, Number(index) || 0));
+    keyMappingCaptureSlot = selectedKeyMappingSlot;
+    renderKeyMappingPanel();
+}
+
+function renderKeyMappingGrid() {
+    const grid = document.getElementById('key-mapping-grid');
+    if (!grid || !keyMappingSettings) return;
+    grid.replaceChildren();
+    keyMappingSettings.slots.forEach((slot, index) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'key-slot-button';
+        if (index === selectedKeyMappingSlot) button.classList.add('selected');
+        if (index === keyMappingCaptureSlot) button.classList.add('capturing');
+        button.style.setProperty('--slot-color', slot.color);
+        button.title = `技能 ${index + 1}：${slot.label || '未绑定'}`;
+        button.innerHTML = `<span class="key-slot-number">${index + 1}</span>` +
+            `<span class="key-slot-label">${escapeHtml(slot.label || '--')}</span>`;
+        button.addEventListener('click', () => beginKeyBindingCapture(index));
+        grid.appendChild(button);
+    });
+}
+
+function syncKeySlotEditor() {
+    if (!keyMappingSettings) return;
+    const slot = keyMappingSettings.slots[selectedKeyMappingSlot];
+    document.getElementById('key-slot-editor-index').textContent = `技能 ${selectedKeyMappingSlot + 1}`;
+    const captureState = document.getElementById('key-capture-state');
+    captureState.textContent = keyMappingCaptureSlot >= 0 ? '请按一个键盘按键' : '点击格子后按键';
+    captureState.classList.toggle('active', keyMappingCaptureSlot >= 0);
+    const capture = document.getElementById('key-binding-capture');
+    capture.textContent = slot.label || '未绑定';
+    capture.style.borderColor = slot.color;
+    document.getElementById('key-slot-color').value = slot.color;
+    document.getElementById('key-slot-color-text').value = slot.color;
+    document.getElementById('key-slot-opacity').value = String(slot.opacity);
+    document.getElementById('key-slot-opacity-value').value = String(slot.opacity);
+}
+
+function renderKeyMappingPanel() {
+    if (!keyMappingSettings) keyMappingSettings = createDefaultKeyMappingSettings();
+    const status = document.getElementById('key-mapping-status');
+    status.textContent = '默认 QWERTY+Ctrl / ASDFGH+Alt · 点击格子可手动绑定';
+    document.getElementById('key-mapping-enabled').checked = keyMappingSettings.enabled;
+    const displayButton = document.getElementById('btn-key-display-toggle');
+    displayButton.textContent = keyMappingSettings.windowVisible ? '关闭响应窗口' : '打开响应窗口';
+    displayButton.classList.toggle('accent', keyMappingSettings.windowVisible);
+    document.getElementById('btn-key-display-toggle').disabled = !keyMappingSettings.httpReady;
+    renderKeyMappingGrid();
+    syncKeySlotEditor();
+}
+
+function resetKeyMappingDefaults() {
+    if (!keyMappingSettings) keyMappingSettings = createDefaultKeyMappingSettings();
+    keyMappingSettings.slots.forEach((slot, index) => {
+        slot.vk = KEY_MAPPING_DEFAULT_VKS[index];
+        slot.label = KEY_MAPPING_DEFAULT_LABELS[index];
+    });
+    selectedKeyMappingSlot = 0;
+    keyMappingCaptureSlot = -1;
+    renderKeyMappingPanel();
+    sendKeyMappingSettings(true);
+}
+
+function applyKeySlotStyleFromInputs(sourceId) {
+    if (!keyMappingSettings) return;
+    const slot = keyMappingSettings.slots[selectedKeyMappingSlot];
+    if (sourceId === 'key-slot-color' || sourceId === 'key-slot-color-text') {
+        const raw = document.getElementById(sourceId).value;
+        if (/^#[0-9a-f]{6}$/i.test(raw)) slot.color = normalizeKeyColor(raw);
+    } else {
+        const value = Math.max(0, Math.min(100, Number(document.getElementById(sourceId).value || 0)));
+        slot.opacity = value;
+    }
+    renderKeyMappingPanel();
+    sendKeyMappingSettings();
+}
+
+document.addEventListener('keydown', (event) => {
+    if (keyMappingCaptureSlot < 0 || !isKeyMappingPanelOpen()) return;
+    const vk = Number(event.keyCode || event.which || 0);
+    if (vk <= 0 || vk > 254) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const slot = keyMappingSettings.slots[keyMappingCaptureSlot];
+    slot.vk = vk;
+    slot.label = keyLabelFromEvent(event);
+    selectedKeyMappingSlot = keyMappingCaptureSlot;
+    keyMappingCaptureSlot = -1;
+    renderKeyMappingPanel();
+    sendKeyMappingSettings(true);
+}, true);
+
 function applyStateFromServer(state) {
     isSyncingFromServer = true;
 
@@ -2347,8 +2550,10 @@ function applyStateFromServer(state) {
     systemFonts = normalizeSystemFonts(state.systemFonts);
     scoreboardTextStyles = normalizeScoreboardTextStyles(state.scoreboardTextStyles);
     killDisplaySettings = normalizeKillDisplaySettings(state.killDisplaySettings);
+    keyMappingSettings = normalizeKeyMappingSettings(state.keyMappingSettings || keyMappingSettings || {});
     applyScoreboardTextStyles(scoreboardTextStyles);
     applyKillDisplaySettings(killDisplaySettings);
+    if (isKeyMappingPanelOpen()) renderKeyMappingPanel();
     if (isAppearancePanelOpen()) {
         renderAppearanceScopeTabs();
         renderAppearanceStyleList();
@@ -3784,6 +3989,7 @@ document.addEventListener('input', (e) => {
 
 document.getElementById('btn-swap').addEventListener('click', () => window.chrome.webview.postMessage({ action: "cmd_swap" }));
 document.getElementById('btn-random-teams')?.addEventListener('click', openRandomTool);
+document.getElementById('btn-key-mapping')?.addEventListener('click', openKeyMappingPanel);
 document.getElementById('btn-more-controls')?.addEventListener('click', (e) => {
     e.stopPropagation();
     toggleMoreControlsMenu();
@@ -3834,6 +4040,44 @@ if (deathAlgoSelect) {
 document.getElementById('btn-auth').addEventListener('click', () => { showPrompt("请输入授权卡密 (CDK):", (c) => { if (c) window.chrome.webview.postMessage({ action: "cmd_auth", code: c.trim() }); }); });
 document.getElementById('btn-kill-display-toggle')?.addEventListener('click', () => {
     if (window.chrome?.webview) window.chrome.webview.postMessage({ action: 'cmd_toggle_kill_display' });
+});
+document.getElementById('btn-key-mapping-close')?.addEventListener('click', closeKeyMappingPanel);
+document.getElementById('key-mapping-overlay')?.addEventListener('click', (event) => {
+    if (event.target?.id === 'key-mapping-overlay') closeKeyMappingPanel();
+});
+document.getElementById('key-mapping-enabled')?.addEventListener('change', function () {
+    keyMappingSettings.enabled = this.checked;
+    sendKeyMappingSettings(true);
+    renderKeyMappingPanel();
+});
+document.getElementById('btn-key-display-toggle')?.addEventListener('click', () => {
+    window.chrome?.webview?.postMessage({ action: 'cmd_toggle_key_display' });
+});
+document.getElementById('btn-key-reset-defaults')?.addEventListener('click', resetKeyMappingDefaults);
+document.getElementById('key-binding-capture')?.addEventListener('click', () => beginKeyBindingCapture());
+document.getElementById('btn-key-binding-clear')?.addEventListener('click', () => {
+    const slot = keyMappingSettings.slots[selectedKeyMappingSlot];
+    slot.vk = 0;
+    slot.label = '';
+    keyMappingCaptureSlot = -1;
+    renderKeyMappingPanel();
+    sendKeyMappingSettings(true);
+});
+['key-slot-color', 'key-slot-color-text', 'key-slot-opacity', 'key-slot-opacity-value'].forEach(id => {
+    const element = document.getElementById(id);
+    if (!element) return;
+    element.addEventListener(element.type === 'text' || element.type === 'number' ? 'change' : 'input', () => {
+        applyKeySlotStyleFromInputs(id);
+    });
+});
+document.getElementById('btn-key-style-apply-all')?.addEventListener('click', () => {
+    const source = keyMappingSettings.slots[selectedKeyMappingSlot];
+    keyMappingSettings.slots.forEach(slot => {
+        slot.color = source.color;
+        slot.opacity = source.opacity;
+    });
+    renderKeyMappingPanel();
+    sendKeyMappingSettings(true);
 });
 document.getElementById('kill-show-death-toggle-main')?.addEventListener('change', function () {
     setKillDisplayShowDeathNumber(this.checked);
@@ -4078,6 +4322,11 @@ document.addEventListener('keydown', function (e) {
     else if (e.key === 'Escape') {
         // 对话框激活：由对话框自己的监听器处理（那边已经 stopImmediatePropagation）
         if (customModal.classList.contains('active')) return;
+        if (isKeyMappingPanelOpen()) {
+            e.preventDefault();
+            closeKeyMappingPanel();
+            return;
+        }
         if (isReviewPanelOpen) {
             e.preventDefault();
             setReviewPanelOpen(false);

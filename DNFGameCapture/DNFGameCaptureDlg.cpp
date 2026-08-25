@@ -18,6 +18,9 @@
 #include <climits>
 #include <cstdlib>
 #include <cstring>
+#include <array>
+#include <functional>
+#include <memory>
 
 #pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "winhttp.lib")
@@ -100,6 +103,29 @@ static const wchar_t* KILL_DISPLAY_STYLE_SECTION = L"KillDisplayTextStyles";
 static constexpr int KILL_DISPLAY_HTTP_PORT = 18777;
 static constexpr wchar_t KILL_DISPLAY_OBS_URL_W[] = L"http://127.0.0.1:18777/kill.html";
 static constexpr char KILL_DISPLAY_OBS_URL_UTF8[] = "http://127.0.0.1:18777/kill.html";
+
+static CString DnfNormalizeHexColor(CString value)
+{
+    value.Trim();
+    if (value.GetLength() != 7 || value[0] != L'#') return L"#00E5FF";
+    for (int i = 1; i < value.GetLength(); ++i) {
+        if (!iswxdigit(value[i])) return L"#00E5FF";
+    }
+    value.MakeUpper();
+    return value;
+}
+
+struct DnfDefaultKeyMappingSlot {
+    UINT vk;
+    const wchar_t* label;
+};
+
+static constexpr DnfDefaultKeyMappingSlot KEY_MAPPING_DEFAULTS[KEY_MAPPING_SLOT_COUNT] = {
+    { 'Q', L"Q" }, { 'W', L"W" }, { 'E', L"E" }, { 'R', L"R" },
+    { 'T', L"T" }, { 'Y', L"Y" }, { VK_CONTROL, L"Ctrl" },
+    { 'A', L"A" }, { 'S', L"S" }, { 'D', L"D" }, { 'F', L"F" },
+    { 'G', L"G" }, { 'H', L"H" }, { VK_MENU, L"Alt" }
+};
 
 struct DnfScoreboardStyleDefault {
     const char* key;
@@ -747,6 +773,9 @@ static bool DnfKillDisplayStaticPathForRoute(const CString& webDir, const std::s
     if (route == "/" || route == "/kill.html") name = "kill.html";
     else if (route == "/kill.css") name = "kill.css";
     else if (route == "/kill.js") name = "kill.js";
+    else if (route == "/keys.html") name = "keys.html";
+    else if (route == "/keys.css") name = "keys.css";
+    else if (route == "/keys.js") name = "keys.js";
     else return false;
 
     CString fileName = CA2W(name.c_str(), CP_UTF8);
@@ -792,6 +821,21 @@ static void DnfHandleKillDisplayHttpClient(SOCKET client)
             host = g_killDisplayHttpServer.host;
         }
         const std::string body = host ? host->BuildKillDisplayStatePayload() : "{\"action\":\"sync_state\",\"data\":{}}";
+        DnfHttpSendResponse(client, 200, "OK", "application/json; charset=utf-8", body);
+        return;
+    }
+
+    if (route == "/api/key-mapping-state") {
+        if (method != "GET") {
+            DnfHttpSendResponse(client, 405, "Method Not Allowed", "text/plain; charset=utf-8", "GET only");
+            return;
+        }
+        CDNFGameCaptureDlg* host = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_killDisplayHttpServer.mutex);
+            host = g_killDisplayHttpServer.host;
+        }
+        const std::string body = host ? host->BuildKeyMappingStatePayload() : "{\"enabled\":false,\"activeMask\":0,\"slots\":[]}";
         DnfHttpSendResponse(client, 200, "OK", "application/json; charset=utf-8", body);
         return;
     }
@@ -876,8 +920,11 @@ static bool DnfStartKillDisplayHttpServer(CDNFGameCaptureDlg* host, const CStrin
 
     if (!DnfFileExists(DnfJoinPath(webDir, L"kill.html")) ||
         !DnfFileExists(DnfJoinPath(webDir, L"kill.css")) ||
-        !DnfFileExists(DnfJoinPath(webDir, L"kill.js"))) {
-        errorMsg = L"展示页服务启动失败：缺少 kill.html / kill.css / kill.js。";
+        !DnfFileExists(DnfJoinPath(webDir, L"kill.js")) ||
+        !DnfFileExists(DnfJoinPath(webDir, L"keys.html")) ||
+        !DnfFileExists(DnfJoinPath(webDir, L"keys.css")) ||
+        !DnfFileExists(DnfJoinPath(webDir, L"keys.js"))) {
+        errorMsg = L"展示页服务启动失败：缺少 kill/keys 展示页文件。";
         return false;
     }
 
@@ -3125,6 +3172,7 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     ON_MESSAGE(WM_OCR_START_RESULT, &CDNFGameCaptureDlg::OnOcrStartResult)
     ON_MESSAGE(WM_OCR_RECOVER_RESULT, &CDNFGameCaptureDlg::OnOcrRecoverResult)
     ON_MESSAGE(WM_KILL_DISPLAY_VISIBILITY_CHANGED, &CDNFGameCaptureDlg::OnKillDisplayVisibilityChanged)
+    ON_MESSAGE(WM_KEY_DISPLAY_VISIBILITY_CHANGED, &CDNFGameCaptureDlg::OnKeyDisplayVisibilityChanged)
     ON_CBN_DROPDOWN(1031, &CDNFGameCaptureDlg::OnCbnDropdownTargetWindow)
     ON_CBN_CLOSEUP(1031, &CDNFGameCaptureDlg::OnCbnCloseupTargetWindow)
     ON_BN_CLICKED(ID_CHK_AUTO_CROP_BLACK_BARS, &CDNFGameCaptureDlg::OnBnClickedAutoCropBlackBars)
@@ -4267,6 +4315,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_bIsAuthValid = false;
     m_pWebDlg = nullptr;
     m_pKillDisplayDlg = nullptr;
+    m_pKeyDisplayDlg = nullptr;
     m_bIsManualAuthCheck = false; // 初始设为 false
 
     m_hSingleInstanceMutex = CreateMutex(NULL, TRUE, L"Global\\DNFGameCapture_SingleInstance");
@@ -4305,9 +4354,13 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_configPath = appDir + L"players_config.txt";
     m_iniPath = appDir + L"config.ini";
     m_webFrontDir = appDir + L"web前端";
+    LoadKeyMappingSettings();
     m_bKillDisplayHttpReady = DnfStartKillDisplayHttpServer(this, m_webFrontDir, m_killDisplayHttpError);
     if (m_bKillDisplayHttpReady) {
         OpenKillDisplayWindow();
+        if (GetPrivateProfileInt(L"KeyDisplayWindow", L"Visible", 0, m_iniPath) != 0) {
+            OpenKeyDisplayWindow();
+        }
     }
     if (!m_bKillDisplayHttpReady && !m_killDisplayHttpError.IsEmpty()) {
         WriteMatchLog(L"[击杀展示页] " + m_killDisplayHttpError);
@@ -4441,6 +4494,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
 
     SetTimer(5, 100, NULL);
     SetTimer(6, 1000, NULL);
+    SetTimer(8, 16, NULL);
     EnsureBackgroundTimersStarted();
 
     if (m_pWebDlg == nullptr) {
@@ -4486,6 +4540,11 @@ CDNFGameCaptureDlg::~CDNFGameCaptureDlg() {
         m_pKillDisplayDlg->DestroyWindow();
         delete m_pKillDisplayDlg;
         m_pKillDisplayDlg = nullptr;
+    }
+    if (m_pKeyDisplayDlg) {
+        m_pKeyDisplayDlg->DestroyWindow();
+        delete m_pKeyDisplayDlg;
+        m_pKeyDisplayDlg = nullptr;
     }
     CoUninitialize();
 }
@@ -7474,7 +7533,7 @@ void CDNFGameCaptureDlg::DoRealExit() {
     m_bOcrHealthCheckPending = false;
     m_bOcrRecoveryPending = false;
     m_ocrRecoveryRequestId.fetch_add(1);
-    KillTimer(1); KillTimer(2); KillTimer(3); KillTimer(4);
+    KillTimer(1); KillTimer(2); KillTimer(3); KillTimer(4); KillTimer(8);
     ResetDeathXStableState();
 
     // ==========================================
@@ -8987,8 +9046,7 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
     // 左右放大框：把每个 X 的检查区域放大显示，方便观察中心点和射线命中位置。
     // 左框显示左侧 4 个 X，蓝框显示右侧 4 个 X。
     // ===================================================
-    {
-        DeathXDebugState snap = {};
+    DeathXDebugState snap = {};
         {
             std::lock_guard<std::mutex> dbgLock(g_deathXDebugMutex);
             snap = g_deathXDebug;
@@ -9213,8 +9271,6 @@ void CDNFGameCaptureDlg::Draw(CDC& dc) {
             ::SelectObject(hBmpDC, oldBmp);
             ::DeleteDC(hBmpDC);
         }
-    }
-
 
     // ===================================================
     // 绘制 10 倍像素级显微镜
@@ -9412,6 +9468,9 @@ void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
         if (!m_bIsRunning) {
             Capture();
         }
+    }
+    else if (nID == 8) {
+        PollKeyMappingState();
     }
     // ==========================================
     // 【Timer 7】: 终极系统级轮询 (无视任何消息屏蔽)
@@ -10608,6 +10667,45 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 BroadcastStateToWeb();
             }
         }
+        else if (action == "cmd_set_key_mapping_settings") {
+            if (j.contains("settings") && j["settings"].is_object()) {
+                const auto& settings = j["settings"];
+                m_keyMappingEnabled = settings.value("enabled", m_keyMappingEnabled.load());
+                if (settings.contains("slots") && settings["slots"].is_array()) {
+                    std::lock_guard<std::mutex> lock(m_keyMappingMutex);
+                    const size_t count = std::min<size_t>(KEY_MAPPING_SLOT_COUNT, settings["slots"].size());
+                    for (size_t i = 0; i < count; ++i) {
+                        const auto& item = settings["slots"][i];
+                        if (!item.is_object()) continue;
+                        int vk = item.value("vk", (int)m_keyMappingSlots[i].vk);
+                        if (vk < 0 || vk > 0xFE || (vk >= VK_LBUTTON && vk <= VK_XBUTTON2)) vk = 0;
+                        CString label = m_keyMappingSlots[i].label;
+                        if (item.contains("label")) {
+                            label = CA2W(item.value("label", std::string()).c_str(), CP_UTF8);
+                        }
+                        label.Replace(L"\r", L"");
+                        label.Replace(L"\n", L"");
+                        label.Trim();
+                        if (label.GetLength() > 16) label = label.Left(16);
+                        CString color = m_keyMappingSlots[i].color;
+                        if (item.contains("color")) {
+                            color = CA2W(item.value("color", std::string("#00E5FF")).c_str(), CP_UTF8);
+                        }
+                        m_keyMappingSlots[i].vk = (UINT)vk;
+                        m_keyMappingSlots[i].label = label;
+                        m_keyMappingSlots[i].color = DnfNormalizeHexColor(color);
+                        m_keyMappingSlots[i].opacity = max(0, min(100,
+                            item.value("opacity", m_keyMappingSlots[i].opacity)));
+                    }
+                }
+                SaveKeyMappingSettings();
+                PollKeyMappingState();
+                BroadcastStateToWeb();
+            }
+        }
+        else if (action == "cmd_toggle_key_display") {
+            ToggleKeyDisplayWindow();
+        }
         else if (action == "cmd_open_kill_display") {
             OpenKillDisplayWindow();
             BroadcastStateToWeb();
@@ -10877,6 +10975,8 @@ json CDNFGameCaptureDlg::DnfBuildSharedWebStateJson()
     data["killDisplayHttpReady"] = m_bKillDisplayHttpReady;
     data["killDisplayHttpError"] = DnfJsonUtf8(m_killDisplayHttpError);
     data["killDisplayWindowVisible"] = IsKillDisplayWindowVisible();
+    data["keyMappingSettings"] = BuildKeyMappingSettingsJson();
+    data["keyDisplayWindowVisible"] = IsKeyDisplayWindowVisible();
     data["systemFonts"] = DnfBuildInstalledFontListJson();
 
     bool deathPatchInstalled = false;
@@ -10998,6 +11098,31 @@ std::string CDNFGameCaptureDlg::BuildKillDisplayStatePayload()
     }
 }
 
+std::string CDNFGameCaptureDlg::BuildKeyMappingStatePayload()
+{
+    try {
+        json state;
+        state["enabled"] = m_keyMappingEnabled.load();
+        state["activeMask"] = m_keyMappingActiveMask.load();
+        state["rows"] = 2;
+        state["columns"] = 7;
+        state["slots"] = json::array();
+        {
+            std::lock_guard<std::mutex> lock(m_keyMappingMutex);
+            for (const auto& slot : m_keyMappingSlots) {
+                json item;
+                item["color"] = DnfJsonUtf8(slot.color);
+                item["opacity"] = slot.opacity;
+                state["slots"].push_back(item);
+            }
+        }
+        return state.dump();
+    }
+    catch (...) {
+        return "{\"enabled\":false,\"activeMask\":0,\"rows\":2,\"columns\":7,\"slots\":[]}";
+    }
+}
+
 bool CDNFGameCaptureDlg::SaveKillDisplaySettingsPayload(const std::string& requestBody, std::string& responseBody)
 {
     try {
@@ -11095,6 +11220,172 @@ bool CDNFGameCaptureDlg::IsKillDisplayWindowVisible() const
     return m_pKillDisplayDlg &&
         ::IsWindow(m_pKillDisplayDlg->GetSafeHwnd()) &&
         m_pKillDisplayDlg->IsWindowVisible();
+}
+
+json CDNFGameCaptureDlg::BuildKeyMappingSettingsJson()
+{
+    json settings;
+    settings["enabled"] = m_keyMappingEnabled.load();
+    settings["windowVisible"] = IsKeyDisplayWindowVisible();
+    settings["httpReady"] = m_bKillDisplayHttpReady;
+    settings["slots"] = json::array();
+    {
+        std::lock_guard<std::mutex> lock(m_keyMappingMutex);
+        for (int i = 0; i < KEY_MAPPING_SLOT_COUNT; ++i) {
+            const auto& slot = m_keyMappingSlots[i];
+            settings["slots"].push_back({
+                { "index", i },
+                { "vk", slot.vk },
+                { "label", DnfJsonUtf8(slot.label) },
+                { "color", DnfJsonUtf8(slot.color) },
+                { "opacity", slot.opacity }
+            });
+        }
+    }
+    return settings;
+}
+
+void CDNFGameCaptureDlg::LoadKeyMappingSettings()
+{
+    m_keyMappingEnabled = GetPrivateProfileInt(L"KeyMapping", L"Enabled", 0, m_iniPath) != 0;
+
+    std::lock_guard<std::mutex> lock(m_keyMappingMutex);
+    for (int i = 0; i < KEY_MAPPING_SLOT_COUNT; ++i) {
+        CString prefix;
+        prefix.Format(L"Slot%02d", i + 1);
+        CString key = prefix + L"Vk";
+        wchar_t vkText[32] = {};
+        GetPrivateProfileString(L"KeyMappingSlots", key, L"", vkText, 32, m_iniPath);
+        const bool hasStoredVk = vkText[0] != L'\0';
+        UINT vk = hasStoredVk ? (UINT)_wtoi(vkText) : KEY_MAPPING_DEFAULTS[i].vk;
+        if (vk > 0xFE || (vk >= VK_LBUTTON && vk <= VK_XBUTTON2)) vk = 0;
+        m_keyMappingSlots[i].vk = vk;
+
+        wchar_t text[64] = {};
+        key = prefix + L"Label";
+        GetPrivateProfileString(L"KeyMappingSlots", key,
+            hasStoredVk ? L"" : KEY_MAPPING_DEFAULTS[i].label, text, 64, m_iniPath);
+        m_keyMappingSlots[i].label = text;
+        m_keyMappingSlots[i].label.Trim();
+        if (!hasStoredVk && m_keyMappingSlots[i].label.IsEmpty()) {
+            m_keyMappingSlots[i].label = KEY_MAPPING_DEFAULTS[i].label;
+        }
+
+        key = prefix + L"Color";
+        GetPrivateProfileString(L"KeyMappingSlots", key, L"#00E5FF", text, 64, m_iniPath);
+        m_keyMappingSlots[i].color = DnfNormalizeHexColor(text);
+
+        key = prefix + L"Opacity";
+        m_keyMappingSlots[i].opacity = max(0, min(100,
+            GetPrivateProfileInt(L"KeyMappingSlots", key, 42, m_iniPath)));
+    }
+}
+
+void CDNFGameCaptureDlg::SaveKeyMappingSettings()
+{
+    WritePrivateProfileString(L"KeyMapping", L"Enabled", m_keyMappingEnabled.load() ? L"1" : L"0", m_iniPath);
+
+    CString value;
+    std::lock_guard<std::mutex> lock(m_keyMappingMutex);
+    for (int i = 0; i < KEY_MAPPING_SLOT_COUNT; ++i) {
+        CString prefix;
+        prefix.Format(L"Slot%02d", i + 1);
+        CString key = prefix + L"Vk";
+        value.Format(L"%u", m_keyMappingSlots[i].vk);
+        WritePrivateProfileString(L"KeyMappingSlots", key, value, m_iniPath);
+        key = prefix + L"Label";
+        WritePrivateProfileString(L"KeyMappingSlots", key, m_keyMappingSlots[i].label, m_iniPath);
+        key = prefix + L"Color";
+        WritePrivateProfileString(L"KeyMappingSlots", key, m_keyMappingSlots[i].color, m_iniPath);
+        key = prefix + L"Opacity";
+        value.Format(L"%d", m_keyMappingSlots[i].opacity);
+        WritePrivateProfileString(L"KeyMappingSlots", key, value, m_iniPath);
+    }
+}
+
+void CDNFGameCaptureDlg::OpenKeyDisplayWindow()
+{
+    if (!m_bKillDisplayHttpReady) {
+        ShowCenteredMsgBox(L"按键映射本地展示服务未启动。", L"按键映射", MB_ICONWARNING | MB_OK);
+        return;
+    }
+    if (!m_pKeyDisplayDlg) {
+        m_pKeyDisplayDlg = new CKeyDisplayDlg(m_iniPath, this);
+        m_pKeyDisplayDlg->Create(IDD_WEB_SCORE_DIALOG, this);
+    }
+    if (m_pKeyDisplayDlg) {
+        WritePrivateProfileString(L"KeyDisplayWindow", L"Visible", L"1", m_iniPath);
+        m_pKeyDisplayDlg->ShowWindow(SW_SHOW);
+        m_pKeyDisplayDlg->ShowWindow(SW_RESTORE);
+        m_pKeyDisplayDlg->SetWindowPos(nullptr, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW);
+        m_pKeyDisplayDlg->SetForegroundWindow();
+        BroadcastStateToWeb();
+    }
+}
+
+void CDNFGameCaptureDlg::HideKeyDisplayWindow()
+{
+    WritePrivateProfileString(L"KeyDisplayWindow", L"Visible", L"0", m_iniPath);
+    if (m_pKeyDisplayDlg && ::IsWindow(m_pKeyDisplayDlg->GetSafeHwnd())) {
+        m_pKeyDisplayDlg->ShowWindow(SW_HIDE);
+    }
+    BroadcastStateToWeb();
+}
+
+void CDNFGameCaptureDlg::ToggleKeyDisplayWindow()
+{
+    if (IsKeyDisplayWindowVisible()) HideKeyDisplayWindow();
+    else OpenKeyDisplayWindow();
+}
+
+bool CDNFGameCaptureDlg::IsKeyDisplayWindowVisible() const
+{
+    return m_pKeyDisplayDlg && ::IsWindow(m_pKeyDisplayDlg->GetSafeHwnd()) &&
+        m_pKeyDisplayDlg->IsWindowVisible();
+}
+
+void CDNFGameCaptureDlg::PollKeyMappingState()
+{
+    if (!m_keyMappingEnabled.load()) {
+        m_keyMappingActiveMask.store(0);
+        return;
+    }
+
+    const CString targetLabel = GetSelectedTargetWindowLabel();
+    const bool isDefaultDnf = targetLabel.Left(4) == L"[默认]";
+    bool allowPolling = false;
+    if (isDefaultDnf) {
+        HWND target = m_cachedGameHwnd;
+        if (!target || !::IsWindow(target)) target = ::FindWindow(nullptr, DNF_WINDOW_NAME);
+        HWND foreground = ::GetForegroundWindow();
+        HWND targetRoot = target ? ::GetAncestor(target, GA_ROOT) : nullptr;
+        HWND foregroundRoot = foreground ? ::GetAncestor(foreground, GA_ROOT) : nullptr;
+        allowPolling = targetRoot && foregroundRoot == targetRoot;
+    }
+    else {
+        allowPolling = (m_bIsRunning == TRUE);
+    }
+
+    if (!allowPolling) {
+        m_keyMappingActiveMask.store(0);
+        return;
+    }
+
+    std::array<UINT, KEY_MAPPING_SLOT_COUNT> keys = {};
+    {
+        std::lock_guard<std::mutex> lock(m_keyMappingMutex);
+        for (int i = 0; i < KEY_MAPPING_SLOT_COUNT; ++i) keys[i] = m_keyMappingSlots[i].vk;
+    }
+
+    unsigned int mask = 0;
+    for (int i = 0; i < KEY_MAPPING_SLOT_COUNT; ++i) {
+        const UINT vk = keys[i];
+        if (vk > 0 && vk <= 0xFE && (::GetAsyncKeyState((int)vk) & 0x8000) != 0) {
+            mask |= (1u << i);
+        }
+    }
+    m_keyMappingActiveMask.store(mask);
 }
 
 // 将数据同步到树状控件（带视觉状态记忆）
@@ -11952,6 +12243,14 @@ LRESULT CDNFGameCaptureDlg::OnKillDisplayVisibilityChanged(WPARAM wParam, LPARAM
     return 0;
 }
 
+LRESULT CDNFGameCaptureDlg::OnKeyDisplayVisibilityChanged(WPARAM wParam, LPARAM lParam)
+{
+    WritePrivateProfileString(L"KeyDisplayWindow", L"Visible",
+        IsKeyDisplayWindowVisible() ? L"1" : L"0", m_iniPath);
+    BroadcastStateToWeb();
+    return 0;
+}
+
 // ============================================================================
 // 系统版本与权限检测
 // ============================================================================
@@ -12426,4 +12725,5 @@ void CDNFGameCaptureDlg::OnCbnCloseupTargetWindow() {
     }
 
     AppLog(L"🎯 [设置] 已切换捕获目标", RGB(0, 255, 255));
+    BroadcastStateToWeb();
 }

@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DNF 赛事计分板 - WebView2 版</title>
-    <meta name="dnf-web-layout-version" content="20260622-kill-display-toggle">
-    <link rel="stylesheet" href="style.css?v=20260622-kill-display-toggle">
+    <meta name="dnf-web-layout-version" content="20260826-key-mapping-2x7">
+    <link rel="stylesheet" href="style.css?v=20260826-key-mapping-2x7">
 </head>
 <body>
 
@@ -68,6 +68,7 @@
                             <div class="more-controls-section">
                                 <div class="more-controls-title">工具</div>
                                 <button class="ctrl-btn btn-random" id="btn-random-teams">🎲 分组和抽签</button>
+                                <button class="ctrl-btn btn-key-mapping" id="btn-key-mapping">⌨ 按键映射</button>
                                 <button class="ctrl-btn btn-console-toggle" id="btn-console-toggle" aria-expanded="false">
                                     <span>C++日志</span>
                                     <span class="console-toggle-count" id="console-toggle-count">0</span>
@@ -174,6 +175,57 @@
         </div>
     </div>
 
+    <div class="key-mapping-overlay" id="key-mapping-overlay" aria-hidden="true">
+        <div class="key-mapping-panel" role="dialog" aria-modal="true" aria-labelledby="key-mapping-title">
+            <div class="key-mapping-header">
+                <div>
+                    <div class="key-mapping-title" id="key-mapping-title">按键映射</div>
+                    <div class="key-mapping-subtitle" id="key-mapping-status">默认 QWERTY+Ctrl / ASDFGH+Alt</div>
+                </div>
+                <button class="key-mapping-close" id="btn-key-mapping-close" title="关闭">&times;</button>
+            </div>
+
+            <div class="key-mapping-toolbar">
+                <label class="key-mapping-switch">
+                    <input type="checkbox" id="key-mapping-enabled">
+                    <span>启用按键响应</span>
+                </label>
+                <button class="key-mapping-action" id="btn-key-display-toggle">打开响应窗口</button>
+                <button class="key-mapping-action accent" id="btn-key-reset-defaults">恢复默认键位</button>
+            </div>
+
+            <div class="key-mapping-body">
+                <section class="key-mapping-grid-wrap" aria-label="14个技能格键位">
+                    <div class="key-mapping-grid" id="key-mapping-grid"></div>
+                </section>
+
+                <aside class="key-slot-editor">
+                    <div class="key-slot-editor-title">
+                        <span id="key-slot-editor-index">技能 1</span>
+                        <span class="key-capture-state" id="key-capture-state">点击左侧格子后按键</span>
+                    </div>
+                    <button class="key-binding-capture" id="key-binding-capture">未绑定</button>
+                    <button class="key-binding-clear" id="btn-key-binding-clear">清除键位</button>
+                    <label class="key-style-field">
+                        <span>高亮颜色</span>
+                        <div class="key-color-row">
+                            <input type="color" id="key-slot-color" value="#00e5ff">
+                            <input type="text" id="key-slot-color-text" value="#00E5FF" maxlength="7">
+                        </div>
+                    </label>
+                    <label class="key-style-field">
+                        <span>透明度</span>
+                        <div class="key-opacity-row">
+                            <input type="range" id="key-slot-opacity" min="0" max="100" step="1" value="42">
+                            <input type="number" id="key-slot-opacity-value" min="0" max="100" step="1" value="42">
+                        </div>
+                    </label>
+                    <button class="key-mapping-action apply-all" id="btn-key-style-apply-all">颜色和透明度应用到全部</button>
+                </aside>
+            </div>
+        </div>
+    </div>
+
     <div class="appearance-overlay" id="appearance-overlay" aria-hidden="true">
         <div class="appearance-panel" role="dialog" aria-modal="true" aria-labelledby="appearance-title">
             <div class="appearance-header">
@@ -257,6 +309,6 @@
         </div>
     </div>
 
-    <script src="main.js?v=20260622-kill-display-toggle" defer></script>
+    <script src="main.js?v=20260826-key-mapping-2x7" defer></script>
 </body>
 </html>

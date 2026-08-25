@@ -1,0 +1,103 @@
+:root {
+    color-scheme: dark;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+    background: transparent;
+}
+
+body {
+    font-family: "Microsoft YaHei", sans-serif;
+}
+
+.key-stage,
+.key-grid {
+    position: absolute;
+    inset: 0;
+}
+
+.key-grid {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+    pointer-events: none;
+}
+
+.key-highlight {
+    min-width: 0;
+    min-height: 0;
+    opacity: 0;
+    background-color: #00e5ff;
+    transition: none;
+}
+
+.shell-controls {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+    display: flex;
+    gap: 5px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 120ms ease;
+}
+
+.shell-mode:hover .shell-controls,
+.shell-mode:hover .shell-resize {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.shell-button {
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.38);
+    border-radius: 5px;
+    color: #f7fbff;
+    background: rgba(10, 14, 22, 0.78);
+    font-size: 19px;
+    line-height: 28px;
+    cursor: pointer;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32);
+}
+
+.shell-button:hover {
+    border-color: rgba(0, 229, 255, 0.82);
+    background: rgba(12, 25, 34, 0.94);
+}
+
+.shell-drag {
+    cursor: move;
+    font-size: 15px;
+}
+
+.shell-close:hover {
+    border-color: rgba(255, 80, 110, 0.9);
+    background: rgba(100, 12, 32, 0.94);
+}
+
+.shell-resize {
+    position: absolute;
+    right: 5px;
+    bottom: 5px;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    opacity: 0;
+    background:
+        linear-gradient(135deg, transparent 52%, rgba(255, 255, 255, 0.78) 53%, rgba(255, 255, 255, 0.78) 59%, transparent 60%),
+        linear-gradient(135deg, transparent 69%, rgba(0, 229, 255, 0.92) 70%, rgba(0, 229, 255, 0.92) 78%, transparent 79%);
+    cursor: nwse-resize;
+    transition: opacity 120ms ease;
+}
