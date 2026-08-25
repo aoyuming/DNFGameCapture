@@ -554,7 +554,7 @@ if (window.chrome && window.chrome.webview) {
             else if (msg.action === 'web_zoom_calibrated') {
                 scheduleLayoutFit(true, 'zoom-calibrated');
             }
-            else if (msg.action === 'auth_result' || msg.action === 'start_guard' || msg.action === 'patch_result' || msg.action === 'alias_submit_result' || msg.action === 'alias_sync_result' || msg.action === 'copy_window_clipboard_result' || msg.action === 'kill_obs_url_result') { showAlert(msg.message); }
+            else if (msg.action === 'auth_result' || msg.action === 'start_guard' || msg.action === 'patch_result' || msg.action === 'alias_submit_result' || msg.action === 'alias_sync_result' || msg.action === 'copy_window_clipboard_result' || msg.action === 'kill_obs_url_result' || msg.action === 'key_mapping_error') { showAlert(msg.message); }
             else if (msg.action === 'alias_direct_sync_result') {
                 if (String(msg.message || '').includes('失败')) showAlert(msg.message);
                 else console.info('[alias direct sync]', msg.message);

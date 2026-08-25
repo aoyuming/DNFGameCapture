@@ -19,6 +19,7 @@
 #include "WebScoreDlg.h"
 #include "KillDisplayDlg.h"
 #include "KeyDisplayDlg.h"
+#include "KeyMappingHook.h"
 #include "json.hpp"
 
 struct ScorePointF {
@@ -260,6 +261,7 @@ private:
     nlohmann::json BuildKeyMappingSettingsJson();
     void LoadKeyMappingSettings();
     void SaveKeyMappingSettings();
+    bool SetKeyMappingEnabled(bool enabled, CString& errorMessage);
     void PollKeyMappingState();
     void OpenKeyDisplayWindow();
     void HideKeyDisplayWindow();
@@ -431,6 +433,7 @@ private:
     std::mutex m_keyMappingMutex;
     std::atomic<unsigned int> m_keyMappingActiveMask{ 0 };
     std::atomic<bool> m_keyMappingEnabled{ false };
+    CKeyMappingHook m_keyMappingHook;
 
     int m_totalScoreRed;
     int m_totalScoreBlue;

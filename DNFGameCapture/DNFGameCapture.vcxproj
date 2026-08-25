@@ -208,6 +208,7 @@
     <ClInclude Include="CameraCapture.h" />
     <ClInclude Include="KillDisplayDlg.h" />
     <ClInclude Include="KeyDisplayDlg.h" />
+    <ClInclude Include="KeyMappingHook.h" />
     <ClInclude Include="TemporalIdentityMatcher.hpp" />
     <ClInclude Include="WebScoreDlg.h" />
     <ClInclude Include="DNFGameCapture.h" />
@@ -225,6 +226,7 @@
     <ClCompile Include="DNFGameCaptureDlg_IdentityPatch.cpp" />
     <ClCompile Include="KillDisplayDlg.cpp" />
     <ClCompile Include="KeyDisplayDlg.cpp" />
+    <ClCompile Include="KeyMappingHook.cpp" />
     <ClCompile Include="WebScoreDlg.cpp" />
     <ClCompile Include="DNFGameCapture.cpp" />
     <ClCompile Include="DNFGameCaptureDlg.cpp" />

@@ -126,6 +126,7 @@ static constexpr DnfDefaultKeyMappingSlot KEY_MAPPING_DEFAULTS[KEY_MAPPING_SLOT_
     { 'A', L"A" }, { 'S', L"S" }, { 'D', L"D" }, { 'F', L"F" },
     { 'G', L"G" }, { 'H', L"H" }, { VK_MENU, L"Alt" }
 };
+static constexpr int KEY_MAPPING_LAYOUT_VERSION = 2;
 
 struct DnfScoreboardStyleDefault {
     const char* key;
@@ -4516,6 +4517,8 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
 }
 
 CDNFGameCaptureDlg::~CDNFGameCaptureDlg() {
+    m_keyMappingHook.Uninstall();
+    m_keyMappingActiveMask.store(0);
     ::UnregisterHotKey(m_hWnd, 8008);
     ::UnregisterHotKey(m_hWnd, 8009);
     DnfStopKillDisplayHttpServer();
@@ -10670,7 +10673,6 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
         else if (action == "cmd_set_key_mapping_settings") {
             if (j.contains("settings") && j["settings"].is_object()) {
                 const auto& settings = j["settings"];
-                m_keyMappingEnabled = settings.value("enabled", m_keyMappingEnabled.load());
                 if (settings.contains("slots") && settings["slots"].is_array()) {
                     std::lock_guard<std::mutex> lock(m_keyMappingMutex);
                     const size_t count = std::min<size_t>(KEY_MAPPING_SLOT_COUNT, settings["slots"].size());
@@ -10698,9 +10700,16 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                             item.value("opacity", m_keyMappingSlots[i].opacity)));
                     }
                 }
+                CString hookError;
+                const bool requestedEnabled = settings.value("enabled", m_keyMappingEnabled.load());
+                const bool enabledApplied = SetKeyMappingEnabled(requestedEnabled, hookError);
                 SaveKeyMappingSettings();
                 PollKeyMappingState();
                 BroadcastStateToWeb();
+                if (!enabledApplied) {
+                    AppLog(L"⚠️ [按键映射] " + hookError, RGB(255, 180, 0));
+                    DnfSendWebToast(m_pWebDlg, L"key_mapping_error", hookError);
+                }
             }
         }
         else if (action == "cmd_toggle_key_display") {
@@ -11245,39 +11254,79 @@ json CDNFGameCaptureDlg::BuildKeyMappingSettingsJson()
     return settings;
 }
 
+bool CDNFGameCaptureDlg::SetKeyMappingEnabled(bool enabled, CString& errorMessage)
+{
+    errorMessage.Empty();
+    if (!enabled) {
+        m_keyMappingEnabled.store(false);
+        m_keyMappingHook.Uninstall();
+        m_keyMappingActiveMask.store(0);
+        return true;
+    }
+
+    DWORD errorCode = ERROR_SUCCESS;
+    if (!m_keyMappingHook.Install(errorCode)) {
+        m_keyMappingEnabled.store(false);
+        m_keyMappingActiveMask.store(0);
+        errorMessage.Format(L"全局按键钩子安装失败（错误 %lu）。", errorCode);
+        return false;
+    }
+    m_keyMappingEnabled.store(true);
+    return true;
+}
+
 void CDNFGameCaptureDlg::LoadKeyMappingSettings()
 {
-    m_keyMappingEnabled = GetPrivateProfileInt(L"KeyMapping", L"Enabled", 0, m_iniPath) != 0;
+    const bool savedEnabled = GetPrivateProfileInt(L"KeyMapping", L"Enabled", 0, m_iniPath) != 0;
+    const int storedLayoutVersion = GetPrivateProfileInt(
+        L"KeyMapping", L"LayoutVersion", 0, m_iniPath);
+    m_keyMappingEnabled.store(false);
 
-    std::lock_guard<std::mutex> lock(m_keyMappingMutex);
-    for (int i = 0; i < KEY_MAPPING_SLOT_COUNT; ++i) {
-        CString prefix;
-        prefix.Format(L"Slot%02d", i + 1);
-        CString key = prefix + L"Vk";
-        wchar_t vkText[32] = {};
-        GetPrivateProfileString(L"KeyMappingSlots", key, L"", vkText, 32, m_iniPath);
-        const bool hasStoredVk = vkText[0] != L'\0';
-        UINT vk = hasStoredVk ? (UINT)_wtoi(vkText) : KEY_MAPPING_DEFAULTS[i].vk;
-        if (vk > 0xFE || (vk >= VK_LBUTTON && vk <= VK_XBUTTON2)) vk = 0;
-        m_keyMappingSlots[i].vk = vk;
+    {
+        std::lock_guard<std::mutex> lock(m_keyMappingMutex);
+        for (int i = 0; i < KEY_MAPPING_SLOT_COUNT; ++i) {
+            CString prefix;
+            prefix.Format(L"Slot%02d", i + 1);
+            CString key = prefix + L"Vk";
+            wchar_t vkText[32] = {};
+            GetPrivateProfileString(L"KeyMappingSlots", key, L"", vkText, 32, m_iniPath);
+            const bool hasStoredVk = vkText[0] != L'\0';
+            const int storedVk = hasStoredVk ? _wtoi(vkText) : 0;
 
-        wchar_t text[64] = {};
-        key = prefix + L"Label";
-        GetPrivateProfileString(L"KeyMappingSlots", key,
-            hasStoredVk ? L"" : KEY_MAPPING_DEFAULTS[i].label, text, 64, m_iniPath);
-        m_keyMappingSlots[i].label = text;
-        m_keyMappingSlots[i].label.Trim();
-        if (!hasStoredVk && m_keyMappingSlots[i].label.IsEmpty()) {
-            m_keyMappingSlots[i].label = KEY_MAPPING_DEFAULTS[i].label;
+            wchar_t labelText[64] = {};
+            key = prefix + L"Label";
+            GetPrivateProfileString(L"KeyMappingSlots", key, L"", labelText, 64, m_iniPath);
+            CString storedLabel = labelText;
+            storedLabel.Trim();
+
+            const bool migrateLegacySlot = storedLayoutVersion < KEY_MAPPING_LAYOUT_VERSION &&
+                hasStoredVk && storedVk == 0 && storedLabel.IsEmpty();
+            const bool useDefault = !hasStoredVk || migrateLegacySlot;
+            UINT vk = useDefault ? KEY_MAPPING_DEFAULTS[i].vk : (UINT)storedVk;
+            if (vk > 0xFE || (vk >= VK_LBUTTON && vk <= VK_XBUTTON2)) vk = 0;
+            m_keyMappingSlots[i].vk = vk;
+            m_keyMappingSlots[i].label = useDefault ? KEY_MAPPING_DEFAULTS[i].label : storedLabel;
+
+            wchar_t text[64] = {};
+            key = prefix + L"Color";
+            GetPrivateProfileString(L"KeyMappingSlots", key, L"#00E5FF", text, 64, m_iniPath);
+            m_keyMappingSlots[i].color = DnfNormalizeHexColor(text);
+
+            key = prefix + L"Opacity";
+            m_keyMappingSlots[i].opacity = max(0, min(100,
+                GetPrivateProfileInt(L"KeyMappingSlots", key, 42, m_iniPath)));
         }
+    }
 
-        key = prefix + L"Color";
-        GetPrivateProfileString(L"KeyMappingSlots", key, L"#00E5FF", text, 64, m_iniPath);
-        m_keyMappingSlots[i].color = DnfNormalizeHexColor(text);
-
-        key = prefix + L"Opacity";
-        m_keyMappingSlots[i].opacity = max(0, min(100,
-            GetPrivateProfileInt(L"KeyMappingSlots", key, 42, m_iniPath)));
+    bool shouldSave = storedLayoutVersion < KEY_MAPPING_LAYOUT_VERSION;
+    CString hookError;
+    if (savedEnabled && !SetKeyMappingEnabled(true, hookError)) {
+        shouldSave = true;
+        AppLog(L"⚠️ [按键映射] " + hookError, RGB(255, 180, 0));
+        WriteMatchLog(L"[按键映射] " + hookError);
+    }
+    if (shouldSave) {
+        SaveKeyMappingSettings();
     }
 }
 
@@ -11286,20 +11335,26 @@ void CDNFGameCaptureDlg::SaveKeyMappingSettings()
     WritePrivateProfileString(L"KeyMapping", L"Enabled", m_keyMappingEnabled.load() ? L"1" : L"0", m_iniPath);
 
     CString value;
+    bool slotsSaved = true;
     std::lock_guard<std::mutex> lock(m_keyMappingMutex);
     for (int i = 0; i < KEY_MAPPING_SLOT_COUNT; ++i) {
         CString prefix;
         prefix.Format(L"Slot%02d", i + 1);
         CString key = prefix + L"Vk";
         value.Format(L"%u", m_keyMappingSlots[i].vk);
-        WritePrivateProfileString(L"KeyMappingSlots", key, value, m_iniPath);
+        slotsSaved = WritePrivateProfileString(L"KeyMappingSlots", key, value, m_iniPath) != FALSE && slotsSaved;
         key = prefix + L"Label";
-        WritePrivateProfileString(L"KeyMappingSlots", key, m_keyMappingSlots[i].label, m_iniPath);
+        slotsSaved = WritePrivateProfileString(L"KeyMappingSlots", key, m_keyMappingSlots[i].label, m_iniPath) != FALSE && slotsSaved;
         key = prefix + L"Color";
-        WritePrivateProfileString(L"KeyMappingSlots", key, m_keyMappingSlots[i].color, m_iniPath);
+        slotsSaved = WritePrivateProfileString(L"KeyMappingSlots", key, m_keyMappingSlots[i].color, m_iniPath) != FALSE && slotsSaved;
         key = prefix + L"Opacity";
         value.Format(L"%d", m_keyMappingSlots[i].opacity);
-        WritePrivateProfileString(L"KeyMappingSlots", key, value, m_iniPath);
+        slotsSaved = WritePrivateProfileString(L"KeyMappingSlots", key, value, m_iniPath) != FALSE && slotsSaved;
+    }
+    if (slotsSaved) {
+        CString layoutVersion;
+        layoutVersion.Format(L"%d", KEY_MAPPING_LAYOUT_VERSION);
+        WritePrivateProfileString(L"KeyMapping", L"LayoutVersion", layoutVersion, m_iniPath);
     }
 }
 
@@ -11347,27 +11402,7 @@ bool CDNFGameCaptureDlg::IsKeyDisplayWindowVisible() const
 
 void CDNFGameCaptureDlg::PollKeyMappingState()
 {
-    if (!m_keyMappingEnabled.load()) {
-        m_keyMappingActiveMask.store(0);
-        return;
-    }
-
-    const CString targetLabel = GetSelectedTargetWindowLabel();
-    const bool isDefaultDnf = targetLabel.Left(4) == L"[默认]";
-    bool allowPolling = false;
-    if (isDefaultDnf) {
-        HWND target = m_cachedGameHwnd;
-        if (!target || !::IsWindow(target)) target = ::FindWindow(nullptr, DNF_WINDOW_NAME);
-        HWND foreground = ::GetForegroundWindow();
-        HWND targetRoot = target ? ::GetAncestor(target, GA_ROOT) : nullptr;
-        HWND foregroundRoot = foreground ? ::GetAncestor(foreground, GA_ROOT) : nullptr;
-        allowPolling = targetRoot && foregroundRoot == targetRoot;
-    }
-    else {
-        allowPolling = (m_bIsRunning == TRUE);
-    }
-
-    if (!allowPolling) {
+    if (!m_keyMappingEnabled.load() || !m_keyMappingHook.IsInstalled()) {
         m_keyMappingActiveMask.store(0);
         return;
     }
@@ -11381,7 +11416,7 @@ void CDNFGameCaptureDlg::PollKeyMappingState()
     unsigned int mask = 0;
     for (int i = 0; i < KEY_MAPPING_SLOT_COUNT; ++i) {
         const UINT vk = keys[i];
-        if (vk > 0 && vk <= 0xFE && (::GetAsyncKeyState((int)vk) & 0x8000) != 0) {
+        if (vk > 0 && vk <= 0xFE && m_keyMappingHook.IsKeyDown(vk)) {
             mask |= (1u << i);
         }
     }
