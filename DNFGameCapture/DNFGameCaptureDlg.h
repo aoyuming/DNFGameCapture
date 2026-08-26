@@ -8,6 +8,7 @@
 #include <vector>
 #include <string>
 #include <mutex>
+#include <condition_variable>
 #include <future>
 #include <winhttp.h>
 #include "NameMatcher.hpp"
@@ -20,6 +21,7 @@
 #include "KillDisplayDlg.h"
 #include "KeyDisplayDlg.h"
 #include "KeyMappingHook.h"
+#include "KeyMappingLanService.h"
 #include "json.hpp"
 
 struct ScorePointF {
@@ -68,6 +70,10 @@ struct ScorePointF {
 #define WM_OCR_RECOVER_RESULT   (WM_USER + 110) // 【新增】：Umi-OCR 运行中恢复完成
 #define WM_KILL_DISPLAY_VISIBILITY_CHANGED (WM_USER + 111) // 击杀展示窗口显示/隐藏后同步 Web 按钮状态
 #define WM_KEY_DISPLAY_VISIBILITY_CHANGED (WM_USER + 113)
+#define WM_KEY_MAPPING_LAN_CHANGED (WM_USER + 114)
+#define WM_KEY_MAPPING_TEAM_SYNC (WM_USER + 115)
+#define WM_CAPTURE_SOURCE_SWITCH_DONE (WM_USER + 116)
+#define WM_CAMERA_LIST_READY (WM_USER + 117)
 
 // =========================================================
 // 【编译环境切换开关】
@@ -220,6 +226,8 @@ protected:
     afx_msg LRESULT OnOcrRecoverResult(WPARAM wParam, LPARAM lParam); // 【新增】：OCR 运行中恢复完成回调
     afx_msg LRESULT OnKillDisplayVisibilityChanged(WPARAM wParam, LPARAM lParam);
     afx_msg LRESULT OnKeyDisplayVisibilityChanged(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnKeyMappingLanChanged(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnKeyMappingTeamSync(WPARAM wParam, LPARAM lParam);
 
     std::vector<CString> m_autoExpandedNodes; // 【新增】：记忆刚才修改过，需要临时展开3秒的主号
 
@@ -248,6 +256,7 @@ private:
     void NotifyIdentityKillConfirmed(int deadTeam, const CString& deadName);
     void NotifyIdentityRoundReset(const CString& reason);
     void AddReviewEvent(const RecentEvent& ev);
+    void AddReviewEventUnlocked(const RecentEvent& ev);
     bool ToggleReviewEvent(int eventId);
 
     void FilterLivePlatformPrefixes();
@@ -263,6 +272,18 @@ private:
     void SaveKeyMappingSettings();
     bool SetKeyMappingEnabled(bool enabled, CString& errorMessage);
     void PollKeyMappingState();
+    void LoadKeyMappingLanSettings();
+    void SaveKeyMappingLanSettings();
+    void SetKeyMappingLanRole(KeyMappingLanRole role);
+    void NotifyKeyMappingAdminRequired(const CString& reason);
+    CString GetKeyMappingLanDeviceName() const;
+    std::string BuildTeamSyncSnapshotPayload();
+    std::string BuildTeamSyncSnapshotPayloadUnlocked();
+    bool ValidateTeamSyncSnapshot(const nlohmann::json& snapshot, CString& errorMessage) const;
+    bool ApplyTeamSyncSnapshot(const nlohmann::json& snapshot, bool createBackup,
+        CString& errorMessage, bool automatic = false);
+    void RefreshAfterTeamSyncApply();
+    void ClearTeamSyncState();
     void OpenKeyDisplayWindow();
     void HideKeyDisplayWindow();
     void ToggleKeyDisplayWindow();
@@ -349,7 +370,33 @@ private:
     std::atomic<bool> m_bWGCInitPending{ false };  // WGC 正在后台初始化中
     HWND m_hWGCInitTarget = NULL;                  // 正在初始化的目标窗口
     afx_msg LRESULT OnWGCInitDone(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnCaptureSourceSwitchDone(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnCameraListReady(WPARAM wParam, LPARAM lParam);
     std::atomic<int> m_nWGCInitGeneration{ 0 };  // WGC 初始化代际计数
+    std::atomic<unsigned int> m_captureSwitchGeneration{ 0 };
+    std::atomic<bool> m_captureSwitchPending{ false };
+    ULONGLONG m_captureSwitchStartedAt = 0;
+    struct CaptureSwitchJob {
+        WGCCapture* wgc = nullptr;
+        CameraCapture* camera = nullptr;
+        HWND notifyWindow = nullptr;
+        unsigned int generation = 0;
+        bool notifyWhenDone = false;
+    };
+    std::thread m_captureSwitchWorker;
+    std::mutex m_captureSwitchMutex;
+    std::condition_variable m_captureSwitchCv;
+    std::deque<CaptureSwitchJob> m_captureSwitchQueue;
+    bool m_captureSwitchWorkerStopping = false;
+    void StartCaptureSwitchWorker();
+    void StopCaptureSwitchWorker();
+    void EnqueueCaptureSwitchJob(CaptureSwitchJob job);
+    void QueueCaptureSourceSwitch();
+    void SafeDeleteCamera();
+    void BeginCameraEnumeration();
+    std::mutex m_cameraListMutex;
+    std::vector<std::wstring> m_cachedCameraNames;
+    std::atomic<bool> m_cameraEnumerationPending{ false };
 
     afx_msg void OnMouseMove(UINT nFlags, CPoint point);
     afx_msg void OnRButtonDown(UINT nFlags, CPoint point);
@@ -431,9 +478,34 @@ private:
 
     KeyMappingSlot m_keyMappingSlots[KEY_MAPPING_SLOT_COUNT];
     std::mutex m_keyMappingMutex;
+    std::atomic<unsigned int> m_keyMappingLocalMask{ 0 };
     std::atomic<unsigned int> m_keyMappingActiveMask{ 0 };
     std::atomic<bool> m_keyMappingEnabled{ false };
     CKeyMappingHook m_keyMappingHook;
+    KeyMappingLanService m_keyMappingLanService;
+    KeyMappingLanRole m_keyMappingLanRole = KeyMappingLanRole::standalone;
+    unsigned short m_keyMappingLanPort = 18778;
+    CString m_keyMappingLanPairCode;
+    CString m_keyMappingLanClientPairCode;
+    CString m_keyMappingLanServerAddress;
+    CString m_keyMappingLanServerId;
+    CString m_keyMappingLanDeviceId;
+    CString m_keyMappingLanLastServerId;
+    CString m_keyMappingLanLastStatus;
+    bool m_keyMappingLanWasConnected = false;
+    bool m_keyMappingAdminRequired = false;
+    nlohmann::json m_teamSyncPendingSnapshot;
+    nlohmann::json m_teamSyncLocalBaselineSnapshot;
+    nlohmann::json m_teamSyncAppliedSnapshot;
+    nlohmann::json m_teamSyncBackupSnapshot;
+    bool m_teamSyncBackupAvailable = false;
+    bool m_teamSyncAutoReceive = false;
+    bool m_teamSyncAllowClientWrite = false;
+    bool m_teamSyncAutoSend = false;
+    std::uint64_t m_teamSyncLastAutoRevision = 0;
+    CString m_teamSyncLastAutoResult;
+    int m_teamSyncEventBoundaryId = 0;
+    int m_teamSyncBackupEventBoundaryId = 0;
 
     int m_totalScoreRed;
     int m_totalScoreBlue;

@@ -683,10 +683,17 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     box-shadow: 0 0 12px rgba(0, 229, 255, 0.22);
 }
 .more-controls-menu {
-    position: absolute;
-    right: 0;
-    bottom: calc(100% + 10px);
-    width: min(520px, calc(100vw - 28px));
+    position: fixed;
+    left: var(--more-menu-left, 12px);
+    top: var(--more-menu-top, 12px);
+    bottom: var(--more-menu-bottom, auto);
+    width: var(--more-menu-width, min(520px, calc(100vw - 24px)));
+    max-height: var(--more-menu-max-height, calc(100vh - 24px));
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    box-sizing: border-box;
     display: none;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px;
@@ -699,6 +706,12 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 }
 .more-controls-menu.active {
     display: grid;
+}
+@media (max-width: 620px) {
+    .more-controls-menu {
+        grid-template-columns: minmax(0, 1fr);
+    }
+    .more-controls-danger { grid-column: 1; }
 }
 .more-controls-section {
     display: flex;
@@ -1780,7 +1793,14 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     color: #d9fffa;
 }
 
-.key-mapping-overlay {
+.btn-key-lan {
+    background: #293647;
+    border: 1px solid rgba(111, 168, 255, 0.42);
+    color: #e2eeff;
+}
+
+.key-mapping-overlay,
+.key-lan-overlay {
     position: fixed;
     inset: 0;
     z-index: 1500;
@@ -1791,19 +1811,39 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     background: rgba(3, 6, 12, 0.76);
 }
 
-.key-mapping-overlay.active {
+.key-mapping-overlay.active,
+.key-lan-overlay.active {
     display: flex;
 }
 
 .key-mapping-panel {
     width: min(940px, calc(100vw - 36px));
     max-height: calc(100vh - 36px);
-    overflow: auto;
+    overflow-x: hidden;
+    overflow-y: auto;
     border: 1px solid rgba(74, 223, 210, 0.44);
     border-radius: 8px;
     background: #111722;
     color: #eef7fa;
     box-shadow: 0 22px 70px rgba(0, 0, 0, 0.62), 0 0 24px rgba(0, 229, 255, 0.1);
+}
+
+.key-lan-dialog {
+    width: min(920px, calc(100vw - 36px));
+    max-height: calc(100vh - 36px);
+    overflow-x: hidden;
+    overflow-y: auto;
+    border: 1px solid rgba(111, 168, 255, 0.46);
+    border-radius: 8px;
+    background: #111722;
+    color: #eef7fa;
+    box-shadow: 0 22px 70px rgba(0, 0, 0, 0.62), 0 0 24px rgba(72, 136, 255, 0.1);
+}
+
+.key-lan-dialog-body {
+    display: grid;
+    gap: 10px;
+    padding: 14px 16px 16px;
 }
 
 .key-mapping-header {
@@ -1900,6 +1940,233 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 .key-mapping-action:disabled {
     opacity: 0.42;
     cursor: not-allowed;
+}
+
+.key-lan-panel {
+    padding: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 6px;
+    background: #101923;
+}
+
+.key-lan-section-title {
+    margin-bottom: 9px;
+    color: #e6eef7;
+    font-size: 13px;
+    font-weight: 800;
+}
+
+.key-lan-role-row {
+    display: grid;
+    grid-template-columns: minmax(180px, 260px) minmax(0, 1fr);
+    align-items: end;
+    gap: 12px;
+}
+
+.key-lan-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    min-width: 0;
+    color: #91a7b1;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.key-lan-field input,
+.key-lan-field select {
+    width: 100%;
+    height: 34px;
+    min-width: 0;
+    padding: 0 9px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 5px;
+    color: #eef9fb;
+    background: #202b37;
+    font: 700 12px "Microsoft YaHei", sans-serif;
+    outline: none;
+}
+
+.key-lan-field input:focus,
+.key-lan-field select:focus {
+    border-color: rgba(74, 223, 210, 0.78);
+    box-shadow: 0 0 0 2px rgba(74, 223, 210, 0.12);
+}
+
+.key-lan-status {
+    min-width: 0;
+    padding: 8px 10px;
+    border-left: 3px solid #617580;
+    color: #a9bbc3;
+    background: rgba(255, 255, 255, 0.035);
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.key-lan-status[data-state="working"] {
+    border-left-color: #e9b949;
+    color: #f1d489;
+}
+
+.key-lan-status[data-state="connected"] {
+    border-left-color: #3ed3a4;
+    color: #8ff0d0;
+}
+
+.key-lan-mode-panel {
+    display: grid;
+    grid-template-columns: minmax(160px, 1.4fr) 92px 86px 92px 120px minmax(120px, 1fr);
+    align-items: end;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.key-lan-mode-panel[hidden] {
+    display: none;
+}
+
+.key-lan-mode-panel.client-panel {
+    grid-template-columns: 104px minmax(150px, 1.2fr) minmax(140px, 1fr) 82px 104px 90px;
+}
+
+.key-lan-info,
+.key-lan-peer {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-width: 0;
+    min-height: 34px;
+    padding: 5px 9px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.035);
+}
+
+.key-lan-info span {
+    color: #718892;
+    font-size: 9px;
+    font-weight: 700;
+}
+
+.key-lan-info strong,
+.key-lan-peer {
+    overflow: hidden;
+    color: #dcebed;
+    font-size: 11px;
+    line-height: 1.3;
+    text-overflow: clip;
+    white-space: nowrap;
+}
+
+.pair-code-info strong {
+    color: #ffe38a;
+    font-size: 16px;
+    letter-spacing: 0;
+}
+
+.key-lan-button {
+    min-height: 34px;
+    padding: 5px 9px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 5px;
+    color: #dce8ec;
+    background: #283440;
+    font: 700 12px "Microsoft YaHei", sans-serif;
+    cursor: pointer;
+}
+
+.key-lan-button:hover:not(:disabled) {
+    border-color: rgba(74, 223, 210, 0.68);
+    background: #304550;
+}
+
+.key-lan-button.primary {
+    border-color: rgba(62, 211, 164, 0.48);
+    color: #d8fff2;
+    background: #175044;
+}
+
+.key-lan-button.danger {
+    border-color: rgba(255, 91, 124, 0.45);
+    color: #ffdce4;
+    background: #5b2332;
+}
+
+.key-lan-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.key-lan-feature-panel,
+.key-team-sync-panel {
+    padding: 11px 12px;
+    border: 1px solid rgba(255, 204, 92, 0.28);
+    border-radius: 6px;
+    background: rgba(255, 204, 92, 0.055);
+}
+
+.key-lan-feature-panel {
+    border-color: rgba(74, 223, 210, 0.24);
+    background: rgba(74, 223, 210, 0.045);
+}
+
+.key-lan-feature-panel .key-lan-section-title,
+.key-team-sync-panel .key-lan-section-title {
+    margin-bottom: 6px;
+}
+
+.key-lan-feature-hint {
+    color: #9fb3bc;
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+.key-team-auto-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 34px;
+    color: #ffe7ad;
+    font-size: 12px;
+    font-weight: 800;
+    cursor: pointer;
+}
+
+.key-team-auto-toggle[hidden] {
+    display: none;
+}
+
+.key-team-auto-toggle input {
+    width: 17px;
+    height: 17px;
+    accent-color: #3ed3a4;
+}
+
+.key-team-sync-hint {
+    min-width: 0;
+    color: #a9bac1;
+    font-size: 11px;
+    line-height: 1.4;
+}
+
+.key-team-sync-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 9px;
+}
+
+.key-team-sync-actions[hidden] {
+    display: none;
+}
+
+@media (max-width: 760px) {
+    .key-team-sync-actions {
+        justify-content: stretch;
+    }
+
+    .key-team-sync-actions .key-lan-button {
+        flex: 1;
+    }
 }
 
 .key-mapping-body {
@@ -2079,6 +2346,20 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 
     .key-mapping-body {
         grid-template-columns: 1fr;
+    }
+
+    .key-lan-role-row,
+    .key-lan-mode-panel,
+    .key-lan-mode-panel.client-panel {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .key-lan-status,
+    .key-lan-info:first-child,
+    .server-list-field,
+    .address-field,
+    .key-lan-peer {
+        grid-column: 1 / -1;
     }
 
     .key-slot-editor {

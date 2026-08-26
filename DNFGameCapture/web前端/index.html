@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DNF 赛事计分板 - WebView2 版</title>
-    <meta name="dnf-web-layout-version" content="20260826-key-mapping-2x7">
-    <link rel="stylesheet" href="style.css?v=20260826-key-mapping-2x7">
+    <meta name="dnf-web-layout-version" content="20260827-bidirectional-sync-2">
+    <link rel="stylesheet" href="style.css?v=20260827-bidirectional-sync-2">
 </head>
 <body>
 
@@ -69,6 +69,7 @@
                                 <div class="more-controls-title">工具</div>
                                 <button class="ctrl-btn btn-random" id="btn-random-teams">🎲 分组和抽签</button>
                                 <button class="ctrl-btn btn-key-mapping" id="btn-key-mapping">⌨ 按键映射</button>
+                                <button class="ctrl-btn btn-key-lan" id="btn-key-lan">局域网同步</button>
                                 <button class="ctrl-btn btn-console-toggle" id="btn-console-toggle" aria-expanded="false">
                                     <span>C++日志</span>
                                     <span class="console-toggle-count" id="console-toggle-count">0</span>
@@ -226,6 +227,102 @@
         </div>
     </div>
 
+    <div class="key-lan-overlay" id="key-lan-overlay" aria-hidden="true">
+        <div class="key-lan-dialog" role="dialog" aria-modal="true" aria-labelledby="key-lan-title">
+            <div class="key-mapping-header">
+                <div>
+                    <div class="key-mapping-title" id="key-lan-title">局域网同步</div>
+                    <div class="key-mapping-subtitle">连接一台客户端，同步按键位置和比赛数据</div>
+                </div>
+                <button class="key-mapping-close" id="btn-key-lan-close" title="关闭">&times;</button>
+            </div>
+
+            <div class="key-lan-dialog-body">
+                <section class="key-lan-panel" aria-label="连接设置">
+                    <div class="key-lan-section-title">连接设置</div>
+                    <div class="key-lan-role-row">
+                        <label class="key-lan-field role-field">
+                            <span>工作模式</span>
+                            <select id="key-lan-role">
+                                <option value="standalone">单机</option>
+                                <option value="server">服务器</option>
+                                <option value="client">客户端</option>
+                            </select>
+                        </label>
+                        <div class="key-lan-status" id="key-lan-status">单机模式</div>
+                    </div>
+
+                    <div class="key-lan-mode-panel" id="key-lan-server-panel" hidden>
+                        <div class="key-lan-info">
+                            <span>本机地址</span>
+                            <strong id="key-lan-local-addresses">正在读取</strong>
+                        </div>
+                        <label class="key-lan-field compact-field">
+                            <span>端口</span>
+                            <input id="key-lan-server-port" type="number" min="1024" max="65535" value="18778">
+                        </label>
+                        <div class="key-lan-info pair-code-info">
+                            <span>配对码</span>
+                            <strong id="key-lan-server-pair-code">----</strong>
+                        </div>
+                        <button class="key-lan-button" id="btn-key-lan-regenerate">重新生成</button>
+                        <button class="key-lan-button primary" id="btn-key-lan-server-toggle">启动服务器</button>
+                        <div class="key-lan-peer" id="key-lan-server-client">等待客户端</div>
+                    </div>
+
+                    <div class="key-lan-mode-panel client-panel" id="key-lan-client-panel" hidden>
+                        <button class="key-lan-button" id="btn-key-lan-discover">搜索服务器</button>
+                        <label class="key-lan-field server-list-field">
+                            <span>搜索结果</span>
+                            <select id="key-lan-server-list">
+                                <option value="">尚未搜索</option>
+                            </select>
+                        </label>
+                        <label class="key-lan-field address-field">
+                            <span>服务器 IP</span>
+                            <input id="key-lan-server-address" type="text" inputmode="decimal" placeholder="例如 192.168.1.20">
+                        </label>
+                        <label class="key-lan-field compact-field">
+                            <span>端口</span>
+                            <input id="key-lan-client-port" type="number" min="1024" max="65535" value="18778">
+                        </label>
+                        <label class="key-lan-field pair-field">
+                            <span>4 位配对码</span>
+                            <input id="key-lan-pair-code" type="text" inputmode="numeric" maxlength="4" placeholder="0000">
+                        </label>
+                        <button class="key-lan-button primary" id="btn-key-lan-client-toggle">连接</button>
+                    </div>
+                </section>
+
+                <section class="key-lan-feature-panel" aria-label="按键状态同步">
+                    <div class="key-lan-section-title">按键状态</div>
+                    <div class="key-lan-feature-hint" id="key-lan-key-status">联网后只同步 14 个位置的亮灭，不传输键名、颜色或透明度。</div>
+                </section>
+
+                <section class="key-team-sync-panel" id="key-team-sync-panel" aria-label="比赛数据同步">
+                    <div class="key-lan-section-title">比赛数据</div>
+                    <label class="key-team-auto-toggle" id="key-team-allow-write-wrap" hidden>
+                        <input type="checkbox" id="team-sync-allow-client-write">
+                        <span>允许客户端修改比赛状态</span>
+                    </label>
+                    <label class="key-team-auto-toggle" id="key-team-auto-wrap">
+                        <input type="checkbox" id="team-sync-auto-receive">
+                        <span>自动接收服务器比赛状态</span>
+                    </label>
+                    <label class="key-team-auto-toggle" id="key-team-auto-send-wrap" hidden>
+                        <input type="checkbox" id="team-sync-auto-send">
+                        <span>同步本机修改到服务器</span>
+                    </label>
+                    <div class="key-team-sync-hint" id="key-team-sync-status">切换为客户端并连接后，可以同步比分、名单和战绩。</div>
+                    <div class="key-team-sync-actions" id="key-team-sync-actions">
+                        <button class="key-lan-button primary" id="btn-key-team-sync">获取服务器比赛状态</button>
+                        <button class="key-lan-button" id="btn-key-team-undo-sync" hidden>撤销本次同步</button>
+                    </div>
+                </section>
+            </div>
+        </div>
+    </div>
+
     <div class="appearance-overlay" id="appearance-overlay" aria-hidden="true">
         <div class="appearance-panel" role="dialog" aria-modal="true" aria-labelledby="appearance-title">
             <div class="appearance-header">
@@ -309,6 +406,6 @@
         </div>
     </div>
 
-    <script src="main.js?v=20260826-key-mapping-2x7" defer></script>
+    <script src="main.js?v=20260827-bidirectional-sync-2" defer></script>
 </body>
 </html>

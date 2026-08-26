@@ -41,6 +41,7 @@ private:
 
     std::thread m_captureThread;
     std::atomic<bool> m_isCapturing{ false };
+    std::atomic<bool> m_stopRequested{ false };
 
     std::mutex m_frameMutex;
     HBITMAP m_latestBmp = nullptr;

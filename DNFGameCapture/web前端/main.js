@@ -19,6 +19,8 @@ let keyMappingSettings = null;
 let selectedKeyMappingSlot = 0;
 let keyMappingCaptureSlot = -1;
 let keyMappingSyncTimer = null;
+let keyMappingAdminPromptVisible = false;
+let pendingTeamSyncSnapshot = null;
 let systemFonts = [];
 let appearanceScope = 'scoreboard';
 let activeScoreboardStyleKey = 'teamName';
@@ -47,7 +49,7 @@ let pendingAliasPopoverName = '';
 let pendingAliasPopoverInput = null;
 let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
-const WEB_LAYOUT_VERSION = '20260826-key-mapping-2x7';
+const WEB_LAYOUT_VERSION = '20260827-bidirectional-sync';
 const KEY_MAPPING_SLOT_COUNT = 14;
 const KEY_MAPPING_DEFAULT_LABELS = ['Q', 'W', 'E', 'R', 'T', 'Y', 'Ctrl', 'A', 'S', 'D', 'F', 'G', 'H', 'Alt'];
 const KEY_MAPPING_DEFAULT_VKS = [81, 87, 69, 82, 84, 89, 17, 65, 83, 68, 70, 71, 72, 18];
@@ -107,11 +109,43 @@ function aliasHasDeclaredJob(aliasName) {
     return !!getAliasJobKey(aliasName);
 }
 
+function positionMoreControlsMenu() {
+    const menu = document.getElementById('more-controls-menu');
+    const button = document.getElementById('btn-more-controls');
+    if (!menu || !button) return;
+    // .app-shell is scaled to fit the WebView. A fixed element inside that
+    // transformed tree is positioned against the shell instead of the viewport.
+    if (menu.parentElement !== document.body) document.body.appendChild(menu);
+    const margin = 12;
+    const gap = 8;
+    const buttonRect = button.getBoundingClientRect();
+    const menuWidth = Math.max(260, Math.min(520, window.innerWidth - margin * 2));
+    const left = Math.max(margin, Math.min(buttonRect.right - menuWidth,
+        window.innerWidth - margin - menuWidth));
+    const availableAbove = Math.max(0, buttonRect.top - margin - gap);
+    const availableBelow = Math.max(0, window.innerHeight - buttonRect.bottom - margin - gap);
+    const openAbove = availableAbove >= availableBelow;
+    const chosenSpace = openAbove ? availableAbove : availableBelow;
+    const useViewportFallback = chosenSpace < 160;
+    const moreMenuMaxHeight = useViewportFallback
+        ? Math.max(80, window.innerHeight - margin * 2)
+        : chosenSpace;
+    menu.style.setProperty('--more-menu-left', `${left}px`);
+    menu.style.setProperty('--more-menu-top', useViewportFallback
+        ? `${margin}px` : (openAbove ? 'auto' : `${buttonRect.bottom + gap}px`));
+    menu.style.setProperty('--more-menu-bottom', useViewportFallback
+        ? 'auto' : (openAbove ? `${window.innerHeight - buttonRect.top + gap}px` : 'auto'));
+    menu.style.setProperty('--more-menu-width', `${menuWidth}px`);
+    menu.style.setProperty('--more-menu-max-height', `${moreMenuMaxHeight}px`);
+    menu.dataset.placement = openAbove ? 'top' : 'bottom';
+}
+
 function setMoreControlsOpen(open) {
     const menu = document.getElementById('more-controls-menu');
     const button = document.getElementById('btn-more-controls');
     const panel = document.querySelector('.control-panel');
     if (!menu || !button) return;
+    if (open) positionMoreControlsMenu();
     menu.classList.toggle('active', open);
     menu.setAttribute('aria-hidden', open ? 'false' : 'true');
     button.classList.toggle('active', open);
@@ -553,6 +587,16 @@ if (window.chrome && window.chrome.webview) {
             }
             else if (msg.action === 'web_zoom_calibrated') {
                 scheduleLayoutFit(true, 'zoom-calibrated');
+            }
+            else if (msg.action === 'key_mapping_admin_required') {
+                showKeyMappingAdminPrompt(msg.message);
+            }
+            else if (msg.action === 'team_sync_snapshot') {
+                showTeamSyncSnapshot(msg.data);
+            }
+            else if (msg.action === 'team_sync_error') {
+                pendingTeamSyncSnapshot = null;
+                showAlert(msg.message);
             }
             else if (msg.action === 'auth_result' || msg.action === 'start_guard' || msg.action === 'patch_result' || msg.action === 'alias_submit_result' || msg.action === 'alias_sync_result' || msg.action === 'copy_window_clipboard_result' || msg.action === 'kill_obs_url_result' || msg.action === 'key_mapping_error') { showAlert(msg.message); }
             else if (msg.action === 'alias_direct_sync_result') {
@@ -2319,11 +2363,46 @@ function shouldPreserveNoAliasInput(inputElem, serverName) {
     return aliases.length === 0;
 }
 
+window.addEventListener('resize', () => {
+    if (document.getElementById('more-controls-menu')?.classList.contains('active')) {
+        positionMoreControlsMenu();
+    }
+});
+
+document.getElementById('more-controls-menu')?.addEventListener('focusin', (event) => {
+    event.target?.scrollIntoView?.({ block: 'nearest' });
+});
+
 function createDefaultKeyMappingSettings() {
     return {
         enabled: false,
         windowVisible: false,
         httpReady: false,
+        lan: {
+            role: 'standalone',
+            running: false,
+            connected: false,
+            reconnecting: false,
+            discovering: false,
+            status: '',
+            isAdmin: false,
+            adminRequired: false,
+            port: 18778,
+            serverAddress: '',
+            serverPairCode: '----',
+            clientPairCode: '',
+            serverId: '',
+            remoteDeviceName: '',
+            localAddresses: [],
+            servers: [],
+            teamSyncPending: false,
+            teamSyncCanUndo: false,
+            teamSyncSupported: true,
+            teamSyncPushSupported: false,
+            teamSyncSubscribed: false,
+            teamSyncAutoReceive: false,
+            teamSyncLastAutoResult: ''
+        },
         slots: Array.from({ length: KEY_MAPPING_SLOT_COUNT }, (_, index) => ({
             index,
             vk: KEY_MAPPING_DEFAULT_VKS[index],
@@ -2342,10 +2421,21 @@ function normalizeKeyColor(value) {
 function normalizeKeyMappingSettings(value = {}) {
     const defaults = createDefaultKeyMappingSettings();
     const incomingSlots = Array.isArray(value.slots) ? value.slots : [];
+    const incomingLan = value.lan && typeof value.lan === 'object' ? value.lan : {};
+    const role = ['standalone', 'server', 'client'].includes(incomingLan.role)
+        ? incomingLan.role : 'standalone';
     return {
         enabled: value.enabled === true,
         windowVisible: value.windowVisible === true,
         httpReady: value.httpReady === true,
+        lan: {
+            ...defaults.lan,
+            ...incomingLan,
+            role,
+            port: Math.max(1024, Math.min(65535, Number(incomingLan.port || 18778))),
+            localAddresses: Array.isArray(incomingLan.localAddresses) ? incomingLan.localAddresses : [],
+            servers: Array.isArray(incomingLan.servers) ? incomingLan.servers : []
+        },
         slots: defaults.slots.map((slot, index) => {
             const incoming = incomingSlots[index];
             if (!incoming || typeof incoming !== 'object') return { ...slot };
@@ -2358,6 +2448,271 @@ function normalizeKeyMappingSettings(value = {}) {
             };
         })
     };
+}
+
+function sendKeyLanCommand(action, payload = {}) {
+    window.chrome?.webview?.postMessage({ action, ...payload });
+}
+
+function keyLanStatusText(lan) {
+    if (lan.role === 'standalone') return lan.isAdmin ? '单机模式 · 管理员权限' : '单机模式 · 需要管理员权限读取 DNF';
+    const labels = {
+        starting: '正在启动',
+        listening: '等待客户端连接',
+        connecting: '正在连接',
+        connected: `已连接${lan.remoteDeviceName ? ` · ${lan.remoteDeviceName}` : ''}`,
+        reconnecting: '连接已断开，2 秒后重连',
+        stopped: '未启动',
+        bind_failed: '启动失败：端口可能被占用',
+        socket_failed: '网络初始化失败',
+        rejected_pair_code: '配对码错误',
+        rejected_busy: '服务器忙',
+        rejected_version: '协议版本不一致'
+    };
+    if (lan.discovering) return '正在搜索局域网服务器';
+    return labels[lan.status] || (lan.role === 'server' ? '服务器未启动' : '客户端未连接');
+}
+
+function showKeyMappingAdminPrompt(message) {
+    if (keyMappingAdminPromptVisible) return;
+    keyMappingAdminPromptVisible = true;
+    showConfirm(`${escapeHtml(message || 'DNF 内按键需要管理员权限。').replace(/\n/g, '<br>')}<br><br>` +
+        '点击“管理员重启”保存配置并以管理员身份重启；取消后按键响应保持关闭。', (ok) => {
+        keyMappingAdminPromptVisible = false;
+        if (ok) {
+            sendKeyLanCommand('cmd_restart_as_admin');
+            return;
+        }
+        if (keyMappingSettings) {
+            keyMappingSettings.enabled = false;
+            sendKeyMappingSettings(true);
+            renderKeyMappingPanel();
+        }
+    }, { okText: '管理员重启', cancelText: '取消' });
+}
+
+function renderKeyLanPanel() {
+    if (!keyMappingSettings) return;
+    const lan = keyMappingSettings.lan || createDefaultKeyMappingSettings().lan;
+    const roleSelect = document.getElementById('key-lan-role');
+    if (roleSelect) roleSelect.value = lan.role;
+
+    const status = document.getElementById('key-lan-status');
+    if (status) {
+        status.textContent = keyLanStatusText(lan);
+        status.dataset.state = lan.connected ? 'connected' : (lan.running || lan.reconnecting ? 'working' : 'idle');
+    }
+
+    const serverPanel = document.getElementById('key-lan-server-panel');
+    const clientPanel = document.getElementById('key-lan-client-panel');
+    if (serverPanel) serverPanel.hidden = lan.role !== 'server';
+    if (clientPanel) clientPanel.hidden = lan.role !== 'client';
+
+    if (lan.role === 'server') {
+        document.getElementById('key-lan-local-addresses').textContent =
+            lan.localAddresses.length ? lan.localAddresses.join(' / ') : '启动后显示';
+        document.getElementById('key-lan-server-pair-code').textContent = lan.serverPairCode || '----';
+        document.getElementById('key-lan-server-client').textContent = lan.connected
+            ? `已连接：${lan.remoteDeviceName || '客户端'}` : '等待客户端';
+        const port = document.getElementById('key-lan-server-port');
+        if (document.activeElement !== port) port.value = String(lan.port);
+        const toggle = document.getElementById('btn-key-lan-server-toggle');
+        toggle.textContent = lan.running ? '停止服务器' : '启动服务器';
+        toggle.classList.toggle('danger', lan.running);
+    }
+
+    if (lan.role === 'client') {
+        const address = document.getElementById('key-lan-server-address');
+        const pairCode = document.getElementById('key-lan-pair-code');
+        const port = document.getElementById('key-lan-client-port');
+        if (document.activeElement !== address) address.value = lan.serverAddress || '';
+        if (document.activeElement !== pairCode) pairCode.value = lan.clientPairCode || '';
+        if (document.activeElement !== port) port.value = String(lan.port);
+
+        const list = document.getElementById('key-lan-server-list');
+        const previousAddress = list.selectedOptions[0]?.dataset?.address || '';
+        list.replaceChildren();
+        if (!lan.servers.length) {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = lan.discovering ? '正在搜索...' : '没有发现服务器，可手动输入 IP';
+            list.appendChild(option);
+        } else {
+            lan.servers.forEach((server, index) => {
+                const option = document.createElement('option');
+                option.value = String(index);
+                option.dataset.address = String(server.address || '');
+                option.dataset.port = String(server.port || lan.port);
+                option.textContent = `${server.name || '按键服务器'} · ${server.address}`;
+                if (server.address === previousAddress || (!previousAddress && server.address === lan.serverAddress)) {
+                    option.selected = true;
+                }
+                list.appendChild(option);
+            });
+        }
+        const discover = document.getElementById('btn-key-lan-discover');
+        discover.disabled = lan.discovering;
+        discover.textContent = lan.discovering ? '搜索中...' : '搜索服务器';
+        const toggle = document.getElementById('btn-key-lan-client-toggle');
+        toggle.textContent = lan.running ? '断开连接' : '连接';
+        toggle.classList.toggle('danger', lan.running);
+
+    }
+
+    const keyStatus = document.getElementById('key-lan-key-status');
+    if (keyStatus) {
+        if (lan.role === 'server') {
+            keyStatus.textContent = lan.connected
+                ? `正在接收 ${lan.remoteDeviceName || '客户端'} 的 14 位按键状态，使用服务器本机样式显示。`
+                : '服务器启动后，将接收客户端的 14 位按键亮灭状态。';
+        } else if (lan.role === 'client') {
+            keyStatus.textContent = lan.connected
+                ? '正在向服务器发送 14 位按键亮灭状态，不传输键名和样式。'
+                : '连接服务器后发送本机按键位置状态。';
+        } else {
+            keyStatus.textContent = '单机模式只在本机响应和显示按键，不进行网络传输。';
+        }
+    }
+
+    const autoWrap = document.getElementById('key-team-auto-wrap');
+    const autoReceive = document.getElementById('team-sync-auto-receive');
+    const allowWriteWrap = document.getElementById('key-team-allow-write-wrap');
+    const allowWrite = document.getElementById('team-sync-allow-client-write');
+    const autoSendWrap = document.getElementById('key-team-auto-send-wrap');
+    const autoSend = document.getElementById('team-sync-auto-send');
+    const syncActions = document.getElementById('key-team-sync-actions');
+    const syncButton = document.getElementById('btn-key-team-sync');
+    const undoButton = document.getElementById('btn-key-team-undo-sync');
+    const syncStatus = document.getElementById('key-team-sync-status');
+    const isClient = lan.role === 'client';
+    const isServer = lan.role === 'server';
+    if (autoWrap) autoWrap.hidden = !isClient;
+    if (allowWriteWrap) allowWriteWrap.hidden = !isServer;
+    if (autoSendWrap) autoSendWrap.hidden = !isClient;
+    if (syncActions) syncActions.hidden = !isClient;
+    if (autoReceive) {
+        autoReceive.checked = lan.teamSyncAutoReceive === true;
+        autoReceive.disabled = isClient && lan.connected && lan.teamSyncPushSupported === false;
+    }
+    if (allowWrite) {
+        allowWrite.checked = lan.teamSyncAllowClientWrite === true;
+        allowWrite.disabled = !isServer;
+    }
+    if (autoSend) {
+        autoSend.checked = lan.teamSyncAutoSend === true;
+        autoSend.disabled = !isClient || (lan.connected &&
+            (lan.teamSyncBidirectionalSupported === false ||
+                lan.teamSyncClientWriteAllowed === false));
+        autoSend.title = lan.connected && lan.teamSyncClientWriteAllowed === false
+            ? '需要服务器先勾选允许客户端修改比赛状态' : '';
+    }
+    if (syncButton) {
+        syncButton.disabled = !isClient || lan.teamSyncAutoReceive === true || !lan.connected ||
+            lan.teamSyncPending || lan.teamSyncSupported === false;
+        syncButton.textContent = lan.teamSyncPending ? '获取中...' : '获取服务器比赛状态';
+    }
+    if (undoButton) {
+        undoButton.hidden = lan.teamSyncAutoReceive === true || !lan.teamSyncCanUndo;
+        undoButton.disabled = lan.teamSyncAutoReceive === true;
+    }
+    if (syncStatus) {
+        if (lan.role === 'server') {
+            syncStatus.textContent = lan.connected
+                ? `${lan.teamSyncSubscribed
+                    ? '客户端已开启自动接收；服务器变化会主动推送。'
+                    : '客户端未开启自动接收。'} ${lan.teamSyncAllowClientWrite
+                    ? '已允许客户端提交修改。' : '客户端修改权限已关闭。'}`
+                : '客户端连接后，可手动获取或订阅服务器比赛状态。';
+        } else if (!isClient) {
+            syncStatus.textContent = '切换为服务器或客户端后，可以同步比分、名单和战绩。';
+        } else if (lan.connected && lan.teamSyncPushSupported === false) {
+            syncStatus.textContent = '服务器版本不支持自动同步，请升级服务器软件；手动同步仍可使用。';
+        } else if (lan.teamSyncAutoReceive) {
+            const base = lan.connected
+                ? (lan.teamSyncSubscribed ? '已自动订阅，服务器变化后会直接覆盖本地状态。' : '正在订阅服务器比赛状态。')
+                : '已记住自动接收，连接服务器后会立即同步。';
+            syncStatus.textContent = lan.teamSyncLastAutoResult ? `${base} ${lan.teamSyncLastAutoResult}` : base;
+            if (lan.teamSyncAutoSend) {
+                syncStatus.textContent += lan.teamSyncClientWriteAllowed
+                    ? ' 本机后续修改会自动提交给服务器。'
+                    : ' 正在等待服务器授权客户端修改。';
+            }
+        } else if (lan.teamSyncPending) {
+            syncStatus.textContent = '正在读取服务器快照，本地状态不会改变。';
+        } else if (lan.connected) {
+            syncStatus.textContent = '手动获取比分、8 人队伍和战绩；确认前不会覆盖本地。';
+        } else {
+            syncStatus.textContent = '连接后可手动获取服务器的比分、队伍和战绩。';
+        }
+    }
+}
+
+function getCurrentMatchSnapshotFromWeb() {
+    const players = [];
+    document.querySelectorAll('#team-red .player-row').forEach(row => players.push(getRowData(row, 0)));
+    document.querySelectorAll('#team-blue .player-row').forEach(row => players.push(getRowData(row, 1)));
+    return {
+        redScore: Number(document.querySelector('#team-red .team-score-input')?.value || 0),
+        blueScore: Number(document.querySelector('#team-blue .team-score-input')?.value || 0),
+        redPickMode,
+        isFlipped: (document.getElementById('teams-wrap') || document.getElementById('main-container'))
+            ?.style?.flexDirection === 'row-reverse',
+        outputSeatLabelToKillFile,
+        players
+    };
+}
+
+function buildTeamSyncDiffHtml(snapshot, localBaseline) {
+    const local = localBaseline || getCurrentMatchSnapshotFromWeb();
+    const lines = [];
+    const add = (label, before, after) => {
+        if (String(before) === String(after)) return;
+        lines.push(`<div><strong>${escapeHtml(label)}</strong>：` +
+            `<span style="color:#f3a6a6">${escapeHtml(String(before))}</span> → ` +
+            `<span style="color:#9ed4ff">${escapeHtml(String(after))}</span></div>`);
+    };
+
+    add('红队比分', local.redScore, snapshot.redScore);
+    add('蓝队比分', local.blueScore, snapshot.blueScore);
+    add('红队选人', local.redPickMode === 'first' ? '先选' : '后选', snapshot.redPickMode === 'first' ? '先选' : '后选');
+    add('红蓝翻转', local.isFlipped ? '已翻转' : '未翻转', snapshot.isFlipped ? '已翻转' : '未翻转');
+    add('TXT 选人顺序', local.outputSeatLabelToKillFile ? '输出' : '不输出',
+        snapshot.outputSeatLabelToKillFile ? '输出' : '不输出');
+    const teamText = value => Number(value) === 0 ? '红队' : (Number(value) === 1 ? '蓝队' : '无');
+    add('上一击击杀队伍', teamText(local.lastKillerTeam), teamText(snapshot.lastKillerTeam));
+    (Array.isArray(snapshot.players) ? snapshot.players : []).forEach((player, index) => {
+        const before = local.players[index] || {};
+        const seat = `${index < 4 ? '红' : '蓝'}${(index % 4) + 1}`;
+        add(`${seat} 主号`, before.name || '空', player.name || '空');
+        add(`${seat} 小号`, (before.aliases || []).join('、') || '无', (player.aliases || []).join('、') || '无');
+        add(`${seat} 战绩`, `${before.kills || 0}/${before.deaths || 0}/A${before.akCount || 0}`,
+            `${player.kills || 0}/${player.deaths || 0}/A${player.akCount || 0}`);
+        add(`${seat} 连杀进度`, before.currentStreak || 0, player.currentStreak || 0);
+    });
+
+    if (!lines.length) lines.push('<div>服务器比赛状态与本地相同。</div>');
+    return '<div style="max-height:300px;overflow:auto;text-align:left;line-height:1.7">' +
+        '<div style="margin-bottom:8px;color:#ffd87a">确认后将覆盖本地比分、队伍和战绩，最近识别记录不会同步。</div>' +
+        lines.join('') + '</div>';
+}
+
+function showTeamSyncSnapshot(data) {
+    const snapshot = data?.snapshot;
+    const localBaseline = data?.localBaseline;
+    if (!snapshot || !Array.isArray(snapshot.players) || snapshot.players.length !== 8) {
+        pendingTeamSyncSnapshot = null;
+        showAlert('服务器比赛状态格式无效，本地数据未修改。');
+        return;
+    }
+    pendingTeamSyncSnapshot = snapshot;
+    showConfirm(buildTeamSyncDiffHtml(snapshot, localBaseline), (ok) => {
+        if (ok) {
+            sendKeyLanCommand('cmd_apply_team_sync');
+        } else {
+            sendKeyLanCommand('cmd_cancel_team_sync');
+        }
+        pendingTeamSyncSnapshot = null;
+    }, { okText: '确认覆盖本地', cancelText: '取消' });
 }
 
 function isKeyMappingPanelOpen() {
@@ -2380,6 +2735,29 @@ function closeKeyMappingPanel() {
     const overlay = document.getElementById('key-mapping-overlay');
     if (!overlay) return;
     keyMappingCaptureSlot = -1;
+    overlay.classList.remove('active');
+    overlay.setAttribute('aria-hidden', 'true');
+    window.chrome?.webview?.postMessage({ action: 'cmd_set_appearance_panel_open', open: false });
+}
+
+function isKeyLanPanelOpen() {
+    return document.getElementById('key-lan-overlay')?.classList.contains('active') === true;
+}
+
+function openKeyLanPanel() {
+    const overlay = document.getElementById('key-lan-overlay');
+    if (!overlay) return;
+    keyMappingSettings = normalizeKeyMappingSettings(keyMappingSettings || {});
+    setMoreControlsOpen(false);
+    overlay.classList.add('active');
+    overlay.setAttribute('aria-hidden', 'false');
+    renderKeyLanPanel();
+    window.chrome?.webview?.postMessage({ action: 'cmd_set_appearance_panel_open', open: true });
+}
+
+function closeKeyLanPanel() {
+    const overlay = document.getElementById('key-lan-overlay');
+    if (!overlay) return;
     overlay.classList.remove('active');
     overlay.setAttribute('aria-hidden', 'true');
     window.chrome?.webview?.postMessage({ action: 'cmd_set_appearance_panel_open', open: false });
@@ -2464,7 +2842,7 @@ function syncKeySlotEditor() {
 function renderKeyMappingPanel() {
     if (!keyMappingSettings) keyMappingSettings = createDefaultKeyMappingSettings();
     const status = document.getElementById('key-mapping-status');
-    status.textContent = '默认 QWERTY+Ctrl / ASDFGH+Alt · 点击格子可手动绑定';
+    status.textContent = '默认 QWERTY+Ctrl / ASDFGH+Alt · 点击技能格后直接按键绑定';
     document.getElementById('key-mapping-enabled').checked = keyMappingSettings.enabled;
     const displayButton = document.getElementById('btn-key-display-toggle');
     displayButton.textContent = keyMappingSettings.windowVisible ? '关闭响应窗口' : '打开响应窗口';
@@ -2554,6 +2932,10 @@ function applyStateFromServer(state) {
     applyScoreboardTextStyles(scoreboardTextStyles);
     applyKillDisplaySettings(killDisplaySettings);
     if (isKeyMappingPanelOpen()) renderKeyMappingPanel();
+    if (isKeyLanPanelOpen()) renderKeyLanPanel();
+    if (keyMappingSettings.lan.adminRequired && !keyMappingSettings.lan.isAdmin) {
+        setTimeout(() => showKeyMappingAdminPrompt('DNF 以更高权限运行，按键映射需要管理员权限才能读取游戏内按键。'), 0);
+    }
     if (isAppearancePanelOpen()) {
         renderAppearanceScopeTabs();
         renderAppearanceStyleList();
@@ -3079,6 +3461,8 @@ function renderAliasInputHelp() {
 function resetModalInputUi() {
     modalInput.placeholder = '';
     currentModalOptions = {};
+    modalOk.textContent = '确定';
+    modalCancel.textContent = '取消';
     if (modalInputHelp) {
         modalInputHelp.style.display = 'none';
         modalInputHelp.innerHTML = '';
@@ -3105,12 +3489,14 @@ function showAliasPrompt(playerName, callback, msg = null, initialValue = '') {
 }
 
 
-function showConfirm(msg, callback) {
+function showConfirm(msg, callback, options = {}) {
     resetModalInputUi();
     currentModalOptions = {};
     modalMsg.innerHTML = msg;
     modalInput.style.display = 'none';
     modalCancel.style.display = 'inline-block';
+    modalOk.textContent = options.okText || '确定';
+    modalCancel.textContent = options.cancelText || '取消';
     customModal.classList.add('active');
     currentModalCallback = callback;
 }
@@ -3971,6 +4357,7 @@ document.addEventListener('click', (e) => {
         e.target.closest('#custom-modal') ||
         e.target.closest('.popover') ||
         e.target.closest('.more-controls-wrap') ||
+        e.target.closest('.more-controls-menu') ||
         e.target.classList.contains('name-input') ||
         e.target.classList.contains('gear-btn')
     ) return;
@@ -3990,6 +4377,7 @@ document.addEventListener('input', (e) => {
 document.getElementById('btn-swap').addEventListener('click', () => window.chrome.webview.postMessage({ action: "cmd_swap" }));
 document.getElementById('btn-random-teams')?.addEventListener('click', openRandomTool);
 document.getElementById('btn-key-mapping')?.addEventListener('click', openKeyMappingPanel);
+document.getElementById('btn-key-lan')?.addEventListener('click', openKeyLanPanel);
 document.getElementById('btn-more-controls')?.addEventListener('click', (e) => {
     e.stopPropagation();
     toggleMoreControlsMenu();
@@ -4045,6 +4433,10 @@ document.getElementById('btn-key-mapping-close')?.addEventListener('click', clos
 document.getElementById('key-mapping-overlay')?.addEventListener('click', (event) => {
     if (event.target?.id === 'key-mapping-overlay') closeKeyMappingPanel();
 });
+document.getElementById('btn-key-lan-close')?.addEventListener('click', closeKeyLanPanel);
+document.getElementById('key-lan-overlay')?.addEventListener('click', (event) => {
+    if (event.target?.id === 'key-lan-overlay') closeKeyLanPanel();
+});
 document.getElementById('key-mapping-enabled')?.addEventListener('change', function () {
     keyMappingSettings.enabled = this.checked;
     sendKeyMappingSettings(true);
@@ -4052,6 +4444,93 @@ document.getElementById('key-mapping-enabled')?.addEventListener('change', funct
 });
 document.getElementById('btn-key-display-toggle')?.addEventListener('click', () => {
     window.chrome?.webview?.postMessage({ action: 'cmd_toggle_key_display' });
+});
+document.getElementById('key-lan-role')?.addEventListener('change', function () {
+    const role = ['standalone', 'server', 'client'].includes(this.value) ? this.value : 'standalone';
+    keyMappingSettings.lan.role = role;
+    keyMappingSettings.lan.running = false;
+    keyMappingSettings.lan.connected = false;
+    renderKeyLanPanel();
+    sendKeyLanCommand('cmd_set_key_lan_role', { role });
+});
+document.getElementById('btn-key-lan-server-toggle')?.addEventListener('click', () => {
+    const lan = keyMappingSettings.lan;
+    if (lan.running) {
+        sendKeyLanCommand('cmd_stop_key_lan_server');
+        return;
+    }
+    const port = Math.max(1024, Math.min(65535,
+        Number(document.getElementById('key-lan-server-port').value || 18778)));
+    sendKeyLanCommand('cmd_start_key_lan_server', { port });
+});
+document.getElementById('btn-key-lan-regenerate')?.addEventListener('click', () => {
+    showConfirm('重新生成配对码后，已保存旧配对码的客户端需要输入新码。确定继续吗？', (ok) => {
+        if (ok) sendKeyLanCommand('cmd_regenerate_key_pair_code');
+    });
+});
+document.getElementById('btn-key-lan-discover')?.addEventListener('click', () => {
+    const port = Math.max(1024, Math.min(65535,
+        Number(document.getElementById('key-lan-client-port').value || 18778)));
+    sendKeyLanCommand('cmd_discover_key_lan_servers', { port });
+});
+document.getElementById('key-lan-server-list')?.addEventListener('change', function () {
+    const option = this.selectedOptions[0];
+    if (!option?.dataset?.address) return;
+    document.getElementById('key-lan-server-address').value = option.dataset.address;
+    document.getElementById('key-lan-client-port').value = option.dataset.port || '18778';
+});
+document.getElementById('key-lan-pair-code')?.addEventListener('input', function () {
+    this.value = this.value.replace(/\D/g, '').slice(0, 4);
+});
+document.getElementById('btn-key-lan-client-toggle')?.addEventListener('click', () => {
+    const lan = keyMappingSettings.lan;
+    if (lan.running) {
+        sendKeyLanCommand('cmd_disconnect_key_lan');
+        return;
+    }
+    const address = document.getElementById('key-lan-server-address').value.trim();
+    const pairCode = document.getElementById('key-lan-pair-code').value.trim();
+    const port = Math.max(1024, Math.min(65535,
+        Number(document.getElementById('key-lan-client-port').value || 18778)));
+    if (!address || !/^\d{4}$/.test(pairCode)) {
+        showAlert('请输入服务器 IP 和 4 位配对码。');
+        return;
+    }
+    sendKeyLanCommand('cmd_connect_key_lan', { address, pairCode, port });
+});
+document.getElementById('btn-key-team-sync')?.addEventListener('click', () => {
+    if (!keyMappingSettings?.lan?.connected) {
+        showAlert('请先连接局域网服务器。');
+        return;
+    }
+    pendingTeamSyncSnapshot = null;
+    pushStateToServer();
+    sendKeyLanCommand('cmd_request_team_sync');
+});
+document.getElementById('btn-key-team-undo-sync')?.addEventListener('click', () => {
+    showConfirm('确定撤销本次比赛状态同步，恢复同步前的本地比分、队伍和战绩吗？', (ok) => {
+        if (ok) sendKeyLanCommand('cmd_undo_team_sync');
+    }, { okText: '确认撤销', cancelText: '取消' });
+});
+document.getElementById('team-sync-auto-receive')?.addEventListener('change', function () {
+    const enabled = this.checked;
+    keyMappingSettings.lan.teamSyncAutoReceive = enabled;
+    keyMappingSettings.lan.teamSyncCanUndo = false;
+    pendingTeamSyncSnapshot = null;
+    renderKeyLanPanel();
+    sendKeyLanCommand('cmd_set_team_sync_auto_receive', { enabled });
+});
+document.getElementById('team-sync-allow-client-write')?.addEventListener('change', function () {
+    keyMappingSettings.lan.teamSyncAllowClientWrite = this.checked;
+    renderKeyLanPanel();
+    sendKeyLanCommand('cmd_set_team_sync_allow_client_write', { enabled: this.checked });
+});
+document.getElementById('team-sync-auto-send')?.addEventListener('change', function () {
+    const enabled = this.checked;
+    keyMappingSettings.lan.teamSyncAutoSend = enabled;
+    if (enabled) keyMappingSettings.lan.teamSyncAutoReceive = true;
+    renderKeyLanPanel();
+    sendKeyLanCommand('cmd_set_team_sync_auto_send', { enabled });
 });
 document.getElementById('btn-key-reset-defaults')?.addEventListener('click', resetKeyMappingDefaults);
 document.getElementById('key-binding-capture')?.addEventListener('click', () => beginKeyBindingCapture());
@@ -4325,6 +4804,11 @@ document.addEventListener('keydown', function (e) {
         if (isKeyMappingPanelOpen()) {
             e.preventDefault();
             closeKeyMappingPanel();
+            return;
+        }
+        if (isKeyLanPanelOpen()) {
+            e.preventDefault();
+            closeKeyLanPanel();
             return;
         }
         if (isReviewPanelOpen) {

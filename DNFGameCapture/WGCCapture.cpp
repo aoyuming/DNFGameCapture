@@ -133,6 +133,7 @@ bool WGCCapture::StartCapture() {
     if (!m_d3dDevice || !m_d3dContext || !m_winrtDevice) return false;
 
     try {
+        m_stopping.store(false, std::memory_order_release);
         auto size = m_captureItem.Size();
         m_captureWidth = size.Width;
         m_captureHeight = size.Height;
@@ -144,6 +145,7 @@ bool WGCCapture::StartCapture() {
 
         m_frameArrivedToken = m_framePool.FrameArrived(
             { this, &WGCCapture::OnFrameArrived });
+        m_frameHandlerRegistered = true;
 
         m_session = m_framePool.CreateCaptureSession(m_captureItem);
 
@@ -164,9 +166,19 @@ bool WGCCapture::StartCapture() {
 }
 
 void WGCCapture::StopCapture() {
-    if (!m_isCapturing) return;
-    m_isCapturing = false;
+    m_stopping.store(true, std::memory_order_release);
+    m_isCapturing.store(false, std::memory_order_release);
 
+    if (m_framePool && m_frameHandlerRegistered) {
+        try { m_framePool.FrameArrived(m_frameArrivedToken); }
+        catch (...) {}
+        m_frameHandlerRegistered = false;
+    }
+
+    {
+        std::unique_lock<std::mutex> callbackLock(m_callbackMutex);
+        m_callbackCv.wait(callbackLock, [this]() { return m_callbacksInFlight == 0; });
+    }
     if (m_session) {
         m_session.Close();
         m_session = nullptr;
@@ -181,7 +193,22 @@ void WGCCapture::OnFrameArrived(
     Direct3D11CaptureFramePool const& sender,
     winrt::Windows::Foundation::IInspectable const&)
 {
-    if (!m_isCapturing || !m_d3dDevice || !m_d3dContext) return;
+    {
+        std::lock_guard<std::mutex> lock(m_callbackMutex);
+        if (m_stopping.load(std::memory_order_acquire) ||
+            !m_isCapturing.load(std::memory_order_acquire)) return;
+        ++m_callbacksInFlight;
+    }
+    struct CallbackGuard {
+        WGCCapture* owner;
+        ~CallbackGuard() {
+            std::lock_guard<std::mutex> lock(owner->m_callbackMutex);
+            --owner->m_callbacksInFlight;
+            owner->m_callbackCv.notify_all();
+        }
+    } callbackGuard{ this };
+
+    if (!m_d3dDevice || !m_d3dContext) return;
 
     auto frame = sender.TryGetNextFrame();
     if (!frame) return;

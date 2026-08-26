@@ -11,6 +11,7 @@
 #include <windows.graphics.directx.direct3d11.interop.h>
 #include <mutex>
 #include <atomic>
+#include <condition_variable>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -79,4 +80,9 @@ private:
     int m_height = 0;
 
     std::atomic<bool> m_isCapturing{ false };
+    std::atomic<bool> m_stopping{ false };
+    std::mutex m_callbackMutex;
+    std::condition_variable m_callbackCv;
+    int m_callbacksInFlight = 0;
+    bool m_frameHandlerRegistered = false;
 };

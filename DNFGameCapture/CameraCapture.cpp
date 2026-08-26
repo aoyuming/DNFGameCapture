@@ -75,24 +75,35 @@ bool CameraCapture::Initialize(int deviceIndex) {
 
 bool CameraCapture::StartCapture() {
     if (!m_pReader || m_isCapturing) return false;
+    m_stopRequested.store(false, std::memory_order_release);
     m_isCapturing = true;
     m_captureThread = std::thread(&CameraCapture::CaptureThreadFunc, this);
     return true;
 }
 
 void CameraCapture::StopCapture() {
-    if (!m_isCapturing) return;
-    m_isCapturing = false;
+    m_stopRequested.store(true, std::memory_order_release);
+    m_isCapturing.store(false, std::memory_order_release);
+    // ReadSample is synchronous and may wait indefinitely for a device frame.
+    // Flush/Shutdown make it return before we join the worker.
+    if (m_pReader) {
+        m_pReader->Flush(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+    }
+    if (m_pMediaSource) {
+        m_pMediaSource->Shutdown();
+    }
     if (m_captureThread.joinable()) m_captureThread.join();
 }
 
 void CameraCapture::CaptureThreadFunc() {
-    while (m_isCapturing) {
+    while (m_isCapturing.load(std::memory_order_acquire) &&
+        !m_stopRequested.load(std::memory_order_acquire)) {
         DWORD streamIndex, flags;
         LONGLONG llTimeStamp;
         winrt::com_ptr<IMFSample> pSample;
 
         HRESULT hr = m_pReader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &streamIndex, &flags, &llTimeStamp, pSample.put());
+        if (m_stopRequested.load(std::memory_order_acquire)) break;
         if (FAILED(hr) || !pSample) {
             Sleep(10); continue;
         }

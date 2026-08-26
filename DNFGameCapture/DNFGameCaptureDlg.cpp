@@ -21,6 +21,7 @@
 #include <array>
 #include <functional>
 #include <memory>
+#include <random>
 
 #pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "winhttp.lib")
@@ -127,6 +128,56 @@ static constexpr DnfDefaultKeyMappingSlot KEY_MAPPING_DEFAULTS[KEY_MAPPING_SLOT_
     { 'G', L"G" }, { 'H', L"H" }, { VK_MENU, L"Alt" }
 };
 static constexpr int KEY_MAPPING_LAYOUT_VERSION = 2;
+
+static const char* DnfKeyMappingLanRoleName(KeyMappingLanRole role)
+{
+    switch (role) {
+    case KeyMappingLanRole::server: return "server";
+    case KeyMappingLanRole::client: return "client";
+    default: return "standalone";
+    }
+}
+
+static KeyMappingLanRole DnfParseKeyMappingLanRole(const std::string& role)
+{
+    if (role == "server") return KeyMappingLanRole::server;
+    if (role == "client") return KeyMappingLanRole::client;
+    return KeyMappingLanRole::standalone;
+}
+
+static bool DnfIsFourDigitPairCode(const CString& value)
+{
+    if (value.GetLength() != 4) return false;
+    for (int i = 0; i < value.GetLength(); ++i) {
+        if (value[i] < L'0' || value[i] > L'9') return false;
+    }
+    return true;
+}
+
+static CString DnfGenerateKeyMappingPairCode()
+{
+    std::random_device randomDevice;
+    std::mt19937 generator(randomDevice() ^ static_cast<unsigned int>(::GetTickCount()));
+    std::uniform_int_distribution<int> distribution(0, 9999);
+    CString value;
+    value.Format(L"%04d", distribution(generator));
+    return value;
+}
+
+static CString DnfGenerateKeyMappingDeviceId()
+{
+    GUID guid{};
+    if (SUCCEEDED(::CoCreateGuid(&guid))) {
+        wchar_t text[64] = {};
+        ::StringFromGUID2(guid, text, static_cast<int>(std::size(text)));
+        CString value = text;
+        value.Trim(L"{}");
+        return value;
+    }
+    CString fallback;
+    fallback.Format(L"%08lX-%08lX", ::GetCurrentProcessId(), ::GetTickCount());
+    return fallback;
+}
 
 struct DnfScoreboardStyleDefault {
     const char* key;
@@ -3174,6 +3225,10 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     ON_MESSAGE(WM_OCR_RECOVER_RESULT, &CDNFGameCaptureDlg::OnOcrRecoverResult)
     ON_MESSAGE(WM_KILL_DISPLAY_VISIBILITY_CHANGED, &CDNFGameCaptureDlg::OnKillDisplayVisibilityChanged)
     ON_MESSAGE(WM_KEY_DISPLAY_VISIBILITY_CHANGED, &CDNFGameCaptureDlg::OnKeyDisplayVisibilityChanged)
+    ON_MESSAGE(WM_KEY_MAPPING_LAN_CHANGED, &CDNFGameCaptureDlg::OnKeyMappingLanChanged)
+    ON_MESSAGE(WM_KEY_MAPPING_TEAM_SYNC, &CDNFGameCaptureDlg::OnKeyMappingTeamSync)
+    ON_MESSAGE(WM_CAPTURE_SOURCE_SWITCH_DONE, &CDNFGameCaptureDlg::OnCaptureSourceSwitchDone)
+    ON_MESSAGE(WM_CAMERA_LIST_READY, &CDNFGameCaptureDlg::OnCameraListReady)
     ON_CBN_DROPDOWN(1031, &CDNFGameCaptureDlg::OnCbnDropdownTargetWindow)
     ON_CBN_CLOSEUP(1031, &CDNFGameCaptureDlg::OnCbnCloseupTargetWindow)
     ON_BN_CLICKED(ID_CHK_AUTO_CROP_BLACK_BARS, &CDNFGameCaptureDlg::OnBnClickedAutoCropBlackBars)
@@ -4318,6 +4373,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_pKillDisplayDlg = nullptr;
     m_pKeyDisplayDlg = nullptr;
     m_bIsManualAuthCheck = false; // 初始设为 false
+    StartCaptureSwitchWorker();
 
     m_hSingleInstanceMutex = CreateMutex(NULL, TRUE, L"Global\\DNFGameCapture_SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -4355,6 +4411,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_configPath = appDir + L"players_config.txt";
     m_iniPath = appDir + L"config.ini";
     m_webFrontDir = appDir + L"web前端";
+    LoadKeyMappingLanSettings();
     LoadKeyMappingSettings();
     m_bKillDisplayHttpReady = DnfStartKillDisplayHttpServer(this, m_webFrontDir, m_killDisplayHttpError);
     if (m_bKillDisplayHttpReady) {
@@ -4411,6 +4468,19 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     CreateEx(0, cls, title, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
         100, 100, (int)(750 * WINDOW_SCALE), (int)(760 * WINDOW_SCALE), NULL, NULL);
 
+    m_keyMappingLanService.SetStateChangedCallback([this]() {
+        if (::IsWindow(GetSafeHwnd())) PostMessage(WM_KEY_MAPPING_LAN_CHANGED, 0, 0);
+        });
+    m_keyMappingLanService.SetTeamSyncMessageCallback(
+        [this](const std::string& message) {
+            if (!::IsWindow(GetSafeHwnd())) return;
+            auto* payload = new CString(CA2W(message.c_str(), CP_UTF8));
+            if (!PostMessage(WM_KEY_MAPPING_TEAM_SYNC, 0,
+                reinterpret_cast<LPARAM>(payload))) {
+                delete payload;
+            }
+        });
+
     // ========================================================
     // 🚨 终极架构修复：强制在后台提前初始化所有 UI 和数据库！
     // 彻底解决隐藏启动导致的断言崩溃与库文件被清空的问题！
@@ -4448,6 +4518,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_cmbCaptureEngine.SetCurSel(m_nCaptureEngineChoice);
     m_cmbTargetWindow.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, CRect(670, row1_Y, r.right - 105, row1_Y + 400), this, 1031); m_cmbTargetWindow.SetFont(&m_font);
     RefreshTargetList();
+    BeginCameraEnumeration();
     m_chkCropTitle.Create(L"去标题栏", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, CRect(r.right - 100, row1_Y, r.right - 10, row1_Y + 25), this, 1032); m_chkCropTitle.SetFont(&m_font); m_chkCropTitle.SetCheck(BST_CHECKED);
     m_btnCropBlackBars.Create(L"重新裁剪", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(r.right - 125, row1_Y + 28, r.right - 10, row1_Y + 53), this, ID_CHK_AUTO_CROP_BLACK_BARS); m_btnCropBlackBars.SetFont(&m_font);
 
@@ -4517,7 +4588,13 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
 }
 
 CDNFGameCaptureDlg::~CDNFGameCaptureDlg() {
+    StopCaptureSwitchWorker();
+    m_keyMappingLanService.SetStateChangedCallback(nullptr);
+    m_keyMappingLanService.SetTeamSyncMessageCallback(nullptr);
+    m_keyMappingLanService.StopNetwork();
+    m_keyMappingLanService.StopDiscovery();
     m_keyMappingHook.Uninstall();
+    m_keyMappingLocalMask.store(0);
     m_keyMappingActiveMask.store(0);
     ::UnregisterHotKey(m_hWnd, 8008);
     ::UnregisterHotKey(m_hWnd, 8009);
@@ -5148,12 +5225,22 @@ OcrResultData CDNFGameCaptureDlg::RunOCR_Internal(HBITMAP hTargetBmp, int nAreaI
 // ============================================================================
 void CDNFGameCaptureDlg::AddReviewEvent(const RecentEvent& ev)
 {
+    std::lock_guard<std::mutex> lock(m_dataMutex);
+    AddReviewEventUnlocked(ev);
+}
+
+void CDNFGameCaptureDlg::AddReviewEventUnlocked(const RecentEvent& ev)
+{
     m_recentEvents.push_back(ev);
 }
 
 bool CDNFGameCaptureDlg::ToggleReviewEvent(int eventId)
 {
     std::lock_guard<std::mutex> lock(m_dataMutex);
+    if (eventId <= m_teamSyncEventBoundaryId) {
+        AppLog(L"⚠️ [复盘操作] 该记录产生于最近一次比赛状态同步之前，不能再撤销或恢复。", RGB(255, 180, 0));
+        return false;
+    }
     for (auto& ev : m_recentEvents) {
         if (ev.id != eventId) continue;
 
@@ -6645,7 +6732,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 NotifyIdentityRoundReset(L"局间大比分变动/新一局开始");
             }
 
-            AddReviewEvent(review);
+            AddReviewEventUnlocked(review);
             PostMessage(WM_UPDATE_ALL_UI, 0, 0);
         }
         else {
@@ -6678,7 +6765,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 review.ocrSummary += one;
             }
             review.candidateSummary = conflictReason;
-            AddReviewEvent(review);
+            AddReviewEventUnlocked(review);
             PostMessage(WM_UPDATE_ALL_UI, 0, 0);
         }
     }
@@ -6715,6 +6802,73 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
     // ★ 不再需要手动释放 historyClones，因为帧已在循环内逐个释放
 }
 
+void CDNFGameCaptureDlg::StartCaptureSwitchWorker()
+{
+    m_captureSwitchWorker = std::thread([this]() {
+        while (true) {
+            CaptureSwitchJob job;
+            {
+                std::unique_lock<std::mutex> lock(m_captureSwitchMutex);
+                m_captureSwitchCv.wait(lock, [this]() {
+                    return m_captureSwitchWorkerStopping || !m_captureSwitchQueue.empty();
+                });
+                if (m_captureSwitchQueue.empty()) {
+                    if (m_captureSwitchWorkerStopping) break;
+                    continue;
+                }
+                job = m_captureSwitchQueue.front();
+                m_captureSwitchQueue.pop_front();
+            }
+
+            delete job.camera;
+            delete job.wgc;
+
+            bool stopping = false;
+            {
+                std::lock_guard<std::mutex> lock(m_captureSwitchMutex);
+                stopping = m_captureSwitchWorkerStopping;
+            }
+            if (!stopping && job.notifyWhenDone && ::IsWindow(job.notifyWindow)) {
+                ::PostMessage(job.notifyWindow, WM_CAPTURE_SOURCE_SWITCH_DONE,
+                    static_cast<WPARAM>(job.generation), 0);
+            }
+        }
+    });
+}
+
+void CDNFGameCaptureDlg::StopCaptureSwitchWorker()
+{
+    WGCCapture* currentWgc = m_pWGC;
+    CameraCapture* currentCamera = m_pCamera;
+    m_pWGC = nullptr;
+    m_pCamera = nullptr;
+    m_bUseWGC = false;
+    m_captureSwitchPending.store(true, std::memory_order_release);
+
+    {
+        std::lock_guard<std::mutex> lock(m_captureSwitchMutex);
+        m_captureSwitchQueue.push_back({ currentWgc, currentCamera, nullptr, 0, false });
+        m_captureSwitchWorkerStopping = true;
+    }
+    m_captureSwitchCv.notify_one();
+    if (m_captureSwitchWorker.joinable()) m_captureSwitchWorker.join();
+    m_captureSwitchPending.store(false, std::memory_order_release);
+}
+
+void CDNFGameCaptureDlg::EnqueueCaptureSwitchJob(CaptureSwitchJob job)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_captureSwitchMutex);
+        if (m_captureSwitchWorkerStopping) {
+            delete job.camera;
+            delete job.wgc;
+            return;
+        }
+        m_captureSwitchQueue.push_back(job);
+    }
+    m_captureSwitchCv.notify_one();
+}
+
 // ==========================================
 // 🚨 WGC 线程安全收尸器：防止 0xDDDDDDDD 越界崩溃
 // ==========================================
@@ -6725,18 +6879,79 @@ void CDNFGameCaptureDlg::SafeDeleteWGC() {
         m_pWGC = nullptr;
         m_bUseWGC = false;
 
-        // 2. 告诉 WGC 停止捕获
-        try {
-            pTemp->StopCapture();
-        }
-        catch (...) {}
-
-        // 3. 绝杀：开一个后台子线程，等 500 毫秒，让天上飞的 FrameArrived 回调全部落地后，再安全销毁！
-        std::thread([pTemp]() {
-            Sleep(500);
-            delete pTemp;
-            }).detach();
+        EnqueueCaptureSwitchJob({ pTemp, nullptr, nullptr, 0, false });
     }
+}
+
+void CDNFGameCaptureDlg::SafeDeleteCamera()
+{
+    if (!m_pCamera) return;
+    CameraCapture* oldCamera = m_pCamera;
+    m_pCamera = nullptr;
+    EnqueueCaptureSwitchJob({ nullptr, oldCamera, nullptr, 0, false });
+}
+
+void CDNFGameCaptureDlg::QueueCaptureSourceSwitch()
+{
+    const unsigned int generation =
+        m_captureSwitchGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+    m_captureSwitchPending.store(true, std::memory_order_release);
+    m_captureSwitchStartedAt = ::GetTickCount64();
+
+    WGCCapture* oldWgc = m_pWGC;
+    CameraCapture* oldCamera = m_pCamera;
+    m_pWGC = nullptr;
+    m_pCamera = nullptr;
+    m_bUseWGC = false;
+    const HWND notifyWindow = GetSafeHwnd();
+
+    EnqueueCaptureSwitchJob({ oldWgc, oldCamera, notifyWindow, generation, true });
+}
+
+LRESULT CDNFGameCaptureDlg::OnCaptureSourceSwitchDone(WPARAM wParam, LPARAM lParam)
+{
+    const unsigned int generation = static_cast<unsigned int>(wParam);
+    if (generation != m_captureSwitchGeneration.load(std::memory_order_acquire)) return 0;
+    m_captureSwitchPending.store(false, std::memory_order_release);
+    const ULONGLONG elapsed = ::GetTickCount64() - m_captureSwitchStartedAt;
+    CString message;
+    message.Format(L"🔄 [捕获切换] 旧来源已释放，代际=%u，耗时=%llums。",
+        generation, static_cast<unsigned long long>(elapsed));
+    AppLog(message, RGB(0, 220, 255));
+    Capture();
+    BroadcastStateToWeb();
+    return 0;
+}
+
+void CDNFGameCaptureDlg::BeginCameraEnumeration()
+{
+    bool expected = false;
+    if (!m_cameraEnumerationPending.compare_exchange_strong(expected, true,
+        std::memory_order_acq_rel)) return;
+    const HWND notifyWindow = GetSafeHwnd();
+    std::thread([notifyWindow]() {
+        auto* cameras = new std::vector<std::wstring>(CameraCapture::GetAvailableCameras());
+        if (!::IsWindow(notifyWindow) ||
+            !::PostMessage(notifyWindow, WM_CAMERA_LIST_READY, 0,
+                reinterpret_cast<LPARAM>(cameras))) {
+            delete cameras;
+        }
+    }).detach();
+}
+
+LRESULT CDNFGameCaptureDlg::OnCameraListReady(WPARAM wParam, LPARAM lParam)
+{
+    std::unique_ptr<std::vector<std::wstring>> cameras(
+        reinterpret_cast<std::vector<std::wstring>*>(lParam));
+    if (cameras) {
+        std::lock_guard<std::mutex> lock(m_cameraListMutex);
+        m_cachedCameraNames = std::move(*cameras);
+    }
+    m_cameraEnumerationPending.store(false, std::memory_order_release);
+    if (m_cmbTargetWindow.m_hWnd && !m_cmbTargetWindow.GetDroppedState()) {
+        RefreshTargetList();
+    }
+    return 0;
 }
 
 
@@ -7538,6 +7753,13 @@ void CDNFGameCaptureDlg::DoRealExit() {
     m_ocrRecoveryRequestId.fetch_add(1);
     KillTimer(1); KillTimer(2); KillTimer(3); KillTimer(4); KillTimer(8);
     ResetDeathXStableState();
+    m_keyMappingLanService.SetStateChangedCallback(nullptr);
+    m_keyMappingLanService.SetTeamSyncMessageCallback(nullptr);
+    m_keyMappingLanService.StopNetwork();
+    m_keyMappingLanService.StopDiscovery();
+    m_keyMappingHook.Uninstall();
+    m_keyMappingLocalMask.store(0);
+    m_keyMappingActiveMask.store(0);
 
     // ==========================================
     // 【新增】：主程序退出时，拉着 OCR 一起陪葬
@@ -7851,14 +8073,16 @@ void CDNFGameCaptureDlg::OnBnClickedReset() {
 #endif
 
     if (MessageBox(L"确定要将战绩全部归零吗？", L"确认", MB_ICONQUESTION | MB_YESNO) == IDYES) {
-        std::lock_guard<std::mutex> dataLock(m_dataMutex);
-        m_totalScoreRed = 0;
-        m_totalScoreBlue = 0;
-        m_recentEvents.clear();
-        ResetMatchCooldownState(L"手动战绩归零");
-        for (int i = 0; i < 8; i++) {
-            m_players[i].kills = 0; m_players[i].deaths = 0;
-            m_players[i].currentStreak = 0; m_players[i].akCount = 0;
+        {
+            std::lock_guard<std::mutex> dataLock(m_dataMutex);
+            m_totalScoreRed = 0;
+            m_totalScoreBlue = 0;
+            m_recentEvents.clear();
+            ResetMatchCooldownState(L"手动战绩归零");
+            for (int i = 0; i < 8; i++) {
+                m_players[i].kills = 0; m_players[i].deaths = 0;
+                m_players[i].currentStreak = 0; m_players[i].akCount = 0;
+            }
         }
         SyncDataToTree();
         // 【加入这行】：自动识图抓到击杀后，立刻通知网页闪电跳分！
@@ -8126,6 +8350,7 @@ LRESULT CDNFGameCaptureDlg::OnWGCInitDone(WPARAM wParam, LPARAM lParam) {
 }
 
 void CDNFGameCaptureDlg::Capture() {
+    if (m_captureSwitchPending.load(std::memory_order_acquire)) return;
     // ★ 如果既不是监控状态，主窗口也不可见，根本不需要画面，直接返回
     if (!m_bIsRunning && !IsWindowVisible())
         return;
@@ -8681,15 +8906,28 @@ void CDNFGameCaptureDlg::OnPaint() {
     CBitmap* pOldBmp = memDC.SelectObject(&memBmp);
     memDC.FillSolidRect(0, 0, topHalf.Width(), topHalf.Height(), RGB(15, 15, 15));
 
-    if (m_w > 0 && m_h > 0 && IsWindowVisible()) {
+    HBITMAP previewCopy = nullptr;
+    int previewW = 0;
+    int previewH = 0;
+    if (IsWindowVisible()) {
         std::lock_guard<std::mutex> lock(g_bmpMutex);
-        if (m_bmp) {
-            HDC hBmpDC = ::CreateCompatibleDC(dc.GetSafeHdc());
-            HGDIOBJ oldBmp = ::SelectObject(hBmpDC, m_bmp);
-            memDC.SetStretchBltMode(HALFTONE);
-            memDC.StretchBlt(m_previewRect.left, m_previewRect.top, m_previewRect.Width(), m_previewRect.Height(), CDC::FromHandle(hBmpDC), 0, 0, m_w, m_h, SRCCOPY);
-            ::SelectObject(hBmpDC, oldBmp); ::DeleteDC(hBmpDC);
+        previewW = m_w;
+        previewH = m_h;
+        if (m_bmp && previewW > 0 && previewH > 0) {
+            previewCopy = (HBITMAP)::CopyImage(m_bmp, IMAGE_BITMAP, 0, 0,
+                LR_CREATEDIBSECTION);
         }
+    }
+    if (previewCopy) {
+        HDC hBmpDC = ::CreateCompatibleDC(dc.GetSafeHdc());
+        HGDIOBJ oldBmp = ::SelectObject(hBmpDC, previewCopy);
+        memDC.SetStretchBltMode(HALFTONE);
+        memDC.StretchBlt(m_previewRect.left, m_previewRect.top,
+            m_previewRect.Width(), m_previewRect.Height(), CDC::FromHandle(hBmpDC),
+            0, 0, previewW, previewH, SRCCOPY);
+        ::SelectObject(hBmpDC, oldBmp);
+        ::DeleteDC(hBmpDC);
+        ::DeleteObject(previewCopy);
     }
     Draw(memDC);
     dc.BitBlt(0, 0, topHalf.Width(), topHalf.Height(), &memDC, 0, 0, SRCCOPY);
@@ -9379,7 +9617,8 @@ void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
         // ★ 颜色检测降频：每 240ms 检测一次，不是每 50ms
         static DWORD s_lastColorCheck = 0;
         DWORD now = GetTickCount();
-        if (now - s_lastColorCheck >= POLL_COLOR_INTERVAL) {
+        if (!m_captureSwitchPending.load(std::memory_order_acquire) &&
+            now - s_lastColorCheck >= POLL_COLOR_INTERVAL) {
             s_lastColorCheck = now;
             CheckColorTrigger();
         }
@@ -9393,7 +9632,8 @@ void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
         m_bCanTriggerTeamScore = TRUE;
         KillTimer(4);
     }
-    else if (nID == 3 && m_bIsRunning) {
+    else if (nID == 3 && m_bIsRunning &&
+        !m_captureSwitchPending.load(std::memory_order_acquire)) {
         std::lock_guard<std::mutex> lock(g_bmpMutex);
         if (m_bmp && m_w > 0 && m_h > 0) {
             // ★ 旧帧先释放
@@ -10708,12 +10948,308 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 BroadcastStateToWeb();
                 if (!enabledApplied) {
                     AppLog(L"⚠️ [按键映射] " + hookError, RGB(255, 180, 0));
-                    DnfSendWebToast(m_pWebDlg, L"key_mapping_error", hookError);
+                    if (m_keyMappingAdminRequired) NotifyKeyMappingAdminRequired(hookError);
+                    else DnfSendWebToast(m_pWebDlg, L"key_mapping_error", hookError);
                 }
             }
         }
         else if (action == "cmd_toggle_key_display") {
             ToggleKeyDisplayWindow();
+        }
+        else if (action == "cmd_set_key_lan_role") {
+            const KeyMappingLanRole role = DnfParseKeyMappingLanRole(j.value("role", std::string("standalone")));
+            SetKeyMappingLanRole(role);
+            AppLog(L"🌐 [按键映射] 局域网角色已切换。", RGB(0, 220, 255));
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_start_key_lan_server") {
+            if (m_keyMappingLanRole != KeyMappingLanRole::server) {
+                SetKeyMappingLanRole(KeyMappingLanRole::server);
+            }
+            const int requestedPort = j.value("port", static_cast<int>(m_keyMappingLanPort));
+            if (requestedPort >= 1024 && requestedPort <= 65535) {
+                m_keyMappingLanPort = static_cast<unsigned short>(requestedPort);
+            }
+            CString ignored;
+            SetKeyMappingEnabled(true, ignored);
+            std::string error;
+            const bool started = m_keyMappingLanService.StartServer(
+                m_keyMappingLanPort,
+                std::string(CW2A(m_keyMappingLanPairCode, CP_UTF8)),
+                std::string(CW2A(m_keyMappingLanServerId, CP_UTF8)),
+                std::string(CW2A(GetKeyMappingLanDeviceName(), CP_UTF8)), error);
+            SaveKeyMappingSettings();
+            SaveKeyMappingLanSettings();
+            if (!started) {
+                CString message = CA2W(error.c_str(), CP_UTF8);
+                DnfSendWebToast(m_pWebDlg, L"key_mapping_error", L"启动局域网服务器失败：" + message);
+                CString disableError;
+                SetKeyMappingEnabled(false, disableError);
+            }
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_stop_key_lan_server") {
+            m_keyMappingLanService.StopNetwork();
+            ClearTeamSyncState();
+            CString ignored;
+            SetKeyMappingEnabled(false, ignored);
+            SaveKeyMappingSettings();
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_discover_key_lan_servers") {
+            if (m_keyMappingLanRole != KeyMappingLanRole::client) {
+                SetKeyMappingLanRole(KeyMappingLanRole::client);
+            }
+            const int requestedPort = j.value("port", static_cast<int>(m_keyMappingLanPort));
+            if (requestedPort >= 1024 && requestedPort <= 65535) {
+                m_keyMappingLanPort = static_cast<unsigned short>(requestedPort);
+            }
+            std::string error;
+            if (!m_keyMappingLanService.DiscoverServers(m_keyMappingLanPort, error)) {
+                CString message = CA2W(error.c_str(), CP_UTF8);
+                DnfSendWebToast(m_pWebDlg, L"key_mapping_error", L"搜索局域网服务器失败：" + message);
+            }
+            SaveKeyMappingLanSettings();
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_connect_key_lan") {
+            if (m_keyMappingLanRole != KeyMappingLanRole::client) {
+                SetKeyMappingLanRole(KeyMappingLanRole::client);
+            }
+            CString address = CA2W(j.value("address", std::string()).c_str(), CP_UTF8);
+            CString pairCode = CA2W(j.value("pairCode", std::string()).c_str(), CP_UTF8);
+            address.Trim();
+            pairCode.Trim();
+            const int requestedPort = j.value("port", static_cast<int>(m_keyMappingLanPort));
+            if (requestedPort >= 1024 && requestedPort <= 65535) {
+                m_keyMappingLanPort = static_cast<unsigned short>(requestedPort);
+            }
+            if (address.IsEmpty() || !DnfIsFourDigitPairCode(pairCode)) {
+                DnfSendWebToast(m_pWebDlg, L"key_mapping_error", L"请输入服务器 IP 和 4 位配对码。");
+                BroadcastStateToWeb();
+            }
+            else if (!IsRunningAsAdmin()) {
+                CString ignored;
+                SetKeyMappingEnabled(false, ignored);
+                SaveKeyMappingSettings();
+                NotifyKeyMappingAdminRequired(L"客户端需要读取 DNF 按键，请先以管理员身份重启软件。\n当前配置会先保存。 ");
+                BroadcastStateToWeb();
+            }
+            else {
+                CString hookError;
+                if (!SetKeyMappingEnabled(true, hookError)) {
+                    DnfSendWebToast(m_pWebDlg, L"key_mapping_error", hookError);
+                }
+                else {
+                    m_keyMappingLanServerAddress = address;
+                    m_keyMappingLanClientPairCode = pairCode;
+                    SaveKeyMappingLanSettings();
+                    std::string error;
+                    const bool started = m_keyMappingLanService.StartClient(
+                        std::string(CW2A(address, CP_UTF8)), m_keyMappingLanPort,
+                        std::string(CW2A(pairCode, CP_UTF8)),
+                        std::string(CW2A(m_keyMappingLanDeviceId, CP_UTF8)),
+                        std::string(CW2A(GetKeyMappingLanDeviceName(), CP_UTF8)), error);
+                    SaveKeyMappingSettings();
+                    SaveKeyMappingLanSettings();
+                    if (!started) {
+                        CString message = CA2W(error.c_str(), CP_UTF8);
+                        DnfSendWebToast(m_pWebDlg, L"key_mapping_error", L"连接局域网服务器失败：" + message);
+                    }
+                }
+                BroadcastStateToWeb();
+            }
+        }
+        else if (action == "cmd_disconnect_key_lan") {
+            m_keyMappingLanService.StopNetwork();
+            ClearTeamSyncState();
+            m_teamSyncLastAutoRevision = 0;
+            CString ignored;
+            SetKeyMappingEnabled(false, ignored);
+            SaveKeyMappingSettings();
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_set_team_sync_auto_receive") {
+            const bool enabled = j.value("enabled", false);
+            const KeyMappingLanStatusSnapshot status = m_keyMappingLanService.GetStatusSnapshot();
+            if (enabled && m_keyMappingLanRole != KeyMappingLanRole::client) {
+                DnfSendWebToast(m_pWebDlg, L"team_sync_error",
+                    L"请先把局域网工作模式切换为客户端。");
+            }
+            else if (enabled && status.connected && !status.teamSyncPushSupported) {
+                DnfSendWebToast(m_pWebDlg, L"team_sync_error",
+                    L"服务器版本不支持自动比赛同步，请升级服务器软件。");
+            }
+            else {
+                m_teamSyncAutoReceive = enabled;
+                if (!enabled && m_teamSyncAutoSend) {
+                    m_teamSyncAutoSend = false;
+                    m_keyMappingLanService.SetTeamSyncAutoSend(false);
+                }
+                m_teamSyncLastAutoRevision = 0;
+                m_teamSyncLastAutoResult = enabled
+                    ? L"等待连接服务器并接收比赛状态" : L"自动接收已关闭";
+                ClearTeamSyncState();
+                m_keyMappingLanService.SetTeamSyncSubscribed(enabled);
+                SaveKeyMappingLanSettings();
+                AppLog(enabled
+                    ? L"🌐 [比赛同步] 已开启自动接收，服务器变化后会覆盖本地比赛状态。"
+                    : L"🌐 [比赛同步] 已关闭自动接收，恢复手动同步。",
+                    RGB(0, 220, 255));
+            }
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_set_team_sync_allow_client_write") {
+            if (m_keyMappingLanRole != KeyMappingLanRole::server) {
+                DnfSendWebToast(m_pWebDlg, L"team_sync_error",
+                    L"只有服务器可以授权客户端修改比赛状态。");
+            }
+            else {
+                m_teamSyncAllowClientWrite = j.value("enabled", false);
+                m_keyMappingLanService.SetTeamSyncClientWriteAllowed(m_teamSyncAllowClientWrite);
+                SaveKeyMappingLanSettings();
+                AppLog(m_teamSyncAllowClientWrite
+                    ? L"🌐 [比赛同步] 已允许当前客户端提交比赛状态。"
+                    : L"🌐 [比赛同步] 已禁止客户端修改服务器比赛状态。",
+                    RGB(0, 220, 255));
+            }
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_set_team_sync_auto_send") {
+            const bool enabled = j.value("enabled", false);
+            const KeyMappingLanStatusSnapshot status = m_keyMappingLanService.GetStatusSnapshot();
+            if (enabled && m_keyMappingLanRole != KeyMappingLanRole::client) {
+                DnfSendWebToast(m_pWebDlg, L"team_sync_error",
+                    L"只有客户端可以向服务器提交比赛状态。");
+            }
+            else if (enabled && status.connected && !status.teamSyncBidirectionalSupported) {
+                DnfSendWebToast(m_pWebDlg, L"team_sync_error",
+                    L"服务器版本不支持双向比赛同步，请升级服务器软件。");
+            }
+            else {
+                m_teamSyncAutoSend = enabled;
+                if (enabled && !m_teamSyncAutoReceive) {
+                    m_teamSyncAutoReceive = true;
+                    m_teamSyncLastAutoRevision = 0;
+                    m_keyMappingLanService.SetTeamSyncSubscribed(true);
+                }
+                m_keyMappingLanService.SetTeamSyncAutoSend(enabled);
+                SaveKeyMappingLanSettings();
+                AppLog(enabled
+                    ? L"🌐 [比赛同步] 已开启客户端上传；服务器授权后，本机后续变化会自动提交。"
+                    : L"🌐 [比赛同步] 已关闭客户端上传。",
+                    RGB(0, 220, 255));
+            }
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_request_team_sync") {
+            if (m_teamSyncAutoReceive) {
+                DnfSendWebToast(m_pWebDlg, L"team_sync_error",
+                    L"自动接收已开启，无需手动获取服务器比赛状态。");
+            }
+            else if (m_keyMappingLanRole != KeyMappingLanRole::client) {
+                DnfSendWebToast(m_pWebDlg, L"team_sync_error", L"只有客户端可以获取服务器比赛状态。");
+            }
+            else {
+                std::string error;
+                if (!m_keyMappingLanService.RequestTeamSync(error)) {
+                    CString message;
+                    if (error == "server does not support team sync") {
+                        message = L"对方软件版本不支持比赛状态同步。";
+                    }
+                    else {
+                        message = L"无法获取服务器比赛状态：";
+                        message += CA2W(error.c_str(), CP_UTF8);
+                    }
+                    DnfSendWebToast(m_pWebDlg, L"team_sync_error", message);
+                }
+                else {
+                    AppLog(L"🌐 [比赛同步] 正在从服务器获取比赛状态，请稍候。", RGB(0, 220, 255));
+                }
+            }
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_apply_team_sync") {
+            const KeyMappingLanStatusSnapshot applyLanStatus = m_keyMappingLanService.GetStatusSnapshot();
+            if (m_teamSyncAutoReceive) {
+                m_teamSyncPendingSnapshot = json::object();
+                m_teamSyncLocalBaselineSnapshot = json::object();
+                DnfSendWebToast(m_pWebDlg, L"team_sync_error",
+                    L"自动接收已开启，手动快照已经作废。");
+            }
+            else if (m_keyMappingLanRole != KeyMappingLanRole::client || !applyLanStatus.connected) {
+                m_teamSyncPendingSnapshot = json::object();
+                m_teamSyncLocalBaselineSnapshot = json::object();
+                DnfSendWebToast(m_pWebDlg, L"team_sync_error",
+                    L"局域网连接已断开，不能应用服务器比赛状态。本地数据未修改。");
+            }
+            else if (m_teamSyncPendingSnapshot.empty()) {
+                DnfSendWebToast(m_pWebDlg, L"team_sync_error", L"没有待确认的服务器比赛状态。");
+            }
+            else {
+                CString error;
+                if (!ApplyTeamSyncSnapshot(m_teamSyncPendingSnapshot, true, error)) {
+                    DnfSendWebToast(m_pWebDlg, L"team_sync_error", error);
+                }
+                else {
+                    RefreshAfterTeamSyncApply();
+                    AppLog(L"✅ [比赛同步] 已确认覆盖本地比赛状态，可在局域网同步面板撤销。", RGB(0, 255, 120));
+                }
+            }
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_cancel_team_sync") {
+            m_teamSyncPendingSnapshot = json::object();
+            m_teamSyncLocalBaselineSnapshot = json::object();
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_undo_team_sync") {
+            if (m_teamSyncAutoReceive) {
+                DnfSendWebToast(m_pWebDlg, L"team_sync_error",
+                    L"自动接收期间不提供撤销，请先关闭自动接收。");
+            }
+            else if (!m_teamSyncBackupAvailable || m_teamSyncBackupSnapshot.empty()) {
+                DnfSendWebToast(m_pWebDlg, L"team_sync_error", L"没有可以撤销的比赛同步记录。");
+            }
+            else {
+                const json backup = m_teamSyncBackupSnapshot;
+                CString error;
+                if (!ApplyTeamSyncSnapshot(backup, false, error)) {
+                    DnfSendWebToast(m_pWebDlg, L"team_sync_error", error);
+                }
+                else {
+                    RefreshAfterTeamSyncApply();
+                    AppLog(L"↩️ [比赛同步] 已撤销本次同步。", RGB(0, 255, 120));
+                }
+            }
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_regenerate_key_pair_code") {
+            const bool restartServer = m_keyMappingLanRole == KeyMappingLanRole::server &&
+                m_keyMappingLanService.GetStatusSnapshot().running;
+            m_keyMappingLanPairCode = DnfGenerateKeyMappingPairCode();
+            SaveKeyMappingLanSettings();
+            if (restartServer) {
+                std::string error;
+                m_keyMappingLanService.StartServer(
+                    m_keyMappingLanPort,
+                    std::string(CW2A(m_keyMappingLanPairCode, CP_UTF8)),
+                    std::string(CW2A(m_keyMappingLanServerId, CP_UTF8)),
+                    std::string(CW2A(GetKeyMappingLanDeviceName(), CP_UTF8)), error);
+            }
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_restart_as_admin") {
+            SaveKeyMappingSettings();
+            SaveKeyMappingLanSettings();
+            SaveConfigToFile();
+            if (!RelaunchAsAdmin()) {
+                DnfSendWebToast(m_pWebDlg, L"key_mapping_error", L"管理员重启已取消，DNF 内按键仍无法读取。");
+                CString ignored;
+                SetKeyMappingEnabled(false, ignored);
+                SaveKeyMappingSettings();
+                BroadcastStateToWeb();
+            }
         }
         else if (action == "cmd_open_kill_display") {
             OpenKillDisplayWindow();
@@ -11165,6 +11701,13 @@ bool CDNFGameCaptureDlg::SaveKillDisplaySettingsPayload(const std::string& reque
 
 void CDNFGameCaptureDlg::BroadcastStateToWeb()
 {
+    try {
+        m_keyMappingLanService.SetTeamSyncSnapshot(BuildTeamSyncSnapshotPayload());
+    }
+    catch (...) {
+        m_keyMappingLanService.SetTeamSyncSnapshot("");
+    }
+
     if (m_pWebDlg == nullptr) return;
 
     try {
@@ -11251,7 +11794,313 @@ json CDNFGameCaptureDlg::BuildKeyMappingSettingsJson()
             });
         }
     }
+
+    const KeyMappingLanStatusSnapshot lanStatus = m_keyMappingLanService.GetStatusSnapshot();
+    json lan;
+    lan["role"] = DnfKeyMappingLanRoleName(m_keyMappingLanRole);
+    lan["running"] = lanStatus.running;
+    lan["connected"] = lanStatus.connected;
+    lan["reconnecting"] = lanStatus.reconnecting;
+    lan["discovering"] = lanStatus.discovering;
+    lan["status"] = lanStatus.status;
+    lan["isAdmin"] = IsRunningAsAdmin();
+    lan["adminRequired"] = m_keyMappingAdminRequired;
+    lan["port"] = m_keyMappingLanPort;
+    lan["serverAddress"] = DnfJsonUtf8(m_keyMappingLanServerAddress);
+    lan["serverPairCode"] = DnfJsonUtf8(m_keyMappingLanPairCode);
+    lan["clientPairCode"] = DnfJsonUtf8(m_keyMappingLanClientPairCode);
+    lan["serverId"] = lanStatus.serverId;
+    lan["remoteDeviceName"] = lanStatus.remoteDeviceName;
+    lan["teamSyncPending"] = m_keyMappingLanService.IsTeamSyncPending();
+    lan["teamSyncCanUndo"] = m_teamSyncBackupAvailable && !m_teamSyncAutoReceive;
+    lan["teamSyncSupported"] = lanStatus.teamSyncSupported;
+    lan["teamSyncPushSupported"] = lanStatus.teamSyncPushSupported;
+    lan["teamSyncBidirectionalSupported"] = lanStatus.teamSyncBidirectionalSupported;
+    lan["teamSyncSubscribed"] = lanStatus.teamSyncSubscribed;
+    lan["teamSyncClientWriteAllowed"] = lanStatus.teamSyncClientWriteAllowed;
+    lan["teamSyncAutoReceive"] = m_teamSyncAutoReceive;
+    lan["teamSyncAllowClientWrite"] = m_teamSyncAllowClientWrite;
+    lan["teamSyncAutoSend"] = m_teamSyncAutoSend;
+    lan["teamSyncLastAutoResult"] = DnfJsonUtf8(m_teamSyncLastAutoResult);
+    lan["localAddresses"] = lanStatus.localAddresses;
+    lan["servers"] = json::array();
+    for (const auto& server : lanStatus.discoveredServers) {
+        lan["servers"].push_back({
+            { "id", server.id },
+            { "name", server.name },
+            { "address", server.address },
+            { "port", server.port }
+            });
+    }
+    settings["lan"] = std::move(lan);
     return settings;
+}
+
+std::string CDNFGameCaptureDlg::BuildTeamSyncSnapshotPayload()
+{
+    std::lock_guard<std::mutex> lock(m_dataMutex);
+    return BuildTeamSyncSnapshotPayloadUnlocked();
+}
+
+std::string CDNFGameCaptureDlg::BuildTeamSyncSnapshotPayloadUnlocked()
+{
+    json snapshot;
+    snapshot["version"] = 1;
+    snapshot["redScore"] = m_totalScoreRed;
+    snapshot["blueScore"] = m_totalScoreBlue;
+    snapshot["redPickMode"] = m_bRedPickFirst ? "first" : "second";
+    snapshot["isFlipped"] = m_bFlipSides;
+    snapshot["outputSeatLabelToKillFile"] = m_bOutputSeatLabelToKillFile;
+    snapshot["lastKillerTeam"] = m_lastKillerTeam;
+    snapshot["players"] = json::array();
+
+    for (int i = 0; i < 8; ++i) {
+        json player;
+        player["team"] = m_players[i].team;
+        player["name"] = DnfJsonUtf8(m_players[i].name);
+        player["aliases"] = json::array();
+        for (const auto& alias : m_players[i].aliases) {
+            player["aliases"].push_back(DnfJsonUtf8(alias.name));
+        }
+        player["kills"] = m_players[i].kills;
+        player["deaths"] = m_players[i].deaths;
+        player["akCount"] = m_players[i].akCount;
+        player["currentStreak"] = m_players[i].currentStreak;
+        snapshot["players"].push_back(std::move(player));
+    }
+    return snapshot.dump();
+}
+
+bool CDNFGameCaptureDlg::ValidateTeamSyncSnapshot(const json& snapshot, CString& errorMessage) const
+{
+    errorMessage.Empty();
+    if (!snapshot.is_object() || snapshot.value("version", 0) != 1) {
+        errorMessage = L"比赛状态版本不兼容。";
+        return false;
+    }
+    if (snapshot.dump().size() > 60 * 1024) {
+        errorMessage = L"服务器比赛状态数据过大。";
+        return false;
+    }
+    if (!snapshot.contains("players") || !snapshot["players"].is_array() ||
+        snapshot["players"].size() != 8) {
+        errorMessage = L"服务器快照中的选手数量不是 8 个。";
+        return false;
+    }
+
+    auto readCounter = [&](const json& object, const char* key, int maxValue, int& result) {
+        if (!object.contains(key) || !object[key].is_number_integer()) return false;
+        result = object[key].get<int>();
+        return result >= 0 && result <= maxValue;
+    };
+    int score = 0;
+    if (!readCounter(snapshot, "redScore", 1000000, score) ||
+        !readCounter(snapshot, "blueScore", 1000000, score)) {
+        errorMessage = L"服务器比分数据无效。";
+        return false;
+    }
+    const std::string pickMode = snapshot.value("redPickMode", std::string());
+    if (pickMode != "first" && pickMode != "second") {
+        errorMessage = L"服务器选人顺序数据无效。";
+        return false;
+    }
+    if (!snapshot.contains("isFlipped") || !snapshot["isFlipped"].is_boolean() ||
+        !snapshot.contains("outputSeatLabelToKillFile") ||
+        !snapshot["outputSeatLabelToKillFile"].is_boolean()) {
+        errorMessage = L"服务器比赛显示状态无效。";
+        return false;
+    }
+    if (!snapshot.contains("lastKillerTeam") ||
+        !snapshot["lastKillerTeam"].is_number_integer() ||
+            (snapshot["lastKillerTeam"].get<int>() != -1 &&
+                snapshot["lastKillerTeam"].get<int>() != 0 &&
+                snapshot["lastKillerTeam"].get<int>() != 1)) {
+        errorMessage = L"服务器击杀队伍状态无效。";
+        return false;
+    }
+
+    size_t totalTextBytes = 0;
+    for (size_t i = 0; i < snapshot["players"].size(); ++i) {
+        const auto& player = snapshot["players"][i];
+        if (!player.is_object() || player.value("team", -1) != (i < 4 ? 0 : 1)) {
+            errorMessage = L"服务器队伍位置数据无效。";
+            return false;
+        }
+        for (const char* counter : { "kills", "deaths", "akCount", "currentStreak" }) {
+            int value = 0;
+            if (!readCounter(player, counter, 1000000, value)) {
+                errorMessage = L"服务器选手战绩数据无效。";
+                return false;
+            }
+        }
+        if (!player.contains("name") || !player["name"].is_string() ||
+            !player.contains("aliases") || !player["aliases"].is_array()) {
+            errorMessage = L"服务器选手名称数据无效。";
+            return false;
+        }
+        const std::string name = player["name"].get<std::string>();
+        totalTextBytes += name.size();
+        if (name.size() > 256 || name.find('\r') != std::string::npos || name.find('\n') != std::string::npos) {
+            errorMessage = L"服务器主号文本过长或包含换行。";
+            return false;
+        }
+        if (player["aliases"].size() > 128) {
+            errorMessage = L"服务器小号数量过多。";
+            return false;
+        }
+        for (const auto& alias : player["aliases"]) {
+            if (!alias.is_string()) {
+                errorMessage = L"服务器小号数据无效。";
+                return false;
+            }
+            const std::string text = alias.get<std::string>();
+            totalTextBytes += text.size();
+            if (text.size() > 256 || text.find('\r') != std::string::npos || text.find('\n') != std::string::npos) {
+                errorMessage = L"服务器小号文本过长或包含换行。";
+                return false;
+            }
+        }
+    }
+    if (totalTextBytes > 48 * 1024) {
+        errorMessage = L"服务器选手名称和小号数据过大。";
+        return false;
+    }
+    return true;
+}
+
+bool CDNFGameCaptureDlg::ApplyTeamSyncSnapshot(const json& snapshot, bool createBackup,
+    CString& errorMessage, bool automatic)
+{
+    errorMessage.Empty();
+    std::lock_guard<std::mutex> lock(m_dataMutex);
+    if (!ValidateTeamSyncSnapshot(snapshot, errorMessage)) return false;
+
+    json currentSnapshot;
+    if (!automatic) {
+        try {
+            currentSnapshot = json::parse(BuildTeamSyncSnapshotPayloadUnlocked());
+        }
+        catch (...) {
+            errorMessage = L"无法备份当前比赛状态。";
+            return false;
+        }
+        if (createBackup && (m_teamSyncLocalBaselineSnapshot.empty() ||
+            currentSnapshot != m_teamSyncLocalBaselineSnapshot)) {
+            m_teamSyncPendingSnapshot = json::object();
+            m_teamSyncLocalBaselineSnapshot = json::object();
+            errorMessage = L"本地比赛状态已变化，本次未覆盖。请重新获取服务器比赛状态。";
+            return false;
+        }
+        if (!createBackup && (m_teamSyncAppliedSnapshot.empty() ||
+            currentSnapshot != m_teamSyncAppliedSnapshot)) {
+            errorMessage = L"同步后的本地比赛状态已变化，为避免丢失新战绩，本次不能撤销。";
+            return false;
+        }
+    }
+
+    struct ParsedPlayer {
+        CString name;
+        std::vector<CString> aliases;
+        int team = 0;
+        int kills = 0;
+        int deaths = 0;
+        int akCount = 0;
+        int currentStreak = 0;
+    } parsed[8];
+
+    for (int i = 0; i < 8; ++i) {
+        const auto& source = snapshot["players"][i];
+        parsed[i].team = source.value("team", i < 4 ? 0 : 1);
+        parsed[i].name = CA2W(source["name"].get<std::string>().c_str(), CP_UTF8);
+        parsed[i].name.Replace(L"\r", L"");
+        parsed[i].name.Replace(L"\n", L"");
+        parsed[i].name.Trim();
+        parsed[i].kills = source.value("kills", 0);
+        parsed[i].deaths = source.value("deaths", 0);
+        parsed[i].akCount = source.value("akCount", 0);
+        parsed[i].currentStreak = source.value("currentStreak", 0);
+        for (const auto& alias : source["aliases"]) {
+            CString value = CA2W(alias.get<std::string>().c_str(), CP_UTF8);
+            value.Replace(L"\r", L"");
+            value.Replace(L"\n", L"");
+            value.Trim();
+            if (!value.IsEmpty()) parsed[i].aliases.push_back(value);
+        }
+    }
+
+    m_totalScoreRed = snapshot["redScore"].get<int>();
+    m_totalScoreBlue = snapshot["blueScore"].get<int>();
+    m_bRedPickFirst = snapshot["redPickMode"].get<std::string>() != "second";
+    m_bFlipSides = snapshot["isFlipped"].get<bool>();
+    m_bOutputSeatLabelToKillFile = snapshot["outputSeatLabelToKillFile"].get<bool>();
+    m_lastKillerTeam = snapshot.value("lastKillerTeam", -1);
+    for (int i = 0; i < 8; ++i) {
+        m_players[i].team = parsed[i].team;
+        m_players[i].name = parsed[i].name;
+        m_players[i].aliases.clear();
+        for (const auto& alias : parsed[i].aliases) {
+            DnfMergeAliasIntoAliasDataList(m_players[i].aliases, alias);
+        }
+        m_players[i].kills = parsed[i].kills;
+        m_players[i].deaths = parsed[i].deaths;
+        m_players[i].akCount = parsed[i].akCount;
+        m_players[i].currentStreak = parsed[i].currentStreak;
+    }
+
+    if (automatic) {
+        m_teamSyncAppliedSnapshot = json::object();
+        m_teamSyncBackupSnapshot = json::object();
+        m_teamSyncBackupAvailable = false;
+        m_teamSyncBackupEventBoundaryId = 0;
+        for (const auto& event : m_recentEvents) {
+            m_teamSyncEventBoundaryId = (std::max)(m_teamSyncEventBoundaryId, event.id);
+        }
+    }
+    else if (createBackup) {
+        m_teamSyncBackupSnapshot = std::move(currentSnapshot);
+        m_teamSyncBackupAvailable = true;
+        m_teamSyncAppliedSnapshot = snapshot;
+        m_teamSyncBackupEventBoundaryId = m_teamSyncEventBoundaryId;
+        for (const auto& event : m_recentEvents) {
+            m_teamSyncEventBoundaryId = (std::max)(m_teamSyncEventBoundaryId, event.id);
+        }
+    }
+    else {
+        m_teamSyncBackupSnapshot = json::object();
+        m_teamSyncBackupAvailable = false;
+        m_teamSyncAppliedSnapshot = json::object();
+        m_teamSyncEventBoundaryId = m_teamSyncBackupEventBoundaryId;
+        m_teamSyncBackupEventBoundaryId = 0;
+    }
+    m_teamSyncPendingSnapshot = json::object();
+    m_teamSyncLocalBaselineSnapshot = json::object();
+    return true;
+}
+
+void CDNFGameCaptureDlg::RefreshAfterTeamSyncApply()
+{
+    if (m_chkFlip.m_hWnd) {
+        m_chkFlip.SetCheck(m_bFlipSides ? BST_CHECKED : BST_UNCHECKED);
+    }
+    ::WritePrivateProfileString(L"Settings", L"RedPickFirst",
+        m_bRedPickFirst ? L"1" : L"0", m_iniPath);
+    ::WritePrivateProfileString(L"Settings", L"OutputSeatLabelToKillFile",
+        m_bOutputSeatLabelToKillFile ? L"1" : L"0", m_iniPath);
+    SaveAliasDB(false);
+    SaveConfigToFile();
+    WriteScoreToFile();
+    SyncDataToTree();
+    RefreshDisplay();
+}
+
+void CDNFGameCaptureDlg::ClearTeamSyncState()
+{
+    m_teamSyncPendingSnapshot = json::object();
+    m_teamSyncLocalBaselineSnapshot = json::object();
+    m_teamSyncAppliedSnapshot = json::object();
+    m_teamSyncBackupSnapshot = json::object();
+    m_teamSyncBackupAvailable = false;
+    m_teamSyncBackupEventBoundaryId = 0;
 }
 
 bool CDNFGameCaptureDlg::SetKeyMappingEnabled(bool enabled, CString& errorMessage)
@@ -11260,8 +12109,29 @@ bool CDNFGameCaptureDlg::SetKeyMappingEnabled(bool enabled, CString& errorMessag
     if (!enabled) {
         m_keyMappingEnabled.store(false);
         m_keyMappingHook.Uninstall();
+        m_keyMappingLocalMask.store(0);
+        m_keyMappingLanService.SetLocalActiveMask(0);
         m_keyMappingActiveMask.store(0);
+        m_keyMappingAdminRequired = false;
         return true;
+    }
+
+    if (m_keyMappingLanRole == KeyMappingLanRole::server) {
+        m_keyMappingHook.Uninstall();
+        m_keyMappingLocalMask.store(0);
+        m_keyMappingLanService.SetLocalActiveMask(0);
+        m_keyMappingEnabled.store(true);
+        return true;
+    }
+
+    if (!IsRunningAsAdmin()) {
+        m_keyMappingEnabled.store(false);
+        m_keyMappingHook.Uninstall();
+        m_keyMappingLocalMask.store(0);
+        m_keyMappingActiveMask.store(0);
+        m_keyMappingAdminRequired = true;
+        errorMessage = L"DNF 以更高权限运行，按键映射需要管理员权限才能读取游戏内按键。";
+        return false;
     }
 
     DWORD errorCode = ERROR_SUCCESS;
@@ -11272,7 +12142,121 @@ bool CDNFGameCaptureDlg::SetKeyMappingEnabled(bool enabled, CString& errorMessag
         return false;
     }
     m_keyMappingEnabled.store(true);
+    m_keyMappingAdminRequired = false;
     return true;
+}
+
+void CDNFGameCaptureDlg::LoadKeyMappingLanSettings()
+{
+    wchar_t text[512] = {};
+    GetPrivateProfileString(L"KeyMappingLan", L"Role", L"standalone", text, 512, m_iniPath);
+    m_keyMappingLanRole = DnfParseKeyMappingLanRole(std::string(CW2A(text, CP_UTF8)));
+
+    const int storedPort = GetPrivateProfileInt(L"KeyMappingLan", L"Port", 18778, m_iniPath);
+    m_keyMappingLanPort = static_cast<unsigned short>(storedPort >= 1024 && storedPort <= 65535 ? storedPort : 18778);
+
+    GetPrivateProfileString(L"KeyMappingLan", L"PairCode", L"", text, 512, m_iniPath);
+    m_keyMappingLanPairCode = text;
+    m_keyMappingLanPairCode.Trim();
+    if (!DnfIsFourDigitPairCode(m_keyMappingLanPairCode)) {
+        m_keyMappingLanPairCode = DnfGenerateKeyMappingPairCode();
+    }
+
+    GetPrivateProfileString(L"KeyMappingLan", L"ClientPairCode", L"", text, 512, m_iniPath);
+    m_keyMappingLanClientPairCode = text;
+    m_keyMappingLanClientPairCode.Trim();
+
+    GetPrivateProfileString(L"KeyMappingLan", L"ServerAddress", L"", text, 512, m_iniPath);
+    m_keyMappingLanServerAddress = text;
+    m_keyMappingLanServerAddress.Trim();
+
+    GetPrivateProfileString(L"KeyMappingLan", L"ServerId", L"", text, 512, m_iniPath);
+    m_keyMappingLanServerId = text;
+    m_keyMappingLanServerId.Trim();
+    if (m_keyMappingLanServerId.IsEmpty()) m_keyMappingLanServerId = DnfGenerateKeyMappingDeviceId();
+
+    GetPrivateProfileString(L"KeyMappingLan", L"DeviceId", L"", text, 512, m_iniPath);
+    m_keyMappingLanDeviceId = text;
+    m_keyMappingLanDeviceId.Trim();
+    if (m_keyMappingLanDeviceId.IsEmpty()) m_keyMappingLanDeviceId = DnfGenerateKeyMappingDeviceId();
+
+    GetPrivateProfileString(L"KeyMappingLan", L"LastServerId", L"", text, 512, m_iniPath);
+    m_keyMappingLanLastServerId = text;
+    m_keyMappingLanLastServerId.Trim();
+
+    m_teamSyncAutoReceive = GetPrivateProfileInt(L"KeyMappingLan",
+        L"AutoReceiveTeamSync", 0, m_iniPath) != 0;
+    m_teamSyncAllowClientWrite = GetPrivateProfileInt(L"KeyMappingLan",
+        L"AllowClientTeamSyncWrite", 0, m_iniPath) != 0;
+    m_teamSyncAutoSend = GetPrivateProfileInt(L"KeyMappingLan",
+        L"AutoSendTeamSync", 0, m_iniPath) != 0;
+
+    m_keyMappingLanService.SetRole(m_keyMappingLanRole);
+    m_keyMappingLanService.SetTeamSyncClientWriteAllowed(
+        m_keyMappingLanRole == KeyMappingLanRole::server && m_teamSyncAllowClientWrite);
+    m_keyMappingLanService.SetTeamSyncAutoSend(
+        m_keyMappingLanRole == KeyMappingLanRole::client && m_teamSyncAutoSend);
+    m_keyMappingLanService.SetTeamSyncSubscribed(
+        m_keyMappingLanRole == KeyMappingLanRole::client && m_teamSyncAutoReceive);
+    SaveKeyMappingLanSettings();
+}
+
+void CDNFGameCaptureDlg::SaveKeyMappingLanSettings()
+{
+    WritePrivateProfileString(L"KeyMappingLan", L"Role",
+        CA2W(DnfKeyMappingLanRoleName(m_keyMappingLanRole), CP_UTF8), m_iniPath);
+    CString port;
+    port.Format(L"%u", static_cast<unsigned int>(m_keyMappingLanPort));
+    WritePrivateProfileString(L"KeyMappingLan", L"Port", port, m_iniPath);
+    WritePrivateProfileString(L"KeyMappingLan", L"PairCode", m_keyMappingLanPairCode, m_iniPath);
+    WritePrivateProfileString(L"KeyMappingLan", L"ClientPairCode", m_keyMappingLanClientPairCode, m_iniPath);
+    WritePrivateProfileString(L"KeyMappingLan", L"ServerAddress", m_keyMappingLanServerAddress, m_iniPath);
+    WritePrivateProfileString(L"KeyMappingLan", L"ServerId", m_keyMappingLanServerId, m_iniPath);
+    WritePrivateProfileString(L"KeyMappingLan", L"DeviceId", m_keyMappingLanDeviceId, m_iniPath);
+    WritePrivateProfileString(L"KeyMappingLan", L"LastServerId", m_keyMappingLanLastServerId, m_iniPath);
+    WritePrivateProfileString(L"KeyMappingLan", L"AutoReceiveTeamSync",
+        m_teamSyncAutoReceive ? L"1" : L"0", m_iniPath);
+    WritePrivateProfileString(L"KeyMappingLan", L"AllowClientTeamSyncWrite",
+        m_teamSyncAllowClientWrite ? L"1" : L"0", m_iniPath);
+    WritePrivateProfileString(L"KeyMappingLan", L"AutoSendTeamSync",
+        m_teamSyncAutoSend ? L"1" : L"0", m_iniPath);
+}
+
+void CDNFGameCaptureDlg::SetKeyMappingLanRole(KeyMappingLanRole role)
+{
+    m_keyMappingLanService.SetRole(role);
+    ClearTeamSyncState();
+    m_keyMappingHook.Uninstall();
+    m_keyMappingLocalMask.store(0);
+    m_keyMappingActiveMask.store(0);
+    m_keyMappingEnabled.store(false);
+    m_keyMappingLanRole = role;
+    m_keyMappingLanService.SetTeamSyncClientWriteAllowed(
+        role == KeyMappingLanRole::server && m_teamSyncAllowClientWrite);
+    m_keyMappingLanService.SetTeamSyncAutoSend(
+        role == KeyMappingLanRole::client && m_teamSyncAutoSend);
+    m_keyMappingLanService.SetTeamSyncSubscribed(
+        role == KeyMappingLanRole::client && m_teamSyncAutoReceive);
+    m_keyMappingLanWasConnected = false;
+    m_teamSyncLastAutoRevision = 0;
+    m_teamSyncLastAutoResult.Empty();
+    m_keyMappingAdminRequired = false;
+    SaveKeyMappingSettings();
+    SaveKeyMappingLanSettings();
+}
+
+void CDNFGameCaptureDlg::NotifyKeyMappingAdminRequired(const CString& reason)
+{
+    m_keyMappingAdminRequired = true;
+    if (m_pWebDlg) DnfSendWebToast(m_pWebDlg, L"key_mapping_admin_required", reason);
+}
+
+CString CDNFGameCaptureDlg::GetKeyMappingLanDeviceName() const
+{
+    wchar_t name[MAX_COMPUTERNAME_LENGTH + 1] = {};
+    DWORD length = static_cast<DWORD>(std::size(name));
+    if (::GetComputerNameW(name, &length) && length > 0) return CString(name, static_cast<int>(length));
+    return L"DNF点将计分器";
 }
 
 void CDNFGameCaptureDlg::LoadKeyMappingSettings()
@@ -11320,7 +12304,8 @@ void CDNFGameCaptureDlg::LoadKeyMappingSettings()
 
     bool shouldSave = storedLayoutVersion < KEY_MAPPING_LAYOUT_VERSION;
     CString hookError;
-    if (savedEnabled && !SetKeyMappingEnabled(true, hookError)) {
+    if (savedEnabled && m_keyMappingLanRole == KeyMappingLanRole::standalone &&
+        !SetKeyMappingEnabled(true, hookError)) {
         shouldSave = true;
         AppLog(L"⚠️ [按键映射] " + hookError, RGB(255, 180, 0));
         WriteMatchLog(L"[按键映射] " + hookError);
@@ -11402,7 +12387,19 @@ bool CDNFGameCaptureDlg::IsKeyDisplayWindowVisible() const
 
 void CDNFGameCaptureDlg::PollKeyMappingState()
 {
+    if (m_keyMappingLanRole == KeyMappingLanRole::server) {
+        m_keyMappingLocalMask.store(0, std::memory_order_release);
+        m_keyMappingLanService.SetLocalActiveMask(0);
+        const KeyMappingLanStatusSnapshot status = m_keyMappingLanService.GetStatusSnapshot();
+        const unsigned int mask = m_keyMappingEnabled.load() && status.connected
+            ? m_keyMappingLanService.GetRemoteActiveMask() : 0;
+        m_keyMappingActiveMask.store(mask, std::memory_order_release);
+        return;
+    }
+
     if (!m_keyMappingEnabled.load() || !m_keyMappingHook.IsInstalled()) {
+        m_keyMappingLocalMask.store(0, std::memory_order_release);
+        m_keyMappingLanService.SetLocalActiveMask(0);
         m_keyMappingActiveMask.store(0);
         return;
     }
@@ -11420,7 +12417,9 @@ void CDNFGameCaptureDlg::PollKeyMappingState()
             mask |= (1u << i);
         }
     }
-    m_keyMappingActiveMask.store(mask);
+    m_keyMappingLocalMask.store(mask, std::memory_order_release);
+    m_keyMappingLanService.SetLocalActiveMask(mask);
+    m_keyMappingActiveMask.store(mask, std::memory_order_release);
 }
 
 // 将数据同步到树状控件（带视觉状态记忆）
@@ -12068,7 +13067,8 @@ void CDNFGameCaptureDlg::OnEndLabelEdit(NMHDR* pNMHDR, LRESULT* pResult) {
     }
 
     DWORD_PTR data = m_treePlayers.GetItemData(hItem);
-    std::lock_guard<std::mutex> lk(m_dataMutex);
+    {
+        std::lock_guard<std::mutex> lk(m_dataMutex);
 
     CString newNameOnly = line;
     if (!(data & 0x80000000)) {
@@ -12171,6 +13171,7 @@ void CDNFGameCaptureDlg::OnEndLabelEdit(NMHDR* pNMHDR, LRESULT* pResult) {
             }
         }
         m_players[data].name = newMainName;
+        }
     }
 
     AppLog(L"✏️ [信息修改] 成功保存更新: " + line, RGB(0, 255, 100));
@@ -12283,6 +13284,224 @@ LRESULT CDNFGameCaptureDlg::OnKeyDisplayVisibilityChanged(WPARAM wParam, LPARAM 
     WritePrivateProfileString(L"KeyDisplayWindow", L"Visible",
         IsKeyDisplayWindowVisible() ? L"1" : L"0", m_iniPath);
     BroadcastStateToWeb();
+    return 0;
+}
+
+LRESULT CDNFGameCaptureDlg::OnKeyMappingLanChanged(WPARAM wParam, LPARAM lParam)
+{
+    const KeyMappingLanStatusSnapshot status = m_keyMappingLanService.GetStatusSnapshot();
+    const bool becameConnected = status.connected && !m_keyMappingLanWasConnected;
+    const bool becameDisconnected = m_keyMappingLanWasConnected && !status.connected;
+
+    if (becameDisconnected) {
+        m_teamSyncLastAutoRevision = 0;
+        if (m_teamSyncAutoReceive) {
+            m_teamSyncLastAutoResult = L"连接已断开，等待自动重连";
+        }
+    }
+
+    if (becameDisconnected && !m_teamSyncPendingSnapshot.empty()) {
+        m_teamSyncPendingSnapshot = json::object();
+        m_teamSyncLocalBaselineSnapshot = json::object();
+        if (m_pWebDlg) {
+            DnfSendWebToast(m_pWebDlg, L"team_sync_error",
+                L"局域网连接已断开，待确认的比赛状态已作废，本地数据未修改。");
+        }
+    }
+
+    if (becameConnected && m_keyMappingLanRole == KeyMappingLanRole::server) {
+        m_keyMappingLanService.SetTeamSyncClientWriteAllowed(m_teamSyncAllowClientWrite);
+        m_keyMappingEnabled.store(true);
+        OpenKeyDisplayWindow();
+        AppLog(L"🌐 [按键映射] 局域网客户端已连接，正在显示远端按键位置。", RGB(0, 255, 100));
+    }
+    else if (becameConnected && m_keyMappingLanRole == KeyMappingLanRole::client) {
+        m_keyMappingLanLastServerId = CA2W(status.serverId.c_str(), CP_UTF8);
+        m_teamSyncLastAutoRevision = 0;
+        m_keyMappingLanService.SetTeamSyncSubscribed(m_teamSyncAutoReceive);
+        m_keyMappingLanService.SetTeamSyncAutoSend(m_teamSyncAutoSend);
+        if (m_teamSyncAutoReceive && !status.teamSyncPushSupported) {
+            m_teamSyncAutoReceive = false;
+            m_keyMappingLanService.SetTeamSyncSubscribed(false);
+            m_teamSyncLastAutoResult = L"服务器版本不支持自动比赛同步";
+            if (m_pWebDlg) {
+                DnfSendWebToast(m_pWebDlg, L"team_sync_error",
+                    L"服务器版本不支持自动比赛同步，请升级服务器软件。");
+            }
+        }
+        else if (m_teamSyncAutoReceive) {
+            m_teamSyncLastAutoResult = L"已订阅，正在等待服务器当前状态";
+        }
+        SaveKeyMappingLanSettings();
+        AppLog(L"🌐 [按键映射] 已连接局域网按键服务器。", RGB(0, 255, 100));
+    }
+
+    CString currentStatus = CA2W(status.status.c_str(), CP_UTF8);
+    if (currentStatus != m_keyMappingLanLastStatus) {
+        CString message;
+        if (currentStatus == L"bind_failed") message = L"按键映射服务器启动失败：端口 18778 可能已被占用。";
+        else if (currentStatus == L"socket_failed") message = L"按键映射网络初始化失败。";
+        else if (currentStatus == L"rejected_pair_code") message = L"连接被拒绝：配对码错误。";
+        else if (currentStatus == L"rejected_busy") message = L"连接被拒绝：服务器已有一台客户端。";
+        else if (currentStatus == L"rejected_version") message = L"连接被拒绝：双方软件协议版本不一致。";
+        if (!message.IsEmpty() && m_pWebDlg) {
+            DnfSendWebToast(m_pWebDlg, L"key_mapping_error", message);
+        }
+        m_keyMappingLanLastStatus = currentStatus;
+    }
+
+    m_keyMappingLanWasConnected = status.connected;
+    PollKeyMappingState();
+    BroadcastStateToWeb();
+    return 0;
+}
+
+LRESULT CDNFGameCaptureDlg::OnKeyMappingTeamSync(WPARAM wParam, LPARAM lParam)
+{
+    std::unique_ptr<CString> payload(reinterpret_cast<CString*>(lParam));
+    if (!payload) return 0;
+
+    try {
+        const json message = json::parse(std::string(CW2A(*payload, CP_UTF8)));
+        const std::string type = message.value("type", std::string());
+        json webMessage;
+        if (type == "team_sync_snapshot") {
+            const json snapshot = message.value("snapshot", json::object());
+            CString validationError;
+            if (m_teamSyncAutoReceive) {
+                m_teamSyncPendingSnapshot = json::object();
+                m_teamSyncLocalBaselineSnapshot = json::object();
+            }
+            else if (m_keyMappingLanRole != KeyMappingLanRole::client ||
+                !ValidateTeamSyncSnapshot(snapshot, validationError)) {
+                m_teamSyncPendingSnapshot = json::object();
+                m_teamSyncLocalBaselineSnapshot = json::object();
+                webMessage["action"] = "team_sync_error";
+                webMessage["message"] = DnfJsonUtf8(validationError.IsEmpty()
+                    ? L"比赛状态同步失败：服务器快照无效。" : validationError);
+            }
+            else {
+                try {
+                    m_teamSyncLocalBaselineSnapshot = json::parse(BuildTeamSyncSnapshotPayload());
+                    m_teamSyncPendingSnapshot = snapshot;
+                    webMessage["action"] = "team_sync_snapshot";
+                    webMessage["data"] = {
+                        { "snapshot", snapshot },
+                        { "localBaseline", m_teamSyncLocalBaselineSnapshot }
+                    };
+                    AppLog(L"🌐 [比赛同步] 已收到服务器比赛状态，请在 Web 端确认覆盖。", RGB(0, 220, 255));
+                }
+                catch (...) {
+                    m_teamSyncPendingSnapshot = json::object();
+                    m_teamSyncLocalBaselineSnapshot = json::object();
+                    webMessage["action"] = "team_sync_error";
+                    webMessage["message"] = DnfJsonUtf8(L"无法备份当前本地比赛状态。");
+                }
+            }
+        }
+        else if (type == "team_sync_push") {
+            const KeyMappingLanStatusSnapshot status = m_keyMappingLanService.GetStatusSnapshot();
+            const std::uint64_t revision = message.value("revision", 0ull);
+            const json snapshot = message.value("snapshot", json::object());
+            if (!m_teamSyncAutoReceive || m_keyMappingLanRole != KeyMappingLanRole::client ||
+                !status.connected || !status.teamSyncPushSupported || !status.teamSyncSubscribed ||
+                revision == 0 || revision <= m_teamSyncLastAutoRevision) {
+                return 0;
+            }
+
+            CString error;
+            if (!ValidateTeamSyncSnapshot(snapshot, error)) {
+                m_teamSyncLastAutoResult = error.IsEmpty()
+                    ? L"服务器自动快照无效，本地数据未修改" : error;
+                webMessage["action"] = "team_sync_error";
+                webMessage["message"] = DnfJsonUtf8(m_teamSyncLastAutoResult);
+                AppLog(L"⚠️ [比赛同步] " + m_teamSyncLastAutoResult, RGB(255, 180, 0));
+            }
+            else {
+                m_keyMappingLanService.SetRemoteTeamSyncSnapshot(snapshot.dump(), revision);
+                if (!ApplyTeamSyncSnapshot(snapshot, false, error, true)) {
+                    m_teamSyncLastAutoResult = error.IsEmpty()
+                        ? L"服务器自动快照无效，本地数据未修改" : error;
+                    webMessage["action"] = "team_sync_error";
+                    webMessage["message"] = DnfJsonUtf8(m_teamSyncLastAutoResult);
+                    AppLog(L"⚠️ [比赛同步] " + m_teamSyncLastAutoResult, RGB(255, 180, 0));
+                }
+                else {
+                    m_teamSyncLastAutoRevision = revision;
+                    m_teamSyncLastAutoResult.Format(L"已自动同步服务器比赛状态（版本 %llu）",
+                        static_cast<unsigned long long>(revision));
+                    RefreshAfterTeamSyncApply();
+                    AppLog(L"✅ [比赛同步] " + m_teamSyncLastAutoResult, RGB(0, 255, 120));
+                }
+            }
+        }
+        else if (type == "team_sync_propose") {
+            const KeyMappingLanStatusSnapshot status = m_keyMappingLanService.GetStatusSnapshot();
+            const json snapshot = message.value("snapshot", json::object());
+            const std::string sourceId = message.value("sourceId", std::string());
+            const unsigned int proposalId = message.value("proposalId", 0u);
+            CString error;
+            if (m_keyMappingLanRole != KeyMappingLanRole::server || !status.connected ||
+                !m_teamSyncAllowClientWrite) {
+                m_keyMappingLanService.CompleteTeamSyncProposal(sourceId, proposalId, false,
+                    "write_not_allowed");
+                AppLog(L"⚠️ [比赛同步] 已忽略未授权的客户端比赛状态提交。", RGB(255, 180, 0));
+            }
+            else if (!ValidateTeamSyncSnapshot(snapshot, error) ||
+                !ApplyTeamSyncSnapshot(snapshot, false, error, true)) {
+                m_keyMappingLanService.CompleteTeamSyncProposal(sourceId, proposalId, false,
+                    "invalid_snapshot");
+                AppLog(L"⚠️ [比赛同步] 客户端提交无效：" + error, RGB(255, 180, 0));
+            }
+            else {
+                RefreshAfterTeamSyncApply();
+                m_keyMappingLanService.CompleteTeamSyncProposal(sourceId, proposalId, true, "");
+                m_teamSyncLastAutoResult = L"已接收客户端比赛状态";
+                AppLog(L"✅ [比赛同步] 已接收客户端修改并广播为服务器最新状态。",
+                    RGB(0, 255, 120));
+            }
+        }
+        else if (type == "team_sync_propose_result") {
+            if (!message.value("accepted", false)) {
+                const std::string reason = message.value("reason", std::string());
+                CString detail = reason == "write_not_allowed"
+                    ? L"服务器尚未允许客户端修改比赛状态。"
+                    : L"服务器拒绝了本次比赛状态提交。";
+                m_teamSyncLastAutoResult = detail;
+                AppLog(L"⚠️ [比赛同步] " + detail, RGB(255, 180, 0));
+            }
+        }
+        else if (type == "team_sync_error") {
+            const bool automatic = message.value("automatic", false);
+            if (automatic && !m_teamSyncAutoReceive) return 0;
+            m_teamSyncPendingSnapshot = json::object();
+            m_teamSyncLocalBaselineSnapshot = json::object();
+            const std::string reason = message.value("reason", std::string("unknown"));
+            CString error = L"比赛状态同步失败：";
+            if (reason == "unsupported") error += L"对方软件不支持比赛状态同步。";
+            else if (reason == "timeout") error += L"服务器响应超时。";
+            else if (reason == "disconnected") error += L"局域网连接已断开。";
+            else if (reason == "invalid_snapshot") error += L"服务器返回的数据无效。";
+            else if (reason == "payload_too_large") error += L"服务器比赛状态数据过大。";
+            else error += CA2W(reason.c_str(), CP_UTF8);
+            if (automatic) m_teamSyncLastAutoResult = error;
+            webMessage["action"] = "team_sync_error";
+            webMessage["message"] = DnfJsonUtf8(error);
+            AppLog(L"⚠️ [比赛同步] " + error, RGB(255, 180, 0));
+        }
+
+        if (!webMessage.empty() && m_pWebDlg) {
+            CString webJson = CA2W(webMessage.dump().c_str(), CP_UTF8);
+            m_pWebDlg->SendStateToWeb(webJson);
+        }
+        BroadcastStateToWeb();
+    }
+    catch (...) {
+        m_teamSyncPendingSnapshot = json::object();
+        m_teamSyncLocalBaselineSnapshot = json::object();
+        if (m_pWebDlg) DnfSendWebToast(m_pWebDlg, L"team_sync_error", L"比赛状态同步消息格式错误。");
+        BroadcastStateToWeb();
+    }
     return 0;
 }
 
@@ -12604,8 +13823,7 @@ void CDNFGameCaptureDlg::OnCbnSelchangeCaptureEngine() {
 
     ClearPreview();
 
-    // 🚨 换成安全销毁
-    SafeDeleteWGC();
+    QueueCaptureSourceSwitch();
 
     m_nBlankFrameCount = 0;
     m_bAlreadyPrompted = false;
@@ -12677,7 +13895,11 @@ void CDNFGameCaptureDlg::RefreshTargetList() {
     m_cmbTargetWindow.SetItemData(dnfIdx, 0); // 0 代表使用老逻辑寻找DNF
 
     // 2. 枚举摄像头
-    std::vector<std::wstring> cameras = CameraCapture::GetAvailableCameras();
+    std::vector<std::wstring> cameras;
+    {
+        std::lock_guard<std::mutex> lock(m_cameraListMutex);
+        cameras = m_cachedCameraNames;
+    }
     for (size_t i = 0; i < cameras.size(); i++) {
         int idx = m_cmbTargetWindow.AddString(CString(L"[摄像头] ") + cameras[i].c_str());
         // 最高位打个标记 0x80000000，表示这是摄像头，低位存索引
@@ -12738,7 +13960,8 @@ void CDNFGameCaptureDlg::SaveSelectedTargetWindowName()
 }
 
 void CDNFGameCaptureDlg::OnCbnDropdownTargetWindow() {
-    RefreshTargetList(); // 每次点开下拉框，实时刷新最新的窗口列表
+    RefreshTargetList();
+    BeginCameraEnumeration();
 }
 
 // 只在用户"确认选择并关闭下拉框"时触发，滚动期间不触发
@@ -12750,14 +13973,7 @@ void CDNFGameCaptureDlg::OnCbnCloseupTargetWindow() {
 
     ClearPreview();
 
-    // 🚨 换成安全销毁
-    SafeDeleteWGC();
-
-    if (m_pCamera) {
-        m_pCamera->StopCapture();
-        delete m_pCamera;
-        m_pCamera = nullptr;
-    }
+    QueueCaptureSourceSwitch();
 
     AppLog(L"🎯 [设置] 已切换捕获目标", RGB(0, 255, 255));
     BroadcastStateToWeb();

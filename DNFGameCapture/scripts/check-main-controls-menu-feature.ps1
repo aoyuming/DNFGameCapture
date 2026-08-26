@@ -94,6 +94,22 @@ if ($text["style.css"] -notmatch "\.control-panel\.more-controls-open") {
     $errors.Add("style.css must define the open More menu layering state.")
 }
 
+foreach ($needle in @('position: fixed', 'overflow-y: auto', 'scrollbar-gutter: stable')) {
+    if ($text["style.css"].IndexOf($needle, [System.StringComparison]::Ordinal) -lt 0) {
+        $errors.Add("More menu viewport scrolling is missing CSS: $needle")
+    }
+}
+
+foreach ($needle in @('positionMoreControlsMenu', 'document.body.appendChild(menu)', 'moreMenuMaxHeight', "addEventListener('resize'")) {
+    if ($text["main.js"].IndexOf($needle, [System.StringComparison]::Ordinal) -lt 0) {
+        $errors.Add("More menu viewport positioning is missing JS: $needle")
+    }
+}
+
+if ($text["main.js"].IndexOf("e.target.closest('.more-controls-menu')", [System.StringComparison]::Ordinal) -lt 0) {
+    $errors.Add("Clicks inside the body-level More menu must not be treated as outside clicks.")
+}
+
 if ($errors.Count -gt 0) {
     foreach ($err in $errors) {
         Write-Error $err -ErrorAction Continue
