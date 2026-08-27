@@ -18,7 +18,8 @@ function initializeSchema(db: Database.Database): void {
 
       CREATE TABLE IF NOT EXISTS rooms (
         id TEXT PRIMARY KEY,
-        display_name TEXT NOT NULL UNIQUE
+        display_name TEXT NOT NULL UNIQUE,
+        revision INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE TABLE IF NOT EXISTS memberships (
@@ -50,6 +51,11 @@ function initializeSchema(db: Database.Database): void {
         received_at INTEGER NOT NULL
       );
     `);
+
+    const roomColumns = db.pragma('table_info(rooms)') as Array<{ name: string }>;
+    if (!roomColumns.some((column) => column.name === 'revision')) {
+      db.exec('ALTER TABLE rooms ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
+    }
 
     const insertRoom = db.prepare(
       'INSERT OR IGNORE INTO rooms (id, display_name) VALUES (?, ?)',

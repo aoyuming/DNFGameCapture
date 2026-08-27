@@ -11,6 +11,12 @@ export interface MembershipDto {
   deviceSuffix: string;
 }
 
+export interface RoomMemberDto {
+  deviceId: string;
+  broadcasterName: string;
+  deviceSuffix: string;
+}
+
 interface RoomRow {
   id: string;
   display_name: string;
@@ -23,6 +29,16 @@ interface MembershipRow extends RoomRow {
 
 interface ExistingMembershipRow {
   room_id: string;
+  broadcaster_name: string;
+}
+
+interface RoomRevisionRow {
+  revision: number;
+}
+
+interface RoomMemberRow {
+  device_id: string;
+  broadcaster_name: string;
 }
 
 function toRoomDto(row: RoomRow): RoomDto {
@@ -59,6 +75,48 @@ export function getMembership(
   return row ? toMembershipDto(row) : null;
 }
 
+export function listRoomMembers(
+  db: Database.Database,
+  roomId: string,
+): RoomMemberDto[] {
+  const rows = db
+    .prepare(
+      `SELECT device_id, broadcaster_name
+       FROM memberships
+       WHERE room_id = ?
+       ORDER BY device_id`,
+    )
+    .all(roomId) as RoomMemberRow[];
+  return rows.map((row) => ({
+    deviceId: row.device_id,
+    broadcasterName: row.broadcaster_name,
+    deviceSuffix: row.device_id.slice(-4),
+  }));
+}
+
+export function getRoomRevision(db: Database.Database, roomId: string): number {
+  const row = db
+    .prepare('SELECT revision FROM rooms WHERE id = ?')
+    .get(roomId) as RoomRevisionRow | undefined;
+  if (!row) {
+    throw new Error('Room not found');
+  }
+  return row.revision;
+}
+
+export function incrementRoomRevision(
+  db: Database.Database,
+  roomId: string,
+): number {
+  const result = db
+    .prepare('UPDATE rooms SET revision = revision + 1 WHERE id = ?')
+    .run(roomId);
+  if (result.changes !== 1) {
+    throw new Error('Room not found');
+  }
+  return getRoomRevision(db, roomId);
+}
+
 export function joinRoom(
   db: Database.Database,
   deviceId: string,
@@ -75,7 +133,9 @@ export function joinRoom(
     }
 
     const existing = db
-      .prepare('SELECT room_id FROM memberships WHERE device_id = ?')
+      .prepare(
+        'SELECT room_id, broadcaster_name FROM memberships WHERE device_id = ?',
+      )
       .get(deviceId) as ExistingMembershipRow | undefined;
     if (existing && existing.room_id !== roomId) {
       db.prepare('DELETE FROM snapshots WHERE device_id = ?').run(deviceId);
@@ -90,6 +150,15 @@ export function joinRoom(
          updated_at = excluded.updated_at`,
     ).run(deviceId, roomId, broadcasterName, nowSec);
 
+    if (!existing) {
+      incrementRoomRevision(db, roomId);
+    } else if (existing.room_id !== roomId) {
+      incrementRoomRevision(db, existing.room_id);
+      incrementRoomRevision(db, roomId);
+    } else if (existing.broadcaster_name !== broadcasterName) {
+      incrementRoomRevision(db, roomId);
+    }
+
     return getMembership(db, deviceId);
   });
 
@@ -103,6 +172,17 @@ export function renameBroadcaster(
   nowSec: number,
 ): MembershipDto | null {
   const rename = db.transaction(() => {
+    const existing = db
+      .prepare(
+        'SELECT room_id, broadcaster_name FROM memberships WHERE device_id = ?',
+      )
+      .get(deviceId) as ExistingMembershipRow | undefined;
+    if (!existing) {
+      return null;
+    }
+    if (existing.broadcaster_name === broadcasterName) {
+      return getMembership(db, deviceId);
+    }
     const result = db
       .prepare(
         `UPDATE memberships
@@ -110,7 +190,11 @@ export function renameBroadcaster(
          WHERE device_id = ?`,
       )
       .run(broadcasterName, nowSec, deviceId);
-    return result.changes === 0 ? null : getMembership(db, deviceId);
+    if (result.changes !== 1) {
+      return null;
+    }
+    incrementRoomRevision(db, existing.room_id);
+    return getMembership(db, deviceId);
   });
 
   return rename();
@@ -118,8 +202,17 @@ export function renameBroadcaster(
 
 export function leaveRoom(db: Database.Database, deviceId: string): void {
   const leave = db.transaction(() => {
+    const existing = db
+      .prepare(
+        'SELECT room_id, broadcaster_name FROM memberships WHERE device_id = ?',
+      )
+      .get(deviceId) as ExistingMembershipRow | undefined;
+    if (!existing) {
+      return;
+    }
     db.prepare('DELETE FROM snapshots WHERE device_id = ?').run(deviceId);
     db.prepare('DELETE FROM memberships WHERE device_id = ?').run(deviceId);
+    incrementRoomRevision(db, existing.room_id);
   });
   leave();
 }
