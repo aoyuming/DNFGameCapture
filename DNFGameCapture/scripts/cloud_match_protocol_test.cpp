@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <string>
 
 using nlohmann::json;
@@ -87,6 +88,46 @@ void TestSocketIoPackets()
     Require(!IsSocketIoDisconnectPacket("410"), "Socket.IO disconnect must be exact");
 }
 
+void TestSnapshotUploadEnvelopeLimits()
+{
+    constexpr std::uint64_t sizingAckId =
+        (std::numeric_limits<std::uint64_t>::max)() - 1;
+    const std::string emptySnapshot = R"({"padding":""})";
+    std::string encoded;
+    Require(EncodeSnapshotUploadEvent(emptySnapshot, sizingAckId,
+        kMaxCloudMatchPayloadBytes, encoded) == SnapshotUploadEncodeResult::success,
+        "small snapshot envelope should encode");
+    Require(encoded.size() < kMaxCloudMatchPayloadBytes,
+        "small snapshot should leave room in the transport envelope");
+
+    const std::size_t paddingBytes = kMaxCloudMatchPayloadBytes - encoded.size();
+    const std::string largestSnapshot = std::string(R"({"padding":")") +
+        std::string(paddingBytes, 'x') + R"("})";
+    Require(EncodeSnapshotUploadEvent(largestSnapshot, sizingAckId,
+        kMaxCloudMatchPayloadBytes, encoded) == SnapshotUploadEncodeResult::success,
+        "largest fully encoded snapshot event should be accepted");
+    Require(encoded.size() == kMaxCloudMatchPayloadBytes,
+        "largest accepted snapshot event should exactly fill the local limit");
+
+    const std::string oneByteOver = std::string(R"({"padding":")") +
+        std::string(paddingBytes + 1, 'x') + R"("})";
+    Require(EncodeSnapshotUploadEvent(oneByteOver, sizingAckId,
+        kMaxCloudMatchPayloadBytes, encoded) == SnapshotUploadEncodeResult::payloadTooLarge,
+        "one-byte-over encoded snapshot event should be rejected");
+    Require(encoded.empty(), "rejected snapshot event must not retain encoded bytes");
+
+    Require(EncodeSnapshotUploadEvent(largestSnapshot, sizingAckId, 1024, encoded) ==
+        SnapshotUploadEncodeResult::payloadTooLarge,
+        "smaller advertised Engine.IO maxPayload should reject the same snapshot");
+    Require(encoded.empty(), "server-limit rejection must not retain encoded bytes");
+
+    const std::string invalidUtf8 = std::string(R"({"padding":")") +
+        std::string("\xC3\x28", 2) + R"("})";
+    Require(EncodeSnapshotUploadEvent(invalidUtf8, sizingAckId,
+        kMaxCloudMatchPayloadBytes, encoded) == SnapshotUploadEncodeResult::invalidPayload,
+        "invalid UTF-8 snapshot should be rejected before transport");
+}
+
 void TestFragmentAssembly()
 {
     WebSocketTextAssembler assembler;
@@ -170,6 +211,7 @@ int main()
 {
     TestEngineIoPackets();
     TestSocketIoPackets();
+    TestSnapshotUploadEnvelopeLimits();
     TestFragmentAssembly();
     TestMalformedPacketsAreRejected();
     std::cout << "Cloud match protocol tests passed.\n";

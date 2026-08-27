@@ -58,6 +58,16 @@ std::string EncodeSocketEvent(std::string_view eventName,
     const nlohmann::json& payload) noexcept;
 std::string EncodeSocketEvent(std::string_view eventName,
     const nlohmann::json& payload, std::uint64_t ackId) noexcept;
+
+enum class SnapshotUploadEncodeResult
+{
+    success,
+    invalidPayload,
+    payloadTooLarge
+};
+
+SnapshotUploadEncodeResult EncodeSnapshotUploadEvent(std::string_view snapshotJson,
+    std::uint64_t ackId, std::size_t maxEventBytes, std::string& encodedPacket) noexcept;
 bool ParseSocketIoEvent(std::string_view packet, SocketIoEvent& result) noexcept;
 bool ParseSocketIoAck(std::string_view packet, SocketIoAck& result) noexcept;
 bool IsSocketIoDisconnectPacket(std::string_view packet) noexcept;

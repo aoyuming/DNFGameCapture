@@ -27,11 +27,14 @@ namespace {
 
 constexpr std::size_t kMaxCommandQueueSize = 64;
 constexpr std::size_t kMaxPendingAcks = 64;
+constexpr std::size_t kMaxInboundMessageQueueSize = 128;
 constexpr auto kAckTimeout = std::chrono::seconds(8);
 constexpr DWORD kNetworkTimeoutMs = 3000;
 constexpr DWORD kReceivePollTimeoutMs = 200;
 constexpr std::size_t kMaxRegistrationResponseBytes = 4096;
 constexpr std::array<int, 5> kReconnectDelaysSeconds{ 1, 2, 5, 10, 20 };
+constexpr std::uint64_t kSnapshotSizingAckId =
+    (std::numeric_limits<std::uint64_t>::max)() - 1;
 
 class WinHttpHandle
 {
@@ -70,11 +73,28 @@ private:
     HINTERNET handle_ = nullptr;
 };
 
-void SecureClear(std::string& value) noexcept
+template<typename Character>
+void SecureClear(std::basic_string<Character>& value) noexcept
 {
-    std::fill(value.begin(), value.end(), '\0');
+    if (!value.empty()) {
+        SecureZeroMemory(value.data(), value.size() * sizeof(Character));
+    }
     value.clear();
 }
+
+template<typename String>
+class SecureClearGuard
+{
+public:
+    explicit SecureClearGuard(String& value) noexcept : value_(value) {}
+    ~SecureClearGuard() { SecureClear(value_); }
+
+    SecureClearGuard(const SecureClearGuard&) = delete;
+    SecureClearGuard& operator=(const SecureClearGuard&) = delete;
+
+private:
+    String& value_;
+};
 
 std::wstring Utf8ToWide(std::string_view text)
 {
@@ -150,26 +170,6 @@ bool QueryHttpStatus(HINTERNET request, DWORD& status)
         WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX) != FALSE;
 }
 
-bool ReadBoundedResponse(HINTERNET request, std::string& body)
-{
-    body.clear();
-    for (;;) {
-        DWORD available = 0;
-        if (!WinHttpQueryDataAvailable(request, &available)) return false;
-        if (available == 0) return true;
-        if (available > kMaxRegistrationResponseBytes - body.size()) return false;
-
-        const std::size_t offset = body.size();
-        body.resize(offset + available);
-        DWORD downloaded = 0;
-        if (!WinHttpReadData(request, body.data() + offset, available, &downloaded)) {
-            return false;
-        }
-        body.resize(offset + downloaded);
-        if (downloaded == 0) return true;
-    }
-}
-
 } // namespace
 
 class CloudMatchClient::Impl
@@ -181,7 +181,12 @@ public:
     {
         Stop();
         std::lock_guard<std::mutex> lock(mutex);
-        SecureClear(config.deviceToken);
+        ClearCommandsLocked();
+        ClearLatestSnapshotLocked();
+        ClearPendingAcksLocked();
+        ClearDesiredRoomLocked();
+        ClearInboundMessagesLocked();
+        ClearConfigLocked(configGeneration.load(std::memory_order_acquire));
     }
 
     bool Configure(const std::wstring& serverUrl, const std::string& deviceId,
@@ -192,16 +197,21 @@ public:
         parsed.deviceId = deviceId;
         parsed.deviceToken = deviceToken;
         parsed.credentialsValid = validUrl && !deviceId.empty() && !deviceToken.empty();
+        const std::uint64_t generation =
+            configGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+        parsed.generation = generation;
+
+        CancelActiveOperation();
 
         {
             std::lock_guard<std::mutex> lock(mutex);
-            SecureClear(config.deviceToken);
-            const std::uint64_t generation = configGeneration.fetch_add(1) + 1;
-            parsed.generation = generation;
+            ClearCommandsLocked();
+            ClearLatestSnapshotLocked();
+            ClearPendingAcksLocked();
+            ClearDesiredRoomLocked();
+            ClearInboundMessagesLocked();
+            ClearConfigLocked(generation);
             config = std::move(parsed);
-            commands.clear();
-            latestSnapshot.reset();
-            desiredRoom.reset();
             status = {};
             status.configured = config.credentialsValid;
             status.statusText = validUrl ?
@@ -232,20 +242,20 @@ public:
     void Stop()
     {
         std::thread joiningThread;
+        std::uint64_t stopGeneration = 0;
         {
             std::unique_lock<std::mutex> lock(mutex);
             if (stopping) {
                 condition.wait(lock, [&]() { return !stopping; });
                 return;
             }
-            if (!started) return;
             stopping = true;
             stopRequested.store(true, std::memory_order_release);
-            joiningThread = std::move(worker);
+            stopGeneration = configGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+            if (started) joiningThread = std::move(worker);
         }
 
-        HINTERNET activeHandle = activeCancelableHandle.exchange(nullptr);
-        if (activeHandle) WinHttpCloseHandle(activeHandle);
+        CancelActiveOperation();
         condition.notify_all();
         if (joiningThread.joinable()) joiningThread.join();
 
@@ -254,11 +264,13 @@ public:
             started = false;
             stopping = false;
             stopRequested.store(false, std::memory_order_release);
-            commands.clear();
-            latestSnapshot.reset();
-            status.connecting = false;
-            status.connected = false;
-            status.reconnecting = false;
+            ClearCommandsLocked();
+            ClearLatestSnapshotLocked();
+            ClearPendingAcksLocked();
+            ClearDesiredRoomLocked();
+            ClearInboundMessagesLocked();
+            ClearConfigLocked(stopGeneration);
+            status = {};
             status.statusText = "stopped";
         }
         condition.notify_all();
@@ -310,17 +322,38 @@ public:
 
     bool UploadSnapshot(std::string snapshotJson)
     {
-        if (snapshotJson.empty() || snapshotJson.size() > cloud_match::kMaxCloudMatchPayloadBytes) {
-            SetQueueStatus("invalid_snapshot");
-            return false;
-        }
+        std::uint64_t generation = 0;
+        std::size_t outboundLimit = cloud_match::kMaxCloudMatchPayloadBytes;
         {
             std::lock_guard<std::mutex> lock(mutex);
-            if (!config.credentialsValid) {
-                status.statusText = "not_configured";
+            generation = config.generation;
+            outboundLimit = currentOutboundLimit;
+        }
+
+        std::string sizingPacket;
+        const cloud_match::SnapshotUploadEncodeResult encoded =
+            cloud_match::EncodeSnapshotUploadEvent(snapshotJson, kSnapshotSizingAckId,
+                outboundLimit, sizingPacket);
+        SecureClear(sizingPacket);
+        if (encoded != cloud_match::SnapshotUploadEncodeResult::success) {
+            SecureClear(snapshotJson);
+            NotifySnapshotUploadFailure(generation, encoded);
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (config.generation != generation) {
+                SecureClear(snapshotJson);
                 return false;
             }
-            latestSnapshot = PendingSnapshot{ config.generation, std::move(snapshotJson) };
+            if (!config.credentialsValid) {
+                status.statusText = "not_configured";
+                SecureClear(snapshotJson);
+                return false;
+            }
+            ClearLatestSnapshotLocked();
+            latestSnapshot.emplace(generation, std::move(snapshotJson));
         }
         condition.notify_all();
         return true;
@@ -353,6 +386,31 @@ public:
         callback = std::move(newCallback);
     }
 
+    std::size_t DispatchMessages(std::size_t maxCount)
+    {
+        std::size_t dispatched = 0;
+        while (dispatched < maxCount) {
+            InboundMessage message;
+            MessageCallback copiedCallback;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (inboundMessages.empty()) break;
+                message = std::move(inboundMessages.front());
+                inboundMessages.pop_front();
+                copiedCallback = callback;
+            }
+
+            if (copiedCallback) {
+                std::string callbackMessage = message.serialized;
+                copiedCallback(std::move(callbackMessage));
+                SecureClear(callbackMessage);
+            }
+            SecureClear(message.serialized);
+            ++dispatched;
+        }
+        return dispatched;
+    }
+
 private:
     enum class CommandKind
     {
@@ -367,6 +425,50 @@ private:
 
     struct Config
     {
+        Config() = default;
+        ~Config() { Clear(); }
+
+        Config(const Config& other)
+        {
+            CopyFrom(other);
+        }
+
+        Config& operator=(const Config& other)
+        {
+            if (this != &other) {
+                Clear();
+                CopyFrom(other);
+            }
+            return *this;
+        }
+
+        Config(Config&& other) noexcept
+        {
+            Swap(other);
+        }
+
+        Config& operator=(Config&& other) noexcept
+        {
+            if (this != &other) {
+                Clear();
+                Swap(other);
+            }
+            return *this;
+        }
+
+        void Clear() noexcept
+        {
+            serverValid = false;
+            credentialsValid = false;
+            secure = false;
+            port = 0;
+            SecureClear(host);
+            SecureClear(basePath);
+            SecureClear(deviceId);
+            SecureClear(deviceToken);
+            generation = 0;
+        }
+
         bool serverValid = false;
         bool credentialsValid = false;
         bool secure = false;
@@ -376,6 +478,33 @@ private:
         std::string deviceId;
         std::string deviceToken;
         std::uint64_t generation = 0;
+
+    private:
+        void CopyFrom(const Config& other)
+        {
+            serverValid = other.serverValid;
+            credentialsValid = other.credentialsValid;
+            secure = other.secure;
+            port = other.port;
+            host = other.host;
+            basePath = other.basePath;
+            deviceId = other.deviceId;
+            deviceToken = other.deviceToken;
+            generation = other.generation;
+        }
+
+        void Swap(Config& other) noexcept
+        {
+            std::swap(serverValid, other.serverValid);
+            std::swap(credentialsValid, other.credentialsValid);
+            std::swap(secure, other.secure);
+            std::swap(port, other.port);
+            host.swap(other.host);
+            basePath.swap(other.basePath);
+            deviceId.swap(other.deviceId);
+            deviceToken.swap(other.deviceToken);
+            std::swap(generation, other.generation);
+        }
     };
 
     struct Command
@@ -386,16 +515,58 @@ private:
         std::string requestId;
         std::uint64_t generation = 0;
         std::uint64_t sequence = 0;
+
+        void Clear() noexcept
+        {
+            SecureClear(argument);
+            SecureClear(secondArgument);
+            SecureClear(requestId);
+        }
     };
 
     struct DesiredRoom
     {
         std::string roomId;
         std::string broadcasterName;
+
+        ~DesiredRoom()
+        {
+            SecureClear(roomId);
+            SecureClear(broadcasterName);
+        }
     };
 
     struct PendingSnapshot
     {
+        PendingSnapshot() = default;
+        PendingSnapshot(std::uint64_t sourceGeneration, std::string sourceJson)
+            : generation(sourceGeneration)
+        {
+            jsonText.swap(sourceJson);
+            SecureClear(sourceJson);
+        }
+        ~PendingSnapshot() { SecureClear(jsonText); }
+
+        PendingSnapshot(const PendingSnapshot&) = delete;
+        PendingSnapshot& operator=(const PendingSnapshot&) = delete;
+
+        PendingSnapshot(PendingSnapshot&& other) noexcept : generation(other.generation)
+        {
+            jsonText.swap(other.jsonText);
+            other.generation = 0;
+        }
+
+        PendingSnapshot& operator=(PendingSnapshot&& other) noexcept
+        {
+            if (this != &other) {
+                SecureClear(jsonText);
+                generation = other.generation;
+                jsonText.swap(other.jsonText);
+                other.generation = 0;
+            }
+            return *this;
+        }
+
         std::uint64_t generation = 0;
         std::string jsonText;
     };
@@ -406,6 +577,68 @@ private:
         std::string resultType;
         std::string requestId;
         Clock::time_point deadline;
+
+        void Clear() noexcept
+        {
+            SecureClear(resultType);
+            SecureClear(requestId);
+        }
+    };
+
+    struct InboundMessage
+    {
+        InboundMessage() = default;
+        ~InboundMessage()
+        {
+            SecureClear(type);
+            SecureClear(coalesceKey);
+            SecureClear(serialized);
+        }
+
+        InboundMessage(const InboundMessage&) = delete;
+        InboundMessage& operator=(const InboundMessage&) = delete;
+
+        InboundMessage(InboundMessage&& other) noexcept
+            : generation(other.generation), coalescible(other.coalescible),
+            overflowError(other.overflowError), sensitive(other.sensitive)
+        {
+            type.swap(other.type);
+            coalesceKey.swap(other.coalesceKey);
+            serialized.swap(other.serialized);
+            other.generation = 0;
+            other.coalescible = false;
+            other.overflowError = false;
+            other.sensitive = false;
+        }
+
+        InboundMessage& operator=(InboundMessage&& other) noexcept
+        {
+            if (this != &other) {
+                SecureClear(type);
+                SecureClear(coalesceKey);
+                SecureClear(serialized);
+                generation = other.generation;
+                coalescible = other.coalescible;
+                overflowError = other.overflowError;
+                sensitive = other.sensitive;
+                type.swap(other.type);
+                coalesceKey.swap(other.coalesceKey);
+                serialized.swap(other.serialized);
+                other.generation = 0;
+                other.coalescible = false;
+                other.overflowError = false;
+                other.sensitive = false;
+            }
+            return *this;
+        }
+
+        std::uint64_t generation = 0;
+        std::string type;
+        std::string coalesceKey;
+        std::string serialized;
+        bool coalescible = false;
+        bool overflowError = false;
+        bool sensitive = false;
     };
 
     struct WebSocketConnection
@@ -436,9 +669,72 @@ private:
         cancelled
     };
 
-    CancelablePublishResult PublishCancelableHandle(HINTERNET handle) noexcept
+    enum class SnapshotSendResult
     {
-        if (!handle || stopRequested.load(std::memory_order_acquire)) {
+        sent,
+        rejected,
+        transportFailure
+    };
+
+    static bool IsCoalescibleNotification(std::string_view type) noexcept
+    {
+        return type == "room_changed" || type == "room_presence";
+    }
+
+    static bool IsProtectedInboundResult(std::string_view type) noexcept
+    {
+        return type == "device_registered" || type == "device_registration_error" ||
+            type == "room_join_result" || type == "snapshot_upload_result" ||
+            type == "snapshot_result";
+    }
+
+    void ClearCommandsLocked() noexcept
+    {
+        for (Command& command : commands) command.Clear();
+        commands.clear();
+    }
+
+    void ClearLatestSnapshotLocked() noexcept
+    {
+        latestSnapshot.reset();
+    }
+
+    void ClearPendingAcksLocked() noexcept
+    {
+        for (auto& entry : pendingAcks) entry.second.Clear();
+        pendingAcks.clear();
+        nextAckId = 1;
+    }
+
+    void ClearDesiredRoomLocked() noexcept
+    {
+        desiredRoom.reset();
+    }
+
+    void ClearInboundMessagesLocked() noexcept
+    {
+        inboundMessages.clear();
+    }
+
+    void ClearConfigLocked(std::uint64_t generation) noexcept
+    {
+        SecureClear(config.deviceToken);
+        config.Clear();
+        config.generation = generation;
+        currentOutboundLimit = cloud_match::kMaxCloudMatchPayloadBytes;
+    }
+
+    void CancelActiveOperation() noexcept
+    {
+        HINTERNET activeHandle = activeCancelableHandle.exchange(nullptr);
+        if (activeHandle) WinHttpCloseHandle(activeHandle);
+    }
+
+    CancelablePublishResult PublishCancelableHandle(HINTERNET handle,
+        std::uint64_t generation) noexcept
+    {
+        if (!handle || stopRequested.load(std::memory_order_acquire) ||
+            configGeneration.load(std::memory_order_acquire) != generation) {
             return CancelablePublishResult::notPublished;
         }
 
@@ -447,7 +743,8 @@ private:
             std::memory_order_acq_rel)) {
             return CancelablePublishResult::notPublished;
         }
-        if (!stopRequested.load(std::memory_order_acquire)) {
+        if (!stopRequested.load(std::memory_order_acquire) &&
+            configGeneration.load(std::memory_order_acquire) == generation) {
             return CancelablePublishResult::published;
         }
 
@@ -469,11 +766,12 @@ private:
     class ActiveHandleScope
     {
     public:
-        ActiveHandleScope(Impl& owner, WinHttpHandle& handleOwner) noexcept
+        ActiveHandleScope(Impl& owner, WinHttpHandle& handleOwner,
+            std::uint64_t generation) noexcept
             : owner_(owner), handleOwner_(handleOwner)
         {
             const CancelablePublishResult result =
-                owner_.PublishCancelableHandle(handleOwner_.Get());
+                owner_.PublishCancelableHandle(handleOwner_.Get(), generation);
             active_ = result == CancelablePublishResult::published;
             if (result == CancelablePublishResult::cancelled) handleOwner_.Release();
         }
@@ -506,6 +804,7 @@ private:
             return false;
         }
         std::wstring mutableUrl = url;
+        SecureClearGuard mutableUrlGuard(mutableUrl);
         URL_COMPONENTS components{};
         components.dwStructSize = sizeof(components);
         components.dwSchemeLength = static_cast<DWORD>(-1);
@@ -597,24 +896,119 @@ private:
         update(status);
     }
 
-    void NotifyJson(std::uint64_t generation, const json& message)
+    void UpdateOutboundLimit(std::uint64_t generation, std::size_t limit)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (config.generation != generation) return;
+        currentOutboundLimit = (std::min)(limit,
+            cloud_match::kMaxCloudMatchPayloadBytes);
+    }
+
+    void EnqueueInboundMessage(std::uint64_t generation, std::string type,
+        std::string serialized, std::string coalesceKey, bool sensitive)
+    {
+        InboundMessage incoming;
+        incoming.generation = generation;
+        incoming.coalescible = IsCoalescibleNotification(type);
+        incoming.sensitive = sensitive;
+        incoming.type.swap(type);
+        incoming.coalesceKey.swap(coalesceKey);
+        incoming.serialized.swap(serialized);
+
+        std::lock_guard<std::mutex> lock(mutex);
+        if (config.generation != generation) return;
+
+        if (incoming.coalescible) {
+            const auto existing = std::find_if(inboundMessages.rbegin(), inboundMessages.rend(),
+                [&incoming](const InboundMessage& queued) {
+                    return queued.generation == incoming.generation &&
+                        queued.type == incoming.type &&
+                        queued.coalesceKey == incoming.coalesceKey;
+                });
+            if (existing != inboundMessages.rend()) {
+                SecureClear(existing->serialized);
+                existing->serialized.swap(incoming.serialized);
+                existing->sensitive = incoming.sensitive;
+                return;
+            }
+        }
+
+        if (inboundMessages.size() >= kMaxInboundMessageQueueSize) {
+            const auto notification = std::find_if(inboundMessages.begin(),
+                inboundMessages.end(), [](const InboundMessage& queued) {
+                    return queued.coalescible;
+                });
+            if (notification != inboundMessages.end()) {
+                inboundMessages.erase(notification);
+            }
+            else {
+                const bool overflowAlreadyQueued = std::any_of(inboundMessages.begin(),
+                    inboundMessages.end(), [](const InboundMessage& queued) {
+                        return queued.overflowError;
+                    });
+                if (overflowAlreadyQueued) return;
+
+                const auto replaceable = std::find_if(inboundMessages.begin(),
+                    inboundMessages.end(), [](const InboundMessage& queued) {
+                        return !IsProtectedInboundResult(queued.type);
+                    });
+                if (replaceable != inboundMessages.end()) {
+                    inboundMessages.erase(replaceable);
+                }
+                else if (!inboundMessages.empty()) {
+                    inboundMessages.pop_front();
+                }
+
+                InboundMessage overflow;
+                overflow.generation = generation;
+                overflow.type = "cloud_error";
+                overflow.serialized =
+                    R"({"code":"queue_overflow","ok":false,"type":"cloud_error"})";
+                overflow.overflowError = true;
+                inboundMessages.push_back(std::move(overflow));
+                return;
+            }
+        }
+        inboundMessages.push_back(std::move(incoming));
+    }
+
+    void NotifyJson(std::uint64_t generation, const json& message,
+        std::string coalesceKey = {}, bool sensitive = false)
     {
         std::string serialized;
+        std::string type;
         try {
             serialized = message.dump();
+            const auto foundType = message.find("type");
+            if (foundType == message.end() || !foundType->is_string()) {
+                SecureClear(serialized);
+                return;
+            }
+            type = foundType->get<std::string>();
         }
         catch (...) {
+            SecureClear(serialized);
             return;
         }
-        if (serialized.size() > cloud_match::kMaxCloudMatchPayloadBytes) return;
-
-        MessageCallback copiedCallback;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            if (config.generation != generation) return;
-            copiedCallback = callback;
+        if (serialized.size() > cloud_match::kMaxCloudMatchPayloadBytes) {
+            SecureClear(type);
+            SecureClear(serialized);
+            return;
         }
-        if (copiedCallback) copiedCallback(std::move(serialized));
+        EnqueueInboundMessage(generation, std::move(type), std::move(serialized),
+            std::move(coalesceKey), sensitive);
+    }
+
+    void NotifySnapshotUploadFailure(std::uint64_t generation,
+        cloud_match::SnapshotUploadEncodeResult result)
+    {
+        const char* code = result == cloud_match::SnapshotUploadEncodeResult::payloadTooLarge ?
+            "payload_too_large" : "invalid_payload";
+        NotifyJson(generation, json{
+            { "type", "snapshot_upload_result" },
+            { "ok", false },
+            { "code", code }
+        });
     }
 
     void NotifyCloudError(std::uint64_t generation, std::string code,
@@ -661,10 +1055,36 @@ private:
         }
     }
 
+    bool ReadBoundedResponse(HINTERNET request, std::string& body,
+        std::uint64_t generation)
+    {
+        SecureClear(body);
+        for (;;) {
+            if (ShouldAbort(generation)) return false;
+            DWORD available = 0;
+            if (!WinHttpQueryDataAvailable(request, &available) || ShouldAbort(generation)) {
+                return false;
+            }
+            if (available == 0) return true;
+            if (available > kMaxRegistrationResponseBytes - body.size()) return false;
+
+            const std::size_t offset = body.size();
+            body.resize(offset + available);
+            DWORD downloaded = 0;
+            if (!WinHttpReadData(request, body.data() + offset, available, &downloaded) ||
+                ShouldAbort(generation)) {
+                return false;
+            }
+            body.resize(offset + downloaded);
+            if (downloaded == 0) return true;
+        }
+    }
+
     void RegisterDeviceOnWorker(const Config& activeConfig, const std::string& deviceId)
     {
         json requestJson = { { "deviceId", deviceId } };
         std::string requestBody;
+        SecureClearGuard requestBodyGuard(requestBody);
         try {
             requestBody = requestJson.dump();
         }
@@ -699,17 +1119,22 @@ private:
             return;
         }
 
-        ActiveHandleScope requestScope(*this, request);
+        ActiveHandleScope requestScope(*this, request, activeConfig.generation);
         if (!requestScope) return;
 
         constexpr wchar_t headers[] = L"Content-Type: application/json\r\nAccept: application/json\r\n";
+        if (ShouldAbort(activeConfig.generation)) return;
         bool requestSucceeded = WinHttpSendRequest(request.Get(), headers, static_cast<DWORD>(-1),
             requestBody.data(), static_cast<DWORD>(requestBody.size()),
             static_cast<DWORD>(requestBody.size()), 0) != FALSE;
         DWORD requestError = requestSucceeded ? ERROR_SUCCESS : GetLastError();
+        SecureClear(requestBody);
+        if (ShouldAbort(activeConfig.generation)) return;
         if (requestSucceeded) {
+            if (ShouldAbort(activeConfig.generation)) return;
             requestSucceeded = WinHttpReceiveResponse(request.Get(), nullptr) != FALSE;
             if (!requestSucceeded) requestError = GetLastError();
+            if (ShouldAbort(activeConfig.generation)) return;
         }
         if (!requestSucceeded) {
             if ((requestError == ERROR_WINHTTP_OPERATION_CANCELLED && ShouldStop()) ||
@@ -722,8 +1147,11 @@ private:
 
         DWORD httpStatus = 0;
         std::string responseBody;
+        SecureClearGuard responseBodyGuard(responseBody);
+        if (ShouldAbort(activeConfig.generation)) return;
         if (!QueryHttpStatus(request.Get(), httpStatus) ||
-            !ReadBoundedResponse(request.Get(), responseBody)) {
+            ShouldAbort(activeConfig.generation) ||
+            !ReadBoundedResponse(request.Get(), responseBody, activeConfig.generation)) {
             const bool aborted = ShouldAbort(activeConfig.generation);
             SecureClear(responseBody);
             if (!aborted) {
@@ -732,6 +1160,7 @@ private:
             return;
         }
         requestScope.Finish();
+        if (ShouldAbort(activeConfig.generation)) return;
         if (httpStatus == HTTP_STATUS_CONFLICT) {
             NotifyRegistrationError(activeConfig.generation, "device_already_registered");
             SecureClear(responseBody);
@@ -758,13 +1187,20 @@ private:
         }
 
         std::string token = response["deviceToken"].get<std::string>();
+        SecureClearGuard tokenGuard(token);
+        SecureClear(response["deviceToken"].get_ref<std::string&>());
+        if (ShouldAbort(activeConfig.generation)) {
+            response.clear();
+            return;
+        }
         json normalized = {
             { "type", "device_registered" },
             { "ok", true },
             { "deviceId", deviceId },
             { "deviceToken", token }
         };
-        NotifyJson(activeConfig.generation, normalized);
+        NotifyJson(activeConfig.generation, normalized, {}, true);
+        SecureClear(normalized["deviceToken"].get_ref<std::string&>());
         normalized.clear();
         response.clear();
         SecureClear(token);
@@ -801,22 +1237,34 @@ private:
             kNetworkTimeoutMs, kNetworkTimeoutMs, kNetworkTimeoutMs)) {
             return false;
         }
-        ActiveHandleScope requestScope(*this, request);
+        ActiveHandleScope requestScope(*this, request, activeConfig.generation);
         if (!requestScope) return false;
-        if (!WinHttpSetOption(request.Get(), WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET,
-            nullptr, 0) || !WinHttpSendRequest(request.Get(), WINHTTP_NO_ADDITIONAL_HEADERS,
-            0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
-            !WinHttpReceiveResponse(request.Get(), nullptr)) {
+        if (ShouldAbort(activeConfig.generation) ||
+            !WinHttpSetOption(request.Get(), WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET,
+                nullptr, 0)) {
+            return false;
+        }
+        if (ShouldAbort(activeConfig.generation) ||
+            !WinHttpSendRequest(request.Get(), WINHTTP_NO_ADDITIONAL_HEADERS,
+                0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+            ShouldAbort(activeConfig.generation)) {
+            return false;
+        }
+        if (ShouldAbort(activeConfig.generation) ||
+            !WinHttpReceiveResponse(request.Get(), nullptr) ||
+            ShouldAbort(activeConfig.generation)) {
             return false;
         }
 
         DWORD httpStatus = 0;
-        if (!QueryHttpStatus(request.Get(), httpStatus) ||
+        if (ShouldAbort(activeConfig.generation) ||
+            !QueryHttpStatus(request.Get(), httpStatus) ||
+            ShouldAbort(activeConfig.generation) ||
             httpStatus != HTTP_STATUS_SWITCH_PROTOCOLS) {
             return false;
         }
         connection.socket.Reset(WinHttpWebSocketCompleteUpgrade(request.Get(), 0));
-        if (!connection.socket) return false;
+        if (!connection.socket || ShouldAbort(activeConfig.generation)) return false;
         requestScope.Finish();
 
         DWORD receiveTimeout = kReceivePollTimeoutMs;
@@ -831,36 +1279,42 @@ private:
         return true;
     }
 
-    bool SendText(WebSocketConnection& connection, std::string_view message)
+    bool SendText(WebSocketConnection& connection, std::string_view message,
+        std::uint64_t generation)
     {
-        if (message.empty() || message.size() > connection.outboundLimit ||
+        if (ShouldAbort(generation) || message.empty() ||
+            message.size() > connection.outboundLimit ||
             message.size() >
             static_cast<std::size_t>((std::numeric_limits<DWORD>::max)())) {
             return false;
         }
-        ActiveHandleScope socketScope(*this, connection.socket);
+        ActiveHandleScope socketScope(*this, connection.socket, generation);
         if (!socketScope) return false;
         const DWORD error = WinHttpWebSocketSend(connection.socket.Get(),
             WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
             const_cast<char*>(message.data()), static_cast<DWORD>(message.size()));
+        if (ShouldAbort(generation)) return false;
         if (error == ERROR_WINHTTP_OPERATION_CANCELLED && ShouldStop()) return false;
         return error == NO_ERROR;
     }
 
-    ReceiveResult ReceiveText(WebSocketConnection& connection, std::string& message)
+    ReceiveResult ReceiveText(WebSocketConnection& connection, std::string& message,
+        std::uint64_t generation)
     {
+        if (ShouldAbort(generation)) return ReceiveResult::closed;
         std::array<unsigned char, 8192> buffer{};
         DWORD bytesRead = 0;
         WINHTTP_WEB_SOCKET_BUFFER_TYPE bufferType = WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE;
         DWORD error = ERROR_SUCCESS;
         {
-            ActiveHandleScope socketScope(*this, connection.socket);
+            ActiveHandleScope socketScope(*this, connection.socket, generation);
             if (!socketScope) {
-                return ShouldStop() ? ReceiveResult::closed : ReceiveResult::failed;
+                return ShouldAbort(generation) ? ReceiveResult::closed : ReceiveResult::failed;
             }
             error = WinHttpWebSocketReceive(connection.socket.Get(), buffer.data(),
                 static_cast<DWORD>(buffer.size()), &bytesRead, &bufferType);
         }
+        if (ShouldAbort(generation)) return ReceiveResult::closed;
         if (error == ERROR_WINHTTP_TIMEOUT) return ReceiveResult::poll;
         if (error == ERROR_WINHTTP_OPERATION_CANCELLED && ShouldStop()) {
             return ReceiveResult::closed;
@@ -905,7 +1359,9 @@ private:
         bool sentConnect = false;
         while (!ShouldAbort(activeConfig.generation) && Clock::now() < deadline) {
             std::string packet;
-            const ReceiveResult received = ReceiveText(connection, packet);
+            SecureClearGuard packetGuard(packet);
+            const ReceiveResult received = ReceiveText(connection, packet,
+                activeConfig.generation);
             if (received == ReceiveResult::poll) continue;
             if (received == ReceiveResult::closed || received == ReceiveResult::failed) return false;
             if (received == ReceiveResult::rejected) {
@@ -914,7 +1370,8 @@ private:
             }
 
             if (cloud_match::IsEngineIoPingPacket(packet)) {
-                if (!SendText(connection, cloud_match::MakeEngineIoPongPacket())) return false;
+                if (!SendText(connection, cloud_match::MakeEngineIoPongPacket(),
+                    activeConfig.generation)) return false;
                 continue;
             }
 
@@ -927,9 +1384,12 @@ private:
                         *open.maxPayload,
                         static_cast<std::uint64_t>(cloud_match::kMaxCloudMatchPayloadBytes)));
                 }
+                UpdateOutboundLimit(activeConfig.generation, connection.outboundLimit);
+                if (ShouldAbort(activeConfig.generation)) return false;
                 std::string connectPacket = cloud_match::EncodeSocketIoConnectPacket(
                     activeConfig.deviceId, activeConfig.deviceToken, 1);
-                const bool sent = SendText(connection, connectPacket);
+                const bool sent = SendText(connection, connectPacket,
+                    activeConfig.generation);
                 SecureClear(connectPacket);
                 if (!sent) return false;
                 sentConnect = true;
@@ -1000,18 +1460,85 @@ private:
         const std::string& eventName, const json& payload, CommandKind kind,
         const std::string& resultType, const std::string& requestId)
     {
-        if (pendingAcks.size() >= kMaxPendingAcks) return true;
-        if (nextAckId == (std::numeric_limits<std::uint64_t>::max)()) {
+        std::uint64_t ackId = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (config.generation != activeConfig.generation) return false;
+            if (pendingAcks.size() >= kMaxPendingAcks) return true;
+            if (nextAckId != (std::numeric_limits<std::uint64_t>::max)()) {
+                ackId = nextAckId++;
+            }
+        }
+        if (ackId == 0) {
             NotifyCloudError(activeConfig.generation, "ack_id_exhausted");
             return false;
         }
-        const std::uint64_t ackId = nextAckId++;
-        const std::string packet = cloud_match::EncodeSocketEvent(eventName, payload, ackId);
-        if (packet.empty() || !SendText(connection, packet)) return false;
-        pendingAcks.emplace(ackId, PendingAck{
-            kind, resultType, requestId, Clock::now() + kAckTimeout
-        });
+        std::string packet = cloud_match::EncodeSocketEvent(eventName, payload, ackId);
+        const bool sent = !packet.empty() && SendText(connection, packet,
+            activeConfig.generation);
+        SecureClear(packet);
+        if (!sent || ShouldAbort(activeConfig.generation)) return false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (config.generation != activeConfig.generation) return false;
+            pendingAcks.emplace(ackId, PendingAck{
+                kind, resultType, requestId, Clock::now() + kAckTimeout
+            });
+        }
         return true;
+    }
+
+    bool HasPendingAckCapacity(std::uint64_t generation) const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return config.generation == generation && pendingAcks.size() < kMaxPendingAcks;
+    }
+
+    SnapshotSendResult SendSnapshotWithAck(const Config& activeConfig,
+        WebSocketConnection& connection, const PendingSnapshot& snapshot)
+    {
+        std::uint64_t ackId = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (config.generation != activeConfig.generation) {
+                return SnapshotSendResult::transportFailure;
+            }
+            if (nextAckId != (std::numeric_limits<std::uint64_t>::max)()) {
+                ackId = nextAckId++;
+            }
+        }
+        if (ackId == 0) {
+            NotifyCloudError(activeConfig.generation, "ack_id_exhausted");
+            return SnapshotSendResult::transportFailure;
+        }
+
+        std::string packet;
+        const cloud_match::SnapshotUploadEncodeResult encoded =
+            cloud_match::EncodeSnapshotUploadEvent(snapshot.jsonText, ackId,
+                connection.outboundLimit, packet);
+        if (encoded == cloud_match::SnapshotUploadEncodeResult::payloadTooLarge ||
+            encoded == cloud_match::SnapshotUploadEncodeResult::invalidPayload) {
+            SecureClear(packet);
+            NotifySnapshotUploadFailure(activeConfig.generation, encoded);
+            return SnapshotSendResult::rejected;
+        }
+
+        const bool sent = SendText(connection, packet, activeConfig.generation);
+        SecureClear(packet);
+        if (!sent || ShouldAbort(activeConfig.generation)) {
+            return SnapshotSendResult::transportFailure;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (config.generation != activeConfig.generation) {
+                return SnapshotSendResult::transportFailure;
+            }
+            pendingAcks.emplace(ackId, PendingAck{
+                CommandKind::uploadSnapshot, "snapshot_upload_result", {},
+                Clock::now() + kAckTimeout
+            });
+        }
+        return SnapshotSendResult::sent;
     }
 
     bool ProcessOutgoing(const Config& activeConfig, WebSocketConnection& connection)
@@ -1032,8 +1559,10 @@ private:
                     hasCommand = true;
                 }
             }
-            if (!hasCommand || pendingAcks.size() >= kMaxPendingAcks) break;
+            if (!hasCommand || !HasPendingAckCapacity(activeConfig.generation)) break;
+            if (ShouldAbort(activeConfig.generation)) return false;
             if (!SendQueuedCommand(activeConfig, connection, command)) return false;
+            if (ShouldAbort(activeConfig.generation)) return false;
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 const auto found = std::find_if(commands.begin(), commands.end(),
@@ -1044,7 +1573,7 @@ private:
             }
         }
 
-        if (pendingAcks.size() >= kMaxPendingAcks) return true;
+        if (!HasPendingAckCapacity(activeConfig.generation)) return true;
         std::optional<PendingSnapshot> snapshot;
         {
             std::lock_guard<std::mutex> lock(mutex);
@@ -1055,18 +1584,9 @@ private:
         }
         if (!snapshot) return true;
 
-        json parsed = json::parse(snapshot->jsonText, nullptr, false);
-        if (parsed.is_discarded() || !parsed.is_object()) {
-            NotifyJson(activeConfig.generation, json{
-                { "type", "snapshot_upload_result" },
-                { "ok", false },
-                { "code", "invalid_snapshot" }
-            });
-            return true;
-        }
-        if (!SendEventWithAck(activeConfig, connection, "snapshot:upload",
-            json{ { "snapshot", std::move(parsed) } }, CommandKind::uploadSnapshot,
-            "snapshot_upload_result", {})) {
+        const SnapshotSendResult snapshotResult = SendSnapshotWithAck(activeConfig,
+            connection, *snapshot);
+        if (snapshotResult == SnapshotSendResult::transportFailure) {
             std::lock_guard<std::mutex> lock(mutex);
             if (!latestSnapshot && config.generation == activeConfig.generation) {
                 latestSnapshot = std::move(snapshot);
@@ -1090,7 +1610,8 @@ private:
                         command.kind == CommandKind::joinRoom;
                 });
         }
-        if (!remembered || queuedJoin || pendingAcks.size() >= kMaxPendingAcks) return true;
+        if (!remembered || queuedJoin ||
+            !HasPendingAckCapacity(activeConfig.generation)) return true;
         Command join;
         join.kind = CommandKind::joinRoom;
         join.argument = remembered->roomId;
@@ -1101,10 +1622,15 @@ private:
 
     void HandleAck(const Config& activeConfig, const cloud_match::SocketIoAck& ack)
     {
-        const auto found = pendingAcks.find(ack.id);
-        if (found == pendingAcks.end()) return;
-        PendingAck pending = std::move(found->second);
-        pendingAcks.erase(found);
+        PendingAck pending;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (config.generation != activeConfig.generation) return;
+            const auto found = pendingAcks.find(ack.id);
+            if (found == pendingAcks.end()) return;
+            pending = std::move(found->second);
+            pendingAcks.erase(found);
+        }
 
         json normalized;
         const bool validObject = ack.payload.is_object();
@@ -1171,6 +1697,11 @@ private:
                 "room_changed" : "room_presence";
             json normalized = event.payload;
             normalized["type"] = type;
+            std::string coalesceKey = event.payload.value("roomId", std::string{});
+            if (event.name == "room:presence") {
+                coalesceKey += '\n';
+                coalesceKey += event.payload.value("deviceId", std::string{});
+            }
             if (event.payload.contains("roomRevision") &&
                 event.payload["roomRevision"].is_number_unsigned()) {
                 const std::uint64_t revision = event.payload["roomRevision"].get<std::uint64_t>();
@@ -1179,7 +1710,7 @@ private:
                         current.roomRevision = (std::max)(current.roomRevision, revision);
                     });
             }
-            NotifyJson(activeConfig.generation, normalized);
+            NotifyJson(activeConfig.generation, normalized, std::move(coalesceKey));
             return;
         }
         if (event.name == "session:error") {
@@ -1198,13 +1729,17 @@ private:
     {
         const auto now = Clock::now();
         std::vector<PendingAck> expired;
-        for (auto iterator = pendingAcks.begin(); iterator != pendingAcks.end();) {
-            if (iterator->second.deadline <= now) {
-                expired.push_back(std::move(iterator->second));
-                iterator = pendingAcks.erase(iterator);
-            }
-            else {
-                ++iterator;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (config.generation != activeConfig.generation) return;
+            for (auto iterator = pendingAcks.begin(); iterator != pendingAcks.end();) {
+                if (iterator->second.deadline <= now) {
+                    expired.push_back(std::move(iterator->second));
+                    iterator = pendingAcks.erase(iterator);
+                }
+                else {
+                    ++iterator;
+                }
             }
         }
         for (const PendingAck& pending : expired) {
@@ -1220,8 +1755,12 @@ private:
 
     void FailPendingAcks(const Config& activeConfig, const char* code)
     {
-        auto failed = std::move(pendingAcks);
-        pendingAcks.clear();
+        std::unordered_map<std::uint64_t, PendingAck> failed;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (config.generation != activeConfig.generation) return;
+            failed.swap(pendingAcks);
+        }
         for (const auto& entry : failed) {
             const PendingAck& pending = entry.second;
             json normalized = {
@@ -1242,7 +1781,9 @@ private:
             ExpireAcks(activeConfig);
 
             std::string packet;
-            const ReceiveResult received = ReceiveText(connection, packet);
+            SecureClearGuard packetGuard(packet);
+            const ReceiveResult received = ReceiveText(connection, packet,
+                activeConfig.generation);
             if (received == ReceiveResult::closed || received == ReceiveResult::failed) return false;
             if (received == ReceiveResult::rejected) {
                 NotifyCloudError(activeConfig.generation, "binary_or_invalid_message");
@@ -1250,7 +1791,8 @@ private:
             }
             if (received == ReceiveResult::message) {
                 if (cloud_match::IsEngineIoPingPacket(packet)) {
-                    if (!SendText(connection, cloud_match::MakeEngineIoPongPacket())) return false;
+                    if (!SendText(connection, cloud_match::MakeEngineIoPongPacket(),
+                        activeConfig.generation)) return false;
                 }
                 else if (cloud_match::IsSocketIoDisconnectPacket(packet)) {
                     return false;
@@ -1326,13 +1868,25 @@ private:
     {
         std::size_t reconnectIndex = 0;
         bool reconnecting = false;
+        std::uint64_t observedGeneration = (std::numeric_limits<std::uint64_t>::max)();
         for (;;) {
             Config activeConfig = CopyConfig();
-            if (ShouldAbort(activeConfig.generation)) break;
+            if (ShouldStop()) break;
+            if (configGeneration.load(std::memory_order_acquire) != activeConfig.generation) {
+                continue;
+            }
+            if (observedGeneration != activeConfig.generation) {
+                observedGeneration = activeConfig.generation;
+                reconnectIndex = 0;
+                reconnecting = false;
+            }
 
             ProcessRegistrationCommands(activeConfig);
-            if (ShouldAbort(activeConfig.generation)) break;
+            if (ShouldStop()) break;
+            if (ShouldAbort(activeConfig.generation)) continue;
             activeConfig = CopyConfig();
+            if (ShouldStop()) break;
+            if (ShouldAbort(activeConfig.generation)) continue;
             if (!activeConfig.serverValid || !activeConfig.credentialsValid) {
                 UpdateStatus(activeConfig.generation, [](CloudMatchStatusSnapshot& current) {
                     current.connecting = false;
@@ -1353,8 +1907,10 @@ private:
 
             bool connectedOnce = false;
             RunConnection(activeConfig, connectedOnce);
+            if (ShouldStop()) break;
             if (ShouldAbort(activeConfig.generation)) {
-                pendingAcks.clear();
+                std::lock_guard<std::mutex> lock(mutex);
+                ClearPendingAcksLocked();
                 continue;
             }
             FailPendingAcks(activeConfig, "connection_lost");
@@ -1374,7 +1930,10 @@ private:
                 std::chrono::seconds(delaySeconds));
         }
 
-        pendingAcks.clear();
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            ClearPendingAcksLocked();
+        }
         const std::uint64_t finalGeneration = configGeneration.load();
         UpdateStatus(finalGeneration, [](CloudMatchStatusSnapshot& current) {
             current.connecting = false;
@@ -1397,9 +1956,11 @@ private:
     std::optional<PendingSnapshot> latestSnapshot;
     std::optional<DesiredRoom> desiredRoom;
     std::uint64_t nextCommandSequence = 1;
+    std::size_t currentOutboundLimit = cloud_match::kMaxCloudMatchPayloadBytes;
 
     CloudMatchStatusSnapshot status;
     MessageCallback callback;
+    std::deque<InboundMessage> inboundMessages;
 
     std::unordered_map<std::uint64_t, PendingAck> pendingAcks;
     std::uint64_t nextAckId = 1;
@@ -1415,9 +1976,11 @@ CloudMatchClient::~CloudMatchClient()
 bool CloudMatchClient::Configure(const std::string& serverUrl,
     const std::string& deviceId, const std::string& deviceToken)
 {
-    const std::wstring wideUrl = Utf8ToWide(serverUrl);
-    if (wideUrl.empty()) return impl_->Configure({}, deviceId, deviceToken);
-    return impl_->Configure(wideUrl, deviceId, deviceToken);
+    std::wstring wideUrl = Utf8ToWide(serverUrl);
+    const bool configured = wideUrl.empty() ? impl_->Configure({}, deviceId, deviceToken) :
+        impl_->Configure(wideUrl, deviceId, deviceToken);
+    SecureClear(wideUrl);
+    return configured;
 }
 
 bool CloudMatchClient::Configure(const std::wstring& serverUrl,
@@ -1492,4 +2055,9 @@ CloudMatchStatusSnapshot CloudMatchClient::GetStatusSnapshot() const
 void CloudMatchClient::SetMessageCallback(MessageCallback callback)
 {
     impl_->SetMessageCallback(std::move(callback));
+}
+
+std::size_t CloudMatchClient::DispatchMessages(std::size_t maxCount)
+{
+    return impl_->DispatchMessages(maxCount);
 }

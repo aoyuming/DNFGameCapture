@@ -423,23 +423,25 @@ public:
     void RequestSnapshot(unsigned int requestId, const std::string& targetDeviceId);
     CloudMatchStatusSnapshot GetStatusSnapshot() const;
     void SetMessageCallback(std::function<void(std::string)> callback);
+    std::size_t DispatchMessages(std::size_t maxCount = 32);
 };
 ```
 
 实现要求：
 
-- 唯一 `std::thread` 创建、配置并正常关闭 WinHTTP session/connect/request/WebSocket handle；`Stop` 可作为唯一跨线程 handle 操作，通过原子交换关闭当前阻塞的 request/WebSocket 以取消 I/O，worker 使用 compare-exchange 清理避免重复关闭。
+- 唯一 `std::thread` 创建、配置并正常关闭 WinHTTP session/connect/request/WebSocket handle；`Stop` 和 `Configure` 通过同一原子交换关闭当前阻塞的 request/WebSocket 以取消 I/O，worker 使用 compare-exchange 清理避免重复关闭。`Configure` 先递增 generation，再清空旧命令、最新上传、ACK 和目标房间并唤醒 worker；handle 发布、每次发送和阻塞调用返回后都检查 generation，旧配置结果不得进入新配置。
 - UI 线程只向有界命令队列写命令，不等待网络 I/O。
+- worker 只把归一化消息写入最多 128 条的有界入站队列，绝不调用用户回调。宿主 UI 线程调用 `DispatchMessages(maxCount)` 排空消息；它在锁内复制回调和取出消息、在锁外调用，因此回调可安全调用 `Stop`。`room_changed` 和同设备的 `room_presence` 可合并；溢出时优先删除旧通知，否则只排入一个 `cloud_error/queue_overflow`，注册、入房和快照结果不得静默丢失。
 - WebSocket URL 使用 `/socket.io/?EIO=4&transport=websocket`。
 - 收到 ping 立即回 pong；掉线后按 1、2、5、10、20 秒退避重连。
-- `UploadSnapshot` 队列只保留最新一份，避免离线积压。
-- 所有状态和消息通过快照/回调发布，析构时取消 WinHTTP 并 join，不使用 detach。
+- `UploadSnapshot` 队列只保留最新一份，避免离线积压。上传上限按完整 UTF-8 Socket.IO 事件计算，包含事件名、`{"snapshot":...}` 包装和 ACK 数字；事件上限取本地 65536 与 Engine.IO `maxPayload` 的较小值。超限或非法编码只生成一次 `snapshot_upload_result`（`payload_too_large`/`invalid_payload`），不得重排、重连或重试；服务端 schema 仍保留 64KB 概念，但传输包装可进一步缩小原始快照额度。
+- 所有状态和消息通过快照/UI 排空发布，析构时取消 WinHTTP 并 join，不使用 detach。`Config` 的特殊成员、重新配置、`Stop` 和析构必须用 `SecureZeroMemory` 或 volatile 写保证擦除设备令牌，并擦除认证连接串、REST 请求/响应、过期注册结果、已派发注册消息及被清空队列；任何日志不得包含令牌。
 
 - [ ] **Step 5: 运行协议测试和静态线程检查**
 
 Run: `powershell -ExecutionPolicy Bypass -File scripts/check-cloud-match-protocol-test.ps1`
 
-Expected: PASS，并确认源码不存在 `.detach()`、UI 同步 `WinHttpReceiveResponse` 或无上限消息队列。
+Expected: PASS，并确认源码不存在 `.detach()`、worker 回调、UI 同步 `WinHttpReceiveResponse` 或无上限消息队列；覆盖 UI 线程 `DispatchMessages`/回调内 `Stop`、Configure generation 竞态、完整事件精确边界与安全擦除静态断言。
 
 - [ ] **Step 6: 提交 C++ 云端客户端**
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -48,6 +49,7 @@ public:
 
     CloudMatchStatusSnapshot GetStatusSnapshot() const;
     void SetMessageCallback(MessageCallback callback);
+    std::size_t DispatchMessages(std::size_t maxCount = 32);
 
 private:
     class Impl;

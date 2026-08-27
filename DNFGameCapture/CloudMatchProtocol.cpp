@@ -4,6 +4,7 @@
 
 #include "CloudMatchProtocol.h"
 
+#include <algorithm>
 #include <charconv>
 #include <limits>
 #include <utility>
@@ -12,6 +13,27 @@ namespace cloud_match {
 namespace {
 
 using nlohmann::json;
+
+void SecureWipeString(std::string& value) noexcept
+{
+    volatile char* bytes = value.empty() ? nullptr : value.data();
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        bytes[index] = '\0';
+    }
+    value.clear();
+}
+
+void SecureWipeJsonString(json& value, const char* key) noexcept
+{
+    try {
+        const auto found = value.find(key);
+        if (found != value.end() && found->is_string()) {
+            SecureWipeString(found->get_ref<std::string&>());
+        }
+    }
+    catch (...) {
+    }
+}
 
 bool IsValidUtf8(std::string_view text) noexcept
 {
@@ -161,14 +183,21 @@ std::string EncodeSocketIoConnectPacket(std::string_view deviceId,
     std::string_view deviceToken, int protocolVersion) noexcept
 {
     if (deviceId.empty() || deviceToken.empty() || protocolVersion <= 0) return {};
+    json auth;
     try {
-        return EncodeWithPrefix("40", json{
+        auth = json{
             { "deviceId", std::string(deviceId) },
             { "deviceToken", std::string(deviceToken) },
             { "protocolVersion", protocolVersion }
-        });
+        };
+        std::string packet = EncodeWithPrefix("40", auth);
+        SecureWipeJsonString(auth, "deviceToken");
+        auth.clear();
+        return packet;
     }
     catch (...) {
+        SecureWipeJsonString(auth, "deviceToken");
+        auth.clear();
         return {};
     }
 }
@@ -241,6 +270,38 @@ std::string EncodeSocketEvent(std::string_view eventName,
     }
     catch (...) {
         return {};
+    }
+}
+
+SnapshotUploadEncodeResult EncodeSnapshotUploadEvent(std::string_view snapshotJson,
+    std::uint64_t ackId, std::size_t maxEventBytes, std::string& encodedPacket) noexcept
+{
+    encodedPacket.clear();
+    const std::size_t effectiveLimit = (std::min)(maxEventBytes,
+        kMaxCloudMatchPayloadBytes);
+    if (snapshotJson.empty() || snapshotJson.size() > effectiveLimit) {
+        return snapshotJson.empty() ? SnapshotUploadEncodeResult::invalidPayload :
+            SnapshotUploadEncodeResult::payloadTooLarge;
+    }
+    if (!IsValidUtf8(snapshotJson)) return SnapshotUploadEncodeResult::invalidPayload;
+
+    try {
+        json snapshot = json::parse(snapshotJson.begin(), snapshotJson.end(), nullptr, false);
+        if (snapshot.is_discarded() || !snapshot.is_object()) {
+            return SnapshotUploadEncodeResult::invalidPayload;
+        }
+
+        std::string packet = "42" + std::to_string(ackId);
+        packet += json::array({ "snapshot:upload", json{ { "snapshot", std::move(snapshot) } } }).dump();
+        if (packet.size() > effectiveLimit) {
+            return SnapshotUploadEncodeResult::payloadTooLarge;
+        }
+        encodedPacket = std::move(packet);
+        return SnapshotUploadEncodeResult::success;
+    }
+    catch (...) {
+        encodedPacket.clear();
+        return SnapshotUploadEncodeResult::invalidPayload;
     }
 }
 

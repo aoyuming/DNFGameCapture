@@ -14,6 +14,17 @@ foreach ($path in @($protocolSource, $protocolHeader)) {
     }
 }
 
+$protocol = Get-Content -LiteralPath $protocolSource -Raw -Encoding UTF8
+foreach ($needle in @(
+    'void SecureWipeString(std::string& value) noexcept',
+    'volatile char* bytes',
+    'SecureWipeJsonString(auth, "deviceToken")'
+)) {
+    if (-not $protocol.Contains($needle)) {
+        throw "Cloud match protocol token wipe contract is missing: $needle"
+    }
+}
+
 $installRoots = [System.Collections.Generic.List[string]]::new()
 $vswhereCandidates = @(
     (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'),
