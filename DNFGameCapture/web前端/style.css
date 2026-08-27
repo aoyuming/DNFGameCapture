@@ -1840,6 +1840,274 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     box-shadow: 0 22px 70px rgba(0, 0, 0, 0.62), 0 0 24px rgba(72, 136, 255, 0.1);
 }
 
+.cloud-room-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1600;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 18px;
+    background: rgba(3, 7, 14, 0.78);
+}
+
+.cloud-room-overlay.active {
+    display: flex;
+}
+
+.cloud-room-dialog {
+    width: min(680px, calc(100vw - 36px));
+    max-height: calc(100vh - 36px);
+    overflow-x: hidden;
+    overflow-y: auto;
+    border: 1px solid rgba(83, 186, 255, 0.48);
+    border-radius: 8px;
+    color: #eef7fb;
+    background: #101823;
+    box-shadow: 0 22px 68px rgba(0, 0, 0, 0.64), 0 0 22px rgba(49, 164, 255, 0.1);
+}
+
+.cloud-room-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 16px 18px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.cloud-room-title {
+    font-size: 20px;
+    line-height: 1.2;
+    font-weight: 800;
+}
+
+.cloud-room-subtitle {
+    margin-top: 5px;
+    color: #91a9b8;
+    font-size: 12px;
+}
+
+.cloud-room-close {
+    width: 34px;
+    height: 34px;
+    flex: 0 0 34px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 5px;
+    color: #dce8ed;
+    background: #252c38;
+    font-size: 23px;
+    line-height: 30px;
+    cursor: pointer;
+}
+
+.cloud-room-close:hover {
+    border-color: #ff587c;
+    color: #fff;
+    background: #6d1f35;
+}
+
+.cloud-room-body {
+    display: grid;
+    gap: 12px;
+    padding: 16px 18px 18px;
+}
+
+.cloud-room-current,
+.cloud-room-first-run,
+.cloud-room-name-stage {
+    min-width: 0;
+    padding: 13px;
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 7px;
+    background: #111e2a;
+}
+
+.cloud-room-first-run,
+.cloud-room-name-stage {
+    display: grid;
+    grid-template-columns: 30px minmax(0, 1fr);
+    gap: 12px;
+}
+
+.cloud-room-step {
+    width: 30px;
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(71, 194, 255, 0.58);
+    border-radius: 50%;
+    color: #bdeaff;
+    background: #143348;
+    font-size: 13px;
+    font-weight: 800;
+}
+
+.cloud-room-step-copy {
+    min-width: 0;
+}
+
+.cloud-room-section-label {
+    margin-bottom: 10px;
+    color: #dcebf2;
+    font-size: 13px;
+    font-weight: 800;
+}
+
+.cloud-room-options {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.cloud-room-option,
+.cloud-room-button {
+    min-height: 39px;
+    padding: 8px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 6px;
+    color: #e4edf2;
+    background: #25313d;
+    font: 700 13px "Microsoft YaHei", sans-serif;
+    cursor: pointer;
+}
+
+.cloud-room-option:hover:not(:disabled),
+.cloud-room-button:hover:not(:disabled) {
+    border-color: rgba(80, 198, 255, 0.72);
+    color: #fff;
+    background: #2b4252;
+}
+
+.cloud-room-option.selected {
+    border-color: #53c7ff;
+    color: #dff6ff;
+    background: #164965;
+    box-shadow: 0 0 12px rgba(57, 187, 255, 0.18);
+}
+
+.cloud-room-option.muted {
+    color: #aebdc5;
+    background: #202932;
+}
+
+.cloud-room-selected {
+    margin-bottom: 10px;
+    color: #72d7ff;
+    font-size: 14px;
+    font-weight: 800;
+}
+
+.cloud-room-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    color: #91a7b3;
+    font-size: 12px;
+}
+
+.cloud-room-field input {
+    min-width: 0;
+    height: 38px;
+    box-sizing: border-box;
+    padding: 0 10px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 5px;
+    outline: none;
+    color: #f2f8fb;
+    background: #0c141d;
+    font: 600 14px "Microsoft YaHei", sans-serif;
+}
+
+.cloud-room-field input:focus {
+    border-color: #53c7ff;
+    box-shadow: 0 0 0 2px rgba(83, 199, 255, 0.12);
+}
+
+.cloud-room-name-meta {
+    min-height: 22px;
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding-top: 6px;
+    color: #8296a1;
+    font-size: 11px;
+}
+
+#cloud-room-error {
+    min-width: 0;
+    color: #ff879f;
+}
+
+.cloud-room-actions {
+    display: flex;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.cloud-room-button.primary {
+    border-color: rgba(55, 194, 255, 0.64);
+    color: #e9faff;
+    background: #176286;
+}
+
+.cloud-room-button.danger {
+    border-color: rgba(255, 91, 124, 0.34);
+    color: #ffd6df;
+    background: #48202d;
+}
+
+.cloud-room-option:disabled,
+.cloud-room-button:disabled {
+    opacity: 0.44;
+    cursor: not-allowed;
+}
+
+.cloud-room-current-line {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.cloud-room-current-line strong {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: #eef8fc;
+    font-size: 16px;
+}
+
+#cloud-room-connection {
+    flex: 0 0 auto;
+    color: #9dafb8;
+    font-size: 12px;
+    font-weight: 800;
+}
+
+#cloud-room-connection[data-state="online"] { color: #63dfa4; }
+#cloud-room-connection[data-state="working"] { color: #ffd16d; }
+#cloud-room-connection[data-state="offline"] { color: #ff879f; }
+
+.btn-cloud-match {
+    color: #dff6ff;
+    background: #1b536c;
+    border-color: rgba(83, 199, 255, 0.4);
+}
+
+@media (max-width: 560px) {
+    .cloud-room-options { grid-template-columns: minmax(0, 1fr); }
+    .cloud-room-first-run,
+    .cloud-room-name-stage { grid-template-columns: minmax(0, 1fr); }
+    .cloud-room-step { display: none; }
+    .cloud-room-actions { justify-content: stretch; }
+    .cloud-room-button { flex: 1 1 130px; }
+}
+
 .key-lan-dialog-body {
     display: grid;
     gap: 10px;

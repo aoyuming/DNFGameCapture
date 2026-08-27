@@ -77,6 +77,7 @@
                             </div>
                             <div class="more-controls-section">
                                 <div class="more-controls-title">数据</div>
+                                <button class="ctrl-btn btn-cloud-match" id="btn-cloud-match">云端比赛同步</button>
                                 <button class="ctrl-btn btn-sync-db" id="btn-sync-alias-db">☁ 同步云端库</button>
                                 <button class="ctrl-btn btn-push-db" id="btn-push-alias-db">⬆ 推送本地库</button>
                             </div>
@@ -317,6 +318,70 @@
                     <div class="key-team-sync-actions" id="key-team-sync-actions">
                         <button class="key-lan-button primary" id="btn-key-team-sync">获取服务器比赛状态</button>
                         <button class="key-lan-button" id="btn-key-team-undo-sync" hidden>撤销本次同步</button>
+                    </div>
+                </section>
+            </div>
+        </div>
+    </div>
+
+    <div class="cloud-room-overlay" id="cloud-room-overlay" aria-hidden="true">
+        <div class="cloud-room-dialog" role="dialog" aria-modal="true" aria-labelledby="cloud-room-title">
+            <div class="cloud-room-header">
+                <div>
+                    <div class="cloud-room-title" id="cloud-room-title">云端比赛同步</div>
+                    <div class="cloud-room-subtitle">本机数据变化后自动上传，远端数据不会自动覆盖本机</div>
+                </div>
+                <button class="cloud-room-close" id="btn-cloud-room-close" title="关闭">&times;</button>
+            </div>
+
+            <div class="cloud-room-body">
+                <section class="cloud-room-current" id="cloud-room-current" hidden>
+                    <div class="cloud-room-section-label">当前身份</div>
+                    <div class="cloud-room-current-line">
+                        <strong id="cloud-room-current-room">未加入房间</strong>
+                        <span id="cloud-room-connection">离线</span>
+                    </div>
+                    <label class="cloud-room-field">
+                        <span>主播名称</span>
+                        <input id="cloud-room-rename-input" type="text" maxlength="96" autocomplete="off">
+                    </label>
+                    <div class="cloud-room-actions">
+                        <button class="cloud-room-button" id="btn-cloud-room-rename">修改名称</button>
+                        <button class="cloud-room-button" id="btn-cloud-room-change">切换房间</button>
+                        <button class="cloud-room-button danger" id="btn-cloud-room-leave">退出房间</button>
+                    </div>
+                </section>
+
+                <section class="cloud-room-first-run" id="cloud-room-first-run">
+                    <div class="cloud-room-step">1</div>
+                    <div class="cloud-room-step-copy">
+                        <div class="cloud-room-section-label">选择要加入的比赛房间</div>
+                        <div class="cloud-room-options" role="radiogroup" aria-label="比赛房间">
+                            <button class="cloud-room-option" data-cloud-room-id="li-yong" role="radio" aria-checked="false">李永房</button>
+                            <button class="cloud-room-option" data-cloud-room-id="wen-rou" role="radio" aria-checked="false">温柔房</button>
+                            <button class="cloud-room-option" data-cloud-room-id="59" role="radio" aria-checked="false">59房</button>
+                            <button class="cloud-room-option muted" data-cloud-room-id="none" role="radio" aria-checked="false">不加入房间</button>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="cloud-room-name-stage" id="cloud-room-name-stage" hidden>
+                    <div class="cloud-room-step">2</div>
+                    <div class="cloud-room-step-copy">
+                        <div class="cloud-room-section-label">填写本机主播名称</div>
+                        <div class="cloud-room-selected" id="cloud-room-selected">尚未选择房间</div>
+                        <label class="cloud-room-field">
+                            <span>用于区分房间内不同主播</span>
+                            <input id="cloud-room-name-input" type="text" maxlength="96" autocomplete="off" placeholder="请输入主播名称">
+                        </label>
+                        <div class="cloud-room-name-meta">
+                            <span id="cloud-room-error" role="alert"></span>
+                            <span id="cloud-room-name-count">0 / 32</span>
+                        </div>
+                        <div class="cloud-room-actions">
+                            <button class="cloud-room-button" id="btn-cloud-room-back">重新选房</button>
+                            <button class="cloud-room-button primary" id="btn-cloud-room-join" disabled>加入房间</button>
+                        </div>
                     </div>
                 </section>
             </div>

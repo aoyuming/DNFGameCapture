@@ -21,6 +21,10 @@ let keyMappingCaptureSlot = -1;
 let keyMappingSyncTimer = null;
 let keyMappingAdminPromptVisible = false;
 let pendingTeamSyncSnapshot = null;
+let cloudMatchState = null;
+let cloudRoomFirstRun = false;
+let cloudSelectedRoomId = '';
+let cloudRoomChoosing = false;
 let systemFonts = [];
 let appearanceScope = 'scoreboard';
 let activeScoreboardStyleKey = 'teamName';
@@ -49,7 +53,7 @@ let pendingAliasPopoverName = '';
 let pendingAliasPopoverInput = null;
 let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
-const WEB_LAYOUT_VERSION = '20260827-bidirectional-sync';
+const WEB_LAYOUT_VERSION = '20260828-cloud-match-room';
 const KEY_MAPPING_SLOT_COUNT = 14;
 const KEY_MAPPING_DEFAULT_LABELS = ['Q', 'W', 'E', 'R', 'T', 'Y', 'Ctrl', 'A', 'S', 'D', 'F', 'G', 'H', 'Alt'];
 const KEY_MAPPING_DEFAULT_VKS = [81, 87, 69, 82, 84, 89, 17, 65, 83, 68, 70, 71, 72, 18];
@@ -597,6 +601,9 @@ if (window.chrome && window.chrome.webview) {
             else if (msg.action === 'team_sync_error') {
                 pendingTeamSyncSnapshot = null;
                 showAlert(msg.message);
+            }
+            else if (msg.action === 'cloud_room_prompt') {
+                openCloudRoomPanel(true);
             }
             else if (msg.action === 'auth_result' || msg.action === 'start_guard' || msg.action === 'patch_result' || msg.action === 'alias_submit_result' || msg.action === 'alias_sync_result' || msg.action === 'copy_window_clipboard_result' || msg.action === 'kill_obs_url_result' || msg.action === 'key_mapping_error') { showAlert(msg.message); }
             else if (msg.action === 'alias_direct_sync_result') {
@@ -2373,6 +2380,165 @@ document.getElementById('more-controls-menu')?.addEventListener('focusin', (even
     event.target?.scrollIntoView?.({ block: 'nearest' });
 });
 
+const CLOUD_ROOM_NAMES = Object.freeze({
+    'li-yong': '李永房',
+    'wen-rou': '温柔房',
+    '59': '59房'
+});
+const cloudRoomNameSegmenter = typeof Intl.Segmenter === 'function'
+    ? new Intl.Segmenter('zh-CN', { granularity: 'grapheme' }) : null;
+
+function normalizeCloudMatchState(value = {}) {
+    const roomId = Object.prototype.hasOwnProperty.call(CLOUD_ROOM_NAMES, value.roomId)
+        ? value.roomId : '';
+    return {
+        joined: value.joined === true && !!roomId,
+        roomId,
+        roomName: String(value.roomName || CLOUD_ROOM_NAMES[roomId] || ''),
+        broadcasterName: String(value.broadcasterName || ''),
+        configured: value.configured === true,
+        connected: value.connected === true,
+        connecting: value.connecting === true,
+        reconnecting: value.reconnecting === true,
+        joining: value.joining === true,
+        registering: value.registering === true,
+        renaming: value.renaming === true,
+        leaving: value.leaving === true,
+        lastError: String(value.lastError || ''),
+        clientRevision: Math.max(0, Number(value.clientRevision || 0)),
+        shouldPrompt: value.shouldPrompt === true
+    };
+}
+
+function cloudRoomNameInfo(value) {
+    const normalized = String(value || '').normalize('NFC').trim();
+    const graphemeCount = cloudRoomNameSegmenter
+        ? Array.from(cloudRoomNameSegmenter.segment(normalized)).length
+        : Array.from(normalized).length;
+    const forbidden = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(normalized);
+    const visible = /[\p{L}\p{N}\p{P}\p{S}]/u.test(normalized);
+    return {
+        normalized,
+        graphemeCount,
+        valid: graphemeCount >= 1 && graphemeCount <= 32 && !forbidden && visible
+    };
+}
+
+function isCloudRoomPanelOpen() {
+    return document.getElementById('cloud-room-overlay')?.classList.contains('active') === true;
+}
+
+function setCloudRoomInlineError(message) {
+    const error = document.getElementById('cloud-room-error');
+    if (error) error.textContent = message || '';
+}
+
+function updateCloudRoomNameValidation() {
+    const input = document.getElementById('cloud-room-name-input');
+    const joinButton = document.getElementById('btn-cloud-room-join');
+    const count = document.getElementById('cloud-room-name-count');
+    if (!input || !joinButton) return false;
+    const info = cloudRoomNameInfo(input.value);
+    if (count) count.textContent = `${info.graphemeCount} / 32`;
+    const busy = cloudMatchState?.joining || cloudMatchState?.registering;
+    joinButton.disabled = !cloudSelectedRoomId || !info.valid || !!busy;
+    if (info.graphemeCount > 32) setCloudRoomInlineError('主播名称不能超过 32 个字符。');
+    else if (info.normalized && !info.valid) setCloudRoomInlineError('主播名称包含不可用字符。');
+    else if (!cloudMatchState?.lastError) setCloudRoomInlineError('');
+    return info.valid;
+}
+
+function renderCloudRoomPanel() {
+    if (!cloudMatchState) cloudMatchState = normalizeCloudMatchState();
+    const state = cloudMatchState;
+    const current = document.getElementById('cloud-room-current');
+    const chooser = document.getElementById('cloud-room-first-run');
+    const nameStage = document.getElementById('cloud-room-name-stage');
+    const close = document.getElementById('btn-cloud-room-close');
+    if (state.joined && cloudRoomFirstRun) {
+        cloudRoomFirstRun = false;
+        cloudRoomChoosing = false;
+        cloudSelectedRoomId = '';
+    }
+    const showChooser = !state.joined || cloudRoomChoosing;
+    if (close) close.hidden = cloudRoomFirstRun && !state.joined;
+    if (current) current.hidden = !state.joined || showChooser;
+    if (chooser) chooser.hidden = !showChooser;
+    if (nameStage) nameStage.hidden = !showChooser || !cloudSelectedRoomId;
+
+    const room = document.getElementById('cloud-room-current-room');
+    if (room) room.textContent = state.joined
+        ? `${state.roomName || CLOUD_ROOM_NAMES[state.roomId]} · ${state.broadcasterName}`
+        : '未加入房间';
+    const connection = document.getElementById('cloud-room-connection');
+    if (connection) {
+        const working = state.joining || state.registering || state.renaming || state.leaving;
+        connection.textContent = working ? '处理中' : (state.connected ? '已连接' :
+            (state.reconnecting ? '重连中' : (state.connecting ? '连接中' : '离线')));
+        connection.dataset.state = state.connected ? 'online' :
+            (working || state.connecting || state.reconnecting ? 'working' : 'offline');
+    }
+
+    const renameInput = document.getElementById('cloud-room-rename-input');
+    if (renameInput && document.activeElement !== renameInput) {
+        renameInput.value = state.broadcasterName;
+    }
+    const renameButton = document.getElementById('btn-cloud-room-rename');
+    const changeButton = document.getElementById('btn-cloud-room-change');
+    const leaveButton = document.getElementById('btn-cloud-room-leave');
+    const busy = state.joining || state.registering || state.renaming || state.leaving;
+    if (renameButton) {
+        renameButton.disabled = busy;
+        renameButton.textContent = state.renaming ? '修改中...' : '修改名称';
+    }
+    if (changeButton) changeButton.disabled = busy;
+    if (leaveButton) {
+        leaveButton.disabled = busy;
+        leaveButton.textContent = state.leaving ? '退出中...' : '退出房间';
+    }
+
+    document.querySelectorAll('.cloud-room-option').forEach(option => {
+        const selected = option.dataset.cloudRoomId === cloudSelectedRoomId;
+        option.classList.toggle('selected', selected);
+        option.setAttribute('aria-checked', selected ? 'true' : 'false');
+        option.disabled = busy;
+    });
+    const selectedLabel = document.getElementById('cloud-room-selected');
+    if (selectedLabel) selectedLabel.textContent = cloudSelectedRoomId
+        ? `准备加入：${CLOUD_ROOM_NAMES[cloudSelectedRoomId]}` : '尚未选择房间';
+    const joinButton = document.getElementById('btn-cloud-room-join');
+    if (joinButton) joinButton.textContent = state.joining || state.registering ? '加入中...' : '加入房间';
+    setCloudRoomInlineError(state.lastError);
+    updateCloudRoomNameValidation();
+}
+
+function openCloudRoomPanel(firstRun = false) {
+    const overlay = document.getElementById('cloud-room-overlay');
+    if (!overlay) return;
+    setMoreControlsOpen(false);
+    cloudRoomFirstRun = firstRun && !cloudMatchState?.joined;
+    cloudRoomChoosing = !cloudMatchState?.joined;
+    cloudSelectedRoomId = '';
+    overlay.classList.add('active');
+    overlay.setAttribute('aria-hidden', 'false');
+    renderCloudRoomPanel();
+}
+
+function closeCloudRoomPanel(force = false) {
+    if (cloudRoomFirstRun && !cloudMatchState?.joined && !force) return;
+    const overlay = document.getElementById('cloud-room-overlay');
+    if (!overlay) return;
+    overlay.classList.remove('active');
+    overlay.setAttribute('aria-hidden', 'true');
+    cloudRoomFirstRun = false;
+    cloudRoomChoosing = false;
+    cloudSelectedRoomId = '';
+}
+
+function sendCloudRoomCommand(action, payload = {}) {
+    window.chrome?.webview?.postMessage({ action, ...payload });
+}
+
 function createDefaultKeyMappingSettings() {
     return {
         enabled: false,
@@ -2929,10 +3095,12 @@ function applyStateFromServer(state) {
     scoreboardTextStyles = normalizeScoreboardTextStyles(state.scoreboardTextStyles);
     killDisplaySettings = normalizeKillDisplaySettings(state.killDisplaySettings);
     keyMappingSettings = normalizeKeyMappingSettings(state.keyMappingSettings || keyMappingSettings || {});
+    cloudMatchState = normalizeCloudMatchState(state.cloudMatch || cloudMatchState || {});
     applyScoreboardTextStyles(scoreboardTextStyles);
     applyKillDisplaySettings(killDisplaySettings);
     if (isKeyMappingPanelOpen()) renderKeyMappingPanel();
     if (isKeyLanPanelOpen()) renderKeyLanPanel();
+    if (isCloudRoomPanelOpen()) renderCloudRoomPanel();
     if (keyMappingSettings.lan.adminRequired && !keyMappingSettings.lan.isAdmin) {
         setTimeout(() => showKeyMappingAdminPrompt('DNF 以更高权限运行，按键映射需要管理员权限才能读取游戏内按键。'), 0);
     }
@@ -4378,6 +4546,7 @@ document.getElementById('btn-swap').addEventListener('click', () => window.chrom
 document.getElementById('btn-random-teams')?.addEventListener('click', openRandomTool);
 document.getElementById('btn-key-mapping')?.addEventListener('click', openKeyMappingPanel);
 document.getElementById('btn-key-lan')?.addEventListener('click', openKeyLanPanel);
+document.getElementById('btn-cloud-match')?.addEventListener('click', () => openCloudRoomPanel(false));
 document.getElementById('btn-more-controls')?.addEventListener('click', (e) => {
     e.stopPropagation();
     toggleMoreControlsMenu();
@@ -4436,6 +4605,88 @@ document.getElementById('key-mapping-overlay')?.addEventListener('click', (event
 document.getElementById('btn-key-lan-close')?.addEventListener('click', closeKeyLanPanel);
 document.getElementById('key-lan-overlay')?.addEventListener('click', (event) => {
     if (event.target?.id === 'key-lan-overlay') closeKeyLanPanel();
+});
+document.getElementById('btn-cloud-room-close')?.addEventListener('click', () => closeCloudRoomPanel(false));
+document.getElementById('cloud-room-overlay')?.addEventListener('click', (event) => {
+    if (event.target?.id === 'cloud-room-overlay') closeCloudRoomPanel(false);
+});
+document.querySelectorAll('.cloud-room-option').forEach(option => {
+    option.addEventListener('click', () => {
+        const roomId = option.dataset.cloudRoomId || '';
+        if (roomId === 'none') {
+            if (cloudMatchState?.joined) {
+                cloudRoomChoosing = false;
+                cloudSelectedRoomId = '';
+                renderCloudRoomPanel();
+            } else {
+                sendCloudRoomCommand('cmd_cloud_room_skip_once');
+                if (cloudMatchState) cloudMatchState.shouldPrompt = false;
+                closeCloudRoomPanel(true);
+            }
+            return;
+        }
+        if (!Object.prototype.hasOwnProperty.call(CLOUD_ROOM_NAMES, roomId)) return;
+        cloudSelectedRoomId = roomId;
+        setCloudRoomInlineError('');
+        const input = document.getElementById('cloud-room-name-input');
+        if (input && !input.value.trim() && cloudMatchState?.broadcasterName) {
+            input.value = cloudMatchState.broadcasterName;
+        }
+        renderCloudRoomPanel();
+        input?.focus();
+    });
+});
+document.getElementById('cloud-room-name-input')?.addEventListener('input', () => {
+    if (cloudMatchState) cloudMatchState.lastError = '';
+    updateCloudRoomNameValidation();
+});
+document.getElementById('btn-cloud-room-back')?.addEventListener('click', () => {
+    cloudSelectedRoomId = '';
+    setCloudRoomInlineError('');
+    renderCloudRoomPanel();
+});
+document.getElementById('btn-cloud-room-join')?.addEventListener('click', () => {
+    const input = document.getElementById('cloud-room-name-input');
+    const info = cloudRoomNameInfo(input?.value || '');
+    if (!cloudSelectedRoomId || !info.valid) {
+        updateCloudRoomNameValidation();
+        if (!info.normalized) setCloudRoomInlineError('请输入主播名称。');
+        return;
+    }
+    cloudMatchState = normalizeCloudMatchState({ ...(cloudMatchState || {}),
+        joining: true, lastError: '' });
+    renderCloudRoomPanel();
+    sendCloudRoomCommand('cmd_cloud_room_join', {
+        roomId: cloudSelectedRoomId,
+        broadcasterName: info.normalized
+    });
+});
+document.getElementById('btn-cloud-room-rename')?.addEventListener('click', () => {
+    const input = document.getElementById('cloud-room-rename-input');
+    const info = cloudRoomNameInfo(input?.value || '');
+    if (!info.valid) {
+        showAlert('主播名称需要填写 1 到 32 个可见字符。');
+        return;
+    }
+    cloudMatchState = normalizeCloudMatchState({ ...(cloudMatchState || {}),
+        renaming: true, lastError: '' });
+    renderCloudRoomPanel();
+    sendCloudRoomCommand('cmd_cloud_room_rename', { broadcasterName: info.normalized });
+});
+document.getElementById('btn-cloud-room-change')?.addEventListener('click', () => {
+    cloudRoomChoosing = true;
+    cloudSelectedRoomId = '';
+    setCloudRoomInlineError('');
+    renderCloudRoomPanel();
+});
+document.getElementById('btn-cloud-room-leave')?.addEventListener('click', () => {
+    showConfirm('退出后会停止向当前云端房间上传，但不会清空本机比分、名单或战绩。确定退出吗？', (ok) => {
+        if (!ok) return;
+        cloudMatchState = normalizeCloudMatchState({ ...(cloudMatchState || {}),
+            leaving: true, lastError: '' });
+        renderCloudRoomPanel();
+        sendCloudRoomCommand('cmd_cloud_room_leave');
+    }, { okText: '退出房间', cancelText: '取消' });
 });
 document.getElementById('key-mapping-enabled')?.addEventListener('change', function () {
     keyMappingSettings.enabled = this.checked;
@@ -4801,6 +5052,11 @@ document.addEventListener('keydown', function (e) {
     else if (e.key === 'Escape') {
         // 对话框激活：由对话框自己的监听器处理（那边已经 stopImmediatePropagation）
         if (customModal.classList.contains('active')) return;
+        if (isCloudRoomPanelOpen()) {
+            e.preventDefault();
+            closeCloudRoomPanel(false);
+            return;
+        }
         if (isKeyMappingPanelOpen()) {
             e.preventDefault();
             closeKeyMappingPanel();

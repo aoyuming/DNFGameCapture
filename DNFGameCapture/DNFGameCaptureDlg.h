@@ -22,6 +22,7 @@
 #include "KeyDisplayDlg.h"
 #include "KeyMappingHook.h"
 #include "KeyMappingLanService.h"
+#include "CloudMatchClient.h"
 #include "json.hpp"
 
 struct ScorePointF {
@@ -279,6 +280,17 @@ private:
     CString GetKeyMappingLanDeviceName() const;
     std::string BuildTeamSyncSnapshotPayload();
     std::string BuildTeamSyncSnapshotPayloadUnlocked();
+    void LoadCloudMatchSettings();
+    void SaveCloudMatchSettings();
+    void StartSavedCloudMatchSession();
+    void BeginCloudRoomJoin(const std::string& roomId, const CString& broadcasterName);
+    void BeginCloudDeviceRegistration();
+    void HandleCloudMatchMessage(std::string message);
+    void PollCloudMatch();
+    void OnMatchStateChanged(std::string matchPayload, const char* source);
+    std::string BuildCloudMatchSnapshotPayload(const std::string& matchPayload,
+        std::uint64_t clientRevision, const std::string& changeSource) const;
+    void SendCloudRoomPromptIfNeeded();
     bool ValidateTeamSyncSnapshot(const nlohmann::json& snapshot, CString& errorMessage) const;
     bool ApplyTeamSyncSnapshot(const nlohmann::json& snapshot, bool createBackup,
         CString& errorMessage, bool automatic = false);
@@ -506,6 +518,32 @@ private:
     CString m_teamSyncLastAutoResult;
     int m_teamSyncEventBoundaryId = 0;
     int m_teamSyncBackupEventBoundaryId = 0;
+
+    CloudMatchClient m_cloudMatchClient;
+    CString m_cloudMatchServerUrl = L"http://127.0.0.1:18880";
+    std::string m_cloudMatchDeviceId;
+    std::string m_cloudMatchDeviceToken;
+    std::string m_cloudMatchRoomId;
+    CString m_cloudMatchBroadcasterName;
+    std::uint64_t m_cloudMatchClientRevision = 0;
+    std::string m_cloudMatchPendingRoomId;
+    CString m_cloudMatchPendingBroadcasterName;
+    CString m_cloudMatchLastError;
+    std::string m_cloudMatchLastObservedPayload;
+    std::string m_cloudMatchPendingPayload;
+    std::string m_cloudMatchPendingChangeSource = "ocr";
+    std::string m_cloudMatchNextChangeSource = "ocr";
+    ULONGLONG m_cloudMatchUploadDueTick = 0;
+    ULONGLONG m_cloudMatchLastObserveTick = 0;
+    bool m_cloudMatchUploadPending = false;
+    bool m_cloudMatchJoining = false;
+    bool m_cloudMatchRegistering = false;
+    bool m_cloudMatchRenaming = false;
+    bool m_cloudMatchLeaving = false;
+    bool m_cloudMatchSkipPromptThisRun = false;
+    bool m_cloudMatchPromptSent = false;
+    bool m_cloudMatchWebReady = false;
+    int m_cloudMatchRegistrationRetryCount = 0;
 
     int m_totalScoreRed;
     int m_totalScoreBlue;
