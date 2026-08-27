@@ -42,6 +42,12 @@
     <ClInclude Include="CameraCapture.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="CloudMatchClient.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="CloudMatchProtocol.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="json.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -78,6 +84,12 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="CameraCapture.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="CloudMatchClient.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="CloudMatchProtocol.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="WebScoreDlg.cpp">

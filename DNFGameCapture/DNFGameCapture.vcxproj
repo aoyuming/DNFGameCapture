@@ -111,6 +111,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
+      <AdditionalDependencies>winhttp.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Midl>
       <MkTypLibCompatible>false</MkTypLibCompatible>
@@ -135,7 +136,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>windowsapp.lib;d3d11.lib;dxgi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>windowsapp.lib;d3d11.lib;dxgi.lib;winhttp.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Midl>
       <MkTypLibCompatible>false</MkTypLibCompatible>
@@ -164,7 +165,7 @@
       <SubSystem>Windows</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
-      <AdditionalDependencies>windowsapp.lib;d3d11.lib;dxgi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>windowsapp.lib;d3d11.lib;dxgi.lib;winhttp.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Midl>
       <MkTypLibCompatible>false</MkTypLibCompatible>
@@ -192,6 +193,7 @@
       <SubSystem>Windows</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
+      <AdditionalDependencies>winhttp.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Midl>
       <MkTypLibCompatible>false</MkTypLibCompatible>
@@ -206,6 +208,8 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="CameraCapture.h" />
+    <ClInclude Include="CloudMatchClient.h" />
+    <ClInclude Include="CloudMatchProtocol.h" />
     <ClInclude Include="KillDisplayDlg.h" />
     <ClInclude Include="KeyDisplayDlg.h" />
     <ClInclude Include="KeyMappingHook.h" />
@@ -224,6 +228,10 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="CameraCapture.cpp" />
+    <ClCompile Include="CloudMatchClient.cpp" />
+    <ClCompile Include="CloudMatchProtocol.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="DNFGameCaptureDlg_IdentityPatch.cpp" />
     <ClCompile Include="KillDisplayDlg.cpp" />
     <ClCompile Include="KeyDisplayDlg.cpp" />
