@@ -382,7 +382,7 @@ git commit -m "完成云端房间实时快照接口"
 ```cpp
 assert(ParseEngineIoPacket("0{\"sid\":\"abc\",\"pingInterval\":25000,\"pingTimeout\":20000}").sid == "abc");
 assert(EncodeSocketEvent("room:list", json::object()) == "42[\"room:list\",{}]");
-assert(ParseSocketAck("431[{\"ok\":true}]").ackId == 31);
+assert(ParseSocketAck("431[{\"ok\":true}]").ackId == 1);
 assert(IsPingPacket("2"));
 assert(BuildPongPacket("2") == "3");
 assert(!ValidateCloudPayload(std::string(65537, 'x')));
