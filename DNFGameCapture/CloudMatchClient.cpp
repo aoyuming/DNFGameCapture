@@ -217,7 +217,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex);
         if (started) return true;
         if (stopping) return false;
-        stopRequested = false;
+        stopRequested.store(false, std::memory_order_release);
         try {
             worker = std::thread(&Impl::WorkerMain, this);
             started = true;
@@ -233,12 +233,19 @@ public:
     {
         std::thread joiningThread;
         {
-            std::lock_guard<std::mutex> lock(mutex);
+            std::unique_lock<std::mutex> lock(mutex);
+            if (stopping) {
+                condition.wait(lock, [&]() { return !stopping; });
+                return;
+            }
             if (!started) return;
-            stopRequested = true;
             stopping = true;
+            stopRequested.store(true, std::memory_order_release);
             joiningThread = std::move(worker);
         }
+
+        HINTERNET activeHandle = activeCancelableHandle.exchange(nullptr);
+        if (activeHandle) WinHttpCloseHandle(activeHandle);
         condition.notify_all();
         if (joiningThread.joinable()) joiningThread.join();
 
@@ -246,7 +253,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex);
             started = false;
             stopping = false;
-            stopRequested = false;
+            stopRequested.store(false, std::memory_order_release);
             commands.clear();
             latestSnapshot.reset();
             status.connecting = false;
@@ -254,6 +261,7 @@ public:
             status.reconnecting = false;
             status.statusText = "stopped";
         }
+        condition.notify_all();
     }
 
     bool RegisterDevice(const std::string& deviceId)
@@ -421,6 +429,77 @@ private:
         failed
     };
 
+    enum class CancelablePublishResult
+    {
+        published,
+        notPublished,
+        cancelled
+    };
+
+    CancelablePublishResult PublishCancelableHandle(HINTERNET handle) noexcept
+    {
+        if (!handle || stopRequested.load(std::memory_order_acquire)) {
+            return CancelablePublishResult::notPublished;
+        }
+
+        HINTERNET expected = nullptr;
+        if (!activeCancelableHandle.compare_exchange_strong(expected, handle,
+            std::memory_order_acq_rel)) {
+            return CancelablePublishResult::notPublished;
+        }
+        if (!stopRequested.load(std::memory_order_acquire)) {
+            return CancelablePublishResult::published;
+        }
+
+        expected = handle;
+        if (activeCancelableHandle.compare_exchange_strong(expected, nullptr,
+            std::memory_order_acq_rel)) {
+            WinHttpCloseHandle(handle);
+        }
+        return CancelablePublishResult::cancelled;
+    }
+
+    bool ReleaseCancelableHandle(HINTERNET handle) noexcept
+    {
+        HINTERNET expected = handle;
+        return activeCancelableHandle.compare_exchange_strong(expected, nullptr,
+            std::memory_order_acq_rel);
+    }
+
+    class ActiveHandleScope
+    {
+    public:
+        ActiveHandleScope(Impl& owner, WinHttpHandle& handleOwner) noexcept
+            : owner_(owner), handleOwner_(handleOwner)
+        {
+            const CancelablePublishResult result =
+                owner_.PublishCancelableHandle(handleOwner_.Get());
+            active_ = result == CancelablePublishResult::published;
+            if (result == CancelablePublishResult::cancelled) handleOwner_.Release();
+        }
+
+        ~ActiveHandleScope() { Finish(); }
+
+        ActiveHandleScope(const ActiveHandleScope&) = delete;
+        ActiveHandleScope& operator=(const ActiveHandleScope&) = delete;
+
+        explicit operator bool() const noexcept { return active_; }
+
+        void Finish() noexcept
+        {
+            if (!active_) return;
+            if (!owner_.ReleaseCancelableHandle(handleOwner_.Get())) {
+                handleOwner_.Release();
+            }
+            active_ = false;
+        }
+
+    private:
+        Impl& owner_;
+        WinHttpHandle& handleOwner_;
+        bool active_ = false;
+    };
+
     static bool ParseServerUrl(const std::wstring& url, Config& result)
     {
         if (url.empty() || url.size() > 2048 || url.find(L'\0') != std::wstring::npos) {
@@ -501,9 +580,13 @@ private:
 
     bool ShouldAbort(std::uint64_t generation) const
     {
-        if (configGeneration.load() != generation) return true;
-        std::lock_guard<std::mutex> lock(mutex);
-        return stopRequested;
+        return stopRequested.load(std::memory_order_acquire) ||
+            configGeneration.load(std::memory_order_acquire) != generation;
+    }
+
+    bool ShouldStop() const noexcept
+    {
+        return stopRequested.load(std::memory_order_acquire);
     }
 
     void UpdateStatus(std::uint64_t generation,
@@ -616,11 +699,23 @@ private:
             return;
         }
 
+        ActiveHandleScope requestScope(*this, request);
+        if (!requestScope) return;
+
         constexpr wchar_t headers[] = L"Content-Type: application/json\r\nAccept: application/json\r\n";
-        if (!WinHttpSendRequest(request.Get(), headers, static_cast<DWORD>(-1),
+        bool requestSucceeded = WinHttpSendRequest(request.Get(), headers, static_cast<DWORD>(-1),
             requestBody.data(), static_cast<DWORD>(requestBody.size()),
-            static_cast<DWORD>(requestBody.size()), 0) ||
-            !WinHttpReceiveResponse(request.Get(), nullptr)) {
+            static_cast<DWORD>(requestBody.size()), 0) != FALSE;
+        DWORD requestError = requestSucceeded ? ERROR_SUCCESS : GetLastError();
+        if (requestSucceeded) {
+            requestSucceeded = WinHttpReceiveResponse(request.Get(), nullptr) != FALSE;
+            if (!requestSucceeded) requestError = GetLastError();
+        }
+        if (!requestSucceeded) {
+            if ((requestError == ERROR_WINHTTP_OPERATION_CANCELLED && ShouldStop()) ||
+                ShouldAbort(activeConfig.generation)) {
+                return;
+            }
             NotifyRegistrationError(activeConfig.generation, "network_error");
             return;
         }
@@ -629,10 +724,14 @@ private:
         std::string responseBody;
         if (!QueryHttpStatus(request.Get(), httpStatus) ||
             !ReadBoundedResponse(request.Get(), responseBody)) {
-            NotifyRegistrationError(activeConfig.generation, "invalid_response");
+            const bool aborted = ShouldAbort(activeConfig.generation);
             SecureClear(responseBody);
+            if (!aborted) {
+                NotifyRegistrationError(activeConfig.generation, "invalid_response");
+            }
             return;
         }
+        requestScope.Finish();
         if (httpStatus == HTTP_STATUS_CONFLICT) {
             NotifyRegistrationError(activeConfig.generation, "device_already_registered");
             SecureClear(responseBody);
@@ -702,6 +801,8 @@ private:
             kNetworkTimeoutMs, kNetworkTimeoutMs, kNetworkTimeoutMs)) {
             return false;
         }
+        ActiveHandleScope requestScope(*this, request);
+        if (!requestScope) return false;
         if (!WinHttpSetOption(request.Get(), WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET,
             nullptr, 0) || !WinHttpSendRequest(request.Get(), WINHTTP_NO_ADDITIONAL_HEADERS,
             0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
@@ -716,6 +817,7 @@ private:
         }
         connection.socket.Reset(WinHttpWebSocketCompleteUpgrade(request.Get(), 0));
         if (!connection.socket) return false;
+        requestScope.Finish();
 
         DWORD receiveTimeout = kReceivePollTimeoutMs;
         DWORD sendTimeout = kNetworkTimeoutMs;
@@ -736,9 +838,13 @@ private:
             static_cast<std::size_t>((std::numeric_limits<DWORD>::max)())) {
             return false;
         }
-        return WinHttpWebSocketSend(connection.socket.Get(),
+        ActiveHandleScope socketScope(*this, connection.socket);
+        if (!socketScope) return false;
+        const DWORD error = WinHttpWebSocketSend(connection.socket.Get(),
             WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-            const_cast<char*>(message.data()), static_cast<DWORD>(message.size())) == NO_ERROR;
+            const_cast<char*>(message.data()), static_cast<DWORD>(message.size()));
+        if (error == ERROR_WINHTTP_OPERATION_CANCELLED && ShouldStop()) return false;
+        return error == NO_ERROR;
     }
 
     ReceiveResult ReceiveText(WebSocketConnection& connection, std::string& message)
@@ -746,9 +852,20 @@ private:
         std::array<unsigned char, 8192> buffer{};
         DWORD bytesRead = 0;
         WINHTTP_WEB_SOCKET_BUFFER_TYPE bufferType = WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE;
-        const DWORD error = WinHttpWebSocketReceive(connection.socket.Get(), buffer.data(),
-            static_cast<DWORD>(buffer.size()), &bytesRead, &bufferType);
+        DWORD error = ERROR_SUCCESS;
+        {
+            ActiveHandleScope socketScope(*this, connection.socket);
+            if (!socketScope) {
+                return ShouldStop() ? ReceiveResult::closed : ReceiveResult::failed;
+            }
+            error = WinHttpWebSocketReceive(connection.socket.Get(), buffer.data(),
+                static_cast<DWORD>(buffer.size()), &bytesRead, &bufferType);
+        }
         if (error == ERROR_WINHTTP_TIMEOUT) return ReceiveResult::poll;
+        if (error == ERROR_WINHTTP_OPERATION_CANCELLED && ShouldStop()) {
+            return ReceiveResult::closed;
+        }
+        if (ShouldStop()) return ReceiveResult::closed;
         if (error != NO_ERROR) return ReceiveResult::failed;
         if (bufferType == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) return ReceiveResult::closed;
 
@@ -1162,7 +1279,6 @@ private:
                 return false;
             }
         }
-        SendText(connection, "41");
         return false;
     }
 
@@ -1189,7 +1305,7 @@ private:
             current.statusText = "connected";
         });
         const bool result = RunConnected(activeConfig, connection);
-        if (connection.socket) {
+        if (connection.socket && !ShouldStop()) {
             WinHttpWebSocketClose(connection.socket.Get(),
                 WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
         }
@@ -1237,8 +1353,11 @@ private:
 
             bool connectedOnce = false;
             RunConnection(activeConfig, connectedOnce);
+            if (ShouldAbort(activeConfig.generation)) {
+                pendingAcks.clear();
+                continue;
+            }
             FailPendingAcks(activeConfig, "connection_lost");
-            if (ShouldAbort(activeConfig.generation)) continue;
 
             UpdateStatus(activeConfig.generation, [](CloudMatchStatusSnapshot& current) {
                 current.connecting = false;
@@ -1269,7 +1388,8 @@ private:
     std::thread worker;
     bool started = false;
     bool stopping = false;
-    bool stopRequested = false;
+    std::atomic<bool> stopRequested{ false };
+    std::atomic<HINTERNET> activeCancelableHandle{ nullptr };
 
     Config config;
     std::atomic<std::uint64_t> configGeneration{ 0 };

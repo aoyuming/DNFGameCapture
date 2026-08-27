@@ -220,6 +220,18 @@ bool ParseSocketIoConnectError(std::string_view packet,
 }
 
 std::string EncodeSocketEvent(std::string_view eventName,
+    const nlohmann::json& payload) noexcept
+{
+    if (eventName.empty()) return {};
+    try {
+        return EncodeWithPrefix("42", json::array({ std::string(eventName), payload }));
+    }
+    catch (...) {
+        return {};
+    }
+}
+
+std::string EncodeSocketEvent(std::string_view eventName,
     const nlohmann::json& payload, std::uint64_t ackId) noexcept
 {
     if (eventName.empty()) return {};

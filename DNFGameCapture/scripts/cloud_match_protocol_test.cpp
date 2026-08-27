@@ -60,10 +60,18 @@ void TestSocketIoPackets()
     Require(connectError.message == "denied", "connect error message should parse");
     Require(connectError.code == "invalid_token", "connect error code should parse");
 
+    Require(EncodeSocketEvent("room:list", json::object()) ==
+        R"(42["room:list",{}])", "Socket.IO event encoding without an ACK should be exact");
     Require(EncodeSocketEvent("room:list", json::object(), 31) ==
         R"(4231["room:list",{}])", "Socket.IO event encoding should include ack id");
 
     SocketIoAck ack;
+    Require(ParseSocketIoAck(R"(431[{"ok":true}])", ack),
+        "Socket.IO ACK id 1 should parse without ambiguity");
+    Require(ack.id == 1, "single-digit Socket.IO ACK id should parse");
+    Require(ack.payload == json({ { "ok", true } }),
+        "single-digit Socket.IO ACK payload should parse");
+
     Require(ParseSocketIoAck(R"(4331[{"ok":true}])", ack),
         "Socket.IO ACK should parse");
     Require(ack.id == 31, "Socket.IO ACK id should parse");

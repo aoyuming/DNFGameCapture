@@ -428,7 +428,7 @@ public:
 
 实现要求：
 
-- 唯一 `std::thread` 拥有 WinHTTP session/connect/request/WebSocket handle。
+- 唯一 `std::thread` 创建、配置并正常关闭 WinHTTP session/connect/request/WebSocket handle；`Stop` 可作为唯一跨线程 handle 操作，通过原子交换关闭当前阻塞的 request/WebSocket 以取消 I/O，worker 使用 compare-exchange 清理避免重复关闭。
 - UI 线程只向有界命令队列写命令，不等待网络 I/O。
 - WebSocket URL 使用 `/socket.io/?EIO=4&transport=websocket`。
 - 收到 ping 立即回 pong；掉线后按 1、2、5、10、20 秒退避重连。

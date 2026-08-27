@@ -55,6 +55,8 @@ bool ParseSocketIoConnectError(std::string_view packet,
     SocketIoConnectError& result) noexcept;
 
 std::string EncodeSocketEvent(std::string_view eventName,
+    const nlohmann::json& payload) noexcept;
+std::string EncodeSocketEvent(std::string_view eventName,
     const nlohmann::json& payload, std::uint64_t ackId) noexcept;
 bool ParseSocketIoEvent(std::string_view packet, SocketIoEvent& result) noexcept;
 bool ParseSocketIoAck(std::string_view packet, SocketIoAck& result) noexcept;

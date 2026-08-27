@@ -57,6 +57,16 @@ foreach ($needle in @(
     'kReconnectDelaysSeconds{ 1, 2, 5, 10, 20 }',
     'std::thread worker',
     'std::condition_variable condition',
+    'std::atomic<bool> stopRequested',
+    'std::atomic<HINTERNET> activeCancelableHandle',
+    'activeCancelableHandle.exchange(nullptr)',
+    'activeCancelableHandle.compare_exchange_strong',
+    'PublishCancelableHandle(',
+    'ReleaseCancelableHandle(',
+    'ActiveHandleScope requestScope',
+    'ActiveHandleScope socketScope',
+    'handleOwner_.Release()',
+    'ERROR_WINHTTP_OPERATION_CANCELLED',
     'commands.size() >= kMaxCommandQueueSize',
     'pendingAcks.size() >= kMaxPendingAcks',
     'latestSnapshot',
@@ -121,6 +131,25 @@ foreach ($needle in @(
     if (-not $source.Contains($needle)) {
         throw "CloudMatchClient WinHTTP contract is missing: $needle"
     }
+}
+
+if ($source -notmatch '(?s)void Stop\(\).*?stopRequested\.store\(true.*?activeCancelableHandle\.exchange\(nullptr\).*?WinHttpCloseHandle') {
+    throw 'Stop must atomically take and close the active blocking WinHTTP handle.'
+}
+if ($source -notmatch '(?s)PublishCancelableHandle\(HINTERNET handle\).*?stopRequested\.load') {
+    throw 'Cancelable WinHTTP handles must not be published after Stop is requested.'
+}
+if ($source -notmatch '(?s)ERROR_WINHTTP_OPERATION_CANCELLED.*?ShouldStop') {
+    throw 'A Stop-triggered WinHTTP cancellation must be handled as normal shutdown.'
+}
+if ($source -notmatch '(?s)ActiveHandleScope requestScope.*?WinHttpSendRequest') {
+    throw 'REST requests must be published for cancellation before blocking send/receive calls.'
+}
+if ($source -notmatch '(?s)ActiveHandleScope socketScope.*?WinHttpWebSocketReceive') {
+    throw 'The WebSocket must be published for cancellation before a blocking receive.'
+}
+if ($source -notmatch '(?s)if \(stopping\).*?condition\.wait\(lock.*?!stopping') {
+    throw 'Concurrent Stop calls must wait for the in-progress join instead of racing it.'
 }
 
 foreach ($needle in @(
