@@ -286,6 +286,7 @@ private:
     void StartSavedCloudMatchSession();
     void BeginCloudRoomJoin(const std::string& roomId, const CString& broadcasterName);
     void BeginCloudDeviceRegistration();
+    bool BeginCloudRoomRestore(const CString& reason);
     void CancelCloudRoomJoin(const CString& reason);
     void HandleCloudMatchSnapshotUploadResult(const nlohmann::json& event);
     void HandleCloudMatchMessage(std::string message);
@@ -549,6 +550,8 @@ private:
     bool m_cloudMatchUploadDirty = false;
     bool m_cloudMatchUploadInFlight = false;
     bool m_cloudMatchUploadRetryBlocked = false;
+    bool m_cloudMatchRoomConfirmed = false;
+    bool m_cloudMatchRestoring = false;
     bool m_cloudMatchJoining = false;
     bool m_cloudMatchRegistering = false;
     bool m_cloudMatchRenaming = false;

@@ -2405,6 +2405,8 @@ function normalizeCloudMatchState(value = {}) {
         reconnecting: value.reconnecting === true,
         joining: value.joining === true,
         registering: value.registering === true,
+        restoring: value.restoring === true,
+        roomConfirmed: value.roomConfirmed === true,
         renaming: value.renaming === true,
         leaving: value.leaving === true,
         lastError: String(value.lastError || ''),
@@ -2414,7 +2416,8 @@ function normalizeCloudMatchState(value = {}) {
 }
 
 function isCloudRoomBusy(state = cloudMatchState) {
-    return !!(state?.joining || state?.registering || state?.renaming || state?.leaving);
+    return !!(state?.joining || state?.registering || state?.restoring ||
+        state?.renaming || state?.leaving);
 }
 
 function cloudRoomNameInfo(value) {
@@ -2462,7 +2465,8 @@ function renderCloudRoomPanel() {
     const chooser = document.getElementById('cloud-room-first-run');
     const nameStage = document.getElementById('cloud-room-name-stage');
     const close = document.getElementById('btn-cloud-room-close');
-    const joinedRequestedRoom = state.joined && cloudRoomChoosing && cloudRoomJoinTarget &&
+    const joinedRequestedRoom = state.joined && state.roomConfirmed &&
+        !state.restoring && cloudRoomChoosing && cloudRoomJoinTarget &&
         !state.joining && !state.registering && !state.lastError &&
         state.roomId === cloudRoomJoinTarget.roomId &&
         cloudRoomNameInfo(state.broadcasterName).normalized === cloudRoomJoinTarget.broadcasterName;
@@ -2485,9 +2489,11 @@ function renderCloudRoomPanel() {
     const connection = document.getElementById('cloud-room-connection');
     if (connection) {
         const working = state.joining || state.registering || state.renaming || state.leaving;
-        connection.textContent = working ? '处理中' : (state.connected ? '已连接' :
-            (state.reconnecting ? '重连中' : (state.connecting ? '连接中' : '离线')));
-        connection.dataset.state = state.connected ? 'online' :
+        connection.textContent = state.restoring ? '正在恢复原房间' :
+            (working ? '处理中' : (!state.roomConfirmed && state.joined ? '房间状态未确认' :
+                (state.connected ? '已连接' : (state.reconnecting ? '重连中' :
+                    (state.connecting ? '连接中' : '离线')))));
+        connection.dataset.state = state.connected && state.roomConfirmed ? 'online' :
             (working || state.connecting || state.reconnecting ? 'working' : 'offline');
     }
 
@@ -2529,7 +2535,7 @@ function renderCloudRoomPanel() {
     if (cancelJoinButton) {
         cancelJoinButton.hidden = !joinBusy;
         cancelJoinButton.disabled = !joinBusy;
-        cancelJoinButton.textContent = '取消加入';
+        cancelJoinButton.textContent = state.restoring ? '取消恢复' : '取消加入';
     }
     const backButton = document.getElementById('btn-cloud-room-back');
     if (backButton) backButton.disabled = busy;
@@ -4711,6 +4717,8 @@ document.getElementById('btn-cloud-room-join')?.addEventListener('click', () => 
 document.getElementById('btn-cloud-room-cancel-join')?.addEventListener('click', () => {
     if (!cloudMatchState?.joining && !cloudMatchState?.registering) return;
     cloudRoomJoinTarget = null;
+    cloudSelectedRoomId = '';
+    renderCloudRoomPanel();
     const button = document.getElementById('btn-cloud-room-cancel-join');
     if (button) {
         button.disabled = true;

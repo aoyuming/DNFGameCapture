@@ -54,6 +54,8 @@ public:
 #ifdef CLOUD_MATCH_CLIENT_STANDALONE
     std::uint64_t ConfigureForTesting();
     bool CompleteNextProtectedOperationForTesting();
+    bool CompleteLatestSnapshotAckForTesting(bool ok,
+        std::uint64_t acceptedRevision, const std::string& code);
     bool JoinRoomForGenerationForTesting(std::uint64_t generation,
         const std::string& roomId, const std::string& broadcasterName);
     bool HasDesiredRoomForTesting() const;

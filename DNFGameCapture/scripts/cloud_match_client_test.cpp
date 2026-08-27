@@ -9,6 +9,7 @@
 #include <string>
 #include <thread>
 #include <unordered_set>
+#include <vector>
 
 namespace {
 
@@ -28,6 +29,71 @@ void RequireEventually(const std::atomic<bool>& value, const char* message)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     Require(value.load(std::memory_order_acquire), message);
+}
+
+std::string MakeSnapshot(std::uint64_t clientRevision, std::size_t padding = 0)
+{
+    return "{\"clientRevision\":" + std::to_string(clientRevision) +
+        ",\"padding\":\"" + std::string(padding, 'x') + "\"}";
+}
+
+bool HasRevision(const std::string& message, std::uint64_t clientRevision)
+{
+    return message.find("\"clientRevision\":" + std::to_string(clientRevision)) !=
+        std::string::npos;
+}
+
+void TestSnapshotResultsCarryLocalRevisionAndFilterOldGeneration()
+{
+    CloudMatchClient client;
+    client.ConfigureForTesting();
+    std::vector<std::string> messages;
+    client.SetMessageCallback([&](std::string message) {
+        messages.push_back(std::move(message));
+    });
+
+    Require(client.UploadSnapshot(MakeSnapshot(101)),
+        "snapshot A should enter the latest offline slot");
+    Require(client.UploadSnapshot(MakeSnapshot(303)),
+        "snapshot C should replace snapshot A");
+    Require(client.DispatchMessages(8) == 1,
+        "replacing snapshot A should emit one cancellation result");
+    Require(messages.back().find("\"code\":\"canceled\"") != std::string::npos &&
+        HasRevision(messages.back(), 101),
+        "canceled snapshot A must retain revision 101");
+
+    Require(client.CompleteLatestSnapshotAckForTesting(true, 303, {}),
+        "snapshot C should be completed through the ACK path");
+    Require(client.DispatchMessages(8) == 1,
+        "snapshot C success should emit one result");
+    Require(messages.back().find("\"acceptedRevision\":303") != std::string::npos &&
+        HasRevision(messages.back(), 303),
+        "snapshot C success must retain revision 303");
+
+    Require(client.UploadSnapshot(MakeSnapshot(404)),
+        "snapshot failure fixture should enter the latest slot");
+    Require(client.CompleteLatestSnapshotAckForTesting(false, 0, "connection_lost"),
+        "snapshot failure should be completed through the ACK path");
+    Require(client.DispatchMessages(8) == 1,
+        "snapshot failure should emit one result");
+    Require(messages.back().find("\"code\":\"connection_lost\"") != std::string::npos &&
+        HasRevision(messages.back(), 404),
+        "snapshot failure must retain revision 404");
+
+    Require(!client.UploadSnapshot(MakeSnapshot(505, 70000)),
+        "oversized legal JSON should fail before entering the offline slot");
+    Require(client.DispatchMessages(8) == 1 && HasRevision(messages.back(), 505),
+        "encoding failure must retain revision 505");
+
+    Require(!client.UploadSnapshot(MakeSnapshot(606, 70000)),
+        "old-generation encoding failure should be queued");
+    client.ConfigureForTesting();
+    Require(!client.UploadSnapshot(MakeSnapshot(707, 70000)),
+        "new-generation encoding failure should be queued");
+    Require(client.DispatchMessages(8) == 1,
+        "Configure should discard the old-generation snapshot result");
+    Require(HasRevision(messages.back(), 707) && !HasRevision(messages.back(), 606),
+        "only the current-generation snapshot result may be dispatched");
 }
 
 void TestDispatchRunsCallbackOnCallerAndAllowsStop()
@@ -289,6 +355,7 @@ void TestRememberedJoinRetriesAfterDispatchCapacityRelease()
 
 int main()
 {
+    TestSnapshotResultsCarryLocalRevisionAndFilterOldGeneration();
     TestDispatchRunsCallbackOnCallerAndAllowsStop();
     TestConfigureDiscardsOldGenerationMessages();
     TestProtectedResultCapacityBackpressuresAndRecovers();

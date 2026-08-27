@@ -151,6 +151,25 @@ std::string SanitizeServerCode(const json& value, const char* key,
     return code;
 }
 
+std::uint64_t ExtractSnapshotClientRevision(std::string_view snapshotJson) noexcept
+{
+    try {
+        const json snapshot = json::parse(snapshotJson.begin(), snapshotJson.end(),
+            nullptr, false);
+        if (snapshot.is_discarded() || !snapshot.is_object()) return 0;
+        const auto found = snapshot.find("clientRevision");
+        if (found == snapshot.end()) return 0;
+        if (found->is_number_unsigned()) return found->get<std::uint64_t>();
+        if (found->is_number_integer()) {
+            const long long revision = found->get<long long>();
+            return revision > 0 ? static_cast<std::uint64_t>(revision) : 0;
+        }
+    }
+    catch (...) {
+    }
+    return 0;
+}
+
 std::wstring JoinUrlPath(const std::wstring& basePath, std::wstring_view suffix)
 {
     if (basePath.empty()) return std::wstring(suffix);
@@ -315,6 +334,7 @@ public:
     bool UploadSnapshot(std::string snapshotJson)
     {
         std::uint64_t generation = 0;
+        const std::uint64_t clientRevision = ExtractSnapshotClientRevision(snapshotJson);
         std::size_t outboundLimit = cloud_match::kMaxCloudMatchPayloadBytes;
         {
             std::lock_guard<std::mutex> lock(mutex);
@@ -339,7 +359,7 @@ public:
                 protectedResultReservation = true;
             }
             SecureClear(snapshotJson);
-            NotifySnapshotUploadFailure(generation, encoded,
+            NotifySnapshotUploadFailure(generation, clientRevision, encoded,
                 &protectedResultReservation);
             return false;
         }
@@ -364,7 +384,8 @@ public:
                 canceledSnapshot = std::move(latestSnapshot);
                 latestSnapshot.reset();
             }
-            latestSnapshot.emplace(generation, std::move(snapshotJson), true);
+            latestSnapshot.emplace(generation, clientRevision,
+                std::move(snapshotJson), true);
         }
         if (canceledSnapshot) {
             NotifySnapshotCanceled(*canceledSnapshot);
@@ -493,6 +514,47 @@ public:
         return true;
     }
 
+    bool CompleteLatestSnapshotAckForTesting(bool ok,
+        std::uint64_t acceptedRevision, const std::string& code)
+    {
+        std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
+        Config activeConfig;
+        std::uint64_t ackId = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!latestSnapshot || latestSnapshot->generation != config.generation ||
+                nextAckId == (std::numeric_limits<std::uint64_t>::max)()) {
+                return false;
+            }
+            PendingSnapshot snapshot = std::move(*latestSnapshot);
+            latestSnapshot.reset();
+            ackId = nextAckId++;
+            pendingAcks.emplace(ackId, PendingAck{
+                CommandKind::uploadSnapshot, "snapshot_upload_result", {},
+                snapshot.clientRevision, Clock::now() + kAckTimeout,
+                snapshot.protectedResultReservation
+            });
+            snapshot.protectedResultReservation = false;
+            activeConfig = config;
+        }
+
+        cloud_match::SocketIoAck ack;
+        ack.id = ackId;
+        if (ok) {
+            ack.payload = {
+                { "ok", true }, { "acceptedRevision", acceptedRevision }
+            };
+        }
+        else {
+            ack.payload = {
+                { "ok", false },
+                { "code", code.empty() ? "server_error" : code }
+            };
+        }
+        HandleAck(activeConfig, ack);
+        return true;
+    }
+
     bool JoinRoomForGenerationForTesting(std::uint64_t generation,
         const std::string& roomId, const std::string& broadcasterName)
     {
@@ -551,7 +613,7 @@ public:
             const std::uint64_t ackId = nextAckId++;
             pendingAcks.emplace(ackId, PendingAck{
                 CommandKind::joinRoom, "room_join_result", {},
-                Clock::now() + kAckTimeout, join.protectedResultReservation
+                0, Clock::now() + kAckTimeout, join.protectedResultReservation
             });
             join.protectedResultReservation = false;
             desiredJoinInFlightGeneration = generation;
@@ -737,9 +799,11 @@ private:
     struct PendingSnapshot
     {
         PendingSnapshot() = default;
-        PendingSnapshot(std::uint64_t sourceGeneration, std::string sourceJson,
+        PendingSnapshot(std::uint64_t sourceGeneration,
+            std::uint64_t sourceClientRevision, std::string sourceJson,
             bool sourceReservation)
             : generation(sourceGeneration),
+            clientRevision(sourceClientRevision),
             protectedResultReservation(sourceReservation)
         {
             jsonText.swap(sourceJson);
@@ -752,10 +816,12 @@ private:
 
         PendingSnapshot(PendingSnapshot&& other) noexcept
             : generation(other.generation),
+            clientRevision(other.clientRevision),
             protectedResultReservation(other.protectedResultReservation)
         {
             jsonText.swap(other.jsonText);
             other.generation = 0;
+            other.clientRevision = 0;
             other.protectedResultReservation = false;
         }
 
@@ -764,15 +830,18 @@ private:
             if (this != &other) {
                 SecureClear(jsonText);
                 generation = other.generation;
+                clientRevision = other.clientRevision;
                 protectedResultReservation = other.protectedResultReservation;
                 jsonText.swap(other.jsonText);
                 other.generation = 0;
+                other.clientRevision = 0;
                 other.protectedResultReservation = false;
             }
             return *this;
         }
 
         std::uint64_t generation = 0;
+        std::uint64_t clientRevision = 0;
         std::string jsonText;
         bool protectedResultReservation = false;
     };
@@ -782,6 +851,7 @@ private:
         CommandKind kind = CommandKind::joinRoom;
         std::string resultType;
         std::string requestId;
+        std::uint64_t clientRevision = 0;
         Clock::time_point deadline;
         bool protectedResultReservation = false;
 
@@ -789,6 +859,7 @@ private:
         {
             SecureClear(resultType);
             SecureClear(requestId);
+            clientRevision = 0;
             protectedResultReservation = false;
         }
     };
@@ -1323,6 +1394,7 @@ private:
     }
 
     void NotifySnapshotUploadFailure(std::uint64_t generation,
+        std::uint64_t clientRevision,
         cloud_match::SnapshotUploadEncodeResult result,
         bool* protectedResultReservation)
     {
@@ -1331,7 +1403,8 @@ private:
         NotifyJson(generation, json{
             { "type", "snapshot_upload_result" },
             { "ok", false },
-            { "code", code }
+            { "code", code },
+            { "clientRevision", clientRevision }
         }, {}, false, protectedResultReservation);
     }
 
@@ -1340,7 +1413,8 @@ private:
         NotifyJson(snapshot.generation, json{
             { "type", "snapshot_upload_result" },
             { "ok", false },
-            { "code", "canceled" }
+            { "code", "canceled" },
+            { "clientRevision", snapshot.clientRevision }
         }, {}, false, &snapshot.protectedResultReservation);
     }
 
@@ -1820,7 +1894,7 @@ private:
             std::lock_guard<std::mutex> lock(mutex);
             if (config.generation != activeConfig.generation) return false;
             pendingAcks.emplace(ackId, PendingAck{
-                kind, resultType, requestId, Clock::now() + kAckTimeout,
+                kind, resultType, requestId, 0, Clock::now() + kAckTimeout,
                 protectedResultReservation
             });
             if (kind == CommandKind::joinRoom && desiredRoom &&
@@ -1864,7 +1938,8 @@ private:
         if (encoded == cloud_match::SnapshotUploadEncodeResult::payloadTooLarge ||
             encoded == cloud_match::SnapshotUploadEncodeResult::invalidPayload) {
             SecureClear(packet);
-            NotifySnapshotUploadFailure(activeConfig.generation, encoded,
+            NotifySnapshotUploadFailure(activeConfig.generation,
+                snapshot.clientRevision, encoded,
                 &snapshot.protectedResultReservation);
             return SnapshotSendResult::rejected;
         }
@@ -1881,7 +1956,8 @@ private:
             }
             pendingAcks.emplace(ackId, PendingAck{
                 CommandKind::uploadSnapshot, "snapshot_upload_result", {},
-                Clock::now() + kAckTimeout, snapshot.protectedResultReservation
+                snapshot.clientRevision, Clock::now() + kAckTimeout,
+                snapshot.protectedResultReservation
             });
             snapshot.protectedResultReservation = false;
         }
@@ -2081,6 +2157,9 @@ private:
         }
         normalized["type"] = pending.resultType;
         if (!pending.requestId.empty()) normalized["requestId"] = pending.requestId;
+        if (pending.kind == CommandKind::uploadSnapshot) {
+            normalized["clientRevision"] = pending.clientRevision;
+        }
         NotifyJson(activeConfig.generation, normalized, {}, false,
             &pending.protectedResultReservation);
     }
@@ -2181,6 +2260,9 @@ private:
                 { "code", "timeout" }
             };
             if (!pending.requestId.empty()) normalized["requestId"] = pending.requestId;
+            if (pending.kind == CommandKind::uploadSnapshot) {
+                normalized["clientRevision"] = pending.clientRevision;
+            }
             NotifyJson(activeConfig.generation, normalized, {}, false,
                 &pending.protectedResultReservation);
         }
@@ -2209,6 +2291,9 @@ private:
                 { "code", code }
             };
             if (!pending.requestId.empty()) normalized["requestId"] = pending.requestId;
+            if (pending.kind == CommandKind::uploadSnapshot) {
+                normalized["clientRevision"] = pending.clientRevision;
+            }
             NotifyJson(activeConfig.generation, normalized, {}, false,
                 &pending.protectedResultReservation);
         }
@@ -2523,6 +2608,12 @@ std::uint64_t CloudMatchClient::ConfigureForTesting()
 bool CloudMatchClient::CompleteNextProtectedOperationForTesting()
 {
     return impl_->CompleteNextProtectedOperationForTesting();
+}
+
+bool CloudMatchClient::CompleteLatestSnapshotAckForTesting(bool ok,
+    std::uint64_t acceptedRevision, const std::string& code)
+{
+    return impl_->CompleteLatestSnapshotAckForTesting(ok, acceptedRevision, code);
 }
 
 bool CloudMatchClient::JoinRoomForGenerationForTesting(std::uint64_t generation,

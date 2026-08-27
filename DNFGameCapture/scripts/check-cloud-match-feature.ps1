@@ -16,11 +16,53 @@ function Require-Text([string]$content, [string]$needle, [string]$message) {
     }
 }
 
+function Get-CppFunctionBody([string]$content, [string]$signature) {
+    $start = $content.IndexOf($signature, [System.StringComparison]::Ordinal)
+    if ($start -lt 0) { throw "C++ function is missing: $signature" }
+    $open = $content.IndexOf('{', $start)
+    if ($open -lt 0) { throw "C++ function body is missing: $signature" }
+    $depth = 0
+    $inString = $false
+    $inChar = $false
+    $inLineComment = $false
+    $inBlockComment = $false
+    for ($i = $open; $i -lt $content.Length; ++$i) {
+        $ch = $content[$i]
+        $next = if ($i + 1 -lt $content.Length) { $content[$i + 1] } else { [char]0 }
+        if ($inLineComment) {
+            if ($ch -eq "`n") { $inLineComment = $false }
+            continue
+        }
+        if ($inBlockComment) {
+            if ($ch -eq '*' -and $next -eq '/') { $inBlockComment = $false; ++$i }
+            continue
+        }
+        if ($inString -or $inChar) {
+            if ($ch -eq [char]0x5C) { ++$i; continue }
+            if ($inString -and $ch -eq '"') { $inString = $false }
+            elseif ($inChar -and $ch -eq "'") { $inChar = $false }
+            continue
+        }
+        if ($ch -eq '/' -and $next -eq '/') { $inLineComment = $true; ++$i; continue }
+        if ($ch -eq '/' -and $next -eq '*') { $inBlockComment = $true; ++$i; continue }
+        if ($ch -eq '"') { $inString = $true; continue }
+        if ($ch -eq "'") { $inChar = $true; continue }
+        if ($ch -eq '{') { ++$depth; continue }
+        if ($ch -eq '}') {
+            --$depth
+            if ($depth -eq 0) { return $content.Substring($start, $i - $start + 1) }
+        }
+    }
+    throw "Unbalanced C++ function body: $signature"
+}
+
 $header = Read-RequiredFile (Join-Path $root 'DNFGameCaptureDlg.h')
 $source = Read-RequiredFile (Join-Path $root 'DNFGameCaptureDlg.cpp')
 $index = Read-RequiredFile (Join-Path $webRoot 'index.html')
 $main = Read-RequiredFile (Join-Path $webRoot 'main.js')
 $style = Read-RequiredFile (Join-Path $webRoot 'style.css')
+$clientHeader = Read-RequiredFile (Join-Path $root 'CloudMatchClient.h')
+$clientSource = Read-RequiredFile (Join-Path $root 'CloudMatchClient.cpp')
 
 Require-Text $header '#include "CloudMatchClient.h"' 'Main dialog does not include CloudMatchClient.'
 Require-Text $header 'CloudMatchClient m_cloudMatchClient' 'Main dialog does not own CloudMatchClient.'
@@ -78,6 +120,8 @@ Require-Text $header 'm_cloudMatchUploadRetryBlocked' 'Cloud snapshot permanent-
 Require-Text $header 'm_cloudMatchInFlightPayload' 'Cloud snapshot sent payload tracking is missing.'
 Require-Text $header 'm_cloudMatchInFlightRevision' 'Cloud snapshot sent revision tracking is missing.'
 Require-Text $header 'm_cloudMatchJoinDeadlineTick' 'Cloud room join deadline state is missing.'
+Require-Text $header 'm_cloudMatchRoomConfirmed' 'Confirmed cloud room state is missing.'
+Require-Text $header 'm_cloudMatchRestoring' 'Cloud room restore state is missing.'
 Require-Text $header 'bool SaveCloudMatchSettings()' 'Cloud match settings persistence must report failure.'
 Require-Text $header 'bool SaveCloudMatchRevision()' 'Cloud snapshot revision needs dedicated persistence.'
 Require-Text $source 'if (m_cloudMatchJoining || m_cloudMatchRegistering ||' 'C++ does not reject concurrent cloud room mutations.'
@@ -100,12 +144,7 @@ foreach ($match in [regex]::Matches($source,
     }
 }
 
-$handlerStart = $source.IndexOf('void CDNFGameCaptureDlg::HandleCloudMatchMessage(')
-$handlerEnd = $source.IndexOf('std::string CDNFGameCaptureDlg::BuildCloudMatchSnapshotPayload(', $handlerStart)
-if ($handlerStart -lt 0 -or $handlerEnd -le $handlerStart) {
-    throw 'HandleCloudMatchMessage could not be inspected.'
-}
-$handlerBody = $source.Substring($handlerStart, $handlerEnd - $handlerStart)
+$handlerBody = Get-CppFunctionBody $source 'void CDNFGameCaptureDlg::HandleCloudMatchMessage('
 if ($handlerBody.Contains('ApplyTeamSyncSnapshot')) {
     throw 'HandleCloudMatchMessage must never apply a remote team snapshot.'
 }
@@ -114,34 +153,26 @@ Require-Text $handlerBody 'event["broadcasterName"]' 'Join ACK handler does not 
 Require-Text $handlerBody 'ackRoomId != m_cloudMatchPendingRoomId' 'Join ACK room correlation is missing.'
 Require-Text $handlerBody 'DnfCloudMatchNamesMatchForAck' 'Join ACK broadcaster-name correlation is missing.'
 
-$joinStart = $source.IndexOf('void CDNFGameCaptureDlg::BeginCloudRoomJoin(')
-$joinEnd = $source.IndexOf('void CDNFGameCaptureDlg::HandleCloudMatchMessage(', $joinStart)
-if ($joinStart -lt 0 -or $joinEnd -le $joinStart) {
-    throw 'BeginCloudRoomJoin could not be inspected.'
-}
-$joinBody = $source.Substring($joinStart, $joinEnd - $joinStart)
+$joinBody = Get-CppFunctionBody $source 'void CDNFGameCaptureDlg::BeginCloudRoomJoin('
 Require-Text $joinBody 'm_cloudMatchClient.Configure(' 'Every cloud room join must rebuild the client generation.'
 if ($joinBody.Contains('if (!status.configured)') -or
     $joinBody.Contains('GetStatusSnapshot()')) {
     throw 'BeginCloudRoomJoin must unconditionally reconfigure the client for a new generation.'
 }
 
-$cancelStart = $source.IndexOf('void CDNFGameCaptureDlg::CancelCloudRoomJoin(')
-$cancelEnd = $source.IndexOf('void CDNFGameCaptureDlg::HandleCloudMatchMessage(', $cancelStart)
-if ($cancelStart -lt 0 -or $cancelEnd -le $cancelStart) {
-    throw 'CancelCloudRoomJoin could not be inspected.'
-}
-$cancelBody = $source.Substring($cancelStart, $cancelEnd - $cancelStart)
+$cancelBody = Get-CppFunctionBody $source 'void CDNFGameCaptureDlg::CancelCloudRoomJoin('
 Require-Text $cancelBody 'm_cloudMatchClient.Configure(' 'Canceling a join must invalidate the active client generation.'
-Require-Text $cancelBody 'm_cloudMatchJoining = false;' 'Canceling a join must clear joining state.'
-Require-Text $cancelBody 'm_cloudMatchRegistering = false;' 'Canceling a join must clear registration state.'
+Require-Text $cancelBody 'BeginCloudRoomRestore(' 'Canceling a room switch must formally restore the saved room.'
 
-$uploadHandlerStart = $source.IndexOf('void CDNFGameCaptureDlg::HandleCloudMatchSnapshotUploadResult(')
-$uploadHandlerEnd = $source.IndexOf('void CDNFGameCaptureDlg::HandleCloudMatchMessage(', $uploadHandlerStart)
-if ($uploadHandlerStart -lt 0 -or $uploadHandlerEnd -le $uploadHandlerStart) {
-    throw 'Cloud snapshot upload ACK handler could not be inspected.'
-}
-$uploadHandler = $source.Substring($uploadHandlerStart, $uploadHandlerEnd - $uploadHandlerStart)
+$restoreBody = Get-CppFunctionBody $source 'bool CDNFGameCaptureDlg::BeginCloudRoomRestore('
+Require-Text $restoreBody 'm_cloudMatchRestoring = true;' 'Cloud room restore does not enter restoring state.'
+Require-Text $restoreBody 'm_cloudMatchRoomConfirmed = false;' 'Cloud room restore must invalidate room confirmation.'
+Require-Text $restoreBody 'm_cloudMatchClient.Configure(' 'Cloud room restore must rebuild the client generation.'
+Require-Text $restoreBody 'm_cloudMatchClient.Start()' 'Cloud room restore must start the client.'
+Require-Text $restoreBody 'm_cloudMatchClient.JoinRoom(' 'Cloud room restore must formally join the saved room.'
+
+$uploadHandler = Get-CppFunctionBody $source 'void CDNFGameCaptureDlg::HandleCloudMatchSnapshotUploadResult('
+Require-Text $uploadHandler 'event.find("clientRevision")' 'Snapshot results are not correlated by local clientRevision.'
 Require-Text $uploadHandler 'acceptedRevision' 'Snapshot success ACK must validate acceptedRevision.'
 Require-Text $uploadHandler 'm_cloudMatchInFlightRevision' 'Snapshot ACK must correlate the in-flight revision.'
 Require-Text $uploadHandler 'm_cloudMatchPendingPayload == m_cloudMatchInFlightPayload' 'Snapshot ACK must only clear matching dirty content.'
@@ -159,6 +190,13 @@ if ($invalidAckBody.Contains('m_cloudMatchUploadDirty = false;')) {
     throw 'An invalid snapshot success ACK must not clear dirty state.'
 }
 Require-Text $invalidAckBody 'm_cloudMatchUploadRetryBlocked = true;' 'Invalid snapshot success ACKs must block retry without pretending the snapshot was acknowledged.'
+$revisionGuard = $uploadHandler.IndexOf('eventRevision != m_cloudMatchInFlightRevision')
+$firstDueMutation = $uploadHandler.IndexOf('m_cloudMatchUploadDueTick')
+$firstErrorMutation = $uploadHandler.IndexOf('m_cloudMatchLastError')
+if ($revisionGuard -lt 0 -or ($firstDueMutation -ge 0 -and $revisionGuard -gt $firstDueMutation) -or
+    ($firstErrorMutation -ge 0 -and $revisionGuard -gt $firstErrorMutation)) {
+    throw 'Old snapshot results must be rejected before changing debounce or error state.'
+}
 $configureOffset = $joinBody.IndexOf('m_cloudMatchClient.Configure(')
 $startOffset = $joinBody.IndexOf('m_cloudMatchClient.Start()', $configureOffset)
 $joinOffset = $joinBody.IndexOf('m_cloudMatchClient.JoinRoom(', $startOffset)
@@ -183,12 +221,7 @@ foreach ($webContent in @($index, $main)) {
     }
 }
 
-$snapshotStart = $source.IndexOf('BuildCloudMatchSnapshotPayload(')
-$snapshotEnd = $source.IndexOf('OnMatchStateChanged(', $snapshotStart)
-if ($snapshotStart -lt 0 -or $snapshotEnd -le $snapshotStart) {
-    throw 'Cloud snapshot builder could not be inspected for token leakage.'
-}
-$snapshotBuilder = $source.Substring($snapshotStart, $snapshotEnd - $snapshotStart)
+$snapshotBuilder = Get-CppFunctionBody $source 'std::string CDNFGameCaptureDlg::BuildCloudMatchSnapshotPayload('
 if ($snapshotBuilder.Contains('DeviceToken') -or $snapshotBuilder.Contains('deviceToken')) {
     throw 'DeviceToken must not be included in cloud match snapshots.'
 }
@@ -209,16 +242,16 @@ Require-Text $nameValidator 'NormalizeString(NormalizationC' 'Cloud snapshot nam
 Require-Text $nameValidator 'scalarCount > 64' 'Cloud snapshot names are not bounded to 64 Unicode scalars.'
 Require-Text $nameValidator 'DnfIsCloudMatchInvisibleCodePoint' 'Cloud snapshot names do not reject control and invisible characters.'
 
-$pollStart = $source.IndexOf('void CDNFGameCaptureDlg::PollCloudMatch(')
-$pollEnd = $source.IndexOf('void CDNFGameCaptureDlg::SendCloudRoomPromptIfNeeded(', $pollStart)
-if ($pollStart -lt 0 -or $pollEnd -le $pollStart) {
-    throw 'PollCloudMatch could not be inspected.'
-}
-$pollBody = $source.Substring($pollStart, $pollEnd - $pollStart)
+$pollBody = Get-CppFunctionBody $source 'void CDNFGameCaptureDlg::PollCloudMatch('
 Require-Text $pollBody 'm_cloudMatchUploadInFlight' 'PollCloudMatch does not enforce one outstanding snapshot ACK.'
 Require-Text $pollBody 'SaveCloudMatchRevision()' 'Snapshot uploads do not use dedicated revision persistence.'
 Require-Text $pollBody 'm_cloudMatchJoinDeadlineTick' 'PollCloudMatch does not enforce a room join deadline.'
 Require-Text $pollBody 'm_cloudMatchUploadRetryBlocked' 'PollCloudMatch does not honor the permanent-failure retry gate.'
+Require-Text $pollBody 'latestAlreadyQueued' 'PollCloudMatch does not permit a newer debounced snapshot while an older ACK is pending.'
+Require-Text $pollBody '!m_cloudMatchRoomConfirmed' 'Snapshot upload is not gated on confirmed room membership.'
+if ($pollBody.Contains('m_cloudMatchUploadInFlight ||')) {
+    throw 'An older snapshot ACK must not block enqueueing a newer debounced snapshot.'
+}
 if ($pollBody.Contains('SaveCloudMatchSettings()')) {
     throw 'Ordinary snapshot uploads must not rewrite the full CloudMatch identity settings.'
 }
@@ -231,12 +264,7 @@ if ($dataLockOffset -lt 0 -or $snapshotBuildOffset -le $dataLockOffset -or
     throw 'OCR cloud source correlation must hold data then source locks around snapshot construction.'
 }
 
-$saveSettingsStart = $source.IndexOf('bool CDNFGameCaptureDlg::SaveCloudMatchSettings(')
-$saveSettingsEnd = $source.IndexOf('bool CDNFGameCaptureDlg::SaveCloudMatchRevision(', $saveSettingsStart)
-if ($saveSettingsStart -lt 0 -or $saveSettingsEnd -le $saveSettingsStart) {
-    throw 'SaveCloudMatchSettings could not be inspected.'
-}
-$saveSettingsBody = $source.Substring($saveSettingsStart, $saveSettingsEnd - $saveSettingsStart)
+$saveSettingsBody = Get-CppFunctionBody $source 'bool CDNFGameCaptureDlg::SaveCloudMatchSettings('
 Require-Text $saveSettingsBody 'WritePrivateProfileString' 'CloudMatch settings are not written to config.ini.'
 Require-Text $saveSettingsBody 'SecureZeroMemory' 'CloudMatch token conversion buffer is not securely erased.'
 Require-Text $saveSettingsBody 'return saved;' 'CloudMatch settings persistence does not report aggregate write failures.'
@@ -246,9 +274,40 @@ if ($saveSettingsBody.Contains('CA2W(m_cloudMatchDeviceToken')) {
 
 Require-Text $main 'let cloudRoomJoinTarget = null;' 'The Web room chooser does not track the requested switch target.'
 Require-Text $main 'state.roomId === cloudRoomJoinTarget.roomId' 'The Web room chooser does not verify the joined room before resetting.'
+Require-Text $main 'restoring:' 'Web cloud state does not normalize restoring state.'
+Require-Text $main 'roomConfirmed:' 'Web cloud state does not normalize room confirmation.'
 if ($main.Contains('if (state.joined && cloudRoomChoosing)')) {
     throw 'The Web room chooser must not reset merely because the client was already joined before switching rooms.'
 }
+$cancelJoinStart = $main.IndexOf("document.getElementById('btn-cloud-room-cancel-join')?.addEventListener")
+$renameStart = $main.IndexOf("document.getElementById('btn-cloud-room-rename')?.addEventListener", $cancelJoinStart)
+if ($cancelJoinStart -lt 0 -or $renameStart -le $cancelJoinStart) {
+    throw 'Cloud room cancel handler could not be inspected.'
+}
+$cancelJoinHandler = $main.Substring($cancelJoinStart, $renameStart - $cancelJoinStart)
+Require-Text $cancelJoinHandler "cloudSelectedRoomId = '';" 'Canceling a first room join must return Web UI to room selection.'
+
+Require-Text $clientSource 'ExtractSnapshotClientRevision(snapshotJson)' 'CloudMatchClient does not extract clientRevision from legal snapshots.'
+Require-Text $clientSource 'std::uint64_t clientRevision = 0;' 'CloudMatchClient pending snapshot/ACK state does not retain clientRevision.'
+$clientEncodeFailure = Get-CppFunctionBody $clientSource 'void NotifySnapshotUploadFailure('
+Require-Text $clientEncodeFailure '{ "clientRevision", clientRevision }' 'Snapshot encoding failures omit clientRevision.'
+$clientCanceled = Get-CppFunctionBody $clientSource 'void NotifySnapshotCanceled('
+Require-Text $clientCanceled '{ "clientRevision", snapshot.clientRevision }' 'Canceled snapshots omit clientRevision.'
+$clientAckHandler = Get-CppFunctionBody $clientSource 'void HandleAck('
+Require-Text $clientAckHandler 'normalized["clientRevision"] = pending.clientRevision;' 'Snapshot ACK results omit clientRevision.'
+$clientAckTimeout = Get-CppFunctionBody $clientSource 'void ExpireAcks('
+Require-Text $clientAckTimeout 'normalized["clientRevision"] = pending.clientRevision;' 'Snapshot ACK timeout results omit clientRevision.'
+$clientConnectionLoss = Get-CppFunctionBody $clientSource 'void FailPendingAcks('
+Require-Text $clientConnectionLoss 'normalized["clientRevision"] = pending.clientRevision;' 'Snapshot connection-loss results omit clientRevision.'
+Require-Text $clientHeader 'CompleteLatestSnapshotAckForTesting' 'CloudMatchClient ACK correlation lacks an executable test seam.'
+$renameBranchStart = $handlerBody.IndexOf('else if (type == "room_rename_result")')
+$leaveBranchStart = $handlerBody.IndexOf('else if (type == "room_leave_result")', $renameBranchStart)
+if ($renameBranchStart -lt 0 -or $leaveBranchStart -le $renameBranchStart) {
+    throw 'Cloud room rename result branch could not be inspected.'
+}
+$renameBranch = $handlerBody.Substring($renameBranchStart, $leaveBranchStart - $renameBranchStart)
+Require-Text $renameBranch 'm_cloudMatchRenaming = false;' 'Malformed rename ACKs can leave rename permanently busy.'
+Require-Text $renameBranch 'invalid_response' 'Malformed rename ACKs do not report invalid_response.'
 
 foreach ($line in ($source -split "`r?`n")) {
     if (($line.Contains('DeviceToken') -or $line.Contains('deviceToken')) -and
