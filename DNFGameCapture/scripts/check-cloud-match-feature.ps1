@@ -394,7 +394,12 @@ $saveFailureEnd = $leaveResult.IndexOf('else {', $saveFailure)
 $saveFailureBody = $leaveResult.Substring($saveFailure,
     $saveFailureEnd - $saveFailure)
 Require-Text $saveFailureBody 'm_cloudMatchRoomConfirmed = false;' 'Failed leave persistence must keep room membership unconfirmed.'
-Require-Text $saveFailureBody '服务端已退出但本地配置保存失败' 'Failed leave persistence must explain the split server/local state.'
+$leavePersistenceErrorPrefix = [string]([char]0x670D + [char]0x52A1 +
+    [char]0x7AEF + [char]0x5DF2 + [char]0x9000 + [char]0x51FA +
+    [char]0x4F46 + [char]0x672C + [char]0x5730 + [char]0x914D +
+    [char]0x7F6E + [char]0x4FDD + [char]0x5B58 + [char]0x5931 +
+    [char]0x8D25)
+Require-Text $saveFailureBody $leavePersistenceErrorPrefix 'Failed leave persistence must explain the split server/local state.'
 if ($saveFailureBody.Contains('m_cloudMatchRoomId.clear()') -or
     $saveFailureBody.Contains('m_cloudMatchBroadcasterName.Empty()')) {
     throw 'Failed leave persistence must retain the old room identity for an idempotent retry.'
