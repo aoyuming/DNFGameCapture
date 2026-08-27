@@ -18,21 +18,19 @@ export function registerDevice(
   db: Database.Database,
   deviceId: string,
   nowSec: number,
-): RegisteredDevice {
+): RegisteredDevice | null {
   const deviceToken = randomBytes(32).toString('base64url');
   const tokenHash = hashToken(deviceToken).toString('hex');
   const register = db.transaction(() => {
-    db.prepare(
+    const result = db.prepare(
       `INSERT INTO devices (id, token_hash, created_at, last_seen_at)
        VALUES (?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET
-         token_hash = excluded.token_hash,
-         last_seen_at = excluded.last_seen_at`,
+       ON CONFLICT(id) DO NOTHING`,
     ).run(deviceId, tokenHash, nowSec, nowSec);
+    return result.changes === 1;
   });
 
-  register();
-  return { deviceId, deviceToken };
+  return register() ? { deviceId, deviceToken } : null;
 }
 
 export function authenticateDevice(

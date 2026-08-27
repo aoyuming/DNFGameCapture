@@ -187,6 +187,10 @@ git commit -m "新增云端比赛房间服务骨架"
 const registered = await request(app).post('/api/devices/register').send({ deviceId });
 expect(registered.body.deviceToken).toMatch(/^[A-Za-z0-9_-]{40,}$/);
 
+const duplicate = await request(app).post('/api/devices/register').send({ deviceId });
+expect(duplicate.status).toBe(409);
+expect(duplicate.body).toEqual({ ok: false, code: 'device_already_registered' });
+
 const joined = await emitAck(socket, 'room:join', {
   roomId: 'li-yong', broadcasterName: '主播甲'
 });
@@ -198,7 +202,7 @@ const rejected = await emitAck(socket, 'room:join', {
 expect(rejected).toMatchObject({ ok: false, code: 'room_not_found' });
 ```
 
-同时断言：空白名称、超过 32 字符名称、错误令牌被拒绝；同名主播允许加入并返回设备 ID 后四位。
+同时断言：重复设备 ID 返回 409 且不返回令牌、不改变原令牌；空白名称、超过 32 个 grapheme cluster 的名称、控制/格式字符名称、错误令牌被拒绝；同名主播允许加入并返回设备 ID 后四位。
 
 - [ ] **Step 2: 运行身份测试确认失败**
 
@@ -210,6 +214,7 @@ Expected: FAIL，注册路由和 Socket 处理尚不存在。
 
 - 设备令牌使用 `crypto.randomBytes(32).toString('base64url')`。
 - SQLite 只保存 `sha256(deviceToken)`，比较使用 `timingSafeEqual`。
+- 设备注册仅插入新设备；已存在 `deviceId` 返回 HTTP 409 `device_already_registered`，不旋转、不覆盖原令牌，也不提供未鉴权的令牌重置接口。客户端丢失令牌时生成新的随机设备 ID。
 - Socket handshake auth 固定为 `{ deviceId, deviceToken, protocolVersion: 1 }`。
 - 事件固定为 `room:list`、`room:join`、`room:rename`、`room:leave`、`room:status`。
 - `room:leave` 删除 membership 和该设备快照，但保留 device 身份。

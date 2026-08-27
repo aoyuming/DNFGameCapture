@@ -8,18 +8,20 @@ app.httpServer.listen(serverConfig.port, host, () => {
   console.log(`Cloud match server listening on ${host}:${serverConfig.port}`);
 });
 
-let shuttingDown = false;
-async function shutdown(): Promise<void> {
-  if (shuttingDown) {
-    return;
-  }
-  shuttingDown = true;
-  await app.close();
+let shutdownPromise: Promise<void> | undefined;
+function shutdown(): Promise<void> {
+  shutdownPromise ??= app.close();
+  return shutdownPromise;
 }
 
-process.once('SIGINT', () => {
-  void shutdown();
-});
-process.once('SIGTERM', () => {
-  void shutdown();
-});
+async function handleShutdown(): Promise<void> {
+  try {
+    await shutdown();
+  } catch {
+    console.error('Cloud match server shutdown failed');
+    process.exitCode = 1;
+  }
+}
+
+process.once('SIGINT', handleShutdown);
+process.once('SIGTERM', handleShutdown);

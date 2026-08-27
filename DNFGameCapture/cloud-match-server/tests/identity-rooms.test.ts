@@ -7,8 +7,10 @@ import request from 'supertest';
 import { afterEach, describe, expect, test } from 'vitest';
 
 import { createCloudMatchApp } from '../src/app.js';
+import * as roomStore from '../src/rooms.js';
 
 type CloudMatchApp = ReturnType<typeof createCloudMatchApp>;
+type AppOptions = NonNullable<Parameters<typeof createCloudMatchApp>[0]>;
 
 interface RunningApp {
   app: CloudMatchApp;
@@ -24,11 +26,12 @@ interface Registration {
 const runningApps: RunningApp[] = [];
 const sockets: Socket[] = [];
 
-async function startApp(now: () => number = () => 1_700_000_000): Promise<RunningApp> {
+async function startApp(options: AppOptions = {}): Promise<RunningApp> {
   const directory = mkdtempSync(join(tmpdir(), 'dnf-cloud-identity-'));
   const app = createCloudMatchApp({
+    ...options,
     databasePath: join(directory, 'rooms.sqlite'),
-    now,
+    now: options.now ?? (() => 1_700_000_000),
   });
 
   try {
@@ -130,6 +133,12 @@ async function waitUntil(assertion: () => void): Promise<void> {
   throw lastError;
 }
 
+function serverRooms(app: CloudMatchApp, socket: Socket): Set<string> {
+  const serverSocket = app.io.sockets.sockets.get(socket.id as string);
+  expect(serverSocket).toBeDefined();
+  return serverSocket?.rooms as Set<string>;
+}
+
 afterEach(async () => {
   for (const socket of sockets.splice(0)) {
     socket.disconnect();
@@ -163,19 +172,32 @@ describe('device identity', () => {
     expect(stored.token_hash).not.toBe(response.body.deviceToken);
   });
 
-  test('rotates a token when the same device registers again', async () => {
+  test('rejects duplicate registration without rotating or disclosing a token', async () => {
     const { app, url } = await startApp();
     const first = await register(url, 'capture-device-0002');
-    const second = await register(url, 'capture-device-0002');
+    const originalHash = (
+      app.db.prepare('select token_hash from devices where id = ?').get(first.deviceId) as {
+        token_hash: string;
+      }
+    ).token_hash;
 
-    expect(second.deviceToken).not.toBe(first.deviceToken);
+    const duplicate = await request(url)
+      .post('/api/devices/register')
+      .send({ deviceId: first.deviceId });
 
-    const oldConnection = await connect(url, { ...first, protocolVersion: 1 });
-    expect(oldConnection.socket).toBeUndefined();
-    expect(oldConnection.error?.data).toEqual({ code: 'authentication_failed' });
+    expect(duplicate.status).toBe(409);
+    expect(duplicate.body).toEqual({ ok: false, code: 'device_already_registered' });
+    expect(duplicate.body).not.toHaveProperty('deviceToken');
+    expect(
+      (
+        app.db.prepare('select token_hash from devices where id = ?').get(first.deviceId) as {
+          token_hash: string;
+        }
+      ).token_hash,
+    ).toBe(originalHash);
 
-    const currentSocket = await connectRegistered(url, second);
-    expect(currentSocket.connected).toBe(true);
+    const originalSocket = await connectRegistered(url, first);
+    expect(originalSocket.connected).toBe(true);
     expect(
       (app.db.prepare('select count(*) as count from devices where id = ?').get(first.deviceId) as {
         count: number;
@@ -202,6 +224,17 @@ describe('device identity', () => {
       .send('{"deviceId":');
 
     expect(response.status).toBe(400);
+    expect(response.body).toEqual({ ok: false, code: 'invalid_request' });
+  });
+
+  test('limits registration JSON bodies to 4kb', async () => {
+    const { url } = await startApp();
+
+    const response = await request(url)
+      .post('/api/devices/register')
+      .send({ deviceId: 'capture-device-0004', padding: 'x'.repeat(4_096) });
+
+    expect(response.status).toBe(413);
     expect(response.body).toEqual({ ok: false, code: 'invalid_request' });
   });
 
@@ -258,7 +291,7 @@ describe('fixed room membership', () => {
     });
   });
 
-  test('rejects unknown rooms and invalid broadcaster names', async () => {
+  test('rejects unknown rooms, oversized room IDs, and unsafe broadcaster names', async () => {
     const { url } = await startApp();
     const socket = await connectRegistered(
       url,
@@ -269,18 +302,213 @@ describe('fixed room membership', () => {
       emitAck(socket, 'room:join', { roomId: 'unknown', broadcasterName: '主播甲' }),
     ).resolves.toEqual({ ok: false, code: 'room_not_found' });
 
-    for (const broadcasterName of ['', '   ', '播'.repeat(33)]) {
+    await expect(
+      emitAck(socket, 'room:join', {
+        roomId: 'x'.repeat(65),
+        broadcasterName: '主播甲',
+      }),
+    ).resolves.toEqual({ ok: false, code: 'invalid_request' });
+
+    for (const broadcasterName of [
+      '',
+      '   ',
+      '\u200b',
+      '主播\n甲',
+      '主播\u202e甲',
+      '主播\u2028甲',
+      '主播\u2029甲',
+      '播'.repeat(33),
+      '👍🏽'.repeat(33),
+    ]) {
       await expect(
         emitAck(socket, 'room:join', { roomId: 'li-yong', broadcasterName }),
       ).resolves.toEqual({ ok: false, code: 'invalid_broadcaster_name' });
     }
 
+    const decomposedName = `${'e\u0301'.repeat(31)}👍🏽`;
+    const normalizedName = `${'é'.repeat(31)}👍🏽`;
     await expect(
       emitAck(socket, 'room:join', {
         roomId: 'li-yong',
-        broadcasterName: '😀'.repeat(32),
+        broadcasterName: decomposedName,
       }),
-    ).resolves.toMatchObject({ ok: true, broadcasterName: '😀'.repeat(32) });
+    ).resolves.toMatchObject({ ok: true, broadcasterName: normalizedName });
+  });
+
+  test('catches operational Socket errors and remains usable without process errors', async () => {
+    let failList = true;
+    let failJoin = true;
+    const uncaught: unknown[] = [];
+    const unhandled: unknown[] = [];
+    const onUncaught = (error: unknown) => uncaught.push(error);
+    const onUnhandled = (error: unknown) => unhandled.push(error);
+    process.on('uncaughtException', onUncaught);
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      const { app, url } = await startApp({
+        roomService: {
+          listRooms(db) {
+            if (failList) {
+              failList = false;
+              throw new Error('sensitive list failure');
+            }
+            return roomStore.listRooms(db);
+          },
+          async joinRoom(...args) {
+            if (failJoin) {
+              failJoin = false;
+              throw new Error('sensitive async database failure');
+            }
+            return roomStore.joinRoom(...args);
+          },
+        },
+      });
+      const socket = await connectRegistered(
+        url,
+        await register(url, 'capture-device-1003'),
+      );
+
+      await expect(emitAck(socket, 'room:list')).resolves.toEqual({
+        ok: false,
+        code: 'internal_error',
+      });
+      await expect(emitAck(socket, 'room:list')).resolves.toMatchObject({ ok: true });
+      await expect(
+        emitAck(socket, 'room:join', { roomId: '59', broadcasterName: '主播甲' }),
+      ).resolves.toEqual({ ok: false, code: 'internal_error' });
+      expect(roomStore.getMembership(app.db, 'capture-device-1003')).toBeNull();
+      expect(serverRooms(app, socket).has('room:59')).toBe(false);
+
+      await expect(
+        emitAck(socket, 'room:join', { roomId: '59', broadcasterName: '主播甲' }),
+      ).resolves.toMatchObject({ ok: true });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(uncaught).toEqual([]);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('uncaughtException', onUncaught);
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  test('rolls adapter changes back when join or leave persistence fails', async () => {
+    let failJoin = true;
+    let failLeave = true;
+    const { app, url } = await startApp({
+      roomService: {
+        joinRoom(...args) {
+          if (failJoin) {
+            failJoin = false;
+            throw new Error('join persistence failed');
+          }
+          return roomStore.joinRoom(...args);
+        },
+        leaveRoom(...args) {
+          if (failLeave) {
+            failLeave = false;
+            throw new Error('leave persistence failed');
+          }
+          return roomStore.leaveRoom(...args);
+        },
+      },
+    });
+    const registration = await register(url, 'capture-device-1004');
+    const socket = await connectRegistered(url, registration);
+
+    await expect(
+      emitAck(socket, 'room:join', { roomId: '59', broadcasterName: '主播甲' }),
+    ).resolves.toEqual({ ok: false, code: 'internal_error' });
+    expect(roomStore.getMembership(app.db, registration.deviceId)).toBeNull();
+    expect(serverRooms(app, socket).has('room:59')).toBe(false);
+
+    await expect(
+      emitAck(socket, 'room:join', { roomId: '59', broadcasterName: '主播甲' }),
+    ).resolves.toMatchObject({ ok: true });
+    await expect(emitAck(socket, 'room:leave')).resolves.toEqual({
+      ok: false,
+      code: 'internal_error',
+    });
+    expect(roomStore.getMembership(app.db, registration.deviceId)?.room.id).toBe('59');
+    expect(serverRooms(app, socket).has('room:59')).toBe(true);
+
+    await expect(emitAck(socket, 'room:leave')).resolves.toEqual({ ok: true });
+    expect(roomStore.getMembership(app.db, registration.deviceId)).toBeNull();
+    expect(serverRooms(app, socket).has('room:59')).toBe(false);
+  });
+
+  test('restores adapter state after partial adapter failures', async () => {
+    let failJoin = true;
+    let failLeave = false;
+    const { app, url } = await startApp({
+      socketRoomAdapter: {
+        async join(socket, room) {
+          await socket.join(room);
+          if (failJoin) {
+            failJoin = false;
+            throw new Error('adapter join failed after joining');
+          }
+        },
+        async leave(socket, room) {
+          await socket.leave(room);
+          if (failLeave) {
+            failLeave = false;
+            throw new Error('adapter leave failed after leaving');
+          }
+        },
+      },
+    });
+    const registration = await register(url, 'capture-device-1005');
+    const socket = await connectRegistered(url, registration);
+
+    await expect(
+      emitAck(socket, 'room:join', { roomId: '59', broadcasterName: '主播甲' }),
+    ).resolves.toEqual({ ok: false, code: 'internal_error' });
+    expect(roomStore.getMembership(app.db, registration.deviceId)).toBeNull();
+    expect(serverRooms(app, socket).has('room:59')).toBe(false);
+
+    await expect(
+      emitAck(socket, 'room:join', { roomId: '59', broadcasterName: '主播甲' }),
+    ).resolves.toMatchObject({ ok: true });
+    failLeave = true;
+    await expect(emitAck(socket, 'room:leave')).resolves.toEqual({
+      ok: false,
+      code: 'internal_error',
+    });
+    expect(roomStore.getMembership(app.db, registration.deviceId)?.room.id).toBe('59');
+    expect(serverRooms(app, socket).has('room:59')).toBe(true);
+  });
+
+  test('serializes overlapping join and leave mutations per socket', async () => {
+    const acknowledgementOrder: string[] = [];
+    const { app, url } = await startApp({
+      roomService: {
+        async joinRoom(...args) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          return roomStore.joinRoom(...args);
+        },
+      },
+    });
+    const registration = await register(url, 'capture-device-1006');
+    const socket = await connectRegistered(url, registration);
+
+    const joined = emitAck(socket, 'room:join', {
+      roomId: 'li-yong',
+      broadcasterName: '并发主播',
+    }).then((result) => {
+      acknowledgementOrder.push('join');
+      return result;
+    });
+    const left = emitAck(socket, 'room:leave').then((result) => {
+      acknowledgementOrder.push('leave');
+      return result;
+    });
+
+    await expect(joined).resolves.toMatchObject({ ok: true });
+    await expect(left).resolves.toEqual({ ok: true });
+    expect(acknowledgementOrder).toEqual(['join', 'leave']);
+    expect(roomStore.getMembership(app.db, registration.deviceId)).toBeNull();
+    expect(serverRooms(app, socket).has('room:li-yong')).toBe(false);
   });
 
   test('allows duplicate names and returns suffixes for disambiguation', async () => {
@@ -384,6 +612,19 @@ describe('fixed room membership', () => {
 });
 
 describe('Socket connection lifecycle', () => {
+  test('applies Socket payload limits and shares concurrent close calls', async () => {
+    const { app } = await startApp();
+
+    expect(app.io.engine.opts.maxHttpBufferSize).toBe(65_536);
+    const firstClose = app.close();
+    const secondClose = app.close();
+    expect(secondClose).toBe(firstClose);
+
+    await firstClose;
+    expect(app.httpServer.listening).toBe(false);
+    expect(app.db.open).toBe(false);
+  });
+
   test('replaces an older connection for the same device', async () => {
     const { app, url } = await startApp();
     const registration = await register(url, 'capture-device-5001');
@@ -407,7 +648,7 @@ describe('Socket connection lifecycle', () => {
 
   test('touches last-seen and preserves membership after disconnect', async () => {
     let now = 100;
-    const { app, url } = await startApp(() => now);
+    const { app, url } = await startApp({ now: () => now });
     const registration = await register(url, 'capture-device-6001');
     const socket = await connectRegistered(url, registration);
     await emitAck(socket, 'room:join', { roomId: '59', broadcasterName: '离线主播' });
