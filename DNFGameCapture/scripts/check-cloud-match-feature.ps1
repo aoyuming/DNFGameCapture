@@ -103,6 +103,25 @@ Require-Text $handlerBody 'event["broadcasterName"]' 'Join ACK handler does not 
 Require-Text $handlerBody 'ackRoomId != m_cloudMatchPendingRoomId' 'Join ACK room correlation is missing.'
 Require-Text $handlerBody 'DnfCloudMatchNamesMatchForAck' 'Join ACK broadcaster-name correlation is missing.'
 
+$joinStart = $source.IndexOf('void CDNFGameCaptureDlg::BeginCloudRoomJoin(')
+$joinEnd = $source.IndexOf('void CDNFGameCaptureDlg::HandleCloudMatchMessage(', $joinStart)
+if ($joinStart -lt 0 -or $joinEnd -le $joinStart) {
+    throw 'BeginCloudRoomJoin could not be inspected.'
+}
+$joinBody = $source.Substring($joinStart, $joinEnd - $joinStart)
+Require-Text $joinBody 'm_cloudMatchClient.Configure(' 'Every cloud room join must rebuild the client generation.'
+if ($joinBody.Contains('if (!status.configured)') -or
+    $joinBody.Contains('GetStatusSnapshot()')) {
+    throw 'BeginCloudRoomJoin must unconditionally reconfigure the client for a new generation.'
+}
+$configureOffset = $joinBody.IndexOf('m_cloudMatchClient.Configure(')
+$startOffset = $joinBody.IndexOf('m_cloudMatchClient.Start()', $configureOffset)
+$joinOffset = $joinBody.IndexOf('m_cloudMatchClient.JoinRoom(', $startOffset)
+if ($configureOffset -lt 0 -or $startOffset -le $configureOffset -or
+    $joinOffset -le $startOffset) {
+    throw 'BeginCloudRoomJoin must Configure, Start, then JoinRoom in that order.'
+}
+
 $webStateStart = $source.IndexOf('DnfBuildSharedWebStateJson')
 if ($webStateStart -ge 0) {
     $webStateEnd = $source.IndexOf('BuildKillDisplayStatePayload', $webStateStart)
@@ -127,6 +146,10 @@ if ($snapshotStart -lt 0 -or $snapshotEnd -le $snapshotStart) {
 $snapshotBuilder = $source.Substring($snapshotStart, $snapshotEnd - $snapshotStart)
 if ($snapshotBuilder.Contains('DeviceToken') -or $snapshotBuilder.Contains('deviceToken')) {
     throw 'DeviceToken must not be included in cloud match snapshots.'
+}
+Require-Text $snapshotBuilder 'cloud["changeSource"] = "manual";' 'Unknown cloud snapshot sources must fall back to manual.'
+if ($snapshotBuilder.Contains('cloud["changeSource"] = "ocr";')) {
+    throw 'Cloud snapshot builder must not classify an unknown source as OCR.'
 }
 
 foreach ($line in ($source -split "`r?`n")) {

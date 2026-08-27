@@ -12257,16 +12257,13 @@ void CDNFGameCaptureDlg::BeginCloudRoomJoin(const std::string& roomId,
         return;
     }
 
-    const CloudMatchStatusSnapshot status = m_cloudMatchClient.GetStatusSnapshot();
-    if (!status.configured) {
-        const std::string serverUrl = std::string(CW2A(m_cloudMatchServerUrl, CP_UTF8));
-        if (!m_cloudMatchClient.Configure(serverUrl, m_cloudMatchDeviceId,
-            m_cloudMatchDeviceToken) || !m_cloudMatchClient.Start()) {
-            m_cloudMatchJoining = false;
-            m_cloudMatchLastError = L"云端比赛房间连接初始化失败。";
-            BroadcastStateToWeb();
-            return;
-        }
+    const std::string serverUrl = std::string(CW2A(m_cloudMatchServerUrl, CP_UTF8));
+    if (!m_cloudMatchClient.Configure(serverUrl, m_cloudMatchDeviceId,
+        m_cloudMatchDeviceToken) || !m_cloudMatchClient.Start()) {
+        m_cloudMatchJoining = false;
+        m_cloudMatchLastError = L"云端比赛房间连接初始化失败。";
+        BroadcastStateToWeb();
+        return;
     }
 
     if (!m_cloudMatchClient.JoinRoom(roomId,
@@ -12507,7 +12504,7 @@ std::string CDNFGameCaptureDlg::BuildCloudMatchSnapshotPayload(
     }
     else if (changeSource != "ocr" && changeSource != "manual" &&
         changeSource != "local_restore") {
-        cloud["changeSource"] = "ocr";
+        cloud["changeSource"] = "manual";
     }
 
     for (size_t index = 0; index < local["players"].size(); ++index) {
