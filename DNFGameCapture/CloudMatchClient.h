@@ -51,6 +51,15 @@ public:
     void SetMessageCallback(MessageCallback callback);
     std::size_t DispatchMessages(std::size_t maxCount = 32);
 
+#ifdef CLOUD_MATCH_CLIENT_STANDALONE
+    std::uint64_t ConfigureForTesting();
+    bool CompleteNextProtectedOperationForTesting();
+    bool JoinRoomForGenerationForTesting(std::uint64_t generation,
+        const std::string& roomId, const std::string& broadcasterName);
+    bool HasDesiredRoomForTesting() const;
+    std::uint64_t DesiredRoomGenerationForTesting() const;
+#endif
+
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;

@@ -28,6 +28,7 @@ namespace {
 constexpr std::size_t kMaxCommandQueueSize = 64;
 constexpr std::size_t kMaxPendingAcks = 64;
 constexpr std::size_t kMaxInboundMessageQueueSize = 128;
+constexpr std::size_t kMaxProtectedResultCapacity = 96;
 constexpr auto kAckTimeout = std::chrono::seconds(8);
 constexpr DWORD kNetworkTimeoutMs = 3000;
 constexpr DWORD kReceivePollTimeoutMs = 200;
@@ -197,29 +198,7 @@ public:
         parsed.deviceId = deviceId;
         parsed.deviceToken = deviceToken;
         parsed.credentialsValid = validUrl && !deviceId.empty() && !deviceToken.empty();
-        const std::uint64_t generation =
-            configGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
-        parsed.generation = generation;
-
-        CancelActiveOperation();
-
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            ClearCommandsLocked();
-            ClearLatestSnapshotLocked();
-            ClearPendingAcksLocked();
-            ClearDesiredRoomLocked();
-            ClearInboundMessagesLocked();
-            ClearConfigLocked(generation);
-            config = std::move(parsed);
-            status = {};
-            status.configured = config.credentialsValid;
-            status.statusText = validUrl ?
-                (config.credentialsValid ? "configured" : "credentials_required") :
-                "invalid_server_url";
-        }
-        condition.notify_all();
-        return validUrl;
+        return ApplyConfig(std::move(parsed), validUrl);
     }
 
     bool Start()
@@ -269,6 +248,7 @@ public:
             ClearPendingAcksLocked();
             ClearDesiredRoomLocked();
             ClearInboundMessagesLocked();
+            ResetProtectedCapacityLocked();
             ClearConfigLocked(stopGeneration);
             status = {};
             status.statusText = "stopped";
@@ -288,10 +268,9 @@ public:
             broadcasterName.size() > 128) {
             return false;
         }
-        if (!EnqueueCommand(CommandKind::joinRoom, roomId, broadcasterName, {})) return false;
         {
             std::lock_guard<std::mutex> lock(mutex);
-            desiredRoom = DesiredRoom{ roomId, broadcasterName };
+            if (!JoinRoomLocked(config.generation, roomId, broadcasterName)) return false;
         }
         condition.notify_all();
         return true;
@@ -300,10 +279,16 @@ public:
     bool Rename(const std::string& broadcasterName)
     {
         if (broadcasterName.empty() || broadcasterName.size() > 128) return false;
-        if (!EnqueueCommand(CommandKind::renameRoom, broadcasterName, {}, {})) return false;
         {
             std::lock_guard<std::mutex> lock(mutex);
-            if (desiredRoom) desiredRoom->broadcasterName = broadcasterName;
+            const std::uint64_t generation = config.generation;
+            if (!EnqueueCommandLocked(generation, CommandKind::renameRoom,
+                broadcasterName, {}, {})) {
+                return false;
+            }
+            if (desiredRoom && desiredRoom->generation == generation) {
+                desiredRoom->broadcasterName = broadcasterName;
+            }
         }
         condition.notify_all();
         return true;
@@ -311,9 +296,12 @@ public:
 
     bool LeaveRoom()
     {
-        if (!EnqueueCommand(CommandKind::leaveRoom, {}, {}, {})) return false;
         {
             std::lock_guard<std::mutex> lock(mutex);
+            if (!EnqueueCommandLocked(config.generation, CommandKind::leaveRoom,
+                {}, {}, {})) {
+                return false;
+            }
             desiredRoom.reset();
         }
         condition.notify_all();
@@ -336,11 +324,23 @@ public:
                 outboundLimit, sizingPacket);
         SecureClear(sizingPacket);
         if (encoded != cloud_match::SnapshotUploadEncodeResult::success) {
+            bool protectedResultReservation = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (config.generation != generation ||
+                    !ReserveProtectedResultLocked()) {
+                    SecureClear(snapshotJson);
+                    return false;
+                }
+                protectedResultReservation = true;
+            }
             SecureClear(snapshotJson);
-            NotifySnapshotUploadFailure(generation, encoded);
+            NotifySnapshotUploadFailure(generation, encoded,
+                &protectedResultReservation);
             return false;
         }
 
+        std::optional<PendingSnapshot> canceledSnapshot;
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (config.generation != generation) {
@@ -352,8 +352,18 @@ public:
                 SecureClear(snapshotJson);
                 return false;
             }
-            ClearLatestSnapshotLocked();
-            latestSnapshot.emplace(generation, std::move(snapshotJson));
+            if (!ReserveProtectedResultLocked()) {
+                SecureClear(snapshotJson);
+                return false;
+            }
+            if (latestSnapshot) {
+                canceledSnapshot = std::move(latestSnapshot);
+                latestSnapshot.reset();
+            }
+            latestSnapshot.emplace(generation, std::move(snapshotJson), true);
+        }
+        if (canceledSnapshot) {
+            NotifySnapshotCanceled(*canceledSnapshot);
         }
         condition.notify_all();
         return true;
@@ -397,8 +407,12 @@ public:
                 if (inboundMessages.empty()) break;
                 message = std::move(inboundMessages.front());
                 inboundMessages.pop_front();
+                if (message.protectedResult && protectedResultsQueued > 0) {
+                    --protectedResultsQueued;
+                }
                 copiedCallback = callback;
             }
+            condition.notify_all();
 
             if (copiedCallback) {
                 std::string callbackMessage = message.serialized;
@@ -410,6 +424,85 @@ public:
         }
         return dispatched;
     }
+
+#ifdef CLOUD_MATCH_CLIENT_STANDALONE
+    std::uint64_t ConfigureForTesting()
+    {
+        Config parsed;
+        parsed.serverValid = true;
+        parsed.credentialsValid = true;
+        parsed.port = INTERNET_DEFAULT_HTTP_PORT;
+        parsed.host = L"test.invalid";
+        parsed.deviceId = "test-device";
+        parsed.deviceToken = "test-token";
+        ApplyConfig(std::move(parsed), true);
+        return configGeneration.load(std::memory_order_acquire);
+    }
+
+    bool CompleteNextProtectedOperationForTesting()
+    {
+        Command command;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (commands.empty()) return false;
+            command = std::move(commands.front());
+            commands.pop_front();
+        }
+
+        std::string type;
+        switch (command.kind) {
+        case CommandKind::registerDevice:
+            type = "device_registration_error";
+            break;
+        case CommandKind::joinRoom:
+            type = "room_join_result";
+            break;
+        case CommandKind::renameRoom:
+            type = "room_rename_result";
+            break;
+        case CommandKind::leaveRoom:
+            type = "room_leave_result";
+            break;
+        case CommandKind::uploadSnapshot:
+            type = "snapshot_upload_result";
+            break;
+        case CommandKind::requestComparison:
+            type = "room_comparison_result";
+            break;
+        case CommandKind::requestSnapshot:
+            type = "snapshot_result";
+            break;
+        }
+        json result = {
+            { "type", type },
+            { "ok", false },
+            { "code", "test_complete" }
+        };
+        if (!command.requestId.empty()) result["requestId"] = command.requestId;
+        NotifyJson(command.generation, result, {}, false,
+            &command.protectedResultReservation);
+        return true;
+    }
+
+    bool JoinRoomForGenerationForTesting(std::uint64_t generation,
+        const std::string& roomId, const std::string& broadcasterName)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return JoinRoomLocked(generation, roomId, broadcasterName);
+    }
+
+    bool HasDesiredRoomForTesting() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return desiredRoom.has_value();
+    }
+
+    std::uint64_t DesiredRoomGenerationForTesting() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return desiredRoom ? desiredRoom->generation : 0;
+    }
+#endif
 
 private:
     enum class CommandKind
@@ -509,18 +602,58 @@ private:
 
     struct Command
     {
+        Command() = default;
+        ~Command() { Clear(); }
+
+        Command(const Command&) = delete;
+        Command& operator=(const Command&) = delete;
+
+        Command(Command&& other) noexcept
+            : kind(other.kind), generation(other.generation), sequence(other.sequence),
+            protectedResultReservation(other.protectedResultReservation)
+        {
+            argument.swap(other.argument);
+            secondArgument.swap(other.secondArgument);
+            requestId.swap(other.requestId);
+            other.generation = 0;
+            other.sequence = 0;
+            other.protectedResultReservation = false;
+        }
+
+        Command& operator=(Command&& other) noexcept
+        {
+            if (this != &other) {
+                Clear();
+                kind = other.kind;
+                generation = other.generation;
+                sequence = other.sequence;
+                protectedResultReservation = other.protectedResultReservation;
+                argument.swap(other.argument);
+                secondArgument.swap(other.secondArgument);
+                requestId.swap(other.requestId);
+                other.generation = 0;
+                other.sequence = 0;
+                other.protectedResultReservation = false;
+            }
+            return *this;
+        }
+
         CommandKind kind = CommandKind::joinRoom;
         std::string argument;
         std::string secondArgument;
         std::string requestId;
         std::uint64_t generation = 0;
         std::uint64_t sequence = 0;
+        bool protectedResultReservation = false;
 
         void Clear() noexcept
         {
             SecureClear(argument);
             SecureClear(secondArgument);
             SecureClear(requestId);
+            generation = 0;
+            sequence = 0;
+            protectedResultReservation = false;
         }
     };
 
@@ -528,6 +661,7 @@ private:
     {
         std::string roomId;
         std::string broadcasterName;
+        std::uint64_t generation = 0;
 
         ~DesiredRoom()
         {
@@ -539,8 +673,10 @@ private:
     struct PendingSnapshot
     {
         PendingSnapshot() = default;
-        PendingSnapshot(std::uint64_t sourceGeneration, std::string sourceJson)
-            : generation(sourceGeneration)
+        PendingSnapshot(std::uint64_t sourceGeneration, std::string sourceJson,
+            bool sourceReservation)
+            : generation(sourceGeneration),
+            protectedResultReservation(sourceReservation)
         {
             jsonText.swap(sourceJson);
             SecureClear(sourceJson);
@@ -550,10 +686,13 @@ private:
         PendingSnapshot(const PendingSnapshot&) = delete;
         PendingSnapshot& operator=(const PendingSnapshot&) = delete;
 
-        PendingSnapshot(PendingSnapshot&& other) noexcept : generation(other.generation)
+        PendingSnapshot(PendingSnapshot&& other) noexcept
+            : generation(other.generation),
+            protectedResultReservation(other.protectedResultReservation)
         {
             jsonText.swap(other.jsonText);
             other.generation = 0;
+            other.protectedResultReservation = false;
         }
 
         PendingSnapshot& operator=(PendingSnapshot&& other) noexcept
@@ -561,14 +700,17 @@ private:
             if (this != &other) {
                 SecureClear(jsonText);
                 generation = other.generation;
+                protectedResultReservation = other.protectedResultReservation;
                 jsonText.swap(other.jsonText);
                 other.generation = 0;
+                other.protectedResultReservation = false;
             }
             return *this;
         }
 
         std::uint64_t generation = 0;
         std::string jsonText;
+        bool protectedResultReservation = false;
     };
 
     struct PendingAck
@@ -577,11 +719,13 @@ private:
         std::string resultType;
         std::string requestId;
         Clock::time_point deadline;
+        bool protectedResultReservation = false;
 
         void Clear() noexcept
         {
             SecureClear(resultType);
             SecureClear(requestId);
+            protectedResultReservation = false;
         }
     };
 
@@ -600,7 +744,8 @@ private:
 
         InboundMessage(InboundMessage&& other) noexcept
             : generation(other.generation), coalescible(other.coalescible),
-            overflowError(other.overflowError), sensitive(other.sensitive)
+            overflowError(other.overflowError), sensitive(other.sensitive),
+            protectedResult(other.protectedResult)
         {
             type.swap(other.type);
             coalesceKey.swap(other.coalesceKey);
@@ -609,6 +754,7 @@ private:
             other.coalescible = false;
             other.overflowError = false;
             other.sensitive = false;
+            other.protectedResult = false;
         }
 
         InboundMessage& operator=(InboundMessage&& other) noexcept
@@ -621,6 +767,7 @@ private:
                 coalescible = other.coalescible;
                 overflowError = other.overflowError;
                 sensitive = other.sensitive;
+                protectedResult = other.protectedResult;
                 type.swap(other.type);
                 coalesceKey.swap(other.coalesceKey);
                 serialized.swap(other.serialized);
@@ -628,6 +775,7 @@ private:
                 other.coalescible = false;
                 other.overflowError = false;
                 other.sensitive = false;
+                other.protectedResult = false;
             }
             return *this;
         }
@@ -639,6 +787,7 @@ private:
         bool coalescible = false;
         bool overflowError = false;
         bool sensitive = false;
+        bool protectedResult = false;
     };
 
     struct WebSocketConnection
@@ -685,7 +834,43 @@ private:
     {
         return type == "device_registered" || type == "device_registration_error" ||
             type == "room_join_result" || type == "snapshot_upload_result" ||
-            type == "snapshot_result";
+            type == "room_rename_result" || type == "room_leave_result" ||
+            type == "room_comparison_result" || type == "snapshot_result";
+    }
+
+    bool DropOldestNotificationLocked() noexcept
+    {
+        const auto notification = std::find_if(inboundMessages.begin(),
+            inboundMessages.end(), [](const InboundMessage& queued) {
+                return !queued.protectedResult;
+            });
+        if (notification == inboundMessages.end()) return false;
+        inboundMessages.erase(notification);
+        return true;
+    }
+
+    bool ReserveProtectedResultLocked(bool reportQueueFull = true)
+    {
+        if (protectedResultsQueued + protectedResultReservations >=
+            kMaxProtectedResultCapacity) {
+            if (reportQueueFull) status.statusText = "queue_full";
+            return false;
+        }
+        while (inboundMessages.size() + protectedResultReservations >=
+            kMaxInboundMessageQueueSize) {
+            if (!DropOldestNotificationLocked()) {
+                if (reportQueueFull) status.statusText = "queue_full";
+                return false;
+            }
+        }
+        ++protectedResultReservations;
+        return true;
+    }
+
+    void ResetProtectedCapacityLocked() noexcept
+    {
+        protectedResultsQueued = 0;
+        protectedResultReservations = 0;
     }
 
     void ClearCommandsLocked() noexcept
@@ -714,6 +899,7 @@ private:
     void ClearInboundMessagesLocked() noexcept
     {
         inboundMessages.clear();
+        protectedResultsQueued = 0;
     }
 
     void ClearConfigLocked(std::uint64_t generation) noexcept
@@ -838,31 +1024,83 @@ private:
         return !result.host.empty();
     }
 
-    bool EnqueueCommand(CommandKind kind, std::string argument,
-        std::string secondArgument, std::string requestId)
+    bool ApplyConfig(Config&& parsed, bool validUrl)
     {
         {
             std::lock_guard<std::mutex> lock(mutex);
-            const bool registration = kind == CommandKind::registerDevice;
-            if (!config.serverValid || (!registration && !config.credentialsValid)) {
-                status.statusText = "not_configured";
-                return false;
-            }
-            if (commands.size() >= kMaxCommandQueueSize) {
-                status.statusText = "queue_full";
-                return false;
-            }
-            Command command;
-            command.kind = kind;
-            command.argument = std::move(argument);
-            command.secondArgument = std::move(secondArgument);
-            command.requestId = std::move(requestId);
-            command.generation = config.generation;
-            command.sequence = nextCommandSequence++;
-            commands.push_back(std::move(command));
+            const std::uint64_t generation =
+                configGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+            parsed.generation = generation;
+            ClearCommandsLocked();
+            ClearLatestSnapshotLocked();
+            ClearPendingAcksLocked();
+            ClearDesiredRoomLocked();
+            ClearInboundMessagesLocked();
+            ResetProtectedCapacityLocked();
+            CancelActiveOperation();
+            ClearConfigLocked(generation);
+            config = std::move(parsed);
+            status = {};
+            status.configured = config.credentialsValid;
+            status.statusText = validUrl ?
+                (config.credentialsValid ? "configured" : "credentials_required") :
+                "invalid_server_url";
         }
         condition.notify_all();
+        return validUrl;
+    }
+
+    bool EnqueueCommandLocked(std::uint64_t generation, CommandKind kind,
+        std::string argument, std::string secondArgument, std::string requestId)
+    {
+        const bool registration = kind == CommandKind::registerDevice;
+        if (stopping || config.generation != generation ||
+            configGeneration.load(std::memory_order_acquire) != generation ||
+            !config.serverValid || (!registration && !config.credentialsValid)) {
+            status.statusText = "not_configured";
+            return false;
+        }
+        if (commands.size() >= kMaxCommandQueueSize) {
+            status.statusText = "queue_full";
+            return false;
+        }
+        if (!ReserveProtectedResultLocked()) return false;
+
+        Command command;
+        command.kind = kind;
+        command.argument = std::move(argument);
+        command.secondArgument = std::move(secondArgument);
+        command.requestId = std::move(requestId);
+        command.generation = generation;
+        command.sequence = nextCommandSequence++;
+        command.protectedResultReservation = true;
+        commands.push_back(std::move(command));
         return true;
+    }
+
+    bool JoinRoomLocked(std::uint64_t generation, const std::string& roomId,
+        const std::string& broadcasterName)
+    {
+        if (config.generation != generation ||
+            !EnqueueCommandLocked(generation, CommandKind::joinRoom, roomId,
+                broadcasterName, {})) {
+            return false;
+        }
+        desiredRoom = DesiredRoom{ roomId, broadcasterName, generation };
+        return true;
+    }
+
+    bool EnqueueCommand(CommandKind kind, std::string argument,
+        std::string secondArgument, std::string requestId)
+    {
+        bool enqueued = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            enqueued = EnqueueCommandLocked(config.generation, kind,
+                std::move(argument), std::move(secondArgument), std::move(requestId));
+        }
+        if (enqueued) condition.notify_all();
+        return enqueued;
     }
 
     void SetQueueStatus(const char* text)
@@ -905,18 +1143,32 @@ private:
     }
 
     void EnqueueInboundMessage(std::uint64_t generation, std::string type,
-        std::string serialized, std::string coalesceKey, bool sensitive)
+        std::string serialized, std::string coalesceKey, bool sensitive,
+        bool* protectedResultReservation)
     {
         InboundMessage incoming;
         incoming.generation = generation;
         incoming.coalescible = IsCoalescibleNotification(type);
         incoming.sensitive = sensitive;
+        incoming.protectedResult = IsProtectedInboundResult(type);
         incoming.type.swap(type);
         incoming.coalesceKey.swap(coalesceKey);
         incoming.serialized.swap(serialized);
 
         std::lock_guard<std::mutex> lock(mutex);
         if (config.generation != generation) return;
+
+        if (incoming.protectedResult) {
+            if (!protectedResultReservation || !*protectedResultReservation ||
+                protectedResultReservations == 0) {
+                return;
+            }
+            --protectedResultReservations;
+            ++protectedResultsQueued;
+            *protectedResultReservation = false;
+            inboundMessages.push_back(std::move(incoming));
+            return;
+        }
 
         if (incoming.coalescible) {
             const auto existing = std::find_if(inboundMessages.rbegin(), inboundMessages.rend(),
@@ -933,74 +1185,58 @@ private:
             }
         }
 
-        if (inboundMessages.size() >= kMaxInboundMessageQueueSize) {
-            const auto notification = std::find_if(inboundMessages.begin(),
-                inboundMessages.end(), [](const InboundMessage& queued) {
-                    return queued.coalescible;
-                });
-            if (notification != inboundMessages.end()) {
-                inboundMessages.erase(notification);
-            }
-            else {
-                const bool overflowAlreadyQueued = std::any_of(inboundMessages.begin(),
-                    inboundMessages.end(), [](const InboundMessage& queued) {
-                        return queued.overflowError;
-                    });
-                if (overflowAlreadyQueued) return;
-
-                const auto replaceable = std::find_if(inboundMessages.begin(),
-                    inboundMessages.end(), [](const InboundMessage& queued) {
-                        return !IsProtectedInboundResult(queued.type);
-                    });
-                if (replaceable != inboundMessages.end()) {
-                    inboundMessages.erase(replaceable);
-                }
-                else if (!inboundMessages.empty()) {
-                    inboundMessages.pop_front();
-                }
-
-                InboundMessage overflow;
-                overflow.generation = generation;
-                overflow.type = "cloud_error";
-                overflow.serialized =
-                    R"({"code":"queue_overflow","ok":false,"type":"cloud_error"})";
-                overflow.overflowError = true;
-                inboundMessages.push_back(std::move(overflow));
-                return;
-            }
+        if (inboundMessages.size() + protectedResultReservations >=
+            kMaxInboundMessageQueueSize && !DropOldestNotificationLocked()) {
+            return;
         }
         inboundMessages.push_back(std::move(incoming));
     }
 
     void NotifyJson(std::uint64_t generation, const json& message,
-        std::string coalesceKey = {}, bool sensitive = false)
+        std::string coalesceKey = {}, bool sensitive = false,
+        bool* protectedResultReservation = nullptr)
     {
         std::string serialized;
         std::string type;
         try {
-            serialized = message.dump();
             const auto foundType = message.find("type");
             if (foundType == message.end() || !foundType->is_string()) {
-                SecureClear(serialized);
                 return;
             }
             type = foundType->get<std::string>();
+            serialized = message.dump();
         }
         catch (...) {
             SecureClear(serialized);
-            return;
         }
-        if (serialized.size() > cloud_match::kMaxCloudMatchPayloadBytes) {
-            SecureClear(type);
+        if (serialized.empty() ||
+            serialized.size() > cloud_match::kMaxCloudMatchPayloadBytes) {
             SecureClear(serialized);
-            return;
+            if (!protectedResultReservation || !*protectedResultReservation ||
+                !IsProtectedInboundResult(type)) {
+                SecureClear(type);
+                return;
+            }
+            try {
+                serialized = json{
+                    { "type", type },
+                    { "ok", false },
+                    { "code", "payload_too_large" }
+                }.dump();
+            }
+            catch (...) {
+                SecureClear(type);
+                SecureClear(serialized);
+                return;
+            }
         }
         EnqueueInboundMessage(generation, std::move(type), std::move(serialized),
-            std::move(coalesceKey), sensitive);
+            std::move(coalesceKey), sensitive, protectedResultReservation);
     }
 
     void NotifySnapshotUploadFailure(std::uint64_t generation,
-        cloud_match::SnapshotUploadEncodeResult result)
+        cloud_match::SnapshotUploadEncodeResult result,
+        bool* protectedResultReservation)
     {
         const char* code = result == cloud_match::SnapshotUploadEncodeResult::payloadTooLarge ?
             "payload_too_large" : "invalid_payload";
@@ -1008,7 +1244,16 @@ private:
             { "type", "snapshot_upload_result" },
             { "ok", false },
             { "code", code }
-        });
+        }, {}, false, protectedResultReservation);
+    }
+
+    void NotifySnapshotCanceled(PendingSnapshot& snapshot)
+    {
+        NotifyJson(snapshot.generation, json{
+            { "type", "snapshot_upload_result" },
+            { "ok", false },
+            { "code", "canceled" }
+        }, {}, false, &snapshot.protectedResultReservation);
     }
 
     void NotifyCloudError(std::uint64_t generation, std::string code,
@@ -1051,7 +1296,7 @@ private:
         Command command;
         while (!ShouldAbort(activeConfig.generation) &&
             PopRegistrationCommand(activeConfig.generation, command)) {
-            RegisterDeviceOnWorker(activeConfig, command.argument);
+            RegisterDeviceOnWorker(activeConfig, command);
         }
     }
 
@@ -1080,8 +1325,9 @@ private:
         }
     }
 
-    void RegisterDeviceOnWorker(const Config& activeConfig, const std::string& deviceId)
+    void RegisterDeviceOnWorker(const Config& activeConfig, Command& command)
     {
+        const std::string& deviceId = command.argument;
         json requestJson = { { "deviceId", deviceId } };
         std::string requestBody;
         SecureClearGuard requestBodyGuard(requestBody);
@@ -1089,7 +1335,7 @@ private:
             requestBody = requestJson.dump();
         }
         catch (...) {
-            NotifyRegistrationError(activeConfig.generation, "invalid_request");
+            NotifyRegistrationError(activeConfig.generation, "invalid_request", command);
             return;
         }
 
@@ -1098,13 +1344,13 @@ private:
             WINHTTP_NO_PROXY_BYPASS, 0));
         if (!session || !WinHttpSetTimeouts(session.Get(), kNetworkTimeoutMs,
             kNetworkTimeoutMs, kNetworkTimeoutMs, kNetworkTimeoutMs)) {
-            NotifyRegistrationError(activeConfig.generation, "network_error");
+            NotifyRegistrationError(activeConfig.generation, "network_error", command);
             return;
         }
         WinHttpHandle connect(WinHttpConnect(session.Get(), activeConfig.host.c_str(),
             activeConfig.port, 0));
         if (!connect) {
-            NotifyRegistrationError(activeConfig.generation, "network_error");
+            NotifyRegistrationError(activeConfig.generation, "network_error", command);
             return;
         }
 
@@ -1115,7 +1361,7 @@ private:
             nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags));
         if (!request || !WinHttpSetTimeouts(request.Get(), kNetworkTimeoutMs,
             kNetworkTimeoutMs, kNetworkTimeoutMs, kNetworkTimeoutMs)) {
-            NotifyRegistrationError(activeConfig.generation, "network_error");
+            NotifyRegistrationError(activeConfig.generation, "network_error", command);
             return;
         }
 
@@ -1141,7 +1387,7 @@ private:
                 ShouldAbort(activeConfig.generation)) {
                 return;
             }
-            NotifyRegistrationError(activeConfig.generation, "network_error");
+            NotifyRegistrationError(activeConfig.generation, "network_error", command);
             return;
         }
 
@@ -1155,19 +1401,20 @@ private:
             const bool aborted = ShouldAbort(activeConfig.generation);
             SecureClear(responseBody);
             if (!aborted) {
-                NotifyRegistrationError(activeConfig.generation, "invalid_response");
+                NotifyRegistrationError(activeConfig.generation, "invalid_response", command);
             }
             return;
         }
         requestScope.Finish();
         if (ShouldAbort(activeConfig.generation)) return;
         if (httpStatus == HTTP_STATUS_CONFLICT) {
-            NotifyRegistrationError(activeConfig.generation, "device_already_registered");
+            NotifyRegistrationError(activeConfig.generation,
+                "device_already_registered", command);
             SecureClear(responseBody);
             return;
         }
         if (httpStatus != HTTP_STATUS_CREATED) {
-            NotifyRegistrationError(activeConfig.generation, "registration_failed");
+            NotifyRegistrationError(activeConfig.generation, "registration_failed", command);
             SecureClear(responseBody);
             return;
         }
@@ -1182,7 +1429,7 @@ private:
         SecureClear(responseBody);
         if (response.is_discarded() || !response.is_object() ||
             !response.contains("deviceToken") || !response["deviceToken"].is_string()) {
-            NotifyRegistrationError(activeConfig.generation, "invalid_response");
+            NotifyRegistrationError(activeConfig.generation, "invalid_response", command);
             return;
         }
 
@@ -1199,20 +1446,22 @@ private:
             { "deviceId", deviceId },
             { "deviceToken", token }
         };
-        NotifyJson(activeConfig.generation, normalized, {}, true);
+        NotifyJson(activeConfig.generation, normalized, {}, true,
+            &command.protectedResultReservation);
         SecureClear(normalized["deviceToken"].get_ref<std::string&>());
         normalized.clear();
         response.clear();
         SecureClear(token);
     }
 
-    void NotifyRegistrationError(std::uint64_t generation, const std::string& code)
+    void NotifyRegistrationError(std::uint64_t generation, const std::string& code,
+        Command& command)
     {
         NotifyJson(generation, json{
             { "type", "device_registration_error" },
             { "ok", false },
             { "code", code }
-        });
+        }, {}, false, &command.protectedResultReservation);
     }
 
     bool OpenWebSocket(const Config& activeConfig, WebSocketConnection& connection)
@@ -1416,7 +1665,7 @@ private:
     }
 
     bool SendQueuedCommand(const Config& activeConfig, WebSocketConnection& connection,
-        const Command& command)
+        Command& command)
     {
         json payload;
         std::string eventName;
@@ -1453,12 +1702,13 @@ private:
             return true;
         }
         return SendEventWithAck(activeConfig, connection, eventName, payload, command.kind,
-            resultType, command.requestId);
+            resultType, command.requestId, command.protectedResultReservation);
     }
 
     bool SendEventWithAck(const Config& activeConfig, WebSocketConnection& connection,
         const std::string& eventName, const json& payload, CommandKind kind,
-        const std::string& resultType, const std::string& requestId)
+        const std::string& resultType, const std::string& requestId,
+        bool& protectedResultReservation)
     {
         std::uint64_t ackId = 0;
         {
@@ -1482,8 +1732,10 @@ private:
             std::lock_guard<std::mutex> lock(mutex);
             if (config.generation != activeConfig.generation) return false;
             pendingAcks.emplace(ackId, PendingAck{
-                kind, resultType, requestId, Clock::now() + kAckTimeout
+                kind, resultType, requestId, Clock::now() + kAckTimeout,
+                protectedResultReservation
             });
+            protectedResultReservation = false;
         }
         return true;
     }
@@ -1495,7 +1747,7 @@ private:
     }
 
     SnapshotSendResult SendSnapshotWithAck(const Config& activeConfig,
-        WebSocketConnection& connection, const PendingSnapshot& snapshot)
+        WebSocketConnection& connection, PendingSnapshot& snapshot)
     {
         std::uint64_t ackId = 0;
         {
@@ -1519,7 +1771,8 @@ private:
         if (encoded == cloud_match::SnapshotUploadEncodeResult::payloadTooLarge ||
             encoded == cloud_match::SnapshotUploadEncodeResult::invalidPayload) {
             SecureClear(packet);
-            NotifySnapshotUploadFailure(activeConfig.generation, encoded);
+            NotifySnapshotUploadFailure(activeConfig.generation, encoded,
+                &snapshot.protectedResultReservation);
             return SnapshotSendResult::rejected;
         }
 
@@ -1535,8 +1788,9 @@ private:
             }
             pendingAcks.emplace(ackId, PendingAck{
                 CommandKind::uploadSnapshot, "snapshot_upload_result", {},
-                Clock::now() + kAckTimeout
+                Clock::now() + kAckTimeout, snapshot.protectedResultReservation
             });
+            snapshot.protectedResultReservation = false;
         }
         return SnapshotSendResult::sent;
     }
@@ -1554,23 +1808,24 @@ private:
                 while (!commands.empty() && commands.front().generation != activeConfig.generation) {
                     commands.pop_front();
                 }
-                if (!commands.empty() && commands.front().kind != CommandKind::registerDevice) {
-                    command = commands.front();
+                if (!commands.empty() && commands.front().kind != CommandKind::registerDevice &&
+                    pendingAcks.size() < kMaxPendingAcks) {
+                    command = std::move(commands.front());
+                    commands.pop_front();
                     hasCommand = true;
                 }
             }
-            if (!hasCommand || !HasPendingAckCapacity(activeConfig.generation)) break;
+            if (!hasCommand) break;
             if (ShouldAbort(activeConfig.generation)) return false;
-            if (!SendQueuedCommand(activeConfig, connection, command)) return false;
-            if (ShouldAbort(activeConfig.generation)) return false;
-            {
+            if (!SendQueuedCommand(activeConfig, connection, command)) {
                 std::lock_guard<std::mutex> lock(mutex);
-                const auto found = std::find_if(commands.begin(), commands.end(),
-                    [&command](const Command& queued) {
-                        return queued.sequence == command.sequence;
-                    });
-                if (found != commands.end()) commands.erase(found);
+                if (config.generation == activeConfig.generation &&
+                    command.protectedResultReservation) {
+                    commands.push_front(std::move(command));
+                }
+                return false;
             }
+            if (ShouldAbort(activeConfig.generation)) return false;
         }
 
         if (!HasPendingAckCapacity(activeConfig.generation)) return true;
@@ -1587,10 +1842,18 @@ private:
         const SnapshotSendResult snapshotResult = SendSnapshotWithAck(activeConfig,
             connection, *snapshot);
         if (snapshotResult == SnapshotSendResult::transportFailure) {
-            std::lock_guard<std::mutex> lock(mutex);
-            if (!latestSnapshot && config.generation == activeConfig.generation) {
-                latestSnapshot = std::move(snapshot);
+            bool canceled = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (!latestSnapshot && config.generation == activeConfig.generation) {
+                    latestSnapshot = std::move(snapshot);
+                }
+                else if (config.generation == activeConfig.generation &&
+                    snapshot->protectedResultReservation) {
+                    canceled = true;
+                }
             }
+            if (canceled) NotifySnapshotCanceled(*snapshot);
             return false;
         }
         return true;
@@ -1610,14 +1873,37 @@ private:
                         command.kind == CommandKind::joinRoom;
                 });
         }
-        if (!remembered || queuedJoin ||
-            !HasPendingAckCapacity(activeConfig.generation)) return true;
+        if (!remembered || remembered->generation != activeConfig.generation ||
+            queuedJoin || !HasPendingAckCapacity(activeConfig.generation)) return true;
         Command join;
-        join.kind = CommandKind::joinRoom;
-        join.argument = remembered->roomId;
-        join.secondArgument = remembered->broadcasterName;
-        join.generation = activeConfig.generation;
-        return SendQueuedCommand(activeConfig, connection, join);
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (config.generation != activeConfig.generation ||
+                !desiredRoom || desiredRoom->generation != activeConfig.generation ||
+                std::any_of(commands.begin(), commands.end(),
+                    [&activeConfig](const Command& command) {
+                        return command.generation == activeConfig.generation &&
+                            command.kind == CommandKind::joinRoom;
+                    }) ||
+                !ReserveProtectedResultLocked(false)) {
+                return true;
+            }
+            join.kind = CommandKind::joinRoom;
+            join.argument = desiredRoom->roomId;
+            join.secondArgument = desiredRoom->broadcasterName;
+            join.generation = activeConfig.generation;
+            join.protectedResultReservation = true;
+        }
+        if (SendQueuedCommand(activeConfig, connection, join)) return true;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (config.generation == activeConfig.generation &&
+                join.protectedResultReservation && protectedResultReservations > 0) {
+                --protectedResultReservations;
+                join.protectedResultReservation = false;
+            }
+        }
+        return false;
     }
 
     void HandleAck(const Config& activeConfig, const cloud_match::SocketIoAck& ack)
@@ -1653,7 +1939,8 @@ private:
         }
         normalized["type"] = pending.resultType;
         if (!pending.requestId.empty()) normalized["requestId"] = pending.requestId;
-        NotifyJson(activeConfig.generation, normalized);
+        NotifyJson(activeConfig.generation, normalized, {}, false,
+            &pending.protectedResultReservation);
     }
 
     void UpdateStatusFromAck(std::uint64_t generation, CommandKind kind, const json& payload)
@@ -1742,14 +2029,15 @@ private:
                 }
             }
         }
-        for (const PendingAck& pending : expired) {
+        for (PendingAck& pending : expired) {
             json normalized = {
                 { "type", pending.resultType },
                 { "ok", false },
                 { "code", "timeout" }
             };
             if (!pending.requestId.empty()) normalized["requestId"] = pending.requestId;
-            NotifyJson(activeConfig.generation, normalized);
+            NotifyJson(activeConfig.generation, normalized, {}, false,
+                &pending.protectedResultReservation);
         }
     }
 
@@ -1761,15 +2049,16 @@ private:
             if (config.generation != activeConfig.generation) return;
             failed.swap(pendingAcks);
         }
-        for (const auto& entry : failed) {
-            const PendingAck& pending = entry.second;
+        for (auto& entry : failed) {
+            PendingAck& pending = entry.second;
             json normalized = {
                 { "type", pending.resultType },
                 { "ok", false },
                 { "code", code }
             };
             if (!pending.requestId.empty()) normalized["requestId"] = pending.requestId;
-            NotifyJson(activeConfig.generation, normalized);
+            NotifyJson(activeConfig.generation, normalized, {}, false,
+                &pending.protectedResultReservation);
         }
     }
 
@@ -1961,6 +2250,8 @@ private:
     CloudMatchStatusSnapshot status;
     MessageCallback callback;
     std::deque<InboundMessage> inboundMessages;
+    std::size_t protectedResultsQueued = 0;
+    std::size_t protectedResultReservations = 0;
 
     std::unordered_map<std::uint64_t, PendingAck> pendingAcks;
     std::uint64_t nextAckId = 1;
@@ -2061,3 +2352,31 @@ std::size_t CloudMatchClient::DispatchMessages(std::size_t maxCount)
 {
     return impl_->DispatchMessages(maxCount);
 }
+
+#ifdef CLOUD_MATCH_CLIENT_STANDALONE
+std::uint64_t CloudMatchClient::ConfigureForTesting()
+{
+    return impl_->ConfigureForTesting();
+}
+
+bool CloudMatchClient::CompleteNextProtectedOperationForTesting()
+{
+    return impl_->CompleteNextProtectedOperationForTesting();
+}
+
+bool CloudMatchClient::JoinRoomForGenerationForTesting(std::uint64_t generation,
+    const std::string& roomId, const std::string& broadcasterName)
+{
+    return impl_->JoinRoomForGenerationForTesting(generation, roomId, broadcasterName);
+}
+
+bool CloudMatchClient::HasDesiredRoomForTesting() const
+{
+    return impl_->HasDesiredRoomForTesting();
+}
+
+std::uint64_t CloudMatchClient::DesiredRoomGenerationForTesting() const
+{
+    return impl_->DesiredRoomGenerationForTesting();
+}
+#endif

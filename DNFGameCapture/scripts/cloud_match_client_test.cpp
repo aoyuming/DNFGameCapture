@@ -5,6 +5,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <unordered_set>
 
 namespace {
 
@@ -75,12 +76,92 @@ void TestConfigureDiscardsOldGenerationMessages()
     client.Stop();
 }
 
+void TestProtectedResultCapacityBackpressuresAndRecovers()
+{
+    CloudMatchClient client;
+    client.ConfigureForTesting();
+
+    std::size_t callbacks = 0;
+    std::unordered_set<std::string> requestIds;
+    client.SetMessageCallback([&](std::string message) {
+        ++callbacks;
+        for (std::size_t index = 0; index < 96; ++index) {
+            const std::string requestId = "request-" + std::to_string(index);
+            const std::string field = "\"requestId\":\"" + requestId + "\"";
+            if (message.find(field) != std::string::npos) {
+                requestIds.insert(requestId);
+                break;
+            }
+        }
+    });
+
+    for (std::size_t index = 0; index < 48; ++index) {
+        const std::string requestId = "request-" + std::to_string(index);
+        Require(client.RequestComparison(requestId),
+            "protected operation should be accepted while reserved capacity remains");
+        Require(client.CompleteNextProtectedOperationForTesting(),
+            "accepted operation should produce one protected result");
+    }
+    for (std::size_t index = 48; index < 96; ++index) {
+        const std::string requestId = "request-" + std::to_string(index);
+        Require(client.RequestComparison(requestId),
+            "queued operations should retain protected result reservations");
+    }
+
+    Require(!client.RequestComparison("request-overflow"),
+        "operation beyond protected result capacity must be rejected");
+    Require(client.GetStatusSnapshot().statusText == "queue_full",
+        "protected result backpressure should report queue_full");
+    for (std::size_t index = 48; index < 96; ++index) {
+        Require(client.CompleteNextProtectedOperationForTesting(),
+            "each reserved operation should produce one protected result");
+    }
+    Require(client.DispatchMessages(128) == 96,
+        "all accepted operations should retain exactly one protected result");
+    Require(callbacks == 96 && requestIds.size() == 96,
+        "all protected results should be delivered exactly once");
+
+    Require(client.RequestComparison("request-recovered"),
+        "dispatch should release protected capacity for another operation");
+    Require(client.CompleteNextProtectedOperationForTesting(),
+        "operation accepted after dispatch should complete");
+    Require(client.DispatchMessages() == 1,
+        "recovered protected capacity should deliver one result");
+}
+
+void TestDesiredRoomCannotCrossConfigurationGeneration()
+{
+    CloudMatchClient client;
+    const std::uint64_t oldGeneration = client.ConfigureForTesting();
+    Require(client.JoinRoom("old-room", "old-name"),
+        "old-generation join should be accepted");
+
+    const std::uint64_t newGeneration = client.ConfigureForTesting();
+    Require(newGeneration != oldGeneration,
+        "test configuration should advance generation");
+    Require(!client.HasDesiredRoomForTesting(),
+        "Configure should clear the old desired room");
+    Require(!client.JoinRoomForGenerationForTesting(oldGeneration,
+        "stale-room", "stale-name"),
+        "an old-generation join must be rejected after Configure");
+    Require(!client.HasDesiredRoomForTesting(),
+        "a stale join must not restore the old desired room");
+
+    Require(client.JoinRoomForGenerationForTesting(newGeneration,
+        "new-room", "new-name"),
+        "the active generation should still accept joins");
+    Require(client.DesiredRoomGenerationForTesting() == newGeneration,
+        "the remembered room should belong to the active generation");
+}
+
 } // namespace
 
 int main()
 {
     TestDispatchRunsCallbackOnCallerAndAllowsStop();
     TestConfigureDiscardsOldGenerationMessages();
+    TestProtectedResultCapacityBackpressuresAndRecovers();
+    TestDesiredRoomCannotCrossConfigurationGeneration();
     std::cout << "Cloud match client tests passed.\n";
     return 0;
 }

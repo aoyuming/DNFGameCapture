@@ -56,6 +56,7 @@ foreach ($needle in @(
     'kMaxCommandQueueSize = 64',
     'kMaxPendingAcks = 64',
     'kMaxInboundMessageQueueSize = 128',
+    'kMaxProtectedResultCapacity = 96',
     'kAckTimeout = std::chrono::seconds(8)',
     'kNetworkTimeoutMs = 3000',
     'kReceivePollTimeoutMs = 200',
@@ -65,6 +66,8 @@ foreach ($needle in @(
     'std::atomic<bool> stopRequested',
     'std::atomic<HINTERNET> activeCancelableHandle',
     'std::deque<InboundMessage> inboundMessages',
+    'protectedResultsQueued',
+    'protectedResultReservations',
     'activeCancelableHandle.exchange(nullptr)',
     'activeCancelableHandle.compare_exchange_strong',
     'PublishCancelableHandle(',
@@ -110,7 +113,6 @@ foreach ($needle in @(
     'EnqueueInboundMessage(',
     'DispatchMessages(std::size_t maxCount)',
     'IsCoalescibleNotification(',
-    'queue_overflow',
     'ClearCommandsLocked(',
     'ClearLatestSnapshotLocked(',
     'ClearPendingAcksLocked(',
@@ -122,14 +124,54 @@ foreach ($needle in @(
     }
 }
 
+foreach ($needle in @(
+    'ReserveProtectedResultLocked(',
+    'DropOldestNotificationLocked(',
+    'protectedResultsQueued + protectedResultReservations',
+    'inboundMessages.size() + protectedResultReservations',
+    'message.protectedResult && protectedResultsQueued > 0',
+    'condition.notify_all()',
+    'bool protectedResultReservation = false'
+)) {
+    if (-not $source.Contains($needle)) {
+        throw "CloudMatchClient protected-result capacity contract is missing: $needle"
+    }
+}
+if ($source -match '(?s)DropOldestNotificationLocked\(\).*?return\s+queued\.protectedResult') {
+    throw 'Protected results must never be selected as overflow victims.'
+}
+if ($source -notmatch '(?s)ReserveProtectedResultLocked\(.*?kMaxProtectedResultCapacity.*?status\.statusText = "queue_full"') {
+    throw 'Protected result reservations must enforce the hard 96-slot bound.'
+}
+
 if ($source -notmatch '(?s)DispatchMessages\(std::size_t maxCount\).*?copiedCallback.*?copiedCallback\(') {
     throw 'DispatchMessages must copy and invoke the callback on its caller.'
 }
 if ($source -match '(?s)void NotifyJson\(.*?copiedCallback\(') {
     throw 'The worker-side notification path must never invoke user callbacks.'
 }
-if ($source -notmatch '(?s)bool Configure\(.*?configGeneration\.fetch_add.*?CancelActiveOperation\(.*?ClearCommandsLocked\(.*?ClearLatestSnapshotLocked\(.*?ClearPendingAcksLocked\(.*?ClearDesiredRoomLocked\(') {
+if ($source -notmatch '(?s)bool ApplyConfig\(.*?configGeneration\.fetch_add.*?ClearCommandsLocked\(.*?ClearLatestSnapshotLocked\(.*?ClearPendingAcksLocked\(.*?ClearDesiredRoomLocked\(.*?CancelActiveOperation\(') {
     throw 'Configure must advance generation, cancel active I/O, and clear all old work.'
+}
+if ($source -notmatch '(?s)struct DesiredRoom.*?std::uint64_t generation.*?SendRememberedJoinIfNeeded.*?remembered->generation != activeConfig\.generation') {
+    throw 'Remembered room state must be bound to the active configuration generation.'
+}
+if ($source -notmatch '(?s)bool JoinRoom\(.*?lock_guard<std::mutex> lock\(mutex\).*?JoinRoomLocked\(config\.generation') {
+    throw 'JoinRoom must atomically capture generation, enqueue, and update desired room.'
+}
+foreach ($needle in @(
+    '~Command() { Clear(); }',
+    'Command(const Command&) = delete',
+    'Command& operator=(const Command&) = delete',
+    'Command(Command&& other) noexcept',
+    'Command& operator=(Command&& other) noexcept',
+    'SecureClear(argument)',
+    'SecureClear(secondArgument)',
+    'SecureClear(requestId)'
+)) {
+    if (-not $source.Contains($needle)) {
+        throw "CloudMatchClient move-only command hygiene is missing: $needle"
+    }
 }
 if ($source -notmatch 'PublishCancelableHandle\(HINTERNET handle,\s*std::uint64_t generation\)') {
     throw 'Cancelable handles must be published against an explicit configuration generation.'
