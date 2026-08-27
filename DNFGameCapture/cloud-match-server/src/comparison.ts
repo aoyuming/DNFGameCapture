@@ -158,16 +158,22 @@ function compareDeviceIds(left: string, right: string): number {
   return 0;
 }
 
-function normalizedIdentity(player: Player): Set<string> {
+function identityKey(value: string): string {
+  return normalizePlayerName(value).replace(/[A-Z]/g, (character) =>
+    String.fromCharCode(character.charCodeAt(0) + ('a'.charCodeAt(0) - 'A'.charCodeAt(0))),
+  );
+}
+
+function identityKeys(player: Player): Set<string> {
   const names = [player.mainName, ...player.aliases]
-    .map(normalizePlayerName)
+    .map(identityKey)
     .filter((name) => name.length > 0);
   return new Set(names);
 }
 
 function identitiesIntersect(left: Player, right: Player): boolean {
-  const leftNames = normalizedIdentity(left);
-  const rightNames = normalizedIdentity(right);
+  const leftNames = identityKeys(left);
+  const rightNames = identityKeys(right);
   for (const name of leftNames) {
     if (rightNames.has(name)) {
       return true;

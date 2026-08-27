@@ -186,6 +186,62 @@ describe('room snapshot comparison', () => {
     });
   });
 
+  test('folds only ASCII identity case without changing displayed names', () => {
+    const base = snapshot();
+    const a = snapshot({
+      redPlayers: replaceFirstPlayer(
+        base.redPlayers,
+        player('Alice', 0, ['ALICE ALT']),
+      ),
+    });
+    const b = snapshot({
+      redPlayers: replaceFirstPlayer(
+        base.redPlayers,
+        { ...player('alice', 0, ['alice alt']), kills: 1 },
+      ),
+    });
+
+    const result = compareRoomSnapshots([row('device-A', a), row('device-B', b)], 1_000);
+
+    expect(member(result, 'device-B')).toMatchObject({
+      identityMatchPercent: 100,
+      similarity: 99,
+      differences: [
+        {
+          kind: 'stat',
+          team: 'red',
+          playerName: 'Alice',
+          field: 'kills',
+          referenceValue: 0,
+          memberValue: 1,
+          delta: 1,
+        },
+      ],
+    });
+    expect(a.redPlayers[0]).toMatchObject({ mainName: 'Alice', aliases: ['ALICE ALT'] });
+    expect(b.redPlayers[0]).toMatchObject({ mainName: 'alice', aliases: ['alice alt'] });
+  });
+
+  test('does not case-fold non-ASCII identity characters', () => {
+    const base = snapshot();
+    const a = snapshot({
+      redPlayers: replaceFirstPlayer(
+        base.redPlayers,
+        player('\u00c9lodie', 0, ['\u00c9 Alias']),
+      ),
+    });
+    const b = snapshot({
+      redPlayers: replaceFirstPlayer(
+        base.redPlayers,
+        player('\u00e9lodie', 0, ['\u00e9 Alias']),
+      ),
+    });
+
+    const result = compareRoomSnapshots([row('device-A', a), row('device-B', b)], 1_000);
+
+    expect(member(result, 'device-B').identityMatchPercent).toBe(88);
+  });
+
   test('uses deterministic maximum one-to-one matching for overlapping aliases', () => {
     const base = snapshot();
     const a = snapshot({
