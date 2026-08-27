@@ -547,6 +547,7 @@ private:
     ULONGLONG m_cloudMatchUploadQueueResultDeadlineTick = 0;
     ULONGLONG m_cloudMatchLastObserveTick = 0;
     ULONGLONG m_cloudMatchJoinDeadlineTick = 0;
+    ULONGLONG m_cloudMatchLeaveDeadlineTick = 0;
     bool m_cloudMatchUploadDirty = false;
     bool m_cloudMatchUploadInFlight = false;
     bool m_cloudMatchUploadRetryBlocked = false;

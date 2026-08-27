@@ -19,7 +19,30 @@ function Require-Text([string]$content, [string]$needle, [string]$message) {
 function Get-CppFunctionBody([string]$content, [string]$signature) {
     $start = $content.IndexOf($signature, [System.StringComparison]::Ordinal)
     if ($start -lt 0) { throw "C++ function is missing: $signature" }
-    $open = $content.IndexOf('{', $start)
+    $parameterOpen = $content.IndexOf('(', $start)
+    if ($parameterOpen -lt 0) { throw "C++ function parameters are missing: $signature" }
+    $parameterDepth = 0
+    $parameterClose = -1
+    $inParameterString = $false
+    $inParameterChar = $false
+    for ($i = $parameterOpen; $i -lt $content.Length; ++$i) {
+        $ch = $content[$i]
+        if ($inParameterString -or $inParameterChar) {
+            if ($ch -eq [char]0x5C) { ++$i; continue }
+            if ($inParameterString -and $ch -eq '"') { $inParameterString = $false }
+            elseif ($inParameterChar -and $ch -eq "'") { $inParameterChar = $false }
+            continue
+        }
+        if ($ch -eq '"') { $inParameterString = $true; continue }
+        if ($ch -eq "'") { $inParameterChar = $true; continue }
+        if ($ch -eq '(') { ++$parameterDepth; continue }
+        if ($ch -eq ')') {
+            --$parameterDepth
+            if ($parameterDepth -eq 0) { $parameterClose = $i; break }
+        }
+    }
+    if ($parameterClose -lt 0) { throw "Unbalanced C++ parameters: $signature" }
+    $open = $content.IndexOf('{', $parameterClose)
     if ($open -lt 0) { throw "C++ function body is missing: $signature" }
     $depth = 0
     $inString = $false
@@ -63,6 +86,7 @@ $main = Read-RequiredFile (Join-Path $webRoot 'main.js')
 $style = Read-RequiredFile (Join-Path $webRoot 'style.css')
 $clientHeader = Read-RequiredFile (Join-Path $root 'CloudMatchClient.h')
 $clientSource = Read-RequiredFile (Join-Path $root 'CloudMatchClient.cpp')
+$clientTest = Read-RequiredFile (Join-Path $root 'scripts\cloud_match_client_test.cpp')
 
 Require-Text $header '#include "CloudMatchClient.h"' 'Main dialog does not include CloudMatchClient.'
 Require-Text $header 'CloudMatchClient m_cloudMatchClient' 'Main dialog does not own CloudMatchClient.'
@@ -122,6 +146,7 @@ Require-Text $header 'm_cloudMatchInFlightRevision' 'Cloud snapshot sent revisio
 Require-Text $header 'm_cloudMatchJoinDeadlineTick' 'Cloud room join deadline state is missing.'
 Require-Text $header 'm_cloudMatchRoomConfirmed' 'Confirmed cloud room state is missing.'
 Require-Text $header 'm_cloudMatchRestoring' 'Cloud room restore state is missing.'
+Require-Text $header 'm_cloudMatchLeaveDeadlineTick' 'Cloud room leave deadline state is missing.'
 Require-Text $header 'bool SaveCloudMatchSettings()' 'Cloud match settings persistence must report failure.'
 Require-Text $header 'bool SaveCloudMatchRevision()' 'Cloud snapshot revision needs dedicated persistence.'
 Require-Text $source 'if (m_cloudMatchJoining || m_cloudMatchRegistering ||' 'C++ does not reject concurrent cloud room mutations.'
@@ -255,6 +280,19 @@ if ($pollBody.Contains('m_cloudMatchUploadInFlight ||')) {
 if ($pollBody.Contains('SaveCloudMatchSettings()')) {
     throw 'Ordinary snapshot uploads must not rewrite the full CloudMatch identity settings.'
 }
+Require-Text $pollBody 'm_cloudMatchLeaveDeadlineTick' 'PollCloudMatch does not enforce a cloud room leave deadline.'
+$leaveTimeoutStart = $pollBody.IndexOf('if (m_cloudMatchLeaving && m_cloudMatchLeaveDeadlineTick')
+$uploadTimeoutStart = $pollBody.IndexOf('if (m_cloudMatchUploadInFlight &&', $leaveTimeoutStart)
+if ($leaveTimeoutStart -lt 0 -or $uploadTimeoutStart -le $leaveTimeoutStart) {
+    throw 'Cloud room leave timeout block could not be inspected.'
+}
+$leaveTimeout = $pollBody.Substring($leaveTimeoutStart,
+    $uploadTimeoutStart - $leaveTimeoutStart)
+Require-Text $leaveTimeout 'm_cloudMatchLeaving = false;' 'A timed-out leave must clear leaving state.'
+Require-Text $leaveTimeout 'm_cloudMatchRoomConfirmed = false;' 'A timed-out leave must mark room membership unknown.'
+if ($leaveTimeout.Contains('m_cloudMatchRoomId.clear()')) {
+    throw 'A timed-out leave must preserve local room identity for retry.'
+}
 $dataLockOffset = $pollBody.IndexOf('std::lock_guard<std::mutex> dataLock(m_dataMutex)')
 $snapshotBuildOffset = $pollBody.IndexOf('BuildTeamSyncSnapshotPayloadUnlocked()', $dataLockOffset)
 $sourceLockOffset = $pollBody.IndexOf('std::lock_guard<std::mutex> sourceLock(m_cloudMatchSourceMutex)',
@@ -295,11 +333,61 @@ $clientCanceled = Get-CppFunctionBody $clientSource 'void NotifySnapshotCanceled
 Require-Text $clientCanceled '{ "clientRevision", snapshot.clientRevision }' 'Canceled snapshots omit clientRevision.'
 $clientAckHandler = Get-CppFunctionBody $clientSource 'void HandleAck('
 Require-Text $clientAckHandler 'normalized["clientRevision"] = pending.clientRevision;' 'Snapshot ACK results omit clientRevision.'
+$clientAckFailure = Get-CppFunctionBody $clientSource 'void NotifyPendingAckFailure('
+Require-Text $clientAckFailure 'normalized["clientRevision"] = pending.clientRevision;' 'Shared pending-ACK failures omit clientRevision.'
+Require-Text $clientAckFailure 'normalized["requestId"] = pending.requestId;' 'Shared pending-ACK failures omit requestId.'
 $clientAckTimeout = Get-CppFunctionBody $clientSource 'void ExpireAcks('
-Require-Text $clientAckTimeout 'normalized["clientRevision"] = pending.clientRevision;' 'Snapshot ACK timeout results omit clientRevision.'
+Require-Text $clientAckTimeout 'NotifyPendingAckFailure(activeConfig.generation, pending, "timeout")' 'Snapshot ACK timeout does not use the shared revision-preserving settlement path.'
 $clientConnectionLoss = Get-CppFunctionBody $clientSource 'void FailPendingAcks('
-Require-Text $clientConnectionLoss 'normalized["clientRevision"] = pending.clientRevision;' 'Snapshot connection-loss results omit clientRevision.'
+Require-Text $clientConnectionLoss 'NotifyPendingAckFailure(activeConfig.generation, entry.second, code)' 'Snapshot connection-loss does not use the shared revision-preserving settlement path.'
 Require-Text $clientHeader 'CompleteLatestSnapshotAckForTesting' 'CloudMatchClient ACK correlation lacks an executable test seam.'
+$notifyJson = Get-CppFunctionBody $clientSource 'void NotifyJson('
+Require-Text $notifyJson 'clientRevision' 'Oversized protected snapshot results lose clientRevision.'
+Require-Text $notifyJson 'requestId' 'Oversized protected request results lose requestId.'
+Require-Text $clientHeader 'ExpireLatestSnapshotAckForTesting' 'Client tests do not exercise the production ACK expiry path.'
+Require-Text $clientHeader 'FailLatestSnapshotAckForTesting' 'Client tests do not exercise the production connection-loss path.'
+Require-Text $clientSource 'TakeLatestSnapshotForSend(activeConfig.generation)' 'Production snapshot sending does not use the shared latest-snapshot transfer path.'
+Require-Text $clientSource 'TakeLatestSnapshotForSend(generation)' 'Snapshot tests do not use the production latest-snapshot transfer path.'
+Require-Text $clientTest 'ExpireLatestSnapshotAckForTesting()' 'Executable tests do not run the production ACK expiry path.'
+Require-Text $clientTest 'FailLatestSnapshotAckForTesting("connection_lost")' 'Executable tests do not run the production connection-loss path.'
+Require-Text $clientTest 'CompleteLatestSnapshotAckForTesting(true, 808, {}, 70000)' 'Executable tests do not cover oversized snapshot result fallback.'
+
+$webCommandHandler = Get-CppFunctionBody $source 'LRESULT CDNFGameCaptureDlg::OnWebCmdReceived('
+$leaveCommandStart = $webCommandHandler.IndexOf('else if (action == "cmd_cloud_room_leave")')
+$nextCommandStart = $webCommandHandler.IndexOf('else if (action == "cmd_set_appearance_panel_open")', $leaveCommandStart)
+if ($leaveCommandStart -lt 0 -or $nextCommandStart -le $leaveCommandStart) {
+    throw 'Cloud room leave command branch could not be inspected.'
+}
+$leaveCommand = $webCommandHandler.Substring($leaveCommandStart,
+    $nextCommandStart - $leaveCommandStart)
+Require-Text $leaveCommand 'm_cloudMatchClient.Configure(' 'Unknown room leave does not rebuild the client generation.'
+Require-Text $leaveCommand 'm_cloudMatchClient.Start()' 'Unknown room leave does not start the cloud client.'
+Require-Text $leaveCommand 'm_cloudMatchClient.LeaveRoom()' 'Unknown room leave does not send a formal leave request.'
+Require-Text $leaveCommand 'm_cloudMatchLeaving = true;' 'Unknown room leave does not enter leaving state.'
+Require-Text $leaveCommand 'm_cloudMatchLeaveDeadlineTick' 'Cloud room leave command does not start a host deadline.'
+if ($leaveCommand.Contains('m_cloudMatchRoomId.clear()')) {
+    throw 'Cloud room leave command must not clear local identity before a successful ACK.'
+}
+
+$leaveResultStart = $handlerBody.IndexOf('else if (type == "room_leave_result")')
+$snapshotResultStart = $handlerBody.IndexOf('else if (type == "snapshot_upload_result")', $leaveResultStart)
+if ($leaveResultStart -lt 0 -or $snapshotResultStart -le $leaveResultStart) {
+    throw 'Cloud room leave result branch could not be inspected.'
+}
+$leaveResult = $handlerBody.Substring($leaveResultStart,
+    $snapshotResultStart - $leaveResultStart)
+Require-Text $leaveResult 'm_cloudMatchLeaveDeadlineTick = 0;' 'Cloud room leave result does not settle its host deadline.'
+$leaveSuccess = $leaveResult.IndexOf('if (ok)')
+$leaveClear = $leaveResult.IndexOf('m_cloudMatchRoomId.clear()', $leaveSuccess)
+$leaveFailure = $leaveResult.IndexOf('else {', $leaveClear)
+if ($leaveSuccess -lt 0 -or $leaveClear -le $leaveSuccess -or $leaveFailure -le $leaveClear) {
+    throw 'Cloud room identity must only be cleared inside the successful leave ACK branch.'
+}
+$leaveFailureBody = $leaveResult.Substring($leaveFailure)
+Require-Text $leaveFailureBody 'm_cloudMatchRoomConfirmed = false;' 'Failed cloud room leave must mark membership unknown.'
+if ($leaveFailureBody.Contains('m_cloudMatchRoomId.clear()')) {
+    throw 'Failed cloud room leave must preserve local identity for retry.'
+}
 $renameBranchStart = $handlerBody.IndexOf('else if (type == "room_rename_result")')
 $leaveBranchStart = $handlerBody.IndexOf('else if (type == "room_leave_result")', $renameBranchStart)
 if ($renameBranchStart -lt 0 -or $leaveBranchStart -le $renameBranchStart) {

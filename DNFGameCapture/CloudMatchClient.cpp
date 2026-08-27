@@ -469,7 +469,7 @@ public:
         return configGeneration.load(std::memory_order_acquire);
     }
 
-    bool CompleteNextProtectedOperationForTesting()
+    bool CompleteNextProtectedOperationForTesting(std::size_t responsePadding)
     {
         Command command;
         {
@@ -509,34 +509,21 @@ public:
             { "code", "test_complete" }
         };
         if (!command.requestId.empty()) result["requestId"] = command.requestId;
+        if (responsePadding > 0) result["padding"] = std::string(responsePadding, 'x');
         NotifyJson(command.generation, result, {}, false,
             &command.protectedResultReservation);
         return true;
     }
 
     bool CompleteLatestSnapshotAckForTesting(bool ok,
-        std::uint64_t acceptedRevision, const std::string& code)
+        std::uint64_t acceptedRevision, const std::string& code,
+        std::size_t responsePadding)
     {
         std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
         Config activeConfig;
         std::uint64_t ackId = 0;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            if (!latestSnapshot || latestSnapshot->generation != config.generation ||
-                nextAckId == (std::numeric_limits<std::uint64_t>::max)()) {
-                return false;
-            }
-            PendingSnapshot snapshot = std::move(*latestSnapshot);
-            latestSnapshot.reset();
-            ackId = nextAckId++;
-            pendingAcks.emplace(ackId, PendingAck{
-                CommandKind::uploadSnapshot, "snapshot_upload_result", {},
-                snapshot.clientRevision, Clock::now() + kAckTimeout,
-                snapshot.protectedResultReservation
-            });
-            snapshot.protectedResultReservation = false;
-            activeConfig = config;
-        }
+        if (!MoveLatestSnapshotToPendingAckForTesting(
+            Clock::now() + kAckTimeout, activeConfig, ackId)) return false;
 
         cloud_match::SocketIoAck ack;
         ack.id = ackId;
@@ -551,7 +538,32 @@ public:
                 { "code", code.empty() ? "server_error" : code }
             };
         }
+        if (responsePadding > 0) {
+            ack.payload["padding"] = std::string(responsePadding, 'x');
+        }
         HandleAck(activeConfig, ack);
+        return true;
+    }
+
+    bool ExpireLatestSnapshotAckForTesting()
+    {
+        std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
+        Config activeConfig;
+        std::uint64_t ackId = 0;
+        if (!MoveLatestSnapshotToPendingAckForTesting(
+            (Clock::time_point::min)(), activeConfig, ackId)) return false;
+        ExpireAcks(activeConfig);
+        return true;
+    }
+
+    bool FailLatestSnapshotAckForTesting(const std::string& code)
+    {
+        std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
+        Config activeConfig;
+        std::uint64_t ackId = 0;
+        if (!MoveLatestSnapshotToPendingAckForTesting(
+            Clock::now() + kAckTimeout, activeConfig, ackId)) return false;
+        FailPendingAcks(activeConfig, code.empty() ? "connection_lost" : code.c_str());
         return true;
     }
 
@@ -1377,11 +1389,26 @@ private:
                 return;
             }
             try {
-                serialized = json{
+                json fallback = {
                     { "type", type },
                     { "ok", false },
                     { "code", "payload_too_large" }
-                }.dump();
+                };
+                if (type == "snapshot_upload_result") {
+                    const auto revision = message.find("clientRevision");
+                    if (revision != message.end() &&
+                        (revision->is_number_unsigned() || revision->is_number_integer())) {
+                        fallback["clientRevision"] = *revision;
+                    }
+                }
+                const auto requestId = message.find("requestId");
+                if (requestId != message.end() && requestId->is_string()) {
+                    const std::string& value = requestId->get_ref<const std::string&>();
+                    if (!value.empty() && value.size() <= 128) {
+                        fallback["requestId"] = value;
+                    }
+                }
+                serialized = fallback.dump();
             }
             catch (...) {
                 SecureClear(type);
@@ -1913,6 +1940,45 @@ private:
         return config.generation == generation && pendingAcks.size() < kMaxPendingAcks;
     }
 
+    void TrackSnapshotAckLocked(std::uint64_t ackId, PendingSnapshot& snapshot,
+        Clock::time_point deadline)
+    {
+        pendingAcks.emplace(ackId, PendingAck{
+            CommandKind::uploadSnapshot, "snapshot_upload_result", {},
+            snapshot.clientRevision, deadline,
+            snapshot.protectedResultReservation
+        });
+        snapshot.protectedResultReservation = false;
+    }
+
+#ifdef CLOUD_MATCH_CLIENT_STANDALONE
+    bool MoveLatestSnapshotToPendingAckForTesting(Clock::time_point deadline,
+        Config& activeConfig, std::uint64_t& ackId)
+    {
+        const std::uint64_t generation = configGeneration.load(std::memory_order_acquire);
+        std::optional<PendingSnapshot> snapshot = TakeLatestSnapshotForSend(generation);
+        if (!snapshot) return false;
+
+        std::lock_guard<std::mutex> lock(mutex);
+        if (config.generation != generation ||
+            nextAckId == (std::numeric_limits<std::uint64_t>::max)()) return false;
+        ackId = nextAckId++;
+        TrackSnapshotAckLocked(ackId, *snapshot, deadline);
+        activeConfig = config;
+        return true;
+    }
+#endif
+
+    std::optional<PendingSnapshot> TakeLatestSnapshotForSend(std::uint64_t generation)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!latestSnapshot || latestSnapshot->generation != generation ||
+            config.generation != generation) return std::nullopt;
+        std::optional<PendingSnapshot> snapshot(std::move(*latestSnapshot));
+        latestSnapshot.reset();
+        return snapshot;
+    }
+
     SnapshotSendResult SendSnapshotWithAck(const Config& activeConfig,
         WebSocketConnection& connection, PendingSnapshot& snapshot)
     {
@@ -1954,12 +2020,7 @@ private:
             if (config.generation != activeConfig.generation) {
                 return SnapshotSendResult::transportFailure;
             }
-            pendingAcks.emplace(ackId, PendingAck{
-                CommandKind::uploadSnapshot, "snapshot_upload_result", {},
-                snapshot.clientRevision, Clock::now() + kAckTimeout,
-                snapshot.protectedResultReservation
-            });
-            snapshot.protectedResultReservation = false;
+            TrackSnapshotAckLocked(ackId, snapshot, Clock::now() + kAckTimeout);
         }
         return SnapshotSendResult::sent;
     }
@@ -1998,14 +2059,8 @@ private:
         }
 
         if (!HasPendingAckCapacity(activeConfig.generation)) return true;
-        std::optional<PendingSnapshot> snapshot;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            if (latestSnapshot && latestSnapshot->generation == activeConfig.generation) {
-                snapshot = std::move(latestSnapshot);
-                latestSnapshot.reset();
-            }
-        }
+        std::optional<PendingSnapshot> snapshot =
+            TakeLatestSnapshotForSend(activeConfig.generation);
         if (!snapshot) return true;
 
         const SnapshotSendResult snapshotResult = SendSnapshotWithAck(activeConfig,
@@ -2254,18 +2309,24 @@ private:
             }
         }
         for (PendingAck& pending : expired) {
-            json normalized = {
-                { "type", pending.resultType },
-                { "ok", false },
-                { "code", "timeout" }
-            };
-            if (!pending.requestId.empty()) normalized["requestId"] = pending.requestId;
-            if (pending.kind == CommandKind::uploadSnapshot) {
-                normalized["clientRevision"] = pending.clientRevision;
-            }
-            NotifyJson(activeConfig.generation, normalized, {}, false,
-                &pending.protectedResultReservation);
+            NotifyPendingAckFailure(activeConfig.generation, pending, "timeout");
         }
+    }
+
+    void NotifyPendingAckFailure(std::uint64_t generation, PendingAck& pending,
+        const char* code)
+    {
+        json normalized = {
+            { "type", pending.resultType },
+            { "ok", false },
+            { "code", code }
+        };
+        if (!pending.requestId.empty()) normalized["requestId"] = pending.requestId;
+        if (pending.kind == CommandKind::uploadSnapshot) {
+            normalized["clientRevision"] = pending.clientRevision;
+        }
+        NotifyJson(generation, normalized, {}, false,
+            &pending.protectedResultReservation);
     }
 
     void FailPendingAcks(const Config& activeConfig, const char* code)
@@ -2284,18 +2345,7 @@ private:
             }
         }
         for (auto& entry : failed) {
-            PendingAck& pending = entry.second;
-            json normalized = {
-                { "type", pending.resultType },
-                { "ok", false },
-                { "code", code }
-            };
-            if (!pending.requestId.empty()) normalized["requestId"] = pending.requestId;
-            if (pending.kind == CommandKind::uploadSnapshot) {
-                normalized["clientRevision"] = pending.clientRevision;
-            }
-            NotifyJson(activeConfig.generation, normalized, {}, false,
-                &pending.protectedResultReservation);
+            NotifyPendingAckFailure(activeConfig.generation, entry.second, code);
         }
     }
 
@@ -2605,15 +2655,27 @@ std::uint64_t CloudMatchClient::ConfigureForTesting()
     return impl_->ConfigureForTesting();
 }
 
-bool CloudMatchClient::CompleteNextProtectedOperationForTesting()
+bool CloudMatchClient::CompleteNextProtectedOperationForTesting(std::size_t responsePadding)
 {
-    return impl_->CompleteNextProtectedOperationForTesting();
+    return impl_->CompleteNextProtectedOperationForTesting(responsePadding);
 }
 
 bool CloudMatchClient::CompleteLatestSnapshotAckForTesting(bool ok,
-    std::uint64_t acceptedRevision, const std::string& code)
+    std::uint64_t acceptedRevision, const std::string& code,
+    std::size_t responsePadding)
 {
-    return impl_->CompleteLatestSnapshotAckForTesting(ok, acceptedRevision, code);
+    return impl_->CompleteLatestSnapshotAckForTesting(ok, acceptedRevision, code,
+        responsePadding);
+}
+
+bool CloudMatchClient::ExpireLatestSnapshotAckForTesting()
+{
+    return impl_->ExpireLatestSnapshotAckForTesting();
+}
+
+bool CloudMatchClient::FailLatestSnapshotAckForTesting(const std::string& code)
+{
+    return impl_->FailLatestSnapshotAckForTesting(code);
 }
 
 bool CloudMatchClient::JoinRoomForGenerationForTesting(std::uint64_t generation,

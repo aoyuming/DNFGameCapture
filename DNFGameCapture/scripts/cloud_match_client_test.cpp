@@ -71,14 +71,24 @@ void TestSnapshotResultsCarryLocalRevisionAndFilterOldGeneration()
         "snapshot C success must retain revision 303");
 
     Require(client.UploadSnapshot(MakeSnapshot(404)),
-        "snapshot failure fixture should enter the latest slot");
-    Require(client.CompleteLatestSnapshotAckForTesting(false, 0, "connection_lost"),
-        "snapshot failure should be completed through the ACK path");
+        "snapshot timeout fixture should enter the latest slot");
+    Require(client.ExpireLatestSnapshotAckForTesting(),
+        "snapshot timeout should run through the production expiry path");
     Require(client.DispatchMessages(8) == 1,
-        "snapshot failure should emit one result");
-    Require(messages.back().find("\"code\":\"connection_lost\"") != std::string::npos &&
+        "snapshot timeout should emit one result");
+    Require(messages.back().find("\"code\":\"timeout\"") != std::string::npos &&
         HasRevision(messages.back(), 404),
-        "snapshot failure must retain revision 404");
+        "expired snapshot ACK must retain revision 404");
+
+    Require(client.UploadSnapshot(MakeSnapshot(405)),
+        "snapshot disconnect fixture should enter the latest slot");
+    Require(client.FailLatestSnapshotAckForTesting("connection_lost"),
+        "snapshot disconnect should run through the production failure path");
+    Require(client.DispatchMessages(8) == 1,
+        "snapshot disconnect should emit one result");
+    Require(messages.back().find("\"code\":\"connection_lost\"") != std::string::npos &&
+        HasRevision(messages.back(), 405),
+        "connection-lost snapshot ACK must retain revision 405");
 
     Require(!client.UploadSnapshot(MakeSnapshot(505, 70000)),
         "oversized legal JSON should fail before entering the offline slot");
@@ -94,6 +104,36 @@ void TestSnapshotResultsCarryLocalRevisionAndFilterOldGeneration()
         "Configure should discard the old-generation snapshot result");
     Require(HasRevision(messages.back(), 707) && !HasRevision(messages.back(), 606),
         "only the current-generation snapshot result may be dispatched");
+}
+
+void TestOversizedProtectedFallbackPreservesCorrelation()
+{
+    CloudMatchClient client;
+    client.ConfigureForTesting();
+    std::vector<std::string> messages;
+    client.SetMessageCallback([&](std::string message) {
+        messages.push_back(std::move(message));
+    });
+
+    Require(client.UploadSnapshot(MakeSnapshot(808)),
+        "oversized ACK fixture should enter the latest slot");
+    Require(client.CompleteLatestSnapshotAckForTesting(true, 808, {}, 70000),
+        "oversized snapshot ACK should run through HandleAck and NotifyJson");
+    Require(client.DispatchMessages(8) == 1,
+        "oversized snapshot ACK should emit a compact fallback result");
+    Require(messages.back().find("\"code\":\"payload_too_large\"") != std::string::npos &&
+        HasRevision(messages.back(), 808),
+        "oversized snapshot fallback must preserve clientRevision 808");
+
+    Require(client.RequestComparison("comparison-request-42"),
+        "oversized request fixture should enter the command queue");
+    Require(client.CompleteNextProtectedOperationForTesting(70000),
+        "oversized request result should run through NotifyJson");
+    Require(client.DispatchMessages(8) == 1,
+        "oversized request result should emit a compact fallback result");
+    Require(messages.back().find("\"code\":\"payload_too_large\"") != std::string::npos &&
+        messages.back().find("\"requestId\":\"comparison-request-42\"") != std::string::npos,
+        "oversized protected request fallback must preserve requestId");
 }
 
 void TestDispatchRunsCallbackOnCallerAndAllowsStop()
@@ -356,6 +396,7 @@ void TestRememberedJoinRetriesAfterDispatchCapacityRelease()
 int main()
 {
     TestSnapshotResultsCarryLocalRevisionAndFilterOldGeneration();
+    TestOversizedProtectedFallbackPreservesCorrelation();
     TestDispatchRunsCallbackOnCallerAndAllowsStop();
     TestConfigureDiscardsOldGenerationMessages();
     TestProtectedResultCapacityBackpressuresAndRecovers();

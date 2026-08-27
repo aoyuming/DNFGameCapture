@@ -11002,42 +11002,42 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
         else if (action == "cmd_cloud_room_leave") {
             if (m_cloudMatchRoomId.empty()) {
                 m_cloudMatchSkipPromptThisRun = true;
+                m_cloudMatchLeaveDeadlineTick = 0;
                 m_cloudMatchLastError.Empty();
             }
             else if (m_cloudMatchJoining || m_cloudMatchRegistering ||
                 m_cloudMatchRenaming || m_cloudMatchLeaving) {
                 m_cloudMatchLastError = L"云端房间操作正在处理中，请稍候。";
             }
-            else if (!m_cloudMatchRoomConfirmed) {
-                const std::string serverUrl = std::string(CW2A(
-                    m_cloudMatchServerUrl, CP_UTF8));
-                if (m_cloudMatchClient.Configure(serverUrl, m_cloudMatchDeviceId,
-                    m_cloudMatchDeviceToken)) {
-                    m_cloudMatchClient.Start();
-                }
-                m_cloudMatchRoomId.clear();
-                m_cloudMatchBroadcasterName.Empty();
-                m_cloudMatchPendingRoomId.clear();
-                m_cloudMatchPendingBroadcasterName.Empty();
-                m_cloudMatchRoomConfirmed = false;
-                m_cloudMatchRestoring = false;
-                m_cloudMatchUploadDirty = false;
-                m_cloudMatchUploadInFlight = false;
-                m_cloudMatchUploadRetryBlocked = false;
-                m_cloudMatchUploadQueueResultDeadlineTick = 0;
-                m_cloudMatchInFlightRevision = 0;
-                DnfSecureClearString(m_cloudMatchInFlightPayload);
-                DnfSecureClearString(m_cloudMatchInFlightChangeSource);
-                m_cloudMatchSkipPromptThisRun = true;
-                if (SaveCloudMatchSettings()) m_cloudMatchLastError.Empty();
-            }
             else {
-                m_cloudMatchLeaving = m_cloudMatchClient.LeaveRoom();
-                if (!m_cloudMatchLeaving) {
-                    m_cloudMatchLastError = L"暂时无法退出云端房间，请稍后重试。";
+                bool clientReady = true;
+                if (!m_cloudMatchRoomConfirmed) {
+                    clientReady = false;
+                    m_cloudMatchRestoring = false;
+                    m_cloudMatchUploadInFlight = false;
+                    m_cloudMatchUploadQueueResultDeadlineTick = 0;
+                    m_cloudMatchInFlightRevision = 0;
+                    DnfSecureClearString(m_cloudMatchInFlightPayload);
+                    DnfSecureClearString(m_cloudMatchInFlightChangeSource);
+
+                    const std::string serverUrl = std::string(CW2A(
+                        m_cloudMatchServerUrl, CP_UTF8));
+                    clientReady = m_cloudMatchClient.Configure(serverUrl,
+                        m_cloudMatchDeviceId, m_cloudMatchDeviceToken) &&
+                        m_cloudMatchClient.Start();
+                }
+
+                if (clientReady && m_cloudMatchClient.LeaveRoom()) {
+                    m_cloudMatchLeaving = true;
+                    m_cloudMatchLeaveDeadlineTick = ::GetTickCount64() + 15000;
+                    m_cloudMatchLastError.Empty();
                 }
                 else {
-                    m_cloudMatchLastError.Empty();
+                    m_cloudMatchLeaving = false;
+                    m_cloudMatchLeaveDeadlineTick = 0;
+                    m_cloudMatchRoomConfirmed = false;
+                    m_cloudMatchLastError =
+                        L"无法提交退出云端房间请求；本地身份已保留，可稍后重试。";
                 }
             }
             BroadcastStateToWeb();
@@ -12795,6 +12795,7 @@ void CDNFGameCaptureDlg::HandleCloudMatchMessage(std::string message)
     }
     else if (type == "room_leave_result") {
         m_cloudMatchLeaving = false;
+        m_cloudMatchLeaveDeadlineTick = 0;
         if (ok) {
             m_cloudMatchRoomId.clear();
             m_cloudMatchBroadcasterName.Empty();
@@ -12813,7 +12814,9 @@ void CDNFGameCaptureDlg::HandleCloudMatchMessage(std::string message)
             if (SaveCloudMatchSettings()) m_cloudMatchLastError.Empty();
         }
         else {
-            m_cloudMatchLastError = DnfCloudMatchErrorText(code);
+            m_cloudMatchRoomConfirmed = false;
+            m_cloudMatchLastError = DnfCloudMatchErrorText(code) +
+                L" 本地房间身份已保留，退出状态未知，可重试。";
         }
     }
     else if (type == "snapshot_upload_result") {
@@ -13001,6 +13004,26 @@ void CDNFGameCaptureDlg::PollCloudMatch()
         CancelCloudRoomJoin(timeoutReason);
         BroadcastStateToWeb();
     }
+    if (m_cloudMatchLeaving && m_cloudMatchLeaveDeadlineTick != 0 &&
+        now >= m_cloudMatchLeaveDeadlineTick) {
+        const std::string serverUrl = std::string(CW2A(
+            m_cloudMatchServerUrl, CP_UTF8));
+        if (m_cloudMatchClient.Configure(serverUrl, m_cloudMatchDeviceId,
+            m_cloudMatchDeviceToken)) {
+            m_cloudMatchClient.Start();
+        }
+        m_cloudMatchLeaving = false;
+        m_cloudMatchLeaveDeadlineTick = 0;
+        m_cloudMatchRoomConfirmed = false;
+        m_cloudMatchUploadInFlight = false;
+        m_cloudMatchUploadQueueResultDeadlineTick = 0;
+        m_cloudMatchInFlightRevision = 0;
+        DnfSecureClearString(m_cloudMatchInFlightPayload);
+        DnfSecureClearString(m_cloudMatchInFlightChangeSource);
+        m_cloudMatchLastError =
+            L"退出云端房间响应超时；本地房间身份已保留，状态未知，可重试。";
+        BroadcastStateToWeb();
+    }
     if (m_cloudMatchUploadInFlight &&
         m_cloudMatchUploadQueueResultDeadlineTick != 0 &&
         now >= m_cloudMatchUploadQueueResultDeadlineTick) {
@@ -13062,7 +13085,7 @@ void CDNFGameCaptureDlg::PollCloudMatch()
     if (!m_cloudMatchUploadDirty || latestAlreadyQueued ||
         m_cloudMatchUploadRetryBlocked ||
         now < m_cloudMatchUploadDueTick || m_cloudMatchJoining ||
-        m_cloudMatchRegistering || m_cloudMatchRestoring ||
+        m_cloudMatchRegistering || m_cloudMatchRestoring || m_cloudMatchLeaving ||
         !m_cloudMatchRoomConfirmed ||
         !DnfIsCloudMatchRoomId(m_cloudMatchRoomId) ||
         m_cloudMatchDeviceToken.empty()) {
