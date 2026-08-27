@@ -282,6 +282,8 @@ private:
     std::string BuildTeamSyncSnapshotPayloadUnlocked();
     void LoadCloudMatchSettings();
     bool SaveCloudMatchSettings();
+    bool SaveCloudMatchSettingsForRoomIdentity(const std::string& roomIdOverride,
+        const CString& broadcasterNameOverride);
     bool SaveCloudMatchRevision();
     void StartSavedCloudMatchSession();
     void BeginCloudRoomJoin(const std::string& roomId, const CString& broadcasterName);

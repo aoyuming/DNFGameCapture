@@ -12307,6 +12307,13 @@ void CDNFGameCaptureDlg::LoadCloudMatchSettings()
 
 bool CDNFGameCaptureDlg::SaveCloudMatchSettings()
 {
+    return SaveCloudMatchSettingsForRoomIdentity(m_cloudMatchRoomId,
+        m_cloudMatchBroadcasterName);
+}
+
+bool CDNFGameCaptureDlg::SaveCloudMatchSettingsForRoomIdentity(
+    const std::string& roomIdOverride, const CString& broadcasterNameOverride)
+{
     bool saved = true;
     auto writeSetting = [&](const wchar_t* key, const wchar_t* value) {
         if (!::WritePrivateProfileString(L"CloudMatch", key, value, m_iniPath)) {
@@ -12315,7 +12322,7 @@ bool CDNFGameCaptureDlg::SaveCloudMatchSettings()
         };
 
     const CString deviceId = CA2W(m_cloudMatchDeviceId.c_str(), CP_UTF8);
-    const CString roomId = CA2W(m_cloudMatchRoomId.c_str(), CP_UTF8);
+    const CString roomId = CA2W(roomIdOverride.c_str(), CP_UTF8);
     writeSetting(L"ServerUrl", m_cloudMatchServerUrl);
     writeSetting(L"DeviceId", deviceId);
 
@@ -12338,7 +12345,7 @@ bool CDNFGameCaptureDlg::SaveCloudMatchSettings()
     ::SecureZeroMemory(tokenBuffer.data(), tokenBuffer.size() * sizeof(wchar_t));
 
     writeSetting(L"RoomId", roomId);
-    writeSetting(L"BroadcasterName", m_cloudMatchBroadcasterName);
+    writeSetting(L"BroadcasterName", broadcasterNameOverride);
     CString revision;
     revision.Format(L"%llu", static_cast<unsigned long long>(m_cloudMatchClientRevision));
     writeSetting(L"ClientRevision", revision);
@@ -12797,10 +12804,6 @@ void CDNFGameCaptureDlg::HandleCloudMatchMessage(std::string message)
         m_cloudMatchLeaving = false;
         m_cloudMatchLeaveDeadlineTick = 0;
         if (ok) {
-            m_cloudMatchRoomId.clear();
-            m_cloudMatchBroadcasterName.Empty();
-            m_cloudMatchPendingRoomId.clear();
-            m_cloudMatchPendingBroadcasterName.Empty();
             m_cloudMatchUploadDirty = false;
             m_cloudMatchUploadInFlight = false;
             m_cloudMatchUploadRetryBlocked = false;
@@ -12810,8 +12813,19 @@ void CDNFGameCaptureDlg::HandleCloudMatchMessage(std::string message)
             m_cloudMatchInFlightRevision = 0;
             DnfSecureClearString(m_cloudMatchInFlightPayload);
             DnfSecureClearString(m_cloudMatchInFlightChangeSource);
-            m_cloudMatchSkipPromptThisRun = true;
-            if (SaveCloudMatchSettings()) m_cloudMatchLastError.Empty();
+            if (!SaveCloudMatchSettingsForRoomIdentity({}, CString{})) {
+                m_cloudMatchRoomConfirmed = false;
+                m_cloudMatchLastError =
+                    L"服务端已退出但本地配置保存失败，请重试退出或检查 config.ini 写权限。";
+            }
+            else {
+                m_cloudMatchRoomId.clear();
+                m_cloudMatchBroadcasterName.Empty();
+                m_cloudMatchPendingRoomId.clear();
+                m_cloudMatchPendingBroadcasterName.Empty();
+                m_cloudMatchSkipPromptThisRun = true;
+                m_cloudMatchLastError.Empty();
+            }
         }
         else {
             m_cloudMatchRoomConfirmed = false;

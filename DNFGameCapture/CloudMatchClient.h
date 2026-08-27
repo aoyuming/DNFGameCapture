@@ -57,6 +57,8 @@ public:
     bool CompleteLatestSnapshotAckForTesting(bool ok,
         std::uint64_t acceptedRevision, const std::string& code,
         std::size_t responsePadding = 0);
+    bool CompleteLatestSnapshotAckWithPayloadForTesting(
+        const std::string& payloadJson);
     bool ExpireLatestSnapshotAckForTesting();
     bool FailLatestSnapshotAckForTesting(const std::string& code);
     bool JoinRoomForGenerationForTesting(std::uint64_t generation,

@@ -545,6 +545,22 @@ public:
         return true;
     }
 
+    bool CompleteLatestSnapshotAckWithPayloadForTesting(
+        const std::string& payloadJson)
+    {
+        std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
+        Config activeConfig;
+        std::uint64_t ackId = 0;
+        if (!MoveLatestSnapshotToPendingAckForTesting(
+            Clock::now() + kAckTimeout, activeConfig, ackId)) return false;
+
+        cloud_match::SocketIoAck ack;
+        ack.id = ackId;
+        ack.payload = json::parse(payloadJson, nullptr, false);
+        HandleAck(activeConfig, ack);
+        return true;
+    }
+
     bool ExpireLatestSnapshotAckForTesting()
     {
         std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
@@ -2193,7 +2209,10 @@ private:
 
         json normalized;
         const bool validObject = ack.payload.is_object();
-        const bool ok = validObject && ack.payload.value("ok", false);
+        const auto okValue = validObject ? ack.payload.find("ok") : ack.payload.end();
+        const bool validOk = validObject && okValue != ack.payload.end() &&
+            okValue->is_boolean();
+        const bool ok = validOk && okValue->get<bool>();
         if (ok) {
             normalized = ack.payload;
             UpdateStatusFromAck(activeConfig.generation, pending.kind, ack.payload);
@@ -2201,11 +2220,11 @@ private:
         else {
             normalized = {
                 { "ok", false },
-                { "code", validObject ?
+                { "code", validOk ?
                     SanitizeServerCode(ack.payload, "code", "server_error") :
                     "invalid_response" }
             };
-            if (validObject) {
+            if (validOk) {
                 const std::string message = SanitizeServerText(ack.payload, "message");
                 if (!message.empty()) normalized["message"] = message;
             }
@@ -2666,6 +2685,12 @@ bool CloudMatchClient::CompleteLatestSnapshotAckForTesting(bool ok,
 {
     return impl_->CompleteLatestSnapshotAckForTesting(ok, acceptedRevision, code,
         responsePadding);
+}
+
+bool CloudMatchClient::CompleteLatestSnapshotAckWithPayloadForTesting(
+    const std::string& payloadJson)
+{
+    return impl_->CompleteLatestSnapshotAckWithPayloadForTesting(payloadJson);
 }
 
 bool CloudMatchClient::ExpireLatestSnapshotAckForTesting()

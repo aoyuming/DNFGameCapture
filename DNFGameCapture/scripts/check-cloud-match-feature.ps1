@@ -302,7 +302,7 @@ if ($dataLockOffset -lt 0 -or $snapshotBuildOffset -le $dataLockOffset -or
     throw 'OCR cloud source correlation must hold data then source locks around snapshot construction.'
 }
 
-$saveSettingsBody = Get-CppFunctionBody $source 'bool CDNFGameCaptureDlg::SaveCloudMatchSettings('
+$saveSettingsBody = Get-CppFunctionBody $source 'bool CDNFGameCaptureDlg::SaveCloudMatchSettingsForRoomIdentity('
 Require-Text $saveSettingsBody 'WritePrivateProfileString' 'CloudMatch settings are not written to config.ini.'
 Require-Text $saveSettingsBody 'SecureZeroMemory' 'CloudMatch token conversion buffer is not securely erased.'
 Require-Text $saveSettingsBody 'return saved;' 'CloudMatch settings persistence does not report aggregate write failures.'
@@ -341,6 +341,7 @@ Require-Text $clientAckTimeout 'NotifyPendingAckFailure(activeConfig.generation,
 $clientConnectionLoss = Get-CppFunctionBody $clientSource 'void FailPendingAcks('
 Require-Text $clientConnectionLoss 'NotifyPendingAckFailure(activeConfig.generation, entry.second, code)' 'Snapshot connection-loss does not use the shared revision-preserving settlement path.'
 Require-Text $clientHeader 'CompleteLatestSnapshotAckForTesting' 'CloudMatchClient ACK correlation lacks an executable test seam.'
+Require-Text $clientHeader 'CompleteLatestSnapshotAckWithPayloadForTesting' 'CloudMatchClient malformed ACK handling lacks an executable test seam.'
 $notifyJson = Get-CppFunctionBody $clientSource 'void NotifyJson('
 Require-Text $notifyJson 'clientRevision' 'Oversized protected snapshot results lose clientRevision.'
 Require-Text $notifyJson 'requestId' 'Oversized protected request results lose requestId.'
@@ -351,6 +352,7 @@ Require-Text $clientSource 'TakeLatestSnapshotForSend(generation)' 'Snapshot tes
 Require-Text $clientTest 'ExpireLatestSnapshotAckForTesting()' 'Executable tests do not run the production ACK expiry path.'
 Require-Text $clientTest 'FailLatestSnapshotAckForTesting("connection_lost")' 'Executable tests do not run the production connection-loss path.'
 Require-Text $clientTest 'CompleteLatestSnapshotAckForTesting(true, 808, {}, 70000)' 'Executable tests do not cover oversized snapshot result fallback.'
+Require-Text $clientTest 'CompleteLatestSnapshotAckWithPayloadForTesting' 'Executable tests do not cover malformed ACK ok types.'
 
 $webCommandHandler = Get-CppFunctionBody $source 'LRESULT CDNFGameCaptureDlg::OnWebCmdReceived('
 $leaveCommandStart = $webCommandHandler.IndexOf('else if (action == "cmd_cloud_room_leave")')
@@ -377,17 +379,36 @@ if ($leaveResultStart -lt 0 -or $snapshotResultStart -le $leaveResultStart) {
 $leaveResult = $handlerBody.Substring($leaveResultStart,
     $snapshotResultStart - $leaveResultStart)
 Require-Text $leaveResult 'm_cloudMatchLeaveDeadlineTick = 0;' 'Cloud room leave result does not settle its host deadline.'
+Require-Text $leaveResult 'SaveCloudMatchSettingsForRoomIdentity({}, CString{})' 'Successful server leave must persist an empty identity before clearing the in-memory room.'
 $leaveSuccess = $leaveResult.IndexOf('if (ok)')
-$leaveClear = $leaveResult.IndexOf('m_cloudMatchRoomId.clear()', $leaveSuccess)
-$leaveFailure = $leaveResult.IndexOf('else {', $leaveClear)
-if ($leaveSuccess -lt 0 -or $leaveClear -le $leaveSuccess -or $leaveFailure -le $leaveClear) {
-    throw 'Cloud room identity must only be cleared inside the successful leave ACK branch.'
+$saveEmpty = $leaveResult.IndexOf('SaveCloudMatchSettingsForRoomIdentity({}, CString{})', $leaveSuccess)
+$saveFailure = $leaveResult.IndexOf('if (!SaveCloudMatchSettingsForRoomIdentity', $leaveSuccess)
+$leaveClear = $leaveResult.IndexOf('m_cloudMatchRoomId.clear()', $saveFailure)
+$leaveFailure = $leaveResult.LastIndexOf('else {')
+if ($leaveSuccess -lt 0 -or $saveEmpty -le $leaveSuccess -or
+    $saveFailure -le $leaveSuccess -or $leaveClear -le $saveFailure -or
+    $leaveFailure -le $leaveClear) {
+    throw 'Cloud room identity must only be cleared after empty identity persistence succeeds.'
+}
+$saveFailureEnd = $leaveResult.IndexOf('else {', $saveFailure)
+$saveFailureBody = $leaveResult.Substring($saveFailure,
+    $saveFailureEnd - $saveFailure)
+Require-Text $saveFailureBody 'm_cloudMatchRoomConfirmed = false;' 'Failed leave persistence must keep room membership unconfirmed.'
+Require-Text $saveFailureBody '服务端已退出但本地配置保存失败' 'Failed leave persistence must explain the split server/local state.'
+if ($saveFailureBody.Contains('m_cloudMatchRoomId.clear()') -or
+    $saveFailureBody.Contains('m_cloudMatchBroadcasterName.Empty()')) {
+    throw 'Failed leave persistence must retain the old room identity for an idempotent retry.'
 }
 $leaveFailureBody = $leaveResult.Substring($leaveFailure)
 Require-Text $leaveFailureBody 'm_cloudMatchRoomConfirmed = false;' 'Failed cloud room leave must mark membership unknown.'
 if ($leaveFailureBody.Contains('m_cloudMatchRoomId.clear()')) {
     throw 'Failed cloud room leave must preserve local identity for retry.'
 }
+$saveIdentityBody = $saveSettingsBody
+Require-Text $saveIdentityBody 'CA2W(roomIdOverride.c_str(), CP_UTF8)' 'Cloud identity persistence does not write the requested room identity.'
+Require-Text $saveIdentityBody 'writeSetting(L"BroadcasterName", broadcasterNameOverride)' 'Cloud identity persistence does not write the requested broadcaster identity.'
+$startSavedBody = Get-CppFunctionBody $source 'void CDNFGameCaptureDlg::StartSavedCloudMatchSession('
+Require-Text $startSavedBody '!DnfIsCloudMatchRoomId(m_cloudMatchRoomId)' 'Restart must not join after the empty room identity was saved.'
 $renameBranchStart = $handlerBody.IndexOf('else if (type == "room_rename_result")')
 $leaveBranchStart = $handlerBody.IndexOf('else if (type == "room_leave_result")', $renameBranchStart)
 if ($renameBranchStart -lt 0 -or $leaveBranchStart -le $renameBranchStart) {

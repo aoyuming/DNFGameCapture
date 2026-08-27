@@ -136,6 +136,27 @@ void TestOversizedProtectedFallbackPreservesCorrelation()
         "oversized protected request fallback must preserve requestId");
 }
 
+void TestMalformedAckOkTypeBecomesInvalidResponse()
+{
+    CloudMatchClient client;
+    client.ConfigureForTesting();
+    std::vector<std::string> messages;
+    client.SetMessageCallback([&](std::string message) {
+        messages.push_back(std::move(message));
+    });
+
+    Require(client.UploadSnapshot(MakeSnapshot(909)),
+        "malformed ACK fixture should enter the latest slot");
+    Require(client.CompleteLatestSnapshotAckWithPayloadForTesting(
+        R"({"ok":"yes","acceptedRevision":909})"),
+        "malformed ACK should run through the production ACK handler");
+    Require(client.DispatchMessages(8) == 1,
+        "malformed ACK should emit one normalized result");
+    Require(messages.back().find("\"code\":\"invalid_response\"") !=
+        std::string::npos && HasRevision(messages.back(), 909),
+        "non-boolean ACK ok must become invalid_response and retain revision");
+}
+
 void TestDispatchRunsCallbackOnCallerAndAllowsStop()
 {
     CloudMatchClient client;
@@ -397,6 +418,7 @@ int main()
 {
     TestSnapshotResultsCarryLocalRevisionAndFilterOldGeneration();
     TestOversizedProtectedFallbackPreservesCorrelation();
+    TestMalformedAckOkTypeBecomesInvalidResponse();
     TestDispatchRunsCallbackOnCallerAndAllowsStop();
     TestConfigureDiscardsOldGenerationMessages();
     TestProtectedResultCapacityBackpressuresAndRecovers();
