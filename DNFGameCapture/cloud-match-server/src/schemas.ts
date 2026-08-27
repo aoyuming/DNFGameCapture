@@ -3,6 +3,7 @@ import { z } from 'zod';
 const DEVICE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 const DEVICE_TOKEN_PATTERN = /^[A-Za-z0-9_-]+$/;
 const FORBIDDEN_BROADCASTER_CHARACTERS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+const VISIBLE_BROADCASTER_BASE = /[\p{L}\p{N}\p{P}\p{S}]/u;
 const graphemeSegmenter = new Intl.Segmenter('zh-CN', { granularity: 'grapheme' });
 
 export const deviceIdSchema = z
@@ -25,6 +26,7 @@ export const broadcasterNameSchema = z
     const graphemeCount = Array.from(graphemeSegmenter.segment(trimmed)).length;
     if (
       FORBIDDEN_BROADCASTER_CHARACTERS.test(normalized) ||
+      !VISIBLE_BROADCASTER_BASE.test(trimmed) ||
       graphemeCount < 1 ||
       graphemeCount > 32
     ) {

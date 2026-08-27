@@ -169,7 +169,31 @@ export function createCloudMatchApp(
   const httpServer = createServer(expressApp);
   const io = new SocketIoServer(httpServer, { maxHttpBufferSize: 65_536 });
   const activeSockets = new Map<string, Socket>();
+  const deviceQueues = new Map<string, Promise<void>>();
   let closePromise: Promise<void> | undefined;
+
+  const removeSettledDeviceQueue = (deviceId: string, tail: Promise<void>): void => {
+    void tail.then(() => {
+      if (deviceQueues.get(deviceId) === tail && !activeSockets.has(deviceId)) {
+        deviceQueues.delete(deviceId);
+      }
+    });
+  };
+
+  const enqueueDeviceOperation = <T>(
+    deviceId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> => {
+    const previous = deviceQueues.get(deviceId) ?? Promise.resolve();
+    const result = previous.then(operation, operation);
+    const tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    deviceQueues.set(deviceId, tail);
+    removeSettledDeviceQueue(deviceId, tail);
+    return result;
+  };
 
   expressApp.use(express.json({ limit: '4kb' }));
   expressApp.get('/health', (_request, response) => {
@@ -214,26 +238,48 @@ export function createCloudMatchApp(
 
   io.on('connection', (socket) => {
     const deviceId = (socket.data as AuthenticatedSocketData).deviceId;
-    const previousSocket = activeSockets.get(deviceId);
-    if (previousSocket && previousSocket.id !== socket.id) {
-      previousSocket.emit('connection:replaced', {
-        code: 'replaced_by_new_connection',
-      });
-      previousSocket.disconnect(true);
-    }
-    activeSockets.set(deviceId, socket);
-    try {
-      touchLastSeen(db, deviceId, now());
-    } catch {
-      socket.disconnect(true);
-      return;
-    }
+    let restoredRoomId: string | null = null;
 
-    let mutationQueue = Promise.resolve();
+    const initialization = enqueueDeviceOperation(deviceId, async () => {
+      if (!socket.connected) {
+        return;
+      }
+
+      const membership = await roomService.getMembership(db, deviceId);
+      restoredRoomId = membership?.room.id ?? null;
+      if (restoredRoomId) {
+        await socketRoomAdapter.join(socket, roomNamespace(restoredRoomId));
+      }
+      touchLastSeen(db, deviceId, now());
+
+      if (!socket.connected) {
+        return;
+      }
+      const previousSocket = activeSockets.get(deviceId);
+      activeSockets.set(deviceId, socket);
+      if (previousSocket && previousSocket.id !== socket.id) {
+        previousSocket.emit('connection:replaced', {
+          code: 'replaced_by_new_connection',
+        });
+        previousSocket.disconnect(true);
+      }
+    });
+    void initialization.catch(async () => {
+      if (restoredRoomId && socket.rooms.has(roomNamespace(restoredRoomId))) {
+        try {
+          await socketRoomAdapter.leave(socket, roomNamespace(restoredRoomId));
+        } catch {
+          // Disconnecting below removes any adapter state that rollback could not clear.
+        }
+      }
+      socket.emit('session:error', { code: 'internal_error' });
+      socket.disconnect(true);
+    });
+
     const bindAckEvent = (
       event: string,
       handler: (payload: unknown) => MaybePromise<unknown>,
-      serializeMutation = false,
+      serializeForDevice = false,
     ): void => {
       socket.on(event, (...args: unknown[]) => {
         const acknowledge = args.at(-1);
@@ -243,16 +289,20 @@ export function createCloudMatchApp(
         const payload = args.length > 1 ? args[0] : undefined;
         const run = async (): Promise<void> => {
           let response: unknown;
-          try {
-            response = await handler(payload);
-          } catch {
+          if (serializeForDevice && activeSockets.get(deviceId) !== socket) {
             response = { ok: false, code: 'internal_error' };
+          } else {
+            try {
+              response = await handler(payload);
+            } catch {
+              response = { ok: false, code: 'internal_error' };
+            }
           }
           safeAcknowledge(acknowledge as Acknowledge, response);
         };
 
-        if (serializeMutation) {
-          mutationQueue = mutationQueue.then(run, run);
+        if (serializeForDevice) {
+          void enqueueDeviceOperation(deviceId, run);
         } else {
           void run();
         }
@@ -353,21 +403,27 @@ export function createCloudMatchApp(
       true,
     );
 
-    bindAckEvent('room:status', async () => ({
-      ok: true,
-      membership: await roomService.getMembership(db, deviceId),
-      online: activeSockets.get(deviceId) === socket,
-    }));
+    bindAckEvent(
+      'room:status',
+      async () => ({
+        ok: true,
+        membership: await roomService.getMembership(db, deviceId),
+        online: activeSockets.get(deviceId) === socket,
+      }),
+      true,
+    );
 
     socket.on('disconnect', () => {
-      try {
-        touchLastSeen(db, deviceId, now());
-      } catch {
-        // Shutdown may close the database while disconnect notifications drain.
-      }
       if (activeSockets.get(deviceId) === socket) {
         activeSockets.delete(deviceId);
       }
+      void enqueueDeviceOperation(deviceId, async () => {
+        try {
+          touchLastSeen(db, deviceId, now());
+        } catch {
+          // Shutdown may close the database while disconnect notifications drain.
+        }
+      });
     });
   });
 

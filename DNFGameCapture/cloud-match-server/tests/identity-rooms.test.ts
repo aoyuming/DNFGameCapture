@@ -23,8 +23,21 @@ interface Registration {
   deviceToken: string;
 }
 
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve(value: T): void;
+}
+
 const runningApps: RunningApp[] = [];
 const sockets: Socket[] = [];
+
+function createDeferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolver) => {
+    resolve = resolver;
+  });
+  return { promise, resolve };
+}
 
 async function startApp(options: AppOptions = {}): Promise<RunningApp> {
   const directory = mkdtempSync(join(tmpdir(), 'dnf-cloud-identity-'));
@@ -313,6 +326,8 @@ describe('fixed room membership', () => {
       '',
       '   ',
       '\u200b',
+      '\ufe0f',
+      '\u0301\u20dd',
       '主播\n甲',
       '主播\u202e甲',
       '主播\u2028甲',
@@ -333,6 +348,12 @@ describe('fixed room membership', () => {
         broadcasterName: decomposedName,
       }),
     ).resolves.toMatchObject({ ok: true, broadcasterName: normalizedName });
+    await expect(
+      emitAck(socket, 'room:rename', { broadcasterName: '😀' }),
+    ).resolves.toMatchObject({ ok: true, broadcasterName: '😀' });
+    await expect(
+      emitAck(socket, 'room:rename', { broadcasterName: '主播甲' }),
+    ).resolves.toMatchObject({ ok: true, broadcasterName: '主播甲' });
   });
 
   test('catches operational Socket errors and remains usable without process errors', async () => {
@@ -644,6 +665,114 @@ describe('Socket connection lifecycle', () => {
       ok: true,
       online: true,
     });
+  });
+
+  test('restores persisted room membership before reconnect status is handled', async () => {
+    const { app, url } = await startApp();
+    const registration = await register(url, 'capture-device-5002');
+    const first = await connectRegistered(url, registration);
+    await emitAck(first, 'room:join', {
+      roomId: 'li-yong',
+      broadcasterName: '重连主播',
+    });
+    first.disconnect();
+    await waitUntil(() => expect(app.io.sockets.sockets.size).toBe(0));
+
+    const reconnected = await connectRegistered(url, registration);
+
+    await expect(emitAck(reconnected, 'room:status')).resolves.toMatchObject({
+      ok: true,
+      online: true,
+      membership: { room: { id: 'li-yong' }, broadcasterName: '重连主播' },
+    });
+    expect(serverRooms(app, reconnected).has('room:li-yong')).toBe(true);
+  });
+
+  test('rejects a reconnect session when persisted room restoration fails', async () => {
+    let failReconnectJoin = false;
+    const { app, url } = await startApp({
+      socketRoomAdapter: {
+        async join(socket, room) {
+          if (failReconnectJoin) {
+            throw new Error('sensitive reconnect adapter failure');
+          }
+          await socket.join(room);
+        },
+        async leave(socket, room) {
+          await socket.leave(room);
+        },
+      },
+    });
+    const registration = await register(url, 'capture-device-5003');
+    const first = await connectRegistered(url, registration);
+    await emitAck(first, 'room:join', { roomId: '59', broadcasterName: '重连主播' });
+    first.disconnect();
+    await waitUntil(() => expect(app.io.sockets.sockets.size).toBe(0));
+    failReconnectJoin = true;
+
+    const reconnecting = createSocketClient(url, {
+      auth: { ...registration, protocolVersion: 1 },
+      autoConnect: false,
+      forceNew: true,
+      reconnection: false,
+      timeout: 1_000,
+      transports: ['websocket'],
+    });
+    sockets.push(reconnecting);
+    const sessionError = waitForEvent<{ code: string }>(reconnecting, 'session:error');
+    reconnecting.connect();
+    await waitForEvent(reconnecting, 'connect');
+
+    await expect(sessionError).resolves.toEqual({ code: 'internal_error' });
+    await waitUntil(() => expect(reconnecting.connected).toBe(false));
+    expect(app.io.sockets.sockets.size).toBe(0);
+  });
+
+  test('serializes old and replacement socket mutations through one device queue', async () => {
+    const oldJoinEntered = createDeferred<void>();
+    const releaseOldJoin = createDeferred<void>();
+    let blockOldJoin = true;
+    const { app, url } = await startApp({
+      roomService: {
+        async joinRoom(...args) {
+          if (blockOldJoin && args[2] === 'li-yong') {
+            blockOldJoin = false;
+            oldJoinEntered.resolve();
+            await releaseOldJoin.promise;
+          }
+          return roomStore.joinRoom(...args);
+        },
+      },
+    });
+    const registration = await register(url, 'capture-device-5004');
+    const oldSocket = await connectRegistered(url, registration);
+    const oldMutation = emitAck(oldSocket, 'room:join', {
+      roomId: 'li-yong',
+      broadcasterName: '旧连接',
+    });
+    await oldJoinEntered.promise;
+
+    const replacement = await connectRegistered(url, registration);
+    const replacementMutation = emitAck(replacement, 'room:join', {
+      roomId: 'wen-rou',
+      broadcasterName: '新连接',
+    });
+    releaseOldJoin.resolve();
+
+    await expect(oldMutation).resolves.toMatchObject({ ok: true });
+    await expect(replacementMutation).resolves.toMatchObject({
+      ok: true,
+      room: { id: 'wen-rou' },
+      broadcasterName: '新连接',
+    });
+    await waitUntil(() => expect(oldSocket.connected).toBe(false));
+    expect(roomStore.getMembership(app.db, registration.deviceId)).toMatchObject({
+      room: { id: 'wen-rou' },
+      broadcasterName: '新连接',
+    });
+    expect(serverRooms(app, replacement).has('room:wen-rou')).toBe(true);
+    expect(serverRooms(app, replacement).has('room:li-yong')).toBe(false);
+    expect(app.io.sockets.sockets.size).toBe(1);
   });
 
   test('touches last-seen and preserves membership after disconnect', async () => {
