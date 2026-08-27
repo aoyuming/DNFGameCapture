@@ -281,16 +281,20 @@ private:
     std::string BuildTeamSyncSnapshotPayload();
     std::string BuildTeamSyncSnapshotPayloadUnlocked();
     void LoadCloudMatchSettings();
-    void SaveCloudMatchSettings();
+    bool SaveCloudMatchSettings();
+    bool SaveCloudMatchRevision();
     void StartSavedCloudMatchSession();
     void BeginCloudRoomJoin(const std::string& roomId, const CString& broadcasterName);
     void BeginCloudDeviceRegistration();
+    void CancelCloudRoomJoin(const CString& reason);
+    void HandleCloudMatchSnapshotUploadResult(const nlohmann::json& event);
     void HandleCloudMatchMessage(std::string message);
     void PollCloudMatch();
     void OnMatchStateChanged(std::string matchPayload, const char* source);
     void MarkCloudMatchOcrStateChanged(std::string matchPayload);
     std::string BuildCloudMatchSnapshotPayload(const std::string& matchPayload,
-        std::uint64_t clientRevision, const std::string& changeSource) const;
+        std::uint64_t clientRevision, const std::string& changeSource,
+        CString* errorMessage = nullptr) const;
     void SendCloudRoomPromptIfNeeded();
     bool ValidateTeamSyncSnapshot(const nlohmann::json& snapshot, CString& errorMessage) const;
     bool ApplyTeamSyncSnapshot(const nlohmann::json& snapshot, bool createBackup,
@@ -533,11 +537,18 @@ private:
     std::string m_cloudMatchLastObservedPayload;
     std::string m_cloudMatchPendingPayload;
     std::string m_cloudMatchPendingChangeSource = "manual";
+    std::string m_cloudMatchInFlightPayload;
+    std::string m_cloudMatchInFlightChangeSource;
+    std::uint64_t m_cloudMatchInFlightRevision = 0;
     std::mutex m_cloudMatchSourceMutex;
     std::string m_cloudMatchExplicitOcrPayload;
     ULONGLONG m_cloudMatchUploadDueTick = 0;
+    ULONGLONG m_cloudMatchUploadQueueResultDeadlineTick = 0;
     ULONGLONG m_cloudMatchLastObserveTick = 0;
-    bool m_cloudMatchUploadPending = false;
+    ULONGLONG m_cloudMatchJoinDeadlineTick = 0;
+    bool m_cloudMatchUploadDirty = false;
+    bool m_cloudMatchUploadInFlight = false;
+    bool m_cloudMatchUploadRetryBlocked = false;
     bool m_cloudMatchJoining = false;
     bool m_cloudMatchRegistering = false;
     bool m_cloudMatchRenaming = false;

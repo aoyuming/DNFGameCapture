@@ -25,6 +25,7 @@ let cloudMatchState = null;
 let cloudRoomFirstRun = false;
 let cloudSelectedRoomId = '';
 let cloudRoomChoosing = false;
+let cloudRoomJoinTarget = null;
 let systemFonts = [];
 let appearanceScope = 'scoreboard';
 let activeScoreboardStyleKey = 'teamName';
@@ -2461,10 +2462,15 @@ function renderCloudRoomPanel() {
     const chooser = document.getElementById('cloud-room-first-run');
     const nameStage = document.getElementById('cloud-room-name-stage');
     const close = document.getElementById('btn-cloud-room-close');
-    if (state.joined && cloudRoomFirstRun) {
+    const joinedRequestedRoom = state.joined && cloudRoomChoosing && cloudRoomJoinTarget &&
+        !state.joining && !state.registering && !state.lastError &&
+        state.roomId === cloudRoomJoinTarget.roomId &&
+        cloudRoomNameInfo(state.broadcasterName).normalized === cloudRoomJoinTarget.broadcasterName;
+    if (joinedRequestedRoom) {
         cloudRoomFirstRun = false;
         cloudRoomChoosing = false;
         cloudSelectedRoomId = '';
+        cloudRoomJoinTarget = null;
     }
     const showChooser = !state.joined || cloudRoomChoosing;
     if (close) close.hidden = cloudRoomFirstRun && !state.joined;
@@ -2514,7 +2520,17 @@ function renderCloudRoomPanel() {
     if (selectedLabel) selectedLabel.textContent = cloudSelectedRoomId
         ? `准备加入：${CLOUD_ROOM_NAMES[cloudSelectedRoomId]}` : '尚未选择房间';
     const joinButton = document.getElementById('btn-cloud-room-join');
-    if (joinButton) joinButton.textContent = state.joining || state.registering ? '加入中...' : '加入房间';
+    const joinBusy = state.joining || state.registering;
+    if (joinButton) {
+        joinButton.hidden = joinBusy;
+        joinButton.textContent = joinBusy ? '加入中...' : '加入房间';
+    }
+    const cancelJoinButton = document.getElementById('btn-cloud-room-cancel-join');
+    if (cancelJoinButton) {
+        cancelJoinButton.hidden = !joinBusy;
+        cancelJoinButton.disabled = !joinBusy;
+        cancelJoinButton.textContent = '取消加入';
+    }
     const backButton = document.getElementById('btn-cloud-room-back');
     if (backButton) backButton.disabled = busy;
     const nameInput = document.getElementById('cloud-room-name-input');
@@ -2530,6 +2546,7 @@ function openCloudRoomPanel(firstRun = false) {
     cloudRoomFirstRun = firstRun && !cloudMatchState?.joined;
     cloudRoomChoosing = !cloudMatchState?.joined;
     cloudSelectedRoomId = '';
+    cloudRoomJoinTarget = null;
     overlay.classList.add('active');
     overlay.setAttribute('aria-hidden', 'false');
     renderCloudRoomPanel();
@@ -2544,6 +2561,7 @@ function closeCloudRoomPanel(force = false) {
     cloudRoomFirstRun = false;
     cloudRoomChoosing = false;
     cloudSelectedRoomId = '';
+    cloudRoomJoinTarget = null;
 }
 
 function restoreCloudRoomPromptFromState() {
@@ -4634,6 +4652,7 @@ document.querySelectorAll('.cloud-room-option').forEach(option => {
         if (isCloudRoomBusy()) return;
         const roomId = option.dataset.cloudRoomId || '';
         if (roomId === 'none') {
+            cloudRoomJoinTarget = null;
             if (cloudMatchState?.joined) {
                 cloudRoomChoosing = false;
                 cloudSelectedRoomId = '';
@@ -4647,6 +4666,7 @@ document.querySelectorAll('.cloud-room-option').forEach(option => {
         }
         if (!Object.prototype.hasOwnProperty.call(CLOUD_ROOM_NAMES, roomId)) return;
         cloudSelectedRoomId = roomId;
+        cloudRoomJoinTarget = null;
         setCloudRoomInlineError('');
         const input = document.getElementById('cloud-room-name-input');
         if (input && !input.value.trim() && cloudMatchState?.broadcasterName) {
@@ -4663,6 +4683,7 @@ document.getElementById('cloud-room-name-input')?.addEventListener('input', () =
 document.getElementById('btn-cloud-room-back')?.addEventListener('click', () => {
     if (isCloudRoomBusy()) return;
     cloudSelectedRoomId = '';
+    cloudRoomJoinTarget = null;
     setCloudRoomInlineError('');
     renderCloudRoomPanel();
 });
@@ -4675,6 +4696,10 @@ document.getElementById('btn-cloud-room-join')?.addEventListener('click', () => 
         if (!info.normalized) setCloudRoomInlineError('请输入主播名称。');
         return;
     }
+    cloudRoomJoinTarget = {
+        roomId: cloudSelectedRoomId,
+        broadcasterName: info.normalized
+    };
     cloudMatchState = normalizeCloudMatchState({ ...(cloudMatchState || {}),
         joining: true, lastError: '' });
     renderCloudRoomPanel();
@@ -4682,6 +4707,16 @@ document.getElementById('btn-cloud-room-join')?.addEventListener('click', () => 
         roomId: cloudSelectedRoomId,
         broadcasterName: info.normalized
     });
+});
+document.getElementById('btn-cloud-room-cancel-join')?.addEventListener('click', () => {
+    if (!cloudMatchState?.joining && !cloudMatchState?.registering) return;
+    cloudRoomJoinTarget = null;
+    const button = document.getElementById('btn-cloud-room-cancel-join');
+    if (button) {
+        button.disabled = true;
+        button.textContent = '取消中...';
+    }
+    sendCloudRoomCommand('cmd_cloud_room_cancel_join');
 });
 document.getElementById('btn-cloud-room-rename')?.addEventListener('click', () => {
     if (isCloudRoomBusy()) return;
@@ -4700,6 +4735,7 @@ document.getElementById('btn-cloud-room-change')?.addEventListener('click', () =
     if (isCloudRoomBusy()) return;
     cloudRoomChoosing = true;
     cloudSelectedRoomId = '';
+    cloudRoomJoinTarget = null;
     setCloudRoomInlineError('');
     renderCloudRoomPanel();
 });

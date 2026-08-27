@@ -226,7 +226,7 @@ static bool DnfIsCloudMatchInvisibleCodePoint(unsigned int codePoint)
         codePoint == 0xFEFFu ||
         (codePoint >= 0xFFF9u && codePoint <= 0xFFFBu) ||
         codePoint == 0x110BDu || codePoint == 0x110CDu ||
-        (codePoint >= 0x13430u && codePoint <= 0x1343Fu) ||
+        (codePoint >= 0x13430u && codePoint <= 0x13455u) ||
         (codePoint >= 0x1BCA0u && codePoint <= 0x1BCA3u) ||
         (codePoint >= 0x1D173u && codePoint <= 0x1D17Au) ||
         codePoint == 0xE0001u ||
@@ -296,15 +296,121 @@ static bool DnfCloudMatchNamesMatchForAck(const CString& acceptedName,
         acceptedNormalized == pendingNormalized;
 }
 
+static bool DnfNormalizeCloudSnapshotName(const std::string& utf8,
+    std::string& normalizedUtf8)
+{
+    normalizedUtf8.clear();
+    if (utf8.empty() || utf8.size() > 2048) return false;
+
+    const int wideLength = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
+    if (wideLength <= 0) return false;
+    CString wide;
+    wchar_t* wideBuffer = wide.GetBuffer(wideLength);
+    const int converted = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        utf8.data(), static_cast<int>(utf8.size()), wideBuffer, wideLength);
+    wide.ReleaseBuffer(converted > 0 ? converted : 0);
+    if (converted != wideLength) return false;
+
+    const int normalizedLength = ::NormalizeString(NormalizationC,
+        wide.GetString(), wide.GetLength(), nullptr, 0);
+    if (normalizedLength <= 0 || normalizedLength > 256) return false;
+    CString normalized;
+    wchar_t* normalizedBuffer = normalized.GetBuffer(normalizedLength);
+    const int normalizedWritten = ::NormalizeString(NormalizationC,
+        wide.GetString(), wide.GetLength(), normalizedBuffer, normalizedLength);
+    normalized.ReleaseBuffer(normalizedWritten > 0 ? normalizedWritten : 0);
+    if (normalizedWritten != normalizedLength) return false;
+    normalized.Trim();
+    if (normalized.IsEmpty()) return false;
+
+    int scalarCount = 0;
+    bool hasVisibleBase = false;
+    for (int index = 0; index < normalized.GetLength();) {
+        const wchar_t first = normalized[index];
+        unsigned int codePoint = static_cast<unsigned int>(first);
+        int codeUnits = 1;
+        if (first >= 0xD800 && first <= 0xDBFF) {
+            if (index + 1 >= normalized.GetLength()) return false;
+            const wchar_t second = normalized[index + 1];
+            if (second < 0xDC00 || second > 0xDFFF) return false;
+            codePoint = 0x10000u +
+                ((static_cast<unsigned int>(first) - 0xD800u) << 10) +
+                (static_cast<unsigned int>(second) - 0xDC00u);
+            codeUnits = 2;
+        }
+        else if (first >= 0xDC00 && first <= 0xDFFF) {
+            return false;
+        }
+
+        ++scalarCount;
+        if (scalarCount > 64 || DnfIsCloudMatchInvisibleCodePoint(codePoint)) return false;
+        if (codePoint > 0xFFFFu) {
+            hasVisibleBase = true;
+        }
+        else {
+            WORD type1 = 0;
+            WORD type3 = 0;
+            ::GetStringTypeW(CT_CTYPE1, normalized.GetString() + index, 1, &type1);
+            ::GetStringTypeW(CT_CTYPE3, normalized.GetString() + index, 1, &type3);
+            if ((type1 & (C1_ALPHA | C1_DIGIT | C1_PUNCT)) != 0 ||
+                (type3 & C3_SYMBOL) != 0) {
+                hasVisibleBase = true;
+            }
+        }
+        index += codeUnits;
+    }
+    if (!hasVisibleBase) return false;
+
+    const int utf8Length = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+        normalized.GetString(), normalized.GetLength(), nullptr, 0, nullptr, nullptr);
+    if (utf8Length <= 0 || utf8Length > 512) return false;
+    std::string convertedUtf8(static_cast<size_t>(utf8Length), '\0');
+    const int utf8Written = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+        normalized.GetString(), normalized.GetLength(), convertedUtf8.data(), utf8Length,
+        nullptr, nullptr);
+    if (utf8Written != utf8Length) {
+        if (!convertedUtf8.empty()) {
+            ::SecureZeroMemory(convertedUtf8.data(), convertedUtf8.size());
+        }
+        convertedUtf8.clear();
+        return false;
+    }
+    normalizedUtf8.swap(convertedUtf8);
+    return true;
+}
+
+static bool DnfIsTransientCloudSnapshotFailure(const std::string& code)
+{
+    return code == "timeout" || code == "ack_timeout" ||
+        code == "connection_lost" || code == "network_error" ||
+        code == "canceled" || code == "internal_error" ||
+        code == "server_error";
+}
+
+static bool DnfIsFatalCloudJoinError(const std::string& code)
+{
+    return code == "authentication_failed" || code == "invalid_auth" ||
+        code == "unsupported_protocol" || code == "protocol_mismatch" ||
+        code == "invalid_server_url" ||
+        code == "binary_or_invalid_message" || code == "unknown_packet" ||
+        code == "invalid_event_payload" || code == "session_error" ||
+        code == "internal_error" || code == "ack_id_exhausted";
+}
+
 static CString DnfCloudMatchErrorText(const std::string& code)
 {
     if (code == "device_already_registered") return L"本机身份已被注册，正在生成新身份重试。";
     if (code == "network_error" || code == "connection_lost") return L"云端服务器暂时无法连接，请检查网络后重试。";
+    if (code == "authentication_failed" || code == "invalid_auth") return L"云端身份已失效，请重新加入房间以注册新身份。";
+    if (code == "unsupported_protocol" || code == "protocol_mismatch") return L"云端协议版本不兼容，请升级软件或服务器。";
     if (code == "room_not_found") return L"选择的比赛房间不存在。";
     if (code == "invalid_response") return L"云端服务器返回了无效数据。";
     if (code == "queue_full") return L"云端请求较多，请稍后再试。";
-    if (code == "ack_timeout") return L"云端响应超时，请稍后再试。";
-    if (code == "payload_too_large") return L"比赛数据过大，暂时无法上传。";
+    if (code == "timeout" || code == "ack_timeout") return L"云端响应超时，请稍后再试。";
+    if (code == "payload_too_large" || code == "snapshot_too_large") return L"比赛数据过大，暂时无法上传。";
+    if (code == "invalid_payload" || code == "invalid_snapshot" ||
+        code == "invalid_request") return L"比赛数据格式无效，已停止重试；请检查名单内容。";
     if (code == "stale_revision") return L"云端版本号较新，请重新加入房间后再试。";
     return L"云端比赛同步操作失败，请稍后重试。";
 }
@@ -10851,6 +10957,12 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 std::string()).c_str(), CP_UTF8);
             BeginCloudRoomJoin(roomId, broadcasterName);
         }
+        else if (action == "cmd_cloud_room_cancel_join") {
+            if (m_cloudMatchJoining || m_cloudMatchRegistering) {
+                CancelCloudRoomJoin(L"已取消加入云端比赛房间，可修改后重试。");
+            }
+            BroadcastStateToWeb();
+        }
         else if (action == "cmd_cloud_room_skip_once") {
             m_cloudMatchSkipPromptThisRun = true;
             m_cloudMatchPromptSent = true;
@@ -12118,7 +12230,20 @@ void CDNFGameCaptureDlg::LoadCloudMatchSettings()
     m_cloudMatchDeviceId = std::string(CW2A(text, CP_UTF8));
     ::GetPrivateProfileString(L"CloudMatch", L"DeviceToken", L"", text,
         static_cast<DWORD>(std::size(text)), m_iniPath);
-    m_cloudMatchDeviceToken = std::string(CW2A(text, CP_UTF8));
+    DnfSecureClearString(m_cloudMatchDeviceToken);
+    const int tokenLength = static_cast<int>(wcslen(text));
+    const int tokenBytes = tokenLength > 0 ?
+        ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, tokenLength,
+            nullptr, 0, nullptr, nullptr) : 0;
+    if (tokenBytes > 0) {
+        std::vector<char> tokenBuffer(static_cast<size_t>(tokenBytes));
+        const int converted = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+            text, tokenLength, tokenBuffer.data(), tokenBytes, nullptr, nullptr);
+        if (converted == tokenBytes) {
+            m_cloudMatchDeviceToken.assign(tokenBuffer.data(), tokenBuffer.size());
+        }
+        ::SecureZeroMemory(tokenBuffer.data(), tokenBuffer.size());
+    }
     ::SecureZeroMemory(text, sizeof(text));
 
     ::GetPrivateProfileString(L"CloudMatch", L"RoomId", L"", text,
@@ -12152,27 +12277,60 @@ void CDNFGameCaptureDlg::LoadCloudMatchSettings()
     }
 }
 
-void CDNFGameCaptureDlg::SaveCloudMatchSettings()
+bool CDNFGameCaptureDlg::SaveCloudMatchSettings()
 {
-    ::WritePrivateProfileString(L"CloudMatch", L"ServerUrl", m_cloudMatchServerUrl, m_iniPath);
-    ::WritePrivateProfileString(L"CloudMatch", L"DeviceId",
-        CA2W(m_cloudMatchDeviceId.c_str(), CP_UTF8), m_iniPath);
+    bool saved = true;
+    auto writeSetting = [&](const wchar_t* key, const wchar_t* value) {
+        if (!::WritePrivateProfileString(L"CloudMatch", key, value, m_iniPath)) {
+            saved = false;
+        }
+        };
 
-    CString token = CA2W(m_cloudMatchDeviceToken.c_str(), CP_UTF8);
-    ::WritePrivateProfileString(L"CloudMatch", L"DeviceToken", token, m_iniPath);
-    if (!token.IsEmpty()) {
-        wchar_t* buffer = token.GetBuffer();
-        ::SecureZeroMemory(buffer, token.GetLength() * sizeof(wchar_t));
-        token.ReleaseBuffer(0);
+    const CString deviceId = CA2W(m_cloudMatchDeviceId.c_str(), CP_UTF8);
+    const CString roomId = CA2W(m_cloudMatchRoomId.c_str(), CP_UTF8);
+    writeSetting(L"ServerUrl", m_cloudMatchServerUrl);
+    writeSetting(L"DeviceId", deviceId);
+
+    std::vector<wchar_t> tokenBuffer(m_cloudMatchDeviceToken.size() + 1, L'\0');
+    bool tokenConverted = m_cloudMatchDeviceToken.empty();
+    if (!m_cloudMatchDeviceToken.empty()) {
+        const int converted = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+            m_cloudMatchDeviceToken.data(),
+            static_cast<int>(m_cloudMatchDeviceToken.size()), tokenBuffer.data(),
+            static_cast<int>(tokenBuffer.size() - 1));
+        tokenConverted = converted > 0;
+        if (tokenConverted) tokenBuffer[static_cast<size_t>(converted)] = L'\0';
     }
+    if (tokenConverted) {
+        writeSetting(L"DeviceToken", tokenBuffer.data());
+    }
+    else {
+        saved = false;
+    }
+    ::SecureZeroMemory(tokenBuffer.data(), tokenBuffer.size() * sizeof(wchar_t));
 
-    ::WritePrivateProfileString(L"CloudMatch", L"RoomId",
-        CA2W(m_cloudMatchRoomId.c_str(), CP_UTF8), m_iniPath);
-    ::WritePrivateProfileString(L"CloudMatch", L"BroadcasterName",
-        m_cloudMatchBroadcasterName, m_iniPath);
+    writeSetting(L"RoomId", roomId);
+    writeSetting(L"BroadcasterName", m_cloudMatchBroadcasterName);
     CString revision;
     revision.Format(L"%llu", static_cast<unsigned long long>(m_cloudMatchClientRevision));
-    ::WritePrivateProfileString(L"CloudMatch", L"ClientRevision", revision, m_iniPath);
+    writeSetting(L"ClientRevision", revision);
+    if (!saved) {
+        m_cloudMatchLastError = L"云端配置未保存，请检查 config.ini 是否可写后重试。";
+    }
+    return saved;
+}
+
+bool CDNFGameCaptureDlg::SaveCloudMatchRevision()
+{
+    CString revision;
+    revision.Format(L"%llu", static_cast<unsigned long long>(m_cloudMatchClientRevision));
+    const bool saved = ::WritePrivateProfileString(L"CloudMatch", L"ClientRevision",
+        revision, m_iniPath) != FALSE;
+    if (!saved) {
+        m_cloudMatchLastError =
+            L"云端快照版本未保存，已保留待上传数据；请检查 config.ini 是否可写。";
+    }
+    return saved;
 }
 
 void CDNFGameCaptureDlg::StartSavedCloudMatchSession()
@@ -12186,6 +12344,7 @@ void CDNFGameCaptureDlg::StartSavedCloudMatchSession()
     m_cloudMatchPendingRoomId = m_cloudMatchRoomId;
     m_cloudMatchPendingBroadcasterName = m_cloudMatchBroadcasterName;
     m_cloudMatchJoining = true;
+    m_cloudMatchJoinDeadlineTick = ::GetTickCount64() + 15000;
     m_cloudMatchLastError.Empty();
     const std::string serverUrl = std::string(CW2A(m_cloudMatchServerUrl, CP_UTF8));
     if (!m_cloudMatchClient.Configure(serverUrl, m_cloudMatchDeviceId,
@@ -12193,6 +12352,7 @@ void CDNFGameCaptureDlg::StartSavedCloudMatchSession()
         !m_cloudMatchClient.JoinRoom(m_cloudMatchRoomId,
             std::string(CW2A(m_cloudMatchBroadcasterName, CP_UTF8)))) {
         m_cloudMatchJoining = false;
+        m_cloudMatchJoinDeadlineTick = 0;
         m_cloudMatchLastError = L"云端比赛房间连接初始化失败。";
     }
 }
@@ -12203,16 +12363,26 @@ void CDNFGameCaptureDlg::BeginCloudDeviceRegistration()
         m_cloudMatchDeviceId = DnfGenerateCloudMatchDeviceId();
     }
     DnfSecureClearString(m_cloudMatchDeviceToken);
-    SaveCloudMatchSettings();
+    if (!SaveCloudMatchSettings()) {
+        m_cloudMatchRegistering = false;
+        m_cloudMatchJoining = false;
+        m_cloudMatchJoinDeadlineTick = 0;
+        BroadcastStateToWeb();
+        return;
+    }
 
     m_cloudMatchRegistering = true;
     m_cloudMatchJoining = true;
+    if (m_cloudMatchJoinDeadlineTick == 0) {
+        m_cloudMatchJoinDeadlineTick = ::GetTickCount64() + 15000;
+    }
     const std::string serverUrl = std::string(CW2A(m_cloudMatchServerUrl, CP_UTF8));
     if (!m_cloudMatchClient.Configure(serverUrl, m_cloudMatchDeviceId, "") ||
         !m_cloudMatchClient.Start() ||
         !m_cloudMatchClient.RegisterDevice(m_cloudMatchDeviceId)) {
         m_cloudMatchRegistering = false;
         m_cloudMatchJoining = false;
+        m_cloudMatchJoinDeadlineTick = 0;
         m_cloudMatchLastError = L"无法提交云端设备注册，请稍后重试。";
         BroadcastStateToWeb();
     }
@@ -12247,6 +12417,14 @@ void CDNFGameCaptureDlg::BeginCloudRoomJoin(const std::string& roomId,
     m_cloudMatchLastError.Empty();
     m_cloudMatchRegistrationRetryCount = 0;
     m_cloudMatchSkipPromptThisRun = false;
+    m_cloudMatchJoinDeadlineTick = ::GetTickCount64() + 15000;
+    m_cloudMatchUploadInFlight = false;
+    m_cloudMatchUploadRetryBlocked = false;
+    m_cloudMatchUploadQueueResultDeadlineTick = 0;
+    m_cloudMatchInFlightRevision = 0;
+    DnfSecureClearString(m_cloudMatchInFlightPayload);
+    DnfSecureClearString(m_cloudMatchInFlightChangeSource);
+    m_cloudMatchUploadDirty = false;
 
     if (m_cloudMatchDeviceId.empty()) {
         m_cloudMatchDeviceId = DnfGenerateCloudMatchDeviceId();
@@ -12257,10 +12435,18 @@ void CDNFGameCaptureDlg::BeginCloudRoomJoin(const std::string& roomId,
         return;
     }
 
+    if (!SaveCloudMatchSettings()) {
+        m_cloudMatchJoining = false;
+        m_cloudMatchJoinDeadlineTick = 0;
+        BroadcastStateToWeb();
+        return;
+    }
+
     const std::string serverUrl = std::string(CW2A(m_cloudMatchServerUrl, CP_UTF8));
     if (!m_cloudMatchClient.Configure(serverUrl, m_cloudMatchDeviceId,
         m_cloudMatchDeviceToken) || !m_cloudMatchClient.Start()) {
         m_cloudMatchJoining = false;
+        m_cloudMatchJoinDeadlineTick = 0;
         m_cloudMatchLastError = L"云端比赛房间连接初始化失败。";
         BroadcastStateToWeb();
         return;
@@ -12269,9 +12455,127 @@ void CDNFGameCaptureDlg::BeginCloudRoomJoin(const std::string& roomId,
     if (!m_cloudMatchClient.JoinRoom(roomId,
         std::string(CW2A(normalizedName, CP_UTF8)))) {
         m_cloudMatchJoining = false;
+        m_cloudMatchJoinDeadlineTick = 0;
         m_cloudMatchLastError = L"云端请求队列繁忙，请稍后重试。";
     }
     BroadcastStateToWeb();
+}
+
+void CDNFGameCaptureDlg::CancelCloudRoomJoin(const CString& reason)
+{
+    const std::string serverUrl = std::string(CW2A(m_cloudMatchServerUrl, CP_UTF8));
+    const bool configured = m_cloudMatchClient.Configure(serverUrl,
+        m_cloudMatchDeviceId, m_cloudMatchDeviceToken);
+    if (configured) {
+        m_cloudMatchClient.Start();
+        if (DnfIsCloudMatchRoomId(m_cloudMatchRoomId) &&
+            !m_cloudMatchDeviceToken.empty() && !m_cloudMatchBroadcasterName.IsEmpty()) {
+            m_cloudMatchClient.JoinRoom(m_cloudMatchRoomId,
+                std::string(CW2A(m_cloudMatchBroadcasterName, CP_UTF8)));
+        }
+    }
+
+    m_cloudMatchJoining = false;
+    m_cloudMatchRegistering = false;
+    m_cloudMatchJoinDeadlineTick = 0;
+    m_cloudMatchUploadInFlight = false;
+    m_cloudMatchUploadRetryBlocked = false;
+    m_cloudMatchUploadQueueResultDeadlineTick = 0;
+    m_cloudMatchInFlightRevision = 0;
+    DnfSecureClearString(m_cloudMatchInFlightPayload);
+    DnfSecureClearString(m_cloudMatchInFlightChangeSource);
+    if (DnfIsCloudMatchRoomId(m_cloudMatchRoomId)) {
+        try {
+            m_cloudMatchPendingPayload = BuildTeamSyncSnapshotPayload();
+        }
+        catch (...) {
+            m_cloudMatchPendingPayload.clear();
+        }
+        m_cloudMatchPendingChangeSource = "manual";
+        m_cloudMatchUploadDirty = !m_cloudMatchPendingPayload.empty();
+        m_cloudMatchUploadDueTick = ::GetTickCount64() + 400;
+    }
+    m_cloudMatchLastError = reason;
+}
+
+void CDNFGameCaptureDlg::HandleCloudMatchSnapshotUploadResult(const json& event)
+{
+    if (!m_cloudMatchUploadInFlight) return;
+
+    const bool ok = event.value("ok", false);
+    const std::string code = event.value("code", std::string());
+    const bool currentMatchesSent =
+        m_cloudMatchPendingPayload == m_cloudMatchInFlightPayload &&
+        m_cloudMatchPendingChangeSource == m_cloudMatchInFlightChangeSource;
+    auto clearInFlight = [&]() {
+        m_cloudMatchUploadInFlight = false;
+        m_cloudMatchUploadQueueResultDeadlineTick = 0;
+        m_cloudMatchInFlightRevision = 0;
+        DnfSecureClearString(m_cloudMatchInFlightPayload);
+        DnfSecureClearString(m_cloudMatchInFlightChangeSource);
+        };
+
+    if (ok) {
+        const auto accepted = event.find("acceptedRevision");
+        std::uint64_t acceptedRevision = 0;
+        if (accepted != event.end() && accepted->is_number_unsigned()) {
+            acceptedRevision = accepted->get<std::uint64_t>();
+        }
+        else if (accepted != event.end() && accepted->is_number_integer()) {
+            const long long signedRevision = accepted->get<long long>();
+            if (signedRevision > 0) acceptedRevision = static_cast<std::uint64_t>(signedRevision);
+        }
+        if (acceptedRevision == 0 ||
+            acceptedRevision != m_cloudMatchInFlightRevision) {
+            clearInFlight();
+            if (currentMatchesSent) {
+                m_cloudMatchUploadDirty = true;
+                m_cloudMatchUploadRetryBlocked = true;
+            }
+            else {
+                m_cloudMatchUploadRetryBlocked = false;
+                m_cloudMatchUploadDueTick = ::GetTickCount64();
+            }
+            m_cloudMatchLastError = L"云端快照确认响应无效，已停止重试当前数据。";
+            return;
+        }
+
+        clearInFlight();
+        m_cloudMatchUploadRetryBlocked = false;
+        if (currentMatchesSent) {
+            m_cloudMatchUploadDirty = false;
+        }
+        else {
+            m_cloudMatchUploadDirty = true;
+            m_cloudMatchUploadDueTick = ::GetTickCount64();
+        }
+        if (m_cloudMatchLastError == DnfCloudMatchErrorText("timeout") ||
+            m_cloudMatchLastError == DnfCloudMatchErrorText("connection_lost") ||
+            m_cloudMatchLastError == DnfCloudMatchErrorText("invalid_snapshot")) {
+            m_cloudMatchLastError.Empty();
+        }
+        return;
+    }
+
+    clearInFlight();
+    if (DnfIsTransientCloudSnapshotFailure(code)) {
+        m_cloudMatchUploadDirty = true;
+        m_cloudMatchUploadRetryBlocked = false;
+        m_cloudMatchUploadDueTick = ::GetTickCount64() + 250;
+        m_cloudMatchLastError = DnfCloudMatchErrorText(code);
+        return;
+    }
+
+    if (currentMatchesSent) {
+        m_cloudMatchUploadDirty = true;
+        m_cloudMatchUploadRetryBlocked = true;
+    }
+    else {
+        m_cloudMatchUploadDirty = true;
+        m_cloudMatchUploadRetryBlocked = false;
+        m_cloudMatchUploadDueTick = ::GetTickCount64();
+    }
+    m_cloudMatchLastError = DnfCloudMatchErrorText(code);
 }
 
 void CDNFGameCaptureDlg::HandleCloudMatchMessage(std::string message)
@@ -12300,12 +12604,20 @@ void CDNFGameCaptureDlg::HandleCloudMatchMessage(std::string message)
         if (token.empty()) {
             m_cloudMatchRegistering = false;
             m_cloudMatchJoining = false;
+            m_cloudMatchJoinDeadlineTick = 0;
             m_cloudMatchLastError = L"云端设备注册返回的数据无效。";
         }
         else {
             m_cloudMatchDeviceToken = token;
             DnfSecureClearString(token);
-            SaveCloudMatchSettings();
+            if (!SaveCloudMatchSettings()) {
+                m_cloudMatchRegistering = false;
+                m_cloudMatchJoining = false;
+                m_cloudMatchJoinDeadlineTick = 0;
+                event.clear();
+                BroadcastStateToWeb();
+                return;
+            }
             m_cloudMatchRegistering = false;
 
             const std::string serverUrl = std::string(CW2A(m_cloudMatchServerUrl, CP_UTF8));
@@ -12317,6 +12629,7 @@ void CDNFGameCaptureDlg::HandleCloudMatchMessage(std::string message)
                     std::string(CW2A(m_cloudMatchPendingBroadcasterName, CP_UTF8)));
             if (!joinQueued) {
                 m_cloudMatchJoining = false;
+                m_cloudMatchJoinDeadlineTick = 0;
                 m_cloudMatchLastError = L"设备注册成功，但加入比赛房间失败，请重试。";
             }
         }
@@ -12331,44 +12644,64 @@ void CDNFGameCaptureDlg::HandleCloudMatchMessage(std::string message)
         }
         else {
             m_cloudMatchJoining = false;
+            m_cloudMatchJoinDeadlineTick = 0;
             m_cloudMatchLastError = DnfCloudMatchErrorText(code);
         }
     }
     else if (type == "room_join_result") {
+        if (!m_cloudMatchJoining) {
+            event.clear();
+            return;
+        }
         if (ok) {
             if (!event.contains("room") || !event["room"].is_object() ||
                 !event["room"].contains("id") || !event["room"]["id"].is_string() ||
                 !event.contains("broadcasterName") ||
                 !event["broadcasterName"].is_string()) {
-                event.clear();
-                return;
+                CancelCloudRoomJoin(L"云端服务器返回了无效的加入结果，请重试。");
             }
-
-            const std::string ackRoomId = event["room"]["id"].get<std::string>();
-            CString acceptedName = CA2W(
-                event["broadcasterName"].get<std::string>().c_str(), CP_UTF8);
-            CString acceptedSafeName;
-            if (ackRoomId != m_cloudMatchPendingRoomId ||
-                !DnfCloudMatchNamesMatchForAck(acceptedName,
-                    m_cloudMatchPendingBroadcasterName) ||
-                !DnfIsCloudMatchNameSafeBoundary(acceptedName, acceptedSafeName)) {
-                event.clear();
-                return;
+            else {
+                const std::string ackRoomId = event["room"]["id"].get<std::string>();
+                CString acceptedName = CA2W(
+                    event["broadcasterName"].get<std::string>().c_str(), CP_UTF8);
+                CString acceptedSafeName;
+                if (ackRoomId != m_cloudMatchPendingRoomId ||
+                    !DnfCloudMatchNamesMatchForAck(acceptedName,
+                        m_cloudMatchPendingBroadcasterName)) {
+                    event.clear();
+                    return;
+                }
+                if (!DnfIsCloudMatchNameSafeBoundary(acceptedName, acceptedSafeName)) {
+                    CancelCloudRoomJoin(L"云端服务器返回了无效的主播名称，请重试。");
+                }
+                else {
+                    m_cloudMatchJoining = false;
+                    m_cloudMatchJoinDeadlineTick = 0;
+                    m_cloudMatchRoomId = m_cloudMatchPendingRoomId;
+                    m_cloudMatchBroadcasterName = acceptedSafeName;
+                    m_cloudMatchPromptSent = true;
+                    if (SaveCloudMatchSettings()) {
+                        m_cloudMatchLastError.Empty();
+                    }
+                    m_cloudMatchPendingPayload = BuildTeamSyncSnapshotPayload();
+                    m_cloudMatchPendingChangeSource = "manual";
+                    m_cloudMatchUploadDirty = true;
+                    m_cloudMatchUploadInFlight = false;
+                    m_cloudMatchUploadRetryBlocked = false;
+                    m_cloudMatchUploadQueueResultDeadlineTick = 0;
+                    m_cloudMatchInFlightRevision = 0;
+                    DnfSecureClearString(m_cloudMatchInFlightPayload);
+                    DnfSecureClearString(m_cloudMatchInFlightChangeSource);
+                    m_cloudMatchUploadDueTick = ::GetTickCount64();
+                }
             }
-
-            m_cloudMatchJoining = false;
-            m_cloudMatchRoomId = m_cloudMatchPendingRoomId;
-            m_cloudMatchBroadcasterName = acceptedSafeName;
-            m_cloudMatchLastError.Empty();
-            m_cloudMatchPromptSent = true;
-            SaveCloudMatchSettings();
-            m_cloudMatchPendingPayload = BuildTeamSyncSnapshotPayload();
-            m_cloudMatchPendingChangeSource = "manual";
-            m_cloudMatchUploadPending = true;
-            m_cloudMatchUploadDueTick = ::GetTickCount64();
+        }
+        else if (DnfIsTransientCloudSnapshotFailure(code)) {
+            m_cloudMatchLastError = DnfCloudMatchErrorText(code);
         }
         else {
             m_cloudMatchJoining = false;
+            m_cloudMatchJoinDeadlineTick = 0;
             m_cloudMatchLastError = DnfCloudMatchErrorText(code);
         }
     }
@@ -12392,8 +12725,7 @@ void CDNFGameCaptureDlg::HandleCloudMatchMessage(std::string message)
 
             m_cloudMatchRenaming = false;
             m_cloudMatchBroadcasterName = acceptedSafeName;
-            SaveCloudMatchSettings();
-            m_cloudMatchLastError.Empty();
+            if (SaveCloudMatchSettings()) m_cloudMatchLastError.Empty();
         }
         else {
             m_cloudMatchRenaming = false;
@@ -12407,18 +12739,36 @@ void CDNFGameCaptureDlg::HandleCloudMatchMessage(std::string message)
             m_cloudMatchBroadcasterName.Empty();
             m_cloudMatchPendingRoomId.clear();
             m_cloudMatchPendingBroadcasterName.Empty();
-            m_cloudMatchUploadPending = false;
+            m_cloudMatchUploadDirty = false;
+            m_cloudMatchUploadInFlight = false;
+            m_cloudMatchUploadRetryBlocked = false;
+            m_cloudMatchUploadQueueResultDeadlineTick = 0;
+            m_cloudMatchInFlightRevision = 0;
+            DnfSecureClearString(m_cloudMatchInFlightPayload);
+            DnfSecureClearString(m_cloudMatchInFlightChangeSource);
             m_cloudMatchSkipPromptThisRun = true;
-            m_cloudMatchLastError.Empty();
-            SaveCloudMatchSettings();
+            if (SaveCloudMatchSettings()) m_cloudMatchLastError.Empty();
         }
         else {
             m_cloudMatchLastError = DnfCloudMatchErrorText(code);
         }
     }
-    else if (type == "snapshot_upload_result" && !ok &&
-        code != "canceled" && code != "connection_lost") {
-        m_cloudMatchLastError = DnfCloudMatchErrorText(code);
+    else if (type == "snapshot_upload_result") {
+        HandleCloudMatchSnapshotUploadResult(event);
+    }
+    else if (type == "cloud_error") {
+        if ((m_cloudMatchJoining || m_cloudMatchRegistering) &&
+            DnfIsFatalCloudJoinError(code)) {
+            CString error = DnfCloudMatchErrorText(code);
+            if (code == "authentication_failed" || code == "invalid_auth") {
+                DnfSecureClearString(m_cloudMatchDeviceToken);
+                if (!SaveCloudMatchSettings()) error = m_cloudMatchLastError;
+            }
+            CancelCloudRoomJoin(error);
+        }
+        else {
+            m_cloudMatchLastError = DnfCloudMatchErrorText(code);
+        }
     }
 
     event.clear();
@@ -12427,34 +12777,54 @@ void CDNFGameCaptureDlg::HandleCloudMatchMessage(std::string message)
 
 std::string CDNFGameCaptureDlg::BuildCloudMatchSnapshotPayload(
     const std::string& matchPayload, std::uint64_t clientRevision,
-    const std::string& changeSource) const
+    const std::string& changeSource, CString* errorMessage) const
 {
+    if (errorMessage) errorMessage->Empty();
+    auto fail = [&](const CString& message) -> std::string {
+        if (errorMessage) *errorMessage = message;
+        return {};
+        };
+
     json local = json::parse(matchPayload, nullptr, false);
     if (local.is_discarded() || !local.is_object() ||
         !local.contains("players") || !local["players"].is_array() ||
         local["players"].size() != 8 || clientRevision == 0) {
-        return {};
+        return fail(L"本机比赛数据结构无效，云端快照未上传。");
     }
 
     const int redScore = local.value("redScore", -1);
     const int blueScore = local.value("blueScore", -1);
-    if (redScore < 0 || redScore > 999 || blueScore < 0 || blueScore > 999) return {};
+    if (redScore < 0 || redScore > 999 || blueScore < 0 || blueScore > 999) {
+        return fail(L"比分超出云端允许的 0 到 999 范围，快照未上传。");
+    }
 
-    auto buildPlayer = [](const json& input, json& output) -> bool {
-        if (!input.is_object()) return false;
+    auto buildPlayer = [&](const json& input, size_t playerIndex, json& output) -> bool {
+        CString playerPrefix;
+        playerPrefix.Format(L"第 %u 位选手", static_cast<unsigned int>(playerIndex + 1));
+        if (!input.is_object()) {
+            if (errorMessage) *errorMessage = playerPrefix + L"的数据结构无效。";
+            return false;
+        }
         const int kills = input.value("kills", -1);
         const int deaths = input.value("deaths", -1);
         const int ak = input.value("akCount", -1);
         const int streak = input.value("currentStreak", -1);
         if (kills < 0 || kills > 999 || deaths < 0 || deaths > 999 ||
             ak < 0 || ak > 999 || streak < 0 || streak > 999) {
+            if (errorMessage) *errorMessage = playerPrefix + L"的战绩超出 0 到 999 范围。";
             return false;
         }
 
-        CString mainName = CA2W(input.value("name", std::string()).c_str(), CP_UTF8);
-        mainName.Trim();
-        if (mainName.IsEmpty()) return false;
-        const std::string mainUtf8 = std::string(CW2A(mainName, CP_UTF8));
+        const auto foundName = input.find("name");
+        std::string mainUtf8;
+        if (foundName == input.end() || !foundName->is_string() ||
+            !DnfNormalizeCloudSnapshotName(foundName->get<std::string>(), mainUtf8)) {
+            if (errorMessage) {
+                *errorMessage = playerPrefix +
+                    L"的主号必须包含可见文字、不能含控制或不可见字符，且不超过 64 个 Unicode 码位。";
+            }
+            return false;
+        }
         output = {
             { "mainName", mainUtf8 },
             { "aliases", json::array() },
@@ -12466,14 +12836,29 @@ std::string CDNFGameCaptureDlg::BuildCloudMatchSnapshotPayload(
 
         std::set<std::string> aliases;
         const auto foundAliases = input.find("aliases");
-        if (foundAliases != input.end() && foundAliases->is_array()) {
+        if (foundAliases != input.end()) {
+            if (!foundAliases->is_array() || foundAliases->size() > 32) {
+                if (errorMessage) *errorMessage = playerPrefix + L"的小号数量不能超过 32 个。";
+                return false;
+            }
             for (const auto& aliasValue : *foundAliases) {
-                if (!aliasValue.is_string() || aliases.size() >= 32) continue;
-                CString alias = CA2W(aliasValue.get<std::string>().c_str(), CP_UTF8);
-                alias.Trim();
-                if (alias.IsEmpty()) continue;
-                std::string aliasUtf8 = std::string(CW2A(alias, CP_UTF8));
-                if (aliasUtf8 == mainUtf8 || !aliases.insert(aliasUtf8).second) continue;
+                std::string aliasUtf8;
+                const bool validAlias = aliasValue.is_string() &&
+                    DnfNormalizeCloudSnapshotName(aliasValue.get<std::string>(), aliasUtf8);
+                if (!validAlias) {
+                    if (errorMessage) {
+                        *errorMessage = playerPrefix +
+                            L"的小号必须包含可见文字、不能含控制或不可见字符，且不超过 64 个 Unicode 码位。";
+                    }
+                    return false;
+                }
+                if (aliasUtf8 == mainUtf8) {
+                    if (errorMessage) {
+                        *errorMessage = playerPrefix + L"的小号不能与主号相同（按 NFC 规范化后比较）。";
+                    }
+                    return false;
+                }
+                if (!aliases.insert(aliasUtf8).second) continue;
                 output["aliases"].push_back(std::move(aliasUtf8));
             }
         }
@@ -12499,7 +12884,9 @@ std::string CDNFGameCaptureDlg::BuildCloudMatchSnapshotPayload(
 
     if (changeSource == "cloud_sync") {
         const auto syncedFrom = local.find("syncedFrom");
-        if (syncedFrom == local.end() || !syncedFrom->is_object()) return {};
+        if (syncedFrom == local.end() || !syncedFrom->is_object()) {
+            return fail(L"同步来源信息无效，云端快照未上传。");
+        }
         cloud["syncedFrom"] = *syncedFrom;
     }
     else if (changeSource != "ocr" && changeSource != "manual" &&
@@ -12509,11 +12896,14 @@ std::string CDNFGameCaptureDlg::BuildCloudMatchSnapshotPayload(
 
     for (size_t index = 0; index < local["players"].size(); ++index) {
         json player;
-        if (!buildPlayer(local["players"][index], player)) return {};
+        if (!buildPlayer(local["players"][index], index, player)) return {};
         cloud[index < 4 ? "redPlayers" : "bluePlayers"].push_back(std::move(player));
     }
     const std::string serialized = cloud.dump();
-    return serialized.size() <= 60 * 1024 ? serialized : std::string();
+    if (serialized.size() > 60 * 1024) {
+        return fail(L"比赛数据超过 60KB，云端快照未上传。");
+    }
+    return serialized;
 }
 
 void CDNFGameCaptureDlg::OnMatchStateChanged(std::string matchPayload,
@@ -12523,7 +12913,8 @@ void CDNFGameCaptureDlg::OnMatchStateChanged(std::string matchPayload,
     m_cloudMatchLastObservedPayload = matchPayload;
     m_cloudMatchPendingPayload = std::move(matchPayload);
     m_cloudMatchPendingChangeSource = source && *source ? source : "manual";
-    m_cloudMatchUploadPending = true;
+    m_cloudMatchUploadDirty = true;
+    m_cloudMatchUploadRetryBlocked = false;
     m_cloudMatchUploadDueTick = ::GetTickCount64() + 400;
 }
 
@@ -12538,54 +12929,102 @@ void CDNFGameCaptureDlg::PollCloudMatch()
     m_cloudMatchClient.DispatchMessages(32);
 
     const ULONGLONG now = ::GetTickCount64();
+    if (m_cloudMatchJoinDeadlineTick != 0 &&
+        (m_cloudMatchJoining || m_cloudMatchRegistering) &&
+        now >= m_cloudMatchJoinDeadlineTick) {
+        CancelCloudRoomJoin(L"加入云端比赛房间超时，已取消本次操作，请重试。");
+        BroadcastStateToWeb();
+    }
+    if (m_cloudMatchUploadInFlight &&
+        m_cloudMatchUploadQueueResultDeadlineTick != 0 &&
+        now >= m_cloudMatchUploadQueueResultDeadlineTick) {
+        m_cloudMatchUploadInFlight = false;
+        m_cloudMatchUploadQueueResultDeadlineTick = 0;
+        m_cloudMatchInFlightRevision = 0;
+        DnfSecureClearString(m_cloudMatchInFlightPayload);
+        DnfSecureClearString(m_cloudMatchInFlightChangeSource);
+        m_cloudMatchUploadDirty = true;
+        m_cloudMatchUploadRetryBlocked = false;
+        m_cloudMatchUploadDueTick = now + 250;
+        m_cloudMatchLastError = L"云端快照暂未进入发送队列，已保留最新数据等待重试。";
+        BroadcastStateToWeb();
+    }
+
     if (now - m_cloudMatchLastObserveTick >= 100) {
         m_cloudMatchLastObserveTick = now;
         std::string currentPayload;
-        try {
-            currentPayload = BuildTeamSyncSnapshotPayload();
-        }
-        catch (...) {
-            currentPayload.clear();
-        }
-        if (m_cloudMatchLastObservedPayload.empty()) {
-            m_cloudMatchLastObservedPayload = std::move(currentPayload);
-            std::lock_guard<std::mutex> sourceLock(m_cloudMatchSourceMutex);
-            m_cloudMatchExplicitOcrPayload.clear();
-        }
-        else if (!currentPayload.empty() && currentPayload != m_cloudMatchLastObservedPayload) {
-            bool fromOcr = false;
-            {
+        bool initializeObservedPayload = false;
+        bool payloadChanged = false;
+        bool fromOcr = false;
+        {
+            std::lock_guard<std::mutex> dataLock(m_dataMutex);
+            try {
+                currentPayload = BuildTeamSyncSnapshotPayloadUnlocked();
+            }
+            catch (...) {
+                currentPayload.clear();
+            }
+            initializeObservedPayload = m_cloudMatchLastObservedPayload.empty() &&
+                !currentPayload.empty();
+            payloadChanged = !m_cloudMatchLastObservedPayload.empty() &&
+                !currentPayload.empty() &&
+                currentPayload != m_cloudMatchLastObservedPayload;
+            if (initializeObservedPayload || payloadChanged) {
                 std::lock_guard<std::mutex> sourceLock(m_cloudMatchSourceMutex);
-                fromOcr = !m_cloudMatchExplicitOcrPayload.empty() &&
+                fromOcr = payloadChanged && !m_cloudMatchExplicitOcrPayload.empty() &&
                     m_cloudMatchExplicitOcrPayload == currentPayload;
                 m_cloudMatchExplicitOcrPayload.clear();
             }
+        }
+        if (initializeObservedPayload) {
+            m_cloudMatchLastObservedPayload = std::move(currentPayload);
+        }
+        else if (payloadChanged) {
             OnMatchStateChanged(std::move(currentPayload), fromOcr ? "ocr" : "manual");
         }
     }
 
-    if (!m_cloudMatchUploadPending || now < m_cloudMatchUploadDueTick ||
+    if (!m_cloudMatchUploadDirty || m_cloudMatchUploadInFlight ||
+        m_cloudMatchUploadRetryBlocked ||
+        now < m_cloudMatchUploadDueTick || m_cloudMatchJoining ||
+        m_cloudMatchRegistering ||
         !DnfIsCloudMatchRoomId(m_cloudMatchRoomId) ||
         m_cloudMatchDeviceToken.empty()) {
         return;
     }
 
     const std::uint64_t nextRevision = m_cloudMatchClientRevision + 1;
+    CString validationError;
     std::string payload = BuildCloudMatchSnapshotPayload(m_cloudMatchPendingPayload,
-        nextRevision, m_cloudMatchPendingChangeSource);
+        nextRevision, m_cloudMatchPendingChangeSource, &validationError);
     if (payload.empty()) {
-        m_cloudMatchUploadDueTick = now + 1000;
+        m_cloudMatchUploadDirty = true;
+        m_cloudMatchUploadRetryBlocked = true;
+        m_cloudMatchLastError = validationError.IsEmpty() ?
+            L"比赛数据未通过云端上传前校验，已停止重试当前快照。" : validationError;
+        BroadcastStateToWeb();
         return;
     }
 
-    if (m_cloudMatchClient.UploadSnapshot(std::move(payload))) {
-        m_cloudMatchClientRevision = nextRevision;
-        m_cloudMatchUploadPending = false;
-        SaveCloudMatchSettings();
+    const std::uint64_t previousRevision = m_cloudMatchClientRevision;
+    m_cloudMatchClientRevision = nextRevision;
+    if (!SaveCloudMatchRevision()) {
+        m_cloudMatchClientRevision = previousRevision;
+        m_cloudMatchUploadDueTick = now + 1000;
+        BroadcastStateToWeb();
+        return;
     }
-    else {
-        m_cloudMatchUploadDueTick = now + 250;
+
+    if (m_cloudMatchLastError ==
+        L"云端快照版本未保存，已保留待上传数据；请检查 config.ini 是否可写。") {
+        m_cloudMatchLastError.Empty();
     }
+    m_cloudMatchUploadInFlight = true;
+    m_cloudMatchInFlightRevision = nextRevision;
+    m_cloudMatchInFlightPayload = m_cloudMatchPendingPayload;
+    m_cloudMatchInFlightChangeSource = m_cloudMatchPendingChangeSource;
+    const bool queued = m_cloudMatchClient.UploadSnapshot(std::move(payload));
+    m_cloudMatchUploadQueueResultDeadlineTick = queued ? 0 : now + 500;
 }
 
 void CDNFGameCaptureDlg::SendCloudRoomPromptIfNeeded()
