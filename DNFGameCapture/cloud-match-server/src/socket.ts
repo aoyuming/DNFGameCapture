@@ -26,6 +26,7 @@ type MaybePromise<T> = T | Promise<T>;
 type Acknowledge = (response: unknown) => void;
 
 const MAX_SNAPSHOT_BYTES = 65_536;
+const FIXED_ROOM_IDS = ['59', 'li-yong', 'wen-rou'] as const;
 const emptyPayloadSchema = z.object({}).strict();
 const snapshotUploadSchema = z.object({ snapshot: z.unknown() }).strict();
 const snapshotGetSchema = z
@@ -98,6 +99,10 @@ export interface RegisterCloudMatchSocketHandlersContext {
   snapshotService?: SnapshotService;
   comparisonService?: ComparisonService;
   socketRoomAdapter: SocketRoomAdapter;
+}
+
+export interface CloudMatchSocketHandlerRegistration {
+  close(): void;
 }
 
 interface AuthenticatedSocketData {
@@ -183,7 +188,7 @@ function serializedByteLength(value: unknown): number | null {
 
 export function registerCloudMatchSocketHandlers(
   context: RegisterCloudMatchSocketHandlersContext,
-): void {
+): CloudMatchSocketHandlerRegistration {
   const {
     io,
     db,
@@ -195,6 +200,10 @@ export function registerCloudMatchSocketHandlers(
   } = context;
   const activeSockets = new Map<string, Socket>();
   const deviceQueues = new Map<string, Promise<void>>();
+  const lastAnnouncedRevision = new Map<string, number>(
+    FIXED_ROOM_IDS.map((roomId) => [roomId, -1]),
+  );
+  let notificationsClosed = false;
 
   const removeSettledDeviceQueue = (
     deviceId: string,
@@ -222,17 +231,36 @@ export function registerCloudMatchSocketHandlers(
     return result;
   };
 
+  const announceRoomNotification = (
+    roomId: string,
+    roomRevision: number,
+    emit: () => void,
+  ): void => {
+    const previousRevision = lastAnnouncedRevision.get(roomId);
+    if (
+      notificationsClosed ||
+      previousRevision === undefined ||
+      roomRevision <= previousRevision
+    ) {
+      return;
+    }
+    lastAnnouncedRevision.set(roomId, roomRevision);
+    emit();
+  };
+
   const emitRoomChanged = (
     socket: Socket,
     roomId: string,
     roomRevision: number,
   ): void => {
-    const namespace = roomNamespace(roomId);
-    const payload = { roomId, roomRevision };
-    io.to(namespace).emit('room:changed', payload);
-    if (socket.connected && !socket.rooms.has(namespace)) {
-      socket.emit('room:changed', payload);
-    }
+    announceRoomNotification(roomId, roomRevision, () => {
+      const namespace = roomNamespace(roomId);
+      const payload = { roomId, roomRevision };
+      io.to(namespace).emit('room:changed', payload);
+      if (socket.connected && !socket.rooms.has(namespace)) {
+        socket.emit('room:changed', payload);
+      }
+    });
   };
 
   const emitRoomPresence = async (
@@ -241,11 +269,13 @@ export function registerCloudMatchSocketHandlers(
     online: boolean,
   ): Promise<void> => {
     const roomRevision = await roomService.getRoomRevision(db, roomId);
-    io.to(roomNamespace(roomId)).emit('room:presence', {
-      roomId,
-      roomRevision,
-      deviceId,
-      online,
+    announceRoomNotification(roomId, roomRevision, () => {
+      io.to(roomNamespace(roomId)).emit('room:presence', {
+        roomId,
+        roomRevision,
+        deviceId,
+        online,
+      });
     });
   };
 
@@ -660,4 +690,11 @@ export function registerCloudMatchSocketHandlers(
       });
     });
   });
+
+  return {
+    close(): void {
+      notificationsClosed = true;
+      lastAnnouncedRevision.clear();
+    },
+  };
 }

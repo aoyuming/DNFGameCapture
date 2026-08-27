@@ -122,7 +122,7 @@ export function createCloudMatchApp(
   });
   expressApp.use(handleExpressError);
 
-  registerCloudMatchSocketHandlers({
+  const socketHandlers = registerCloudMatchSocketHandlers({
     io,
     db,
     now,
@@ -145,6 +145,7 @@ export function createCloudMatchApp(
             });
           }
         } finally {
+          socketHandlers.close();
           if (db.open) {
             db.close();
           }

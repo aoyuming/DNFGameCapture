@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 
 import { createCloudMatchApp } from '../src/app.js';
 import * as comparisonStore from '../src/comparison.js';
+import * as roomStore from '../src/rooms.js';
 import type { MatchSnapshot, Player } from '../src/schemas.js';
 import * as snapshotStore from '../src/snapshots.js';
 
@@ -34,8 +35,21 @@ interface RoomChanged {
   roomRevision: number;
 }
 
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve(value: T): void;
+}
+
 const runningApps: RunningApp[] = [];
 const sockets: Socket[] = [];
+
+function createDeferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolver) => {
+    resolve = resolver;
+  });
+  return { promise, resolve };
+}
 
 function player(mainName: string, seed: number): Player {
   return {
@@ -531,6 +545,55 @@ describe('cloud match Socket.IO integration', () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(roomRevision(app, '59')).toBe(5);
     expect(changes).toHaveLength(5);
+  });
+
+  test('announces changed and presence revisions monotonically across device queues', async () => {
+    const delayedLookupEntered = createDeferred<void>();
+    const releaseDelayedLookup = createDeferred<void>();
+    const delayedLookupReturned = createDeferred<void>();
+    let revisionToDelay: number | null = null;
+    const { url } = await startApp({
+      roomService: {
+        async getRoomRevision(db, roomId) {
+          const revision = roomStore.getRoomRevision(db, roomId);
+          if (revisionToDelay === revision) {
+            revisionToDelay = null;
+            delayedLookupEntered.resolve();
+            await releaseDelayedLookup.promise;
+            delayedLookupReturned.resolve();
+          }
+          return revision;
+        },
+      },
+    });
+    const disconnecting = await createDevice(url, 'ordering-device-0001');
+    const observer = await createDevice(url, 'ordering-device-0002');
+    await joinRoom(disconnecting.socket, '59', 'Disconnecting');
+    await joinRoom(observer.socket, '59', 'Observer');
+
+    const notifications: Array<RoomChanged & { event: string }> = [];
+    observer.socket.on('room:changed', (event: RoomChanged) => {
+      notifications.push({ event: 'room:changed', ...event });
+    });
+    observer.socket.on('room:presence', (event: RoomChanged) => {
+      notifications.push({ event: 'room:presence', ...event });
+    });
+
+    revisionToDelay = 2;
+    disconnecting.socket.disconnect();
+    await delayedLookupEntered.promise;
+    await emitAck(observer.socket, 'room:rename', { broadcasterName: 'Renamed' });
+    releaseDelayedLookup.resolve();
+    await delayedLookupReturned.promise;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const revisions = notifications.map((notification) => notification.roomRevision);
+    expect(revisions.every((revision, index) => index === 0 || revision > revisions[index - 1]))
+      .toBe(true);
+    expect(revisions.at(-1)).toBe(3);
+    expect(notifications).toEqual([
+      { event: 'room:changed', roomId: '59', roomRevision: 3 },
+    ]);
   });
 
   test('serializes 400 in-flight revisions without starving the event loop', async () => {
