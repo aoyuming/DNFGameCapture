@@ -79,7 +79,7 @@ bool IsValidUtf8(std::string_view text) noexcept
 
 bool IsPacketValid(std::string_view packet) noexcept
 {
-    return packet.size() <= kMaxCloudMatchPayloadBytes && IsValidUtf8(packet);
+    return packet.size() <= kMaxCloudMatchInboundPayloadBytes && IsValidUtf8(packet);
 }
 
 bool ParseJsonAfterPrefix(std::string_view packet, std::string_view prefix,
@@ -366,7 +366,7 @@ WebSocketAssemblyResult WebSocketTextAssembler::Add(std::string_view bytes,
         Reset();
         return WebSocketAssemblyResult::rejected;
     }
-    if (bytes.size() > kMaxCloudMatchPayloadBytes - buffer_.size()) {
+    if (bytes.size() > kMaxCloudMatchInboundPayloadBytes - buffer_.size()) {
         Reset();
         return WebSocketAssemblyResult::rejected;
     }

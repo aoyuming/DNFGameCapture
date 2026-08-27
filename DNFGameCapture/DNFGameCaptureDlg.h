@@ -292,6 +292,12 @@ private:
     void CancelCloudRoomJoin(const CString& reason);
     void HandleCloudMatchSnapshotUploadResult(const nlohmann::json& event);
     void HandleCloudMatchMessage(std::string message);
+    void InvalidateCloudMatchSyncPreview(bool clearMembers = true);
+    void BeginCloudMatchComparisonRequest();
+    void HandleCloudMatchComparisonResult(const nlohmann::json& event);
+    void HandleCloudMatchSnapshotResult(const nlohmann::json& event);
+    void QueueCloudMatchSyncedUpload(const std::string& sourceDeviceId,
+        std::uint64_t sourceRevision);
     void PollCloudMatch();
     void OnMatchStateChanged(std::string matchPayload, const char* source);
     void MarkCloudMatchOcrStateChanged(std::string matchPayload);
@@ -563,6 +569,29 @@ private:
     bool m_cloudMatchPromptSent = false;
     bool m_cloudMatchWebReady = false;
     int m_cloudMatchRegistrationRetryCount = 0;
+
+    bool m_cloudMatchSyncPanelOpen = false;
+    bool m_cloudMatchSyncBusy = false;
+    std::uint64_t m_cloudMatchSyncGeneration = 1;
+    std::uint64_t m_cloudMatchSyncRequestSequence = 0;
+    std::string m_cloudMatchSyncComparisonRequestId;
+    std::string m_cloudMatchSyncSnapshotRequestId;
+    std::string m_cloudMatchSyncRequestRoomId;
+    std::string m_cloudMatchSyncSelectedDeviceId;
+    std::uint64_t m_cloudMatchSyncSelectedRevision = 0;
+    bool m_cloudMatchSyncSelectedSwapped = false;
+    nlohmann::json m_cloudMatchSyncMembers = nlohmann::json::array();
+    nlohmann::json m_cloudMatchSyncGroups = nlohmann::json::array();
+    std::string m_cloudMatchSyncConsensusDeviceId;
+    nlohmann::json m_cloudMatchSyncPreview;
+    nlohmann::json m_cloudMatchSyncPendingSnapshot;
+    nlohmann::json m_cloudMatchSyncLocalBaseline;
+    nlohmann::json m_cloudMatchSyncUndoBackup;
+    nlohmann::json m_cloudMatchSyncUndoApplied;
+    std::string m_cloudMatchSyncUndoAppliedHash;
+    int m_cloudMatchSyncUndoEventBoundaryId = 0;
+    CString m_cloudMatchSyncError;
+    CString m_cloudMatchSyncLastResult;
 
     int m_totalScoreRed;
     int m_totalScoreBlue;

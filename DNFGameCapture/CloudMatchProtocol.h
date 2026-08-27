@@ -11,6 +11,7 @@
 namespace cloud_match {
 
 constexpr std::size_t kMaxCloudMatchPayloadBytes = 65536;
+constexpr std::size_t kMaxCloudMatchInboundPayloadBytes = 131072;
 
 struct EngineIoOpenPacket
 {

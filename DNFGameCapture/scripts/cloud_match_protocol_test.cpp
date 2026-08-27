@@ -161,9 +161,19 @@ void TestFragmentAssembly()
     Require(message.size() == kMaxCloudMatchPayloadBytes,
         "maximum payload should not be truncated");
 
-    const std::string oversized(kMaxCloudMatchPayloadBytes + 1, 'x');
-    Require(assembler.Add(oversized, WebSocketBufferKind::utf8Message, message) ==
-        WebSocketAssemblyResult::rejected, "65537-byte payload should be rejected");
+    const std::string responseEnvelope(kMaxCloudMatchPayloadBytes + 1024, 'x');
+    Require(assembler.Add(responseEnvelope, WebSocketBufferKind::utf8Message, message) ==
+        WebSocketAssemblyResult::complete,
+        "response envelope above the snapshot limit should be accepted");
+    const std::string oversizedInbound(131073, 'x');
+    Require(assembler.Add(oversizedInbound, WebSocketBufferKind::utf8Message, message) ==
+        WebSocketAssemblyResult::rejected, "payload above the inbound limit should fail");
+
+    const std::string largeAck = std::string("431[{\"ok\":true,\"padding\":\"") +
+        std::string(kMaxCloudMatchPayloadBytes, 'x') + "\"}]";
+    SocketIoAck ack;
+    Require(ParseSocketIoAck(largeAck, ack),
+        "legal snapshot response envelope should parse above 64KB");
 }
 
 void TestMalformedPacketsAreRejected()
@@ -191,7 +201,7 @@ void TestMalformedPacketsAreRejected()
         Require(!ParseSocketIoAck("4318446744073709551616[]", ack),
             "overflowing ACK id should fail");
         Require(!ParseSocketIoAck("45unknown", ack), "unknown packet should fail");
-        Require(!ParseSocketIoEvent(std::string(kMaxCloudMatchPayloadBytes + 1, 'x'), event),
+        Require(!ParseSocketIoEvent(std::string(kMaxCloudMatchInboundPayloadBytes + 1, 'x'), event),
             "oversized decoded packet should fail");
 
         WebSocketTextAssembler assembler;

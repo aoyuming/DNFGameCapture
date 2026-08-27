@@ -48,6 +48,9 @@
     <ClInclude Include="CloudMatchProtocol.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="CloudMatchSync.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="json.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -90,6 +93,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="CloudMatchProtocol.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="CloudMatchSync.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="WebScoreDlg.cpp">

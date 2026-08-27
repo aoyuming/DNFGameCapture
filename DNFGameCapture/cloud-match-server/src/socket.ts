@@ -30,7 +30,10 @@ const FIXED_ROOM_IDS = ['59', 'li-yong', 'wen-rou'] as const;
 const emptyPayloadSchema = z.object({}).strict();
 const snapshotUploadSchema = z.object({ snapshot: z.unknown() }).strict();
 const snapshotGetSchema = z
-  .object({ targetDeviceId: deviceIdSchema })
+  .object({
+    targetDeviceId: deviceIdSchema,
+    clientRevision: z.number().int().safe().min(1),
+  })
   .strict();
 
 export interface RoomService {
@@ -660,6 +663,9 @@ export function registerCloudMatchSocketHandlers(
         );
         if (!stored || stored.roomId !== callerMembership.room.id) {
           return { ok: false, code: 'target_has_no_snapshot' };
+        }
+        if (stored.snapshot.clientRevision !== parsed.data.clientRevision) {
+          return { ok: false, code: 'snapshot_revision_changed' };
         }
         return {
           ok: true,

@@ -2411,7 +2411,30 @@ function normalizeCloudMatchState(value = {}) {
         leaving: value.leaving === true,
         lastError: String(value.lastError || ''),
         clientRevision: Math.max(0, Number(value.clientRevision || 0)),
-        shouldPrompt: value.shouldPrompt === true
+        shouldPrompt: value.shouldPrompt === true,
+        syncPanel: normalizeCloudSyncPanel(value.syncPanel)
+    };
+}
+
+function normalizeCloudSyncPanel(value = {}) {
+    const source = value && typeof value === 'object' ? value : {};
+    return {
+        open: source.open === true,
+        loading: source.loading === true,
+        error: String(source.error || ''),
+        members: Array.isArray(source.members) ? source.members : [],
+        groups: Array.isArray(source.groups) ? source.groups : [],
+        consensusDeviceId: typeof source.consensusDeviceId === 'string'
+            ? source.consensusDeviceId : '',
+        selectedDeviceId: String(source.selectedDeviceId || ''),
+        selectedRevision: Math.max(0, Number(source.selectedRevision || 0)),
+        preview: source.preview && typeof source.preview === 'object'
+            ? source.preview : null,
+        busy: source.busy === true,
+        canApply: source.canApply === true,
+        undoAvailable: source.undoAvailable === true,
+        undoReason: String(source.undoReason || ''),
+        lastResult: String(source.lastResult || '')
     };
 }
 
@@ -2579,6 +2602,240 @@ function restoreCloudRoomPromptFromState() {
 
 function sendCloudRoomCommand(action, payload = {}) {
     window.chrome?.webview?.postMessage({ action, ...payload });
+}
+
+function isCloudSyncPanelOpen() {
+    return document.getElementById('cloud-sync-overlay')?.classList.contains('active') === true;
+}
+
+function sendCloudSyncCommand(action, payload = {}) {
+    window.chrome?.webview?.postMessage({ action, ...payload });
+}
+
+function openCloudSyncPanel() {
+    const overlay = document.getElementById('cloud-sync-overlay');
+    if (!overlay) return;
+    setMoreControlsOpen(false);
+    overlay.classList.add('active');
+    overlay.setAttribute('aria-hidden', 'false');
+    renderCloudSyncPanel();
+    sendCloudSyncCommand('cmd_cloud_sync_open');
+}
+
+function closeCloudSyncPanel() {
+    const overlay = document.getElementById('cloud-sync-overlay');
+    if (!overlay) return;
+    overlay.classList.remove('active');
+    overlay.setAttribute('aria-hidden', 'true');
+    sendCloudSyncCommand('cmd_cloud_sync_close');
+}
+
+function cloudSyncMemberName(deviceId) {
+    const member = cloudMatchState?.syncPanel?.members?.find(item =>
+        String(item?.deviceId || '') === String(deviceId || ''));
+    return String(member?.broadcasterName || member?.deviceSuffix || deviceId || '未知主播');
+}
+
+function cloudSyncSnapshotTime(receivedAt) {
+    const seconds = Number(receivedAt || 0);
+    if (!Number.isFinite(seconds) || seconds <= 0) return '无快照';
+    const date = new Date(seconds * 1000);
+    return Number.isNaN(date.getTime()) ? '时间未知' : date.toLocaleTimeString('zh-CN', {
+        hour: '2-digit', minute: '2-digit', second: '2-digit'
+    });
+}
+
+function appendCloudSyncBadge(container, text, className = '') {
+    const badge = document.createElement('span');
+    badge.className = `cloud-sync-badge ${className}`.trim();
+    badge.textContent = text;
+    container.appendChild(badge);
+}
+
+function renderCloudSyncMembers(panel) {
+    const list = document.getElementById('cloud-sync-member-list');
+    if (!list) return;
+    list.replaceChildren();
+    const members = panel.members || [];
+    const count = document.getElementById('cloud-sync-member-count');
+    if (count) count.textContent = String(members.length);
+    if (members.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'cloud-sync-preview-empty';
+        empty.textContent = panel.loading ? '正在读取成员数据...' : '当前房间暂无成员数据。';
+        list.appendChild(empty);
+        return;
+    }
+
+    members.forEach(member => {
+        const hasSnapshot = member?.state !== 'no_data' && Number(member?.clientRevision || 0) > 0;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'cloud-sync-member';
+        button.disabled = !hasSnapshot || panel.busy;
+        button.classList.toggle('selected', String(member?.deviceId || '') === panel.selectedDeviceId);
+        button.dataset.deviceId = String(member?.deviceId || '');
+        button.dataset.clientRevision = String(Number(member?.clientRevision || 0));
+
+        const name = document.createElement('span');
+        name.className = 'cloud-sync-member-name';
+        name.textContent = String(member?.broadcasterName || '未命名主播');
+        const device = document.createElement('span');
+        device.className = 'cloud-sync-member-device';
+        device.textContent = `设备 ·${String(member?.deviceSuffix || '----')}`;
+        const meta = document.createElement('span');
+        meta.className = 'cloud-sync-member-meta';
+        meta.textContent = `${member?.online ? '在线' : '离线'} · ${cloudSyncSnapshotTime(member?.receivedAt)}`;
+        const metrics = document.createElement('span');
+        metrics.className = 'cloud-sync-member-metrics';
+        metrics.textContent = hasSnapshot
+            ? `相似 ${Number(member?.similarity || 0)}% · 身份 ${Number(member?.identityMatchPercent || 0)}%`
+            : '暂无比赛快照';
+        const badges = document.createElement('span');
+        badges.className = 'cloud-sync-badges';
+        if (String(member?.deviceId || '') === panel.consensusDeviceId) {
+            appendCloudSyncBadge(badges, '参考数据', 'reference');
+        }
+        if (member?.stale === true) appendCloudSyncBadge(badges, '陈旧', 'warning');
+        if (member?.excludedFromConsensus === true) appendCloudSyncBadge(badges, '已排除', 'warning');
+        if (member?.sourceRoot && member.sourceRoot !== member.deviceId) {
+            appendCloudSyncBadge(badges, `来源 ·${String(member.sourceRoot).slice(-4)}`);
+        }
+        if (member?.swapped === true) appendCloudSyncBadge(badges, '红蓝已对齐');
+        button.append(name, device, meta, metrics, badges);
+        list.appendChild(button);
+    });
+}
+
+function renderCloudSyncGroups(panel) {
+    const container = document.getElementById('cloud-sync-groups');
+    if (!container) return;
+    container.replaceChildren();
+    if (!panel.groups?.length) {
+        const empty = document.createElement('span');
+        empty.className = 'cloud-sync-member-meta';
+        empty.textContent = '暂无达到阈值的相似组';
+        container.appendChild(empty);
+        return;
+    }
+    panel.groups.forEach((group, index) => {
+        const item = document.createElement('span');
+        item.className = 'cloud-sync-group';
+        const names = Array.isArray(group?.memberDeviceIds)
+            ? group.memberDeviceIds.map(cloudSyncMemberName) : [];
+        item.textContent = `组 ${index + 1}：${names.join('、')}`;
+        container.appendChild(item);
+    });
+}
+
+const CLOUD_SYNC_GROUP_LABELS = Object.freeze({
+    score: '比分', roster: '名单', stats: '战绩', state: '比赛状态'
+});
+const CLOUD_SYNC_FIELD_LABELS = Object.freeze({
+    redScore: '红方比分', blueScore: '蓝方比分', mainName: '主号', aliases: '小号',
+    kills: '击杀', deaths: '死亡', ak: 'AK', streak: '连杀',
+    redPickFirst: '红方先后手', teamsFlipped: '红蓝翻转',
+    outputSeatLabel: 'TXT选人顺序', lastKillTeam: '上一击杀队伍'
+});
+
+function cloudSyncDisplayValue(field, value) {
+    if (Array.isArray(value)) return value.length ? value.join('、') : '无';
+    if (field === 'redPickFirst') return value === 'first' ? '先手' : '后手';
+    if (field === 'teamsFlipped' || field === 'outputSeatLabel') return value ? '开启' : '关闭';
+    if (field === 'lastKillTeam') return Number(value) === 0 ? '红方' : (Number(value) === 1 ? '蓝方' : '无');
+    return String(value ?? '无');
+}
+
+function renderCloudSyncPreview(panel) {
+    const preview = panel.preview;
+    const empty = document.getElementById('cloud-sync-preview-empty');
+    const groups = document.getElementById('cloud-sync-difference-groups');
+    const actions = document.getElementById('cloud-sync-preview-actions');
+    const orientation = document.getElementById('cloud-sync-orientation');
+    if (!groups || !empty || !actions) return;
+    groups.replaceChildren();
+    const hasPreview = !!preview && Array.isArray(preview.groups);
+    empty.hidden = hasPreview;
+    actions.hidden = !hasPreview;
+    if (orientation) orientation.textContent = hasPreview && preview.swapped
+        ? '已自动对齐红蓝方向' : '';
+    if (!hasPreview) {
+        empty.textContent = panel.loading && panel.selectedDeviceId
+            ? '正在获取该主播快照...' : '选择一位有快照的主播查看差异。';
+        return;
+    }
+
+    preview.groups.forEach(group => {
+        const section = document.createElement('section');
+        section.className = 'cloud-sync-difference-group';
+        const heading = document.createElement('div');
+        heading.className = 'cloud-sync-difference-heading';
+        heading.textContent = CLOUD_SYNC_GROUP_LABELS[group?.id] || String(group?.id || '差异');
+        section.appendChild(heading);
+        const items = Array.isArray(group?.items) ? group.items : [];
+        if (items.length === 0) {
+            const same = document.createElement('div');
+            same.className = 'cloud-sync-difference-same';
+            same.textContent = '与本地一致';
+            section.appendChild(same);
+        } else {
+            items.forEach(item => {
+                const row = document.createElement('div');
+                row.className = 'cloud-sync-difference-item';
+                const label = document.createElement('span');
+                label.className = 'cloud-sync-difference-label';
+                const seat = Number.isInteger(item?.seat) ? `${item.seat + 1}号位 · ` : '';
+                label.textContent = `${seat}${CLOUD_SYNC_FIELD_LABELS[item?.field] || item?.field || '字段'}`;
+                const local = document.createElement('span');
+                local.className = 'cloud-sync-difference-local';
+                local.textContent = cloudSyncDisplayValue(item?.field, item?.local);
+                const arrow = document.createElement('span');
+                arrow.className = 'cloud-sync-difference-arrow';
+                arrow.textContent = '→';
+                const remote = document.createElement('span');
+                remote.className = 'cloud-sync-difference-remote';
+                remote.textContent = cloudSyncDisplayValue(item?.field, item?.remote);
+                row.append(label, local, arrow, remote);
+                section.appendChild(row);
+            });
+        }
+        groups.appendChild(section);
+    });
+
+    const apply = document.getElementById('btn-cloud-sync-apply');
+    const cancel = document.getElementById('btn-cloud-sync-cancel-preview');
+    if (apply) apply.disabled = !panel.canApply || panel.busy;
+    if (cancel) cancel.disabled = panel.busy;
+}
+
+function renderCloudSyncPanel() {
+    const panel = cloudMatchState?.syncPanel || normalizeCloudSyncPanel();
+    const joined = cloudMatchState?.joined && cloudMatchState?.roomConfirmed;
+    const context = document.getElementById('cloud-sync-context');
+    if (context) context.textContent = joined
+        ? `${cloudMatchState.roomName || CLOUD_ROOM_NAMES[cloudMatchState.roomId]} · 本机 ${cloudMatchState.broadcasterName}`
+        : '未加入云端比赛房间';
+    const notJoined = document.getElementById('cloud-sync-not-joined');
+    if (notJoined) notJoined.hidden = !!joined;
+    const workspace = document.getElementById('cloud-sync-workspace');
+    if (workspace) workspace.hidden = !joined;
+    const refresh = document.getElementById('btn-cloud-sync-refresh');
+    if (refresh) refresh.disabled = !joined || panel.loading || panel.busy;
+
+    const status = document.getElementById('cloud-sync-status-line');
+    if (status) {
+        status.classList.toggle('error', !!panel.error);
+        status.textContent = panel.error || (panel.loading ? '正在读取云端数据...' : panel.lastResult);
+    }
+    renderCloudSyncMembers(panel);
+    renderCloudSyncGroups(panel);
+    renderCloudSyncPreview(panel);
+
+    const undo = document.getElementById('btn-cloud-sync-undo');
+    if (undo) undo.disabled = !panel.undoAvailable || panel.busy;
+    const undoReason = document.getElementById('cloud-sync-undo-reason');
+    if (undoReason) undoReason.textContent = panel.undoReason ||
+        (panel.undoAvailable ? '可安全恢复最近一次云端同步前的数据。' : '');
 }
 
 function createDefaultKeyMappingSettings() {
@@ -3143,6 +3400,7 @@ function applyStateFromServer(state) {
     if (isKeyMappingPanelOpen()) renderKeyMappingPanel();
     if (isKeyLanPanelOpen()) renderKeyLanPanel();
     if (isCloudRoomPanelOpen()) renderCloudRoomPanel();
+    if (isCloudSyncPanelOpen()) renderCloudSyncPanel();
     restoreCloudRoomPromptFromState();
     if (keyMappingSettings.lan.adminRequired && !keyMappingSettings.lan.isAdmin) {
         setTimeout(() => showKeyMappingAdminPrompt('DNF 以更高权限运行，按键映射需要管理员权限才能读取游戏内按键。'), 0);
@@ -4589,6 +4847,7 @@ document.getElementById('btn-swap').addEventListener('click', () => window.chrom
 document.getElementById('btn-random-teams')?.addEventListener('click', openRandomTool);
 document.getElementById('btn-key-mapping')?.addEventListener('click', openKeyMappingPanel);
 document.getElementById('btn-key-lan')?.addEventListener('click', openKeyLanPanel);
+document.getElementById('btn-cloud-sync')?.addEventListener('click', openCloudSyncPanel);
 document.getElementById('btn-cloud-match')?.addEventListener('click', () => openCloudRoomPanel(false));
 document.getElementById('btn-more-controls')?.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -4652,6 +4911,45 @@ document.getElementById('key-lan-overlay')?.addEventListener('click', (event) =>
 document.getElementById('btn-cloud-room-close')?.addEventListener('click', () => closeCloudRoomPanel(false));
 document.getElementById('cloud-room-overlay')?.addEventListener('click', (event) => {
     if (event.target?.id === 'cloud-room-overlay') closeCloudRoomPanel(false);
+});
+document.getElementById('btn-cloud-sync-close')?.addEventListener('click', closeCloudSyncPanel);
+document.getElementById('btn-cloud-sync-refresh')?.addEventListener('click', () => {
+    sendCloudSyncCommand('cmd_cloud_sync_refresh');
+});
+document.getElementById('btn-cloud-sync-room-settings')?.addEventListener('click', () => {
+    closeCloudSyncPanel();
+    openCloudRoomPanel(false);
+});
+document.getElementById('cloud-sync-member-list')?.addEventListener('click', (event) => {
+    const member = event.target.closest('.cloud-sync-member');
+    if (!member || member.disabled) return;
+    sendCloudSyncCommand('cmd_cloud_sync_select', {
+        deviceId: member.dataset.deviceId || '',
+        clientRevision: Number(member.dataset.clientRevision || 0)
+    });
+});
+document.getElementById('btn-cloud-sync-cancel-preview')?.addEventListener('click', () => {
+    sendCloudSyncCommand('cmd_cloud_sync_cancel_preview');
+});
+document.getElementById('btn-cloud-sync-apply')?.addEventListener('click', () => {
+    const panel = cloudMatchState?.syncPanel;
+    const preview = panel?.preview;
+    if (!panel?.canApply || !preview || panel.busy) return;
+    const targetName = cloudSyncMemberName(preview.deviceId);
+    const revision = Number(preview.clientRevision || 0);
+    showConfirm(`确认使用【${escapeHtml(targetName)}】的版本 ${revision} 覆盖本地比赛数据？<br>比分、名单、战绩和比赛状态都会更新。`, (ok) => {
+        if (ok === true) sendCloudSyncCommand('cmd_cloud_sync_apply', {
+            deviceId: String(preview.deviceId || ''),
+            clientRevision: revision,
+            generation: Number(preview.generation || 0)
+        });
+    }, { okText: '确认覆盖本地', cancelText: '取消' });
+});
+document.getElementById('btn-cloud-sync-undo')?.addEventListener('click', () => {
+    if (!cloudMatchState?.syncPanel?.undoAvailable) return;
+    showConfirm('确认撤销最近一次云端同步并恢复同步前的本地比赛数据？', (ok) => {
+        if (ok === true) sendCloudSyncCommand('cmd_cloud_sync_undo');
+    }, { okText: '撤销本次同步', cancelText: '取消' });
 });
 document.querySelectorAll('.cloud-room-option').forEach(option => {
     option.addEventListener('click', () => {
@@ -5121,6 +5419,15 @@ document.addEventListener('keydown', function (e) {
     else if (e.key === 'Escape') {
         // 对话框激活：由对话框自己的监听器处理（那边已经 stopImmediatePropagation）
         if (customModal.classList.contains('active')) return;
+        if (isCloudSyncPanelOpen()) {
+            e.preventDefault();
+            if (cloudMatchState?.syncPanel?.preview) {
+                sendCloudSyncCommand('cmd_cloud_sync_cancel_preview');
+            } else {
+                closeCloudSyncPanel();
+            }
+            return;
+        }
         if (isCloudRoomPanelOpen()) {
             e.preventDefault();
             closeCloudRoomPanel(false);

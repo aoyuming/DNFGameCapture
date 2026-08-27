@@ -400,13 +400,22 @@ public:
         return EnqueueCommand(CommandKind::requestComparison, {}, {}, requestId);
     }
 
-    bool RequestSnapshot(const std::string& requestId, const std::string& targetDeviceId)
+    bool RequestSnapshot(const std::string& requestId,
+        const std::string& targetDeviceId, std::uint64_t clientRevision)
     {
         if (requestId.empty() || requestId.size() > 128 || targetDeviceId.empty() ||
-            targetDeviceId.size() > 128) {
+            targetDeviceId.size() > 128 || clientRevision == 0) {
             return false;
         }
-        return EnqueueCommand(CommandKind::requestSnapshot, targetDeviceId, {}, requestId);
+        bool enqueued = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            enqueued = EnqueueCommandLocked(config.generation,
+                CommandKind::requestSnapshot, targetDeviceId, {}, requestId,
+                clientRevision);
+        }
+        if (enqueued) condition.notify_all();
+        return enqueued;
     }
 
     CloudMatchStatusSnapshot GetStatusSnapshot() const
@@ -509,9 +518,38 @@ public:
             { "code", "test_complete" }
         };
         if (!command.requestId.empty()) result["requestId"] = command.requestId;
+        if (command.kind == CommandKind::requestSnapshot) {
+            result["targetDeviceId"] = command.argument;
+            result["clientRevision"] = command.clientRevision;
+        }
         if (responsePadding > 0) result["padding"] = std::string(responsePadding, 'x');
         NotifyJson(command.generation, result, {}, false,
             &command.protectedResultReservation);
+        return true;
+    }
+
+    bool FailNextProtectedOperationForTesting(const std::string& code)
+    {
+        Command command;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (commands.empty()) return false;
+            command = std::move(commands.front());
+            commands.pop_front();
+        }
+
+        PendingAck pending;
+        pending.kind = command.kind;
+        pending.resultType = command.kind == CommandKind::requestSnapshot ?
+            "snapshot_result" : "room_comparison_result";
+        pending.requestId = command.requestId;
+        pending.clientRevision = command.clientRevision;
+        pending.targetDeviceId = command.kind == CommandKind::requestSnapshot ?
+            command.argument : std::string();
+        pending.protectedResultReservation = command.protectedResultReservation;
+        command.protectedResultReservation = false;
+        NotifyPendingAckFailure(command.generation, pending,
+            code.empty() ? "connection_lost" : code.c_str());
         return true;
     }
 
@@ -764,6 +802,7 @@ private:
 
         Command(Command&& other) noexcept
             : kind(other.kind), generation(other.generation), sequence(other.sequence),
+            clientRevision(other.clientRevision),
             protectedResultReservation(other.protectedResultReservation)
         {
             argument.swap(other.argument);
@@ -771,6 +810,7 @@ private:
             requestId.swap(other.requestId);
             other.generation = 0;
             other.sequence = 0;
+            other.clientRevision = 0;
             other.protectedResultReservation = false;
         }
 
@@ -781,12 +821,14 @@ private:
                 kind = other.kind;
                 generation = other.generation;
                 sequence = other.sequence;
+                clientRevision = other.clientRevision;
                 protectedResultReservation = other.protectedResultReservation;
                 argument.swap(other.argument);
                 secondArgument.swap(other.secondArgument);
                 requestId.swap(other.requestId);
                 other.generation = 0;
                 other.sequence = 0;
+                other.clientRevision = 0;
                 other.protectedResultReservation = false;
             }
             return *this;
@@ -798,6 +840,7 @@ private:
         std::string requestId;
         std::uint64_t generation = 0;
         std::uint64_t sequence = 0;
+        std::uint64_t clientRevision = 0;
         bool protectedResultReservation = false;
 
         void Clear() noexcept
@@ -807,6 +850,7 @@ private:
             SecureClear(requestId);
             generation = 0;
             sequence = 0;
+            clientRevision = 0;
             protectedResultReservation = false;
         }
     };
@@ -882,11 +926,13 @@ private:
         std::uint64_t clientRevision = 0;
         Clock::time_point deadline;
         bool protectedResultReservation = false;
+        std::string targetDeviceId;
 
         void Clear() noexcept
         {
             SecureClear(resultType);
             SecureClear(requestId);
+            SecureClear(targetDeviceId);
             clientRevision = 0;
             protectedResultReservation = false;
         }
@@ -1236,7 +1282,8 @@ private:
     }
 
     bool EnqueueCommandLocked(std::uint64_t generation, CommandKind kind,
-        std::string argument, std::string secondArgument, std::string requestId)
+        std::string argument, std::string secondArgument, std::string requestId,
+        std::uint64_t clientRevision = 0)
     {
         const bool registration = kind == CommandKind::registerDevice;
         if (stopping || config.generation != generation ||
@@ -1256,6 +1303,7 @@ private:
         command.argument = std::move(argument);
         command.secondArgument = std::move(secondArgument);
         command.requestId = std::move(requestId);
+        command.clientRevision = clientRevision;
         command.generation = generation;
         command.sequence = nextCommandSequence++;
         command.protectedResultReservation = true;
@@ -1397,7 +1445,7 @@ private:
             SecureClear(serialized);
         }
         if (serialized.empty() ||
-            serialized.size() > cloud_match::kMaxCloudMatchPayloadBytes) {
+            serialized.size() > cloud_match::kMaxCloudMatchInboundPayloadBytes) {
             SecureClear(serialized);
             if (!protectedResultReservation || !*protectedResultReservation ||
                 !IsProtectedInboundResult(type)) {
@@ -1415,6 +1463,20 @@ private:
                     if (revision != message.end() &&
                         (revision->is_number_unsigned() || revision->is_number_integer())) {
                         fallback["clientRevision"] = *revision;
+                    }
+                }
+                else if (type == "snapshot_result") {
+                    const auto revision = message.find("clientRevision");
+                    if (revision != message.end() &&
+                        (revision->is_number_unsigned() || revision->is_number_integer())) {
+                        fallback["clientRevision"] = *revision;
+                    }
+                    const auto target = message.find("targetDeviceId");
+                    if (target != message.end() && target->is_string()) {
+                        const std::string& value = target->get_ref<const std::string&>();
+                        if (!value.empty() && value.size() <= 128) {
+                            fallback["targetDeviceId"] = value;
+                        }
                     }
                 }
                 const auto requestId = message.find("requestId");
@@ -1900,19 +1962,24 @@ private:
         case CommandKind::requestSnapshot:
             eventName = "snapshot:get";
             resultType = "snapshot_result";
-            payload = { { "targetDeviceId", command.argument } };
+            payload = {
+                { "targetDeviceId", command.argument },
+                { "clientRevision", command.clientRevision }
+            };
             break;
         case CommandKind::uploadSnapshot:
         case CommandKind::registerDevice:
             return true;
         }
         return SendEventWithAck(activeConfig, connection, eventName, payload, command.kind,
-            resultType, command.requestId, command.protectedResultReservation);
+            resultType, command.requestId, command.argument, command.clientRevision,
+            command.protectedResultReservation);
     }
 
     bool SendEventWithAck(const Config& activeConfig, WebSocketConnection& connection,
         const std::string& eventName, const json& payload, CommandKind kind,
         const std::string& resultType, const std::string& requestId,
+        const std::string& targetDeviceId, std::uint64_t clientRevision,
         bool& protectedResultReservation)
     {
         std::uint64_t ackId = 0;
@@ -1937,8 +2004,9 @@ private:
             std::lock_guard<std::mutex> lock(mutex);
             if (config.generation != activeConfig.generation) return false;
             pendingAcks.emplace(ackId, PendingAck{
-                kind, resultType, requestId, 0, Clock::now() + kAckTimeout,
-                protectedResultReservation
+                kind, resultType, requestId, clientRevision,
+                Clock::now() + kAckTimeout, protectedResultReservation,
+                kind == CommandKind::requestSnapshot ? targetDeviceId : std::string()
             });
             if (kind == CommandKind::joinRoom && desiredRoom &&
                 desiredRoom->generation == activeConfig.generation &&
@@ -2234,6 +2302,10 @@ private:
         if (pending.kind == CommandKind::uploadSnapshot) {
             normalized["clientRevision"] = pending.clientRevision;
         }
+        else if (pending.kind == CommandKind::requestSnapshot) {
+            normalized["targetDeviceId"] = pending.targetDeviceId;
+            normalized["clientRevision"] = pending.clientRevision;
+        }
         NotifyJson(activeConfig.generation, normalized, {}, false,
             &pending.protectedResultReservation);
     }
@@ -2342,6 +2414,10 @@ private:
         };
         if (!pending.requestId.empty()) normalized["requestId"] = pending.requestId;
         if (pending.kind == CommandKind::uploadSnapshot) {
+            normalized["clientRevision"] = pending.clientRevision;
+        }
+        else if (pending.kind == CommandKind::requestSnapshot) {
+            normalized["targetDeviceId"] = pending.targetDeviceId;
             normalized["clientRevision"] = pending.clientRevision;
         }
         NotifyJson(generation, normalized, {}, false,
@@ -2642,15 +2718,15 @@ bool CloudMatchClient::RequestComparison(unsigned int requestId)
 }
 
 bool CloudMatchClient::RequestSnapshot(const std::string& requestId,
-    const std::string& targetDeviceId)
+    const std::string& targetDeviceId, std::uint64_t clientRevision)
 {
-    return impl_->RequestSnapshot(requestId, targetDeviceId);
+    return impl_->RequestSnapshot(requestId, targetDeviceId, clientRevision);
 }
 
 bool CloudMatchClient::RequestSnapshot(unsigned int requestId,
-    const std::string& targetDeviceId)
+    const std::string& targetDeviceId, std::uint64_t clientRevision)
 {
-    return RequestSnapshot(std::to_string(requestId), targetDeviceId);
+    return RequestSnapshot(std::to_string(requestId), targetDeviceId, clientRevision);
 }
 
 CloudMatchStatusSnapshot CloudMatchClient::GetStatusSnapshot() const
@@ -2677,6 +2753,11 @@ std::uint64_t CloudMatchClient::ConfigureForTesting()
 bool CloudMatchClient::CompleteNextProtectedOperationForTesting(std::size_t responsePadding)
 {
     return impl_->CompleteNextProtectedOperationForTesting(responsePadding);
+}
+
+bool CloudMatchClient::FailNextProtectedOperationForTesting(const std::string& code)
+{
+    return impl_->FailNextProtectedOperationForTesting(code);
 }
 
 bool CloudMatchClient::CompleteLatestSnapshotAckForTesting(bool ok,

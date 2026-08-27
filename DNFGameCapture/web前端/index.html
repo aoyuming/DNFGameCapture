@@ -70,6 +70,7 @@
                                 <button class="ctrl-btn btn-random" id="btn-random-teams">🎲 分组和抽签</button>
                                 <button class="ctrl-btn btn-key-mapping" id="btn-key-mapping">⌨ 按键映射</button>
                                 <button class="ctrl-btn btn-key-lan" id="btn-key-lan">局域网同步</button>
+                                <button class="ctrl-btn btn-cloud-sync" id="btn-cloud-sync">云端比赛同步</button>
                                 <button class="ctrl-btn btn-console-toggle" id="btn-console-toggle" aria-expanded="false">
                                     <span>C++日志</span>
                                     <span class="console-toggle-count" id="console-toggle-count">0</span>
@@ -77,7 +78,7 @@
                             </div>
                             <div class="more-controls-section">
                                 <div class="more-controls-title">数据</div>
-                                <button class="ctrl-btn btn-cloud-match" id="btn-cloud-match">云端比赛同步</button>
+                                <button class="ctrl-btn btn-cloud-match" id="btn-cloud-match">云端房间设置</button>
                                 <button class="ctrl-btn btn-sync-db" id="btn-sync-alias-db">☁ 同步云端库</button>
                                 <button class="ctrl-btn btn-push-db" id="btn-push-alias-db">⬆ 推送本地库</button>
                             </div>
@@ -385,6 +386,63 @@
                         </div>
                     </div>
                 </section>
+            </div>
+        </div>
+    </div>
+
+    <div class="cloud-sync-overlay" id="cloud-sync-overlay" aria-hidden="true">
+        <div class="cloud-sync-panel" role="dialog" aria-modal="true" aria-labelledby="cloud-sync-title">
+            <header class="cloud-sync-header">
+                <div>
+                    <div class="cloud-sync-title" id="cloud-sync-title">云端比赛同步</div>
+                    <div class="cloud-sync-context" id="cloud-sync-context">正在读取房间信息</div>
+                </div>
+                <div class="cloud-sync-header-actions">
+                    <button class="cloud-sync-icon-button" id="btn-cloud-sync-refresh" title="刷新房间对比" aria-label="刷新房间对比">↻</button>
+                    <button class="cloud-sync-icon-button" id="btn-cloud-sync-close" title="关闭" aria-label="关闭">&times;</button>
+                </div>
+            </header>
+
+            <div class="cloud-sync-scroll">
+                <div class="cloud-sync-not-joined" id="cloud-sync-not-joined" hidden>
+                    <strong>尚未加入云端比赛房间</strong>
+                    <span>先设置房间和本机主播名称，之后才能查看各主播数据。</span>
+                    <button class="cloud-sync-button" id="btn-cloud-sync-room-settings">进入房间设置</button>
+                </div>
+
+                <div class="cloud-sync-status-line" id="cloud-sync-status-line" role="status"></div>
+
+                <div class="cloud-sync-workspace" id="cloud-sync-workspace">
+                    <aside class="cloud-sync-members-pane">
+                        <div class="cloud-sync-pane-heading">
+                            <span>房间成员</span>
+                            <span id="cloud-sync-member-count">0</span>
+                        </div>
+                        <div class="cloud-sync-member-list" id="cloud-sync-member-list"></div>
+                        <div class="cloud-sync-groups-wrap">
+                            <div class="cloud-sync-subheading">相似组</div>
+                            <div class="cloud-sync-groups" id="cloud-sync-groups"></div>
+                        </div>
+                    </aside>
+
+                    <section class="cloud-sync-preview-pane">
+                        <div class="cloud-sync-pane-heading">
+                            <span>差异预览</span>
+                            <span id="cloud-sync-orientation"></span>
+                        </div>
+                        <div class="cloud-sync-preview-empty" id="cloud-sync-preview-empty">选择一位有快照的主播查看差异。</div>
+                        <div class="cloud-sync-difference-groups" id="cloud-sync-difference-groups"></div>
+                        <div class="cloud-sync-preview-actions" id="cloud-sync-preview-actions" hidden>
+                            <button class="cloud-sync-button danger" id="btn-cloud-sync-apply">确认覆盖本地</button>
+                            <button class="cloud-sync-button" id="btn-cloud-sync-cancel-preview">取消预览</button>
+                        </div>
+                    </section>
+                </div>
+
+                <footer class="cloud-sync-footer">
+                    <div class="cloud-sync-undo-copy" id="cloud-sync-undo-reason">当前没有可撤销的云端同步。</div>
+                    <button class="cloud-sync-button undo" id="btn-cloud-sync-undo" disabled>撤销本次同步</button>
+                </footer>
             </div>
         </div>
     </div>

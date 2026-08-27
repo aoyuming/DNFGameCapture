@@ -210,6 +210,7 @@
     <ClInclude Include="CameraCapture.h" />
     <ClInclude Include="CloudMatchClient.h" />
     <ClInclude Include="CloudMatchProtocol.h" />
+    <ClInclude Include="CloudMatchSync.h" />
     <ClInclude Include="KillDisplayDlg.h" />
     <ClInclude Include="KeyDisplayDlg.h" />
     <ClInclude Include="KeyMappingHook.h" />
@@ -230,6 +231,9 @@
     <ClCompile Include="CameraCapture.cpp" />
     <ClCompile Include="CloudMatchClient.cpp" />
     <ClCompile Include="CloudMatchProtocol.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="CloudMatchSync.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="DNFGameCaptureDlg_IdentityPatch.cpp" />

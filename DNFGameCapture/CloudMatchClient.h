@@ -44,8 +44,10 @@ public:
     bool UploadSnapshot(std::string snapshotJson);
     bool RequestComparison(const std::string& requestId);
     bool RequestComparison(unsigned int requestId);
-    bool RequestSnapshot(const std::string& requestId, const std::string& targetDeviceId);
-    bool RequestSnapshot(unsigned int requestId, const std::string& targetDeviceId);
+    bool RequestSnapshot(const std::string& requestId,
+        const std::string& targetDeviceId, std::uint64_t clientRevision);
+    bool RequestSnapshot(unsigned int requestId,
+        const std::string& targetDeviceId, std::uint64_t clientRevision);
 
     CloudMatchStatusSnapshot GetStatusSnapshot() const;
     void SetMessageCallback(MessageCallback callback);
@@ -54,6 +56,7 @@ public:
 #ifdef CLOUD_MATCH_CLIENT_STANDALONE
     std::uint64_t ConfigureForTesting();
     bool CompleteNextProtectedOperationForTesting(std::size_t responsePadding = 0);
+    bool FailNextProtectedOperationForTesting(const std::string& code);
     bool CompleteLatestSnapshotAckForTesting(bool ok,
         std::uint64_t acceptedRevision, const std::string& code,
         std::size_t responsePadding = 0);

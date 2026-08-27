@@ -351,7 +351,7 @@ Require-Text $clientSource 'TakeLatestSnapshotForSend(activeConfig.generation)' 
 Require-Text $clientSource 'TakeLatestSnapshotForSend(generation)' 'Snapshot tests do not use the production latest-snapshot transfer path.'
 Require-Text $clientTest 'ExpireLatestSnapshotAckForTesting()' 'Executable tests do not run the production ACK expiry path.'
 Require-Text $clientTest 'FailLatestSnapshotAckForTesting("connection_lost")' 'Executable tests do not run the production connection-loss path.'
-Require-Text $clientTest 'CompleteLatestSnapshotAckForTesting(true, 808, {}, 70000)' 'Executable tests do not cover oversized snapshot result fallback.'
+Require-Text $clientTest 'CompleteLatestSnapshotAckForTesting(true, 808, {}, 140000)' 'Executable tests do not cover oversized snapshot result fallback.'
 Require-Text $clientTest 'CompleteLatestSnapshotAckWithPayloadForTesting' 'Executable tests do not cover malformed ACK ok types.'
 
 $webCommandHandler = Get-CppFunctionBody $source 'LRESULT CDNFGameCaptureDlg::OnWebCmdReceived('

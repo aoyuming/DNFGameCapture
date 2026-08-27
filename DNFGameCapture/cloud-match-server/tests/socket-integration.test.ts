@@ -314,7 +314,7 @@ describe('cloud match Socket.IO integration', () => {
     const preview = await emitAck<Record<string, unknown>>(
       devices[0].socket,
       'snapshot:get',
-      { targetDeviceId: devices[7].deviceId },
+      { targetDeviceId: devices[7].deviceId, clientRevision: 8 },
     );
     expect(preview).toEqual({
       ok: true,
@@ -325,6 +325,12 @@ describe('cloud match Socket.IO integration', () => {
       clientRevision: 8,
       snapshot: snapshot(8),
     });
+    await expect(
+      emitAck(devices[0].socket, 'snapshot:get', {
+        targetDeviceId: devices[7].deviceId,
+        clientRevision: 7,
+      }),
+    ).resolves.toEqual({ ok: false, code: 'snapshot_revision_changed' });
 
     const serialized = JSON.stringify({ comparison, preview });
     for (const device of devices) {
@@ -376,13 +382,22 @@ describe('cloud match Socket.IO integration', () => {
     );
 
     await expect(
-      emitAck(caller.socket, 'snapshot:get', { targetDeviceId: otherRoom.deviceId }),
+      emitAck(caller.socket, 'snapshot:get', {
+        targetDeviceId: otherRoom.deviceId,
+        clientRevision: 1,
+      }),
     ).resolves.toEqual({ ok: false, code: 'target_not_found' });
     await expect(
-      emitAck(caller.socket, 'snapshot:get', { targetDeviceId: noData.deviceId }),
+      emitAck(caller.socket, 'snapshot:get', {
+        targetDeviceId: noData.deviceId,
+        clientRevision: 1,
+      }),
     ).resolves.toEqual({ ok: false, code: 'target_has_no_snapshot' });
     await expect(
-      emitAck(caller.socket, 'snapshot:get', { targetDeviceId: 'bad id' }),
+      emitAck(caller.socket, 'snapshot:get', {
+        targetDeviceId: 'bad id',
+        clientRevision: 1,
+      }),
     ).resolves.toEqual({ ok: false, code: 'invalid_request' });
     await expect(
       emitAck(caller.socket, 'room:comparison', { extra: true }),
@@ -391,8 +406,38 @@ describe('cloud match Socket.IO integration', () => {
       emitAck(unjoined.socket, 'room:comparison', {}),
     ).resolves.toEqual({ ok: false, code: 'not_in_room' });
     await expect(
-      emitAck(unjoined.socket, 'snapshot:get', { targetDeviceId: caller.deviceId }),
+      emitAck(unjoined.socket, 'snapshot:get', {
+        targetDeviceId: caller.deviceId,
+        clientRevision: 1,
+      }),
     ).resolves.toEqual({ ok: false, code: 'not_in_room' });
+  });
+
+  test('fetches only the explicitly requested snapshot revision', async () => {
+    const { url } = await startApp();
+    const viewer = await createDevice(url, 'revision-viewer-0001');
+    const source = await createDevice(url, 'revision-source-0002');
+    await joinRoom(viewer.socket, '59', 'Viewer');
+    await joinRoom(source.socket, '59', 'Source');
+    await emitAck(source.socket, 'snapshot:upload', { snapshot: snapshot(4) });
+
+    await expect(
+      emitAck(viewer.socket, 'snapshot:get', {
+        targetDeviceId: source.deviceId,
+        clientRevision: 4,
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      targetDeviceId: source.deviceId,
+      clientRevision: 4,
+      snapshot: { clientRevision: 4 },
+    });
+    await expect(
+      emitAck(viewer.socket, 'snapshot:get', {
+        targetDeviceId: source.deviceId,
+        clientRevision: 3,
+      }),
+    ).resolves.toEqual({ ok: false, code: 'snapshot_revision_changed' });
   });
 
   test('bumps presence revisions across disconnect, reconnect, and disconnect', async () => {
@@ -450,7 +495,10 @@ describe('cloud match Socket.IO integration', () => {
     });
 
     await expect(
-      emitAck(viewer.socket, 'snapshot:get', { targetDeviceId: uploader.deviceId }),
+      emitAck(viewer.socket, 'snapshot:get', {
+        targetDeviceId: uploader.deviceId,
+        clientRevision: 7,
+      }),
     ).resolves.toMatchObject({
       ok: true,
       targetDeviceId: uploader.deviceId,
@@ -540,7 +588,10 @@ describe('cloud match Socket.IO integration', () => {
       },
     ]);
     await expect(
-      emitAck(observer.socket, 'snapshot:get', { targetDeviceId: mover.deviceId }),
+      emitAck(observer.socket, 'snapshot:get', {
+        targetDeviceId: mover.deviceId,
+        clientRevision: 1,
+      }),
     ).resolves.toEqual({ ok: false, code: 'target_not_found' });
     expect(
       (

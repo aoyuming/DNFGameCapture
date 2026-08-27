@@ -117,7 +117,7 @@ void TestOversizedProtectedFallbackPreservesCorrelation()
 
     Require(client.UploadSnapshot(MakeSnapshot(808)),
         "oversized ACK fixture should enter the latest slot");
-    Require(client.CompleteLatestSnapshotAckForTesting(true, 808, {}, 70000),
+    Require(client.CompleteLatestSnapshotAckForTesting(true, 808, {}, 140000),
         "oversized snapshot ACK should run through HandleAck and NotifyJson");
     Require(client.DispatchMessages(8) == 1,
         "oversized snapshot ACK should emit a compact fallback result");
@@ -127,7 +127,7 @@ void TestOversizedProtectedFallbackPreservesCorrelation()
 
     Require(client.RequestComparison("comparison-request-42"),
         "oversized request fixture should enter the command queue");
-    Require(client.CompleteNextProtectedOperationForTesting(70000),
+    Require(client.CompleteNextProtectedOperationForTesting(140000),
         "oversized request result should run through NotifyJson");
     Require(client.DispatchMessages(8) == 1,
         "oversized request result should emit a compact fallback result");
@@ -294,6 +294,63 @@ void TestDesiredRoomCannotCrossConfigurationGeneration()
         "the remembered room should belong to the active generation");
 }
 
+void TestSnapshotRequestsPreserveCorrelationAcrossFailuresAndGeneration()
+{
+    CloudMatchClient client;
+    client.ConfigureForTesting();
+    std::vector<std::string> messages;
+    client.SetMessageCallback([&](std::string message) {
+        messages.push_back(std::move(message));
+    });
+
+    Require(client.RequestSnapshot("snapshot-request-ok", "target-device-a", 41),
+        "revision-bound snapshot request should be accepted");
+    Require(client.CompleteNextProtectedOperationForTesting(),
+        "snapshot request should complete through the protected result path");
+    Require(client.DispatchMessages(4) == 1,
+        "completed snapshot request should dispatch once");
+    Require(messages.back().find("\"requestId\":\"snapshot-request-ok\"") !=
+        std::string::npos &&
+        messages.back().find("\"targetDeviceId\":\"target-device-a\"") !=
+        std::string::npos &&
+        messages.back().find("\"clientRevision\":41") != std::string::npos,
+        "snapshot result must preserve request, device, and revision correlation");
+
+    Require(client.RequestSnapshot("snapshot-request-timeout", "target-device-b", 52),
+        "timeout snapshot request should be accepted");
+    Require(client.FailNextProtectedOperationForTesting("timeout"),
+        "timeout should use the pending request failure path");
+    Require(client.DispatchMessages(4) == 1 &&
+        messages.back().find("\"code\":\"timeout\"") != std::string::npos &&
+        messages.back().find("\"requestId\":\"snapshot-request-timeout\"") !=
+            std::string::npos &&
+        messages.back().find("\"targetDeviceId\":\"target-device-b\"") !=
+            std::string::npos &&
+        messages.back().find("\"clientRevision\":52") != std::string::npos,
+        "timeout result must preserve all snapshot request correlation fields");
+
+    Require(client.RequestSnapshot("snapshot-request-disconnect", "target-device-c", 63),
+        "disconnect snapshot request should be accepted");
+    Require(client.FailNextProtectedOperationForTesting("connection_lost"),
+        "disconnect should use the pending request failure path");
+    Require(client.DispatchMessages(4) == 1 &&
+        messages.back().find("\"code\":\"connection_lost\"") != std::string::npos &&
+        messages.back().find("\"clientRevision\":63") != std::string::npos,
+        "disconnect result must preserve the requested snapshot revision");
+
+    Require(client.RequestSnapshot("stale-generation-request", "old-device", 70),
+        "old generation request should enter the queue");
+    client.ConfigureForTesting();
+    Require(client.RequestSnapshot("current-generation-request", "new-device", 71),
+        "current generation request should enter the queue");
+    Require(client.CompleteNextProtectedOperationForTesting(),
+        "current generation request should complete");
+    Require(client.DispatchMessages(4) == 1 &&
+        messages.back().find("current-generation-request") != std::string::npos &&
+        messages.back().find("stale-generation-request") == std::string::npos,
+        "reconfiguration must discard stale generation snapshot requests");
+}
+
 void TestDispatchLifecycleGateWaitsAndRemainsReentrant()
 {
     {
@@ -423,6 +480,7 @@ int main()
     TestConfigureDiscardsOldGenerationMessages();
     TestProtectedResultCapacityBackpressuresAndRecovers();
     TestDesiredRoomCannotCrossConfigurationGeneration();
+    TestSnapshotRequestsPreserveCorrelationAcrossFailuresAndGeneration();
     TestDispatchLifecycleGateWaitsAndRemainsReentrant();
     TestRememberedJoinRetriesAfterDispatchCapacityRelease();
     std::cout << "Cloud match client tests passed.\n";
