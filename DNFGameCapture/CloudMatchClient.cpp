@@ -180,8 +180,10 @@ public:
 
     ~Impl()
     {
+        std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
         Stop();
         std::lock_guard<std::mutex> lock(mutex);
+        callback = {};
         ClearCommandsLocked();
         ClearLatestSnapshotLocked();
         ClearPendingAcksLocked();
@@ -193,6 +195,7 @@ public:
     bool Configure(const std::wstring& serverUrl, const std::string& deviceId,
         const std::string& deviceToken)
     {
+        std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
         Config parsed;
         const bool validUrl = ParseServerUrl(serverUrl, parsed);
         parsed.deviceId = deviceId;
@@ -220,6 +223,7 @@ public:
 
     void Stop()
     {
+        std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
         std::thread joiningThread;
         std::uint64_t stopGeneration = 0;
         {
@@ -302,7 +306,7 @@ public:
                 {}, {}, {})) {
                 return false;
             }
-            desiredRoom.reset();
+            ClearDesiredRoomLocked();
         }
         condition.notify_all();
         return true;
@@ -392,16 +396,19 @@ public:
 
     void SetMessageCallback(MessageCallback newCallback)
     {
+        std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
         std::lock_guard<std::mutex> lock(mutex);
         callback = std::move(newCallback);
     }
 
     std::size_t DispatchMessages(std::size_t maxCount)
     {
+        std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
         std::size_t dispatched = 0;
         while (dispatched < maxCount) {
             InboundMessage message;
             MessageCallback copiedCallback;
+            bool currentGeneration = false;
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 if (inboundMessages.empty()) break;
@@ -410,11 +417,12 @@ public:
                 if (message.protectedResult && protectedResultsQueued > 0) {
                     --protectedResultsQueued;
                 }
-                copiedCallback = callback;
+                currentGeneration = message.generation == config.generation;
+                if (currentGeneration) copiedCallback = callback;
             }
             condition.notify_all();
 
-            if (copiedCallback) {
+            if (currentGeneration && copiedCallback) {
                 std::string callbackMessage = message.serialized;
                 copiedCallback(std::move(callbackMessage));
                 SecureClear(callbackMessage);
@@ -428,6 +436,7 @@ public:
 #ifdef CLOUD_MATCH_CLIENT_STANDALONE
     std::uint64_t ConfigureForTesting()
     {
+        std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
         Config parsed;
         parsed.serverValid = true;
         parsed.credentialsValid = true;
@@ -501,6 +510,61 @@ public:
     {
         std::lock_guard<std::mutex> lock(mutex);
         return desiredRoom ? desiredRoom->generation : 0;
+    }
+
+    void SetDesiredJoinForReplayForTesting(const std::string& roomId,
+        const std::string& broadcasterName)
+    {
+        std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
+        std::lock_guard<std::mutex> lock(mutex);
+        desiredRoom = DesiredRoom{ roomId, broadcasterName, config.generation };
+        desiredJoinPendingGeneration = config.generation;
+        desiredJoinInFlightGeneration.reset();
+    }
+
+    std::string RetryRememberedJoinForTesting()
+    {
+        std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
+        const std::uint64_t generation = configGeneration.load(std::memory_order_acquire);
+        Command join;
+        switch (PrepareRememberedJoin(generation, join)) {
+        case RememberedJoinPreparation::noDesired:
+            return "no_desired";
+        case RememberedJoinPreparation::alreadyInFlight:
+            return "already_in_flight";
+        case RememberedJoinPreparation::noCapacity:
+            return "no_capacity";
+        case RememberedJoinPreparation::ready:
+            break;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (config.generation != generation ||
+                nextAckId == (std::numeric_limits<std::uint64_t>::max)()) {
+                if (join.protectedResultReservation && protectedResultReservations > 0) {
+                    --protectedResultReservations;
+                    join.protectedResultReservation = false;
+                }
+                return "network_failure";
+            }
+            const std::uint64_t ackId = nextAckId++;
+            pendingAcks.emplace(ackId, PendingAck{
+                CommandKind::joinRoom, "room_join_result", {},
+                Clock::now() + kAckTimeout, join.protectedResultReservation
+            });
+            join.protectedResultReservation = false;
+            desiredJoinInFlightGeneration = generation;
+            ++rememberedJoinSendCountForTesting;
+        }
+        return "sent";
+    }
+
+    std::size_t RememberedJoinSendCountForTesting() const
+    {
+        std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
+        std::lock_guard<std::mutex> lock(mutex);
+        return rememberedJoinSendCountForTesting;
     }
 #endif
 
@@ -825,6 +889,23 @@ private:
         transportFailure
     };
 
+    enum class RememberedJoinResult
+    {
+        noDesired,
+        alreadyInFlight,
+        noCapacity,
+        sent,
+        networkFailure
+    };
+
+    enum class RememberedJoinPreparation
+    {
+        noDesired,
+        alreadyInFlight,
+        noCapacity,
+        ready
+    };
+
     static bool IsCoalescibleNotification(std::string_view type) noexcept
     {
         return type == "room_changed" || type == "room_presence";
@@ -894,6 +975,8 @@ private:
     void ClearDesiredRoomLocked() noexcept
     {
         desiredRoom.reset();
+        desiredJoinPendingGeneration.reset();
+        desiredJoinInFlightGeneration.reset();
     }
 
     void ClearInboundMessagesLocked() noexcept
@@ -1045,6 +1128,9 @@ private:
             status.statusText = validUrl ?
                 (config.credentialsValid ? "configured" : "credentials_required") :
                 "invalid_server_url";
+#ifdef CLOUD_MATCH_CLIENT_STANDALONE
+            rememberedJoinSendCountForTesting = 0;
+#endif
         }
         condition.notify_all();
         return validUrl;
@@ -1087,6 +1173,8 @@ private:
             return false;
         }
         desiredRoom = DesiredRoom{ roomId, broadcasterName, generation };
+        desiredJoinPendingGeneration = generation;
+        desiredJoinInFlightGeneration.reset();
         return true;
     }
 
@@ -1735,6 +1823,11 @@ private:
                 kind, resultType, requestId, Clock::now() + kAckTimeout,
                 protectedResultReservation
             });
+            if (kind == CommandKind::joinRoom && desiredRoom &&
+                desiredRoom->generation == activeConfig.generation &&
+                desiredJoinPendingGeneration == activeConfig.generation) {
+                desiredJoinInFlightGeneration = activeConfig.generation;
+            }
             protectedResultReservation = false;
         }
         return true;
@@ -1859,51 +1952,97 @@ private:
         return true;
     }
 
-    bool SendRememberedJoinIfNeeded(const Config& activeConfig,
+    bool HasJoinCommandOrAckLocked(std::uint64_t generation) const
+    {
+        const bool queued = std::any_of(commands.begin(), commands.end(),
+            [generation](const Command& command) {
+                return command.generation == generation &&
+                    command.kind == CommandKind::joinRoom;
+            });
+        if (queued) return true;
+        return std::any_of(pendingAcks.begin(), pendingAcks.end(),
+            [](const auto& entry) {
+                return entry.second.kind == CommandKind::joinRoom;
+            });
+    }
+
+    void MarkDesiredJoinPendingForConnection(std::uint64_t generation)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (config.generation != generation || !desiredRoom ||
+            desiredRoom->generation != generation) {
+            return;
+        }
+        desiredJoinPendingGeneration = generation;
+        desiredJoinInFlightGeneration.reset();
+    }
+
+    void SettleDesiredJoinLocked(std::uint64_t generation) noexcept
+    {
+        if (desiredJoinPendingGeneration == generation) {
+            desiredJoinPendingGeneration.reset();
+        }
+        if (desiredJoinInFlightGeneration == generation) {
+            desiredJoinInFlightGeneration.reset();
+        }
+    }
+
+    RememberedJoinPreparation PrepareRememberedJoin(std::uint64_t generation,
+        Command& join)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (config.generation != generation || !desiredRoom ||
+            desiredRoom->generation != generation ||
+            desiredJoinPendingGeneration != generation) {
+            return RememberedJoinPreparation::noDesired;
+        }
+        if (desiredJoinInFlightGeneration == generation ||
+            HasJoinCommandOrAckLocked(generation)) {
+            return RememberedJoinPreparation::alreadyInFlight;
+        }
+        if (pendingAcks.size() >= kMaxPendingAcks ||
+            !ReserveProtectedResultLocked(false)) {
+            return RememberedJoinPreparation::noCapacity;
+        }
+
+        join.kind = CommandKind::joinRoom;
+        join.argument = desiredRoom->roomId;
+        join.secondArgument = desiredRoom->broadcasterName;
+        join.generation = generation;
+        join.protectedResultReservation = true;
+        return RememberedJoinPreparation::ready;
+    }
+
+    void ReleaseRememberedJoinReservation(Command& join)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (config.generation == join.generation &&
+            join.protectedResultReservation && protectedResultReservations > 0) {
+            --protectedResultReservations;
+            join.protectedResultReservation = false;
+        }
+    }
+
+    RememberedJoinResult SendRememberedJoinIfNeeded(const Config& activeConfig,
         WebSocketConnection& connection)
     {
-        std::optional<DesiredRoom> remembered;
-        bool queuedJoin = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            remembered = desiredRoom;
-            queuedJoin = std::any_of(commands.begin(), commands.end(),
-                [&activeConfig](const Command& command) {
-                    return command.generation == activeConfig.generation &&
-                        command.kind == CommandKind::joinRoom;
-                });
-        }
-        if (!remembered || remembered->generation != activeConfig.generation ||
-            queuedJoin || !HasPendingAckCapacity(activeConfig.generation)) return true;
         Command join;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            if (config.generation != activeConfig.generation ||
-                !desiredRoom || desiredRoom->generation != activeConfig.generation ||
-                std::any_of(commands.begin(), commands.end(),
-                    [&activeConfig](const Command& command) {
-                        return command.generation == activeConfig.generation &&
-                            command.kind == CommandKind::joinRoom;
-                    }) ||
-                !ReserveProtectedResultLocked(false)) {
-                return true;
-            }
-            join.kind = CommandKind::joinRoom;
-            join.argument = desiredRoom->roomId;
-            join.secondArgument = desiredRoom->broadcasterName;
-            join.generation = activeConfig.generation;
-            join.protectedResultReservation = true;
+        switch (PrepareRememberedJoin(activeConfig.generation, join)) {
+        case RememberedJoinPreparation::noDesired:
+            return RememberedJoinResult::noDesired;
+        case RememberedJoinPreparation::alreadyInFlight:
+            return RememberedJoinResult::alreadyInFlight;
+        case RememberedJoinPreparation::noCapacity:
+            return RememberedJoinResult::noCapacity;
+        case RememberedJoinPreparation::ready:
+            break;
         }
-        if (SendQueuedCommand(activeConfig, connection, join)) return true;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            if (config.generation == activeConfig.generation &&
-                join.protectedResultReservation && protectedResultReservations > 0) {
-                --protectedResultReservations;
-                join.protectedResultReservation = false;
-            }
+
+        if (SendQueuedCommand(activeConfig, connection, join)) {
+            return RememberedJoinResult::sent;
         }
-        return false;
+        ReleaseRememberedJoinReservation(join);
+        return RememberedJoinResult::networkFailure;
     }
 
     void HandleAck(const Config& activeConfig, const cloud_match::SocketIoAck& ack)
@@ -1916,6 +2055,9 @@ private:
             if (found == pendingAcks.end()) return;
             pending = std::move(found->second);
             pendingAcks.erase(found);
+            if (pending.kind == CommandKind::joinRoom) {
+                SettleDesiredJoinLocked(activeConfig.generation);
+            }
         }
 
         json normalized;
@@ -2021,6 +2163,9 @@ private:
             if (config.generation != activeConfig.generation) return;
             for (auto iterator = pendingAcks.begin(); iterator != pendingAcks.end();) {
                 if (iterator->second.deadline <= now) {
+                    if (iterator->second.kind == CommandKind::joinRoom) {
+                        SettleDesiredJoinLocked(activeConfig.generation);
+                    }
                     expired.push_back(std::move(iterator->second));
                     iterator = pendingAcks.erase(iterator);
                 }
@@ -2048,6 +2193,13 @@ private:
             std::lock_guard<std::mutex> lock(mutex);
             if (config.generation != activeConfig.generation) return;
             failed.swap(pendingAcks);
+            if (desiredJoinInFlightGeneration == activeConfig.generation) {
+                desiredJoinInFlightGeneration.reset();
+                if (desiredRoom &&
+                    desiredRoom->generation == activeConfig.generation) {
+                    desiredJoinPendingGeneration = activeConfig.generation;
+                }
+            }
         }
         for (auto& entry : failed) {
             PendingAck& pending = entry.second;
@@ -2064,8 +2216,11 @@ private:
 
     bool RunConnected(const Config& activeConfig, WebSocketConnection& connection)
     {
-        if (!SendRememberedJoinIfNeeded(activeConfig, connection)) return false;
+        MarkDesiredJoinPendingForConnection(activeConfig.generation);
         while (!ShouldAbort(activeConfig.generation)) {
+            const RememberedJoinResult rememberedJoin =
+                SendRememberedJoinIfNeeded(activeConfig, connection);
+            if (rememberedJoin == RememberedJoinResult::networkFailure) return false;
             if (!ProcessOutgoing(activeConfig, connection)) return false;
             ExpireAcks(activeConfig);
 
@@ -2231,6 +2386,7 @@ private:
         });
     }
 
+    mutable std::recursive_mutex dispatchGate;
     mutable std::mutex mutex;
     std::condition_variable condition;
     std::thread worker;
@@ -2244,6 +2400,8 @@ private:
     std::deque<Command> commands;
     std::optional<PendingSnapshot> latestSnapshot;
     std::optional<DesiredRoom> desiredRoom;
+    std::optional<std::uint64_t> desiredJoinPendingGeneration;
+    std::optional<std::uint64_t> desiredJoinInFlightGeneration;
     std::uint64_t nextCommandSequence = 1;
     std::size_t currentOutboundLimit = cloud_match::kMaxCloudMatchPayloadBytes;
 
@@ -2255,6 +2413,9 @@ private:
 
     std::unordered_map<std::uint64_t, PendingAck> pendingAcks;
     std::uint64_t nextAckId = 1;
+#ifdef CLOUD_MATCH_CLIENT_STANDALONE
+    std::size_t rememberedJoinSendCountForTesting = 0;
+#endif
 };
 
 CloudMatchClient::CloudMatchClient() : impl_(std::make_unique<Impl>()) {}
@@ -2378,5 +2539,21 @@ bool CloudMatchClient::HasDesiredRoomForTesting() const
 std::uint64_t CloudMatchClient::DesiredRoomGenerationForTesting() const
 {
     return impl_->DesiredRoomGenerationForTesting();
+}
+
+void CloudMatchClient::SetDesiredJoinForReplayForTesting(const std::string& roomId,
+    const std::string& broadcasterName)
+{
+    impl_->SetDesiredJoinForReplayForTesting(roomId, broadcasterName);
+}
+
+std::string CloudMatchClient::RetryRememberedJoinForTesting()
+{
+    return impl_->RetryRememberedJoinForTesting();
+}
+
+std::size_t CloudMatchClient::RememberedJoinSendCountForTesting() const
+{
+    return impl_->RememberedJoinSendCountForTesting();
 }
 #endif

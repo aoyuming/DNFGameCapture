@@ -58,6 +58,10 @@ public:
         const std::string& roomId, const std::string& broadcasterName);
     bool HasDesiredRoomForTesting() const;
     std::uint64_t DesiredRoomGenerationForTesting() const;
+    void SetDesiredJoinForReplayForTesting(const std::string& roomId,
+        const std::string& broadcasterName);
+    std::string RetryRememberedJoinForTesting();
+    std::size_t RememberedJoinSendCountForTesting() const;
 #endif
 
 private:

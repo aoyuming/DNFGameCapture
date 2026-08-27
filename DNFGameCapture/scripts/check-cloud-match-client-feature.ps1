@@ -85,8 +85,8 @@ foreach ($needle in @(
     'uploadSnapshot,',
     'CommandKind::uploadSnapshot,',
     'room->value("displayName", current.roomName)',
-    'bool SendRememberedJoinIfNeeded(',
-    'if (!SendRememberedJoinIfNeeded(activeConfig, connection)) return false;',
+    'RememberedJoinResult SendRememberedJoinIfNeeded(',
+    'rememberedJoin == RememberedJoinResult::networkFailure',
     '/api/devices/register',
     '/socket.io/?EIO=4&transport=websocket',
     'room:join',
@@ -147,13 +147,60 @@ if ($source -notmatch '(?s)ReserveProtectedResultLocked\(.*?kMaxProtectedResultC
 if ($source -notmatch '(?s)DispatchMessages\(std::size_t maxCount\).*?copiedCallback.*?copiedCallback\(') {
     throw 'DispatchMessages must copy and invoke the callback on its caller.'
 }
+foreach ($needle in @(
+    'std::recursive_mutex dispatchGate',
+    'std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate)',
+    'message.generation == config.generation',
+    'enum class RememberedJoinResult',
+    'noDesired,',
+    'alreadyInFlight,',
+    'noCapacity,',
+    'networkFailure',
+    'desiredJoinPendingGeneration',
+    'desiredJoinInFlightGeneration',
+    'PrepareRememberedJoin(',
+    'MarkDesiredJoinPendingForConnection(',
+    'SettleDesiredJoinLocked('
+)) {
+    if (-not $source.Contains($needle)) {
+        throw "CloudMatchClient dispatch/rejoin hardening is missing: $needle"
+    }
+}
+foreach ($pattern in @(
+    '(?s)~Impl\(\).*?dispatchLock\(dispatchGate\).*?Stop\(\).*?lock\(mutex\)',
+    '(?s)bool Configure\(.*?dispatchLock\(dispatchGate\).*?ApplyConfig\(',
+    '(?s)void Stop\(\).*?dispatchLock\(dispatchGate\).*?lock\(mutex\)',
+    '(?s)void SetMessageCallback\(.*?dispatchLock\(dispatchGate\).*?lock\(mutex\)',
+    '(?s)DispatchMessages\(std::size_t maxCount\).*?dispatchLock\(dispatchGate\).*?lock\(mutex\).*?copiedCallback\('
+)) {
+    if ($source -notmatch $pattern) {
+        throw "Host lifecycle API is missing dispatch-gate lock ordering: $pattern"
+    }
+}
+$workerStart = $source.IndexOf('void WorkerMain()')
+$dispatchMember = $source.IndexOf('mutable std::recursive_mutex dispatchGate', $workerStart)
+if ($workerStart -lt 0 -or $dispatchMember -lt 0) {
+    throw 'Unable to locate WorkerMain dispatch-gate boundary.'
+}
+if ($source.Substring($workerStart, $dispatchMember - $workerStart).Contains('dispatchGate')) {
+    throw 'WorkerMain and worker-only helpers must never take the dispatch gate.'
+}
+if ($source -notmatch '(?s)RememberedJoinPreparation::noCapacity.*?RememberedJoinResult::noCapacity') {
+    throw 'Remembered join capacity exhaustion must remain a non-network result.'
+}
+if ($source -notmatch '(?s)while \(!ShouldAbort\(activeConfig\.generation\)\).*?SendRememberedJoinIfNeeded.*?rememberedJoin == RememberedJoinResult::networkFailure.*?return false') {
+    throw 'Connected polling must retry remembered join and reconnect only on network failure.'
+}
+if ($source -notmatch '(?s)HandleAck\(.*?pending\.kind == CommandKind::joinRoom.*?SettleDesiredJoinLocked') {
+    throw 'A join ACK must settle remembered join in-flight state.'
+}
 if ($source -match '(?s)void NotifyJson\(.*?copiedCallback\(') {
     throw 'The worker-side notification path must never invoke user callbacks.'
 }
 if ($source -notmatch '(?s)bool ApplyConfig\(.*?configGeneration\.fetch_add.*?ClearCommandsLocked\(.*?ClearLatestSnapshotLocked\(.*?ClearPendingAcksLocked\(.*?ClearDesiredRoomLocked\(.*?CancelActiveOperation\(') {
     throw 'Configure must advance generation, cancel active I/O, and clear all old work.'
 }
-if ($source -notmatch '(?s)struct DesiredRoom.*?std::uint64_t generation.*?SendRememberedJoinIfNeeded.*?remembered->generation != activeConfig\.generation') {
+if ($source -notmatch '(?s)struct DesiredRoom.*?std::uint64_t generation.*?PrepareRememberedJoin.*?desiredRoom->generation != generation') {
     throw 'Remembered room state must be bound to the active configuration generation.'
 }
 if ($source -notmatch '(?s)bool JoinRoom\(.*?lock_guard<std::mutex> lock\(mutex\).*?JoinRoomLocked\(config\.generation') {

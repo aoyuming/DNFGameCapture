@@ -1,8 +1,11 @@
 #include "../CloudMatchClient.h"
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -15,6 +18,16 @@ void Require(bool condition, const char* message)
         std::cerr << "FAILED: " << message << '\n';
         std::exit(1);
     }
+}
+
+void RequireEventually(const std::atomic<bool>& value, const char* message)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!value.load(std::memory_order_acquire) &&
+        std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    Require(value.load(std::memory_order_acquire), message);
 }
 
 void TestDispatchRunsCallbackOnCallerAndAllowsStop()
@@ -154,6 +167,124 @@ void TestDesiredRoomCannotCrossConfigurationGeneration()
         "the remembered room should belong to the active generation");
 }
 
+void TestDispatchLifecycleGateWaitsAndRemainsReentrant()
+{
+    {
+        CloudMatchClient client;
+        std::mutex callbackMutex;
+        std::condition_variable callbackCondition;
+        bool releaseCallback = false;
+        std::atomic<bool> callbackEntered{ false };
+        std::atomic<bool> setterStarted{ false };
+        std::atomic<bool> setterReturned{ false };
+
+        client.SetMessageCallback([&](std::string) {
+            callbackEntered.store(true, std::memory_order_release);
+            std::unique_lock<std::mutex> lock(callbackMutex);
+            callbackCondition.wait(lock, [&]() { return releaseCallback; });
+        });
+        Require(!client.UploadSnapshot("{"),
+            "invalid snapshot should queue a callback for the gate test");
+
+        std::thread dispatcher([&]() { client.DispatchMessages(1); });
+        RequireEventually(callbackEntered, "blocking callback should start");
+        std::thread setter([&]() {
+            setterStarted.store(true, std::memory_order_release);
+            client.SetMessageCallback([](std::string) {});
+            setterReturned.store(true, std::memory_order_release);
+        });
+        RequireEventually(setterStarted, "callback setter thread should start");
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        Require(!setterReturned.load(std::memory_order_acquire),
+            "SetMessageCallback must wait for an executing old callback");
+
+        {
+            std::lock_guard<std::mutex> lock(callbackMutex);
+            releaseCallback = true;
+        }
+        callbackCondition.notify_all();
+        dispatcher.join();
+        setter.join();
+        Require(setterReturned.load(std::memory_order_acquire),
+            "SetMessageCallback should return after the old callback exits");
+    }
+
+    {
+        CloudMatchClient client;
+        std::mutex callbackMutex;
+        std::condition_variable callbackCondition;
+        bool releaseCallback = false;
+        std::atomic<bool> callbackEntered{ false };
+        std::atomic<bool> stopStarted{ false };
+        std::atomic<bool> stopReturned{ false };
+        std::atomic<std::size_t> oldCallbackStarts{ 0 };
+
+        client.SetMessageCallback([&](std::string) {
+            oldCallbackStarts.fetch_add(1, std::memory_order_acq_rel);
+            callbackEntered.store(true, std::memory_order_release);
+            std::unique_lock<std::mutex> lock(callbackMutex);
+            callbackCondition.wait(lock, [&]() { return releaseCallback; });
+        });
+        Require(!client.UploadSnapshot("{"), "first gate message should queue");
+        Require(!client.UploadSnapshot("["), "second gate message should queue");
+
+        std::thread dispatcher([&]() { client.DispatchMessages(1); });
+        RequireEventually(callbackEntered, "blocking callback should start before Stop");
+        std::thread stopper([&]() {
+            stopStarted.store(true, std::memory_order_release);
+            client.Stop();
+            stopReturned.store(true, std::memory_order_release);
+        });
+        RequireEventually(stopStarted, "Stop thread should start");
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        Require(!stopReturned.load(std::memory_order_acquire),
+            "Stop must wait for an executing callback");
+
+        {
+            std::lock_guard<std::mutex> lock(callbackMutex);
+            releaseCallback = true;
+        }
+        callbackCondition.notify_all();
+        dispatcher.join();
+        stopper.join();
+        Require(stopReturned.load(std::memory_order_acquire),
+            "Stop should return after the callback exits");
+        Require(client.DispatchMessages(8) == 0,
+            "Stop should clear messages that could start an old callback");
+        Require(oldCallbackStarts.load(std::memory_order_acquire) == 1,
+            "an old callback must never start after Stop returns");
+    }
+}
+
+void TestRememberedJoinRetriesAfterDispatchCapacityRelease()
+{
+    CloudMatchClient client;
+    client.ConfigureForTesting();
+    client.SetDesiredJoinForReplayForTesting("retry-room", "retry-name");
+
+    for (std::size_t index = 0; index < 96; ++index) {
+        Require(client.RequestComparison("capacity-" + std::to_string(index)),
+            "capacity setup operation should be accepted");
+        Require(client.CompleteNextProtectedOperationForTesting(),
+            "capacity setup operation should complete");
+    }
+
+    Require(client.RetryRememberedJoinForTesting() == "no_capacity",
+        "full protected capacity should defer remembered join without sending");
+    Require(client.RememberedJoinSendCountForTesting() == 0,
+        "capacity deferral must not send or reconnect");
+    Require(client.DispatchMessages(1) == 1,
+        "dispatch should free one protected result slot");
+    Require(client.RetryRememberedJoinForTesting() == "sent",
+        "remembered join should retry after dispatch releases capacity");
+    Require(client.RememberedJoinSendCountForTesting() == 1,
+        "remembered join should send exactly once after capacity recovery");
+    Require(client.RetryRememberedJoinForTesting() == "already_in_flight",
+        "in-flight remembered join should suppress duplicate ACK requests");
+    Require(client.RememberedJoinSendCountForTesting() == 1,
+        "duplicate retry must not send another remembered join");
+}
+
 } // namespace
 
 int main()
@@ -162,6 +293,8 @@ int main()
     TestConfigureDiscardsOldGenerationMessages();
     TestProtectedResultCapacityBackpressuresAndRecovers();
     TestDesiredRoomCannotCrossConfigurationGeneration();
+    TestDispatchLifecycleGateWaitsAndRemainsReentrant();
+    TestRememberedJoinRetriesAfterDispatchCapacityRelease();
     std::cout << "Cloud match client tests passed.\n";
     return 0;
 }
