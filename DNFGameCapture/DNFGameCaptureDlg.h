@@ -261,7 +261,7 @@ private:
     bool ToggleReviewEvent(int eventId);
 
     void FilterLivePlatformPrefixes();
-    void WriteScoreToFile();
+    bool WriteScoreToFile();
     nlohmann::json DnfBuildSharedWebStateJson();
     void OpenKillDisplayWindow();
     void HideKillDisplayWindow();
@@ -293,6 +293,7 @@ private:
     void HandleCloudMatchSnapshotUploadResult(const nlohmann::json& event);
     void HandleCloudMatchMessage(std::string message);
     void InvalidateCloudMatchSyncPreview(bool clearMembers = true);
+    void InvalidateCloudMatchSyncUndo();
     void BeginCloudMatchComparisonRequest();
     void HandleCloudMatchComparisonResult(const nlohmann::json& event);
     void HandleCloudMatchSnapshotResult(const nlohmann::json& event);
@@ -300,6 +301,7 @@ private:
         std::uint64_t sourceRevision);
     void PollCloudMatch();
     void OnMatchStateChanged(std::string matchPayload, const char* source);
+    void MarkMatchMutation();
     void MarkCloudMatchOcrStateChanged(std::string matchPayload);
     std::string BuildCloudMatchSnapshotPayload(const std::string& matchPayload,
         std::uint64_t clientRevision, const std::string& changeSource,
@@ -308,7 +310,7 @@ private:
     bool ValidateTeamSyncSnapshot(const nlohmann::json& snapshot, CString& errorMessage) const;
     bool ApplyTeamSyncSnapshot(const nlohmann::json& snapshot, bool createBackup,
         CString& errorMessage, bool automatic = false);
-    void RefreshAfterTeamSyncApply();
+    bool RefreshAfterTeamSyncApply();
     void ClearTeamSyncState();
     void OpenKeyDisplayWindow();
     void HideKeyDisplayWindow();
@@ -324,7 +326,7 @@ private:
     void BeginOcrServiceRecovery(bool probeBeforePending = false);
     void SetOcrStartupPendingUI(bool pending);
     bool RefreshOcrExePathFromRunningProcess(bool persistToIni);
-    void SaveConfigToFile();
+    bool SaveConfigToFile();
 
     // 托盘图标初始化与清理
     void InitTrayIcon();
@@ -478,8 +480,8 @@ private:
 
     std::map<CString, CString> m_aliasDB;        // 本地小号数据库
     void LoadAliasDB();                          // 加载数据库
-    void SaveAliasDB();                          // 保存数据库
-    void SaveAliasDB(bool mergeActivePlayers);
+    bool SaveAliasDB();                          // 保存数据库
+    bool SaveAliasDB(bool mergeActivePlayers);
     std::string BuildAliasDbJsonPayload(int& mainCount, int& pairCount) const;
     void LoadAliasCloudDeleteBaseline();
     void SaveAliasCloudDeleteBaseline() const;
@@ -574,14 +576,23 @@ private:
     bool m_cloudMatchSyncBusy = false;
     std::uint64_t m_cloudMatchSyncGeneration = 1;
     std::uint64_t m_cloudMatchSyncRequestSequence = 0;
+    std::uint64_t m_cloudMatchSyncConnectionGeneration = 0;
+    std::uint64_t m_cloudMatchSyncComparisonRoomRevision = 0;
+    std::uint64_t m_cloudMatchSyncRequestConnectionGeneration = 0;
+    std::size_t m_cloudMatchSyncComparisonPageCount = 0;
+    bool m_cloudMatchSyncWasConnected = false;
     std::string m_cloudMatchSyncComparisonRequestId;
     std::string m_cloudMatchSyncSnapshotRequestId;
+    std::string m_cloudMatchSyncPreviewRequestId;
+    std::string m_cloudMatchSyncComparisonCursor;
     std::string m_cloudMatchSyncRequestRoomId;
     std::string m_cloudMatchSyncSelectedDeviceId;
     std::uint64_t m_cloudMatchSyncSelectedRevision = 0;
     bool m_cloudMatchSyncSelectedSwapped = false;
     nlohmann::json m_cloudMatchSyncMembers = nlohmann::json::array();
     nlohmann::json m_cloudMatchSyncGroups = nlohmann::json::array();
+    nlohmann::json m_cloudMatchSyncPendingMembers = nlohmann::json::array();
+    nlohmann::json m_cloudMatchSyncPendingGroups = nlohmann::json::array();
     std::string m_cloudMatchSyncConsensusDeviceId;
     nlohmann::json m_cloudMatchSyncPreview;
     nlohmann::json m_cloudMatchSyncPendingSnapshot;
@@ -589,7 +600,11 @@ private:
     nlohmann::json m_cloudMatchSyncUndoBackup;
     nlohmann::json m_cloudMatchSyncUndoApplied;
     std::string m_cloudMatchSyncUndoAppliedHash;
+    std::string m_cloudMatchSyncUndoRoomId;
+    std::uint64_t m_cloudMatchSyncUndoConnectionGeneration = 0;
+    std::uint64_t m_cloudMatchSyncUndoPostApplyEpoch = 0;
     int m_cloudMatchSyncUndoEventBoundaryId = 0;
+    std::atomic<std::uint64_t> m_matchMutationEpoch{ 1 };
     CString m_cloudMatchSyncError;
     CString m_cloudMatchSyncLastResult;
 

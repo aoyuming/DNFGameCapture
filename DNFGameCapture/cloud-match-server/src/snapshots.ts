@@ -246,7 +246,18 @@ export function getSnapshot(
 export function getRoomSnapshots(
   db: Database.Database,
   roomId: string,
+  deviceIds?: readonly string[],
 ): RoomSnapshotRow[] {
+  const boundedDeviceIds = deviceIds ? [...new Set(deviceIds)] : null;
+  if (boundedDeviceIds && boundedDeviceIds.length > 512) {
+    throw new RangeError('Too many snapshot device IDs');
+  }
+  if (boundedDeviceIds?.length === 0) {
+    return [];
+  }
+  const deviceFilter = boundedDeviceIds
+    ? ` AND s.device_id IN (${boundedDeviceIds.map(() => '?').join(', ')})`
+    : '';
   const rows = db
     .prepare(
       `SELECT s.device_id, s.room_id, m.broadcaster_name,
@@ -255,9 +266,10 @@ export function getRoomSnapshots(
        JOIN memberships AS m
          ON m.device_id = s.device_id AND m.room_id = s.room_id
        WHERE m.room_id = ?
+       ${deviceFilter}
        ORDER BY s.device_id`,
     )
-    .all(roomId) as RoomSnapshotDatabaseRow[];
+    .all(roomId, ...(boundedDeviceIds ?? [])) as RoomSnapshotDatabaseRow[];
 
   return rows.flatMap((row) => {
     const stored = parseStoredSnapshot(row);

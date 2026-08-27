@@ -160,6 +160,86 @@ void TestStructuredDifferencePreview()
         "roster differences should preserve display names");
 }
 
+void TestRelativeOrientationUsesLocalAndTargetConsensusFlags()
+{
+    const json members = json::array({
+        { { "deviceId", "local-device-0001" }, { "swapped", true } },
+        { { "deviceId", "target-device-0002" }, { "swapped", false } }
+    });
+    bool relativeSwap = false;
+    std::string error;
+    Require(DnfResolveCloudMatchRelativeSwap(members, "local-device-0001",
+        "target-device-0002", relativeSwap, error) && relativeSwap,
+        "local swapped and target normal must require a relative swap");
+
+    json bothSwapped = members;
+    bothSwapped[1]["swapped"] = true;
+    Require(DnfResolveCloudMatchRelativeSwap(bothSwapped, "local-device-0001",
+        "target-device-0002", relativeSwap, error) && !relativeSwap,
+        "two members swapped relative to consensus must be normal relative to each other");
+
+    Require(!DnfResolveCloudMatchRelativeSwap(members, "missing-local-device",
+        "target-device-0002", relativeSwap, error) && error == "local_member_missing",
+        "a missing local comparison member must block orientation instead of guessing");
+}
+
+void TestPreviewCorrelationInvalidatesOnRoomRevisionAndConnectionGeneration()
+{
+    DnfCloudMatchPreviewBinding binding;
+    binding.roomId = "59";
+    binding.connectionGeneration = 7;
+    binding.roomRevision = 41;
+    binding.requestId = "snapshot-7-3";
+    binding.deviceId = "target-device-0002";
+    binding.snapshotRevision = 9;
+
+    DnfCloudMatchCurrentState current;
+    current.connected = true;
+    current.roomConfirmed = true;
+    current.roomId = "59";
+    current.connectionGeneration = 7;
+    current.roomRevision = 41;
+    current.requestId = "snapshot-7-3";
+    current.deviceId = "target-device-0002";
+    current.snapshotRevision = 9;
+    Require(DnfIsCloudMatchPreviewCurrent(binding, current),
+        "all preview correlation fields should permit explicit apply");
+
+    current.roomRevision = 42;
+    Require(!DnfIsCloudMatchPreviewCurrent(binding, current),
+        "room revision changes must invalidate preview");
+    current.roomRevision = 41;
+    current.connectionGeneration = 8;
+    Require(!DnfIsCloudMatchPreviewCurrent(binding, current),
+        "reconnect generation changes must invalidate preview");
+    current.connectionGeneration = 7;
+    current.connected = false;
+    Require(!DnfIsCloudMatchPreviewCurrent(binding, current),
+        "disconnection must invalidate preview");
+}
+
+void TestUndoRequiresEpochHashRoomAndConnectionGeneration()
+{
+    DnfCloudMatchUndoGuard guard;
+    guard.available = true;
+    guard.postApplyEpoch = 12;
+    guard.postApplyHash = DnfCloudMatchContentHash(json({ { "score", 3 } }));
+    guard.roomId = "59";
+    guard.connectionGeneration = 4;
+
+    Require(DnfCanCloudMatchUndo(guard, 12, guard.postApplyHash, "59", 4),
+        "unchanged cloud apply should allow one undo");
+    Require(!DnfCanCloudMatchUndo(guard, 14, guard.postApplyHash, "59", 4),
+        "changed then changed back must remain invalid through the monotonic epoch");
+    Require(!DnfCanCloudMatchUndo(guard, 12, guard.postApplyHash, "li-yong", 4),
+        "undo must not cross rooms");
+    Require(!DnfCanCloudMatchUndo(guard, 12, guard.postApplyHash, "59", 5),
+        "undo must not cross connection generations");
+    guard.available = false;
+    Require(!DnfCanCloudMatchUndo(guard, 12, guard.postApplyHash, "59", 4),
+        "consumed undo must not be available a second time");
+}
+
 } // namespace
 
 int main()
@@ -168,6 +248,9 @@ int main()
     TestStrictCloudSchemaRejections();
     TestSnapshotRevisionCorrelation();
     TestStructuredDifferencePreview();
+    TestRelativeOrientationUsesLocalAndTargetConsensusFlags();
+    TestPreviewCorrelationInvalidatesOnRoomRevisionAndConnectionGeneration();
+    TestUndoRequiresEpochHashRoomAndConnectionGeneration();
     std::cout << "Cloud match sync tests passed.\n";
     return 0;
 }

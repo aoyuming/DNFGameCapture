@@ -413,6 +413,61 @@ describe('cloud match Socket.IO integration', () => {
     ).resolves.toEqual({ ok: false, code: 'not_in_room' });
   });
 
+  test('paginates a room with 65 persistent members and keeps the caller reachable', async () => {
+    const { app, url } = await startApp();
+    const caller = await createDevice(url, 'paged-member-0065');
+    await joinRoom(caller.socket, '59', 'Broadcaster 65');
+
+    const insertDevice = app.db.prepare(
+      'insert into devices (id, token_hash, created_at, last_seen_at) values (?, ?, ?, ?)',
+    );
+    const insertMembership = app.db.prepare(
+      `insert into memberships (device_id, room_id, broadcaster_name, updated_at)
+       values (?, '59', ?, ?)`,
+    );
+    app.db.transaction(() => {
+      for (let index = 1; index <= 64; index += 1) {
+        const suffix = index.toString().padStart(4, '0');
+        const memberId = `paged-member-${suffix}`;
+        insertDevice.run(memberId, `test-hash-${suffix}`, 1_700_000_000, 1_700_000_000);
+        insertMembership.run(memberId, `Broadcaster ${index}`, 1_700_000_000);
+      }
+      app.db.prepare("update rooms set revision = revision + 64 where id = '59'").run();
+    })();
+
+    const first = await emitAck<{
+      ok: boolean;
+      members: Array<{ deviceId: string }>;
+      totalMembers: number;
+      hasMore: boolean;
+      nextCursor: string | null;
+    }>(caller.socket, 'room:comparison', { limit: 64 });
+    expect(first).toMatchObject({ ok: true, totalMembers: 65, hasMore: true });
+    expect(first.members).toHaveLength(8);
+    expect(first.members.map((member) => member.deviceId)).not.toContain(caller.deviceId);
+    expect(first.nextCursor).toBe('paged-member-0008');
+
+    let cursor = first.nextCursor;
+    const collected = [...first.members];
+    let pageCount = 1;
+    while (cursor !== null) {
+      const page = await emitAck<{
+        ok: boolean;
+        members: Array<{ deviceId: string }>;
+        totalMembers: number;
+        hasMore: boolean;
+        nextCursor: string | null;
+      }>(caller.socket, 'room:comparison', { cursor, limit: 64 });
+      expect(page.ok).toBe(true);
+      collected.push(...page.members);
+      cursor = page.nextCursor;
+      pageCount += 1;
+    }
+    expect(pageCount).toBe(9);
+    expect(collected).toHaveLength(65);
+    expect(collected.at(-1)).toEqual(expect.objectContaining({ deviceId: caller.deviceId }));
+  });
+
   test('fetches only the explicitly requested snapshot revision', async () => {
     const { url } = await startApp();
     const viewer = await createDevice(url, 'revision-viewer-0001');

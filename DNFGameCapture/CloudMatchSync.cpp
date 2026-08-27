@@ -4,6 +4,8 @@
 #include <cctype>
 #include <cstdint>
 #include <limits>
+#include <iomanip>
+#include <sstream>
 #include <set>
 #include <string_view>
 
@@ -270,4 +272,89 @@ json DnfBuildCloudMatchPreview(const json& localTeamSnapshot,
         { "groups", json::array({ std::move(score), std::move(roster),
             std::move(stats), std::move(state) }) }
     };
+}
+
+bool DnfResolveCloudMatchRelativeSwap(const json& members,
+    const std::string& localDeviceId, const std::string& targetDeviceId,
+    bool& relativeSwap, std::string& errorCode)
+{
+    relativeSwap = false;
+    errorCode.clear();
+    if (!members.is_array() || members.size() > 512 || localDeviceId.empty() ||
+        targetDeviceId.empty()) {
+        errorCode = "invalid_members";
+        return false;
+    }
+
+    bool localFound = false;
+    bool targetFound = false;
+    bool localSwapped = false;
+    bool targetSwapped = false;
+    for (const auto& member : members) {
+        if (!member.is_object()) continue;
+        const auto id = member.find("deviceId");
+        const auto swapped = member.find("swapped");
+        if (id == member.end() || !id->is_string() ||
+            swapped == member.end() || !swapped->is_boolean()) {
+            continue;
+        }
+        const std::string& deviceId = id->get_ref<const std::string&>();
+        if (deviceId == localDeviceId) {
+            localFound = true;
+            localSwapped = swapped->get<bool>();
+        }
+        if (deviceId == targetDeviceId) {
+            targetFound = true;
+            targetSwapped = swapped->get<bool>();
+        }
+    }
+    if (!localFound) {
+        errorCode = "local_member_missing";
+        return false;
+    }
+    if (!targetFound) {
+        errorCode = "target_member_missing";
+        return false;
+    }
+    relativeSwap = localSwapped != targetSwapped;
+    return true;
+}
+
+bool DnfIsCloudMatchPreviewCurrent(const DnfCloudMatchPreviewBinding& binding,
+    const DnfCloudMatchCurrentState& current) noexcept
+{
+    return current.connected && current.roomConfirmed &&
+        !binding.roomId.empty() && binding.roomId == current.roomId &&
+        binding.connectionGeneration != 0 &&
+        binding.connectionGeneration == current.connectionGeneration &&
+        binding.roomRevision != 0 && binding.roomRevision == current.roomRevision &&
+        !binding.requestId.empty() && binding.requestId == current.requestId &&
+        !binding.deviceId.empty() && binding.deviceId == current.deviceId &&
+        binding.snapshotRevision != 0 &&
+        binding.snapshotRevision == current.snapshotRevision;
+}
+
+std::string DnfCloudMatchContentHash(const json& snapshot)
+{
+    const std::string serialized = snapshot.dump();
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (const unsigned char byte : serialized) {
+        hash ^= byte;
+        hash *= 1099511628211ULL;
+    }
+    std::ostringstream stream;
+    stream << std::hex << std::setfill('0') << std::setw(16) << hash;
+    return stream.str();
+}
+
+bool DnfCanCloudMatchUndo(const DnfCloudMatchUndoGuard& guard,
+    std::uint64_t currentEpoch, const std::string& currentHash,
+    const std::string& currentRoomId,
+    std::uint64_t currentConnectionGeneration) noexcept
+{
+    return guard.available && guard.postApplyEpoch != 0 &&
+        guard.postApplyEpoch == currentEpoch && !guard.postApplyHash.empty() &&
+        guard.postApplyHash == currentHash && !guard.roomId.empty() &&
+        guard.roomId == currentRoomId && guard.connectionGeneration != 0 &&
+        guard.connectionGeneration == currentConnectionGeneration;
 }

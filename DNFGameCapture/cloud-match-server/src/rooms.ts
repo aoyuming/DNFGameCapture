@@ -17,6 +17,11 @@ export interface RoomMemberDto {
   deviceSuffix: string;
 }
 
+export interface BoundedRoomMembers {
+  members: RoomMemberDto[];
+  totalMembers: number;
+}
+
 interface RoomRow {
   id: string;
   display_name: string;
@@ -39,6 +44,18 @@ interface RoomRevisionRow {
 interface RoomMemberRow {
   device_id: string;
   broadcaster_name: string;
+}
+
+interface RoomMemberCountRow {
+  count: number;
+}
+
+function toRoomMemberDto(row: RoomMemberRow): RoomMemberDto {
+  return {
+    deviceId: row.device_id,
+    broadcasterName: row.broadcaster_name,
+    deviceSuffix: row.device_id.slice(-4),
+  };
 }
 
 function toRoomDto(row: RoomRow): RoomDto {
@@ -87,11 +104,55 @@ export function listRoomMembers(
        ORDER BY device_id`,
     )
     .all(roomId) as RoomMemberRow[];
-  return rows.map((row) => ({
-    deviceId: row.device_id,
-    broadcasterName: row.broadcaster_name,
-    deviceSuffix: row.device_id.slice(-4),
-  }));
+  return rows.map(toRoomMemberDto);
+}
+
+export function listRoomMembersBounded(
+  db: Database.Database,
+  roomId: string,
+  requiredDeviceId: string,
+  limit: number,
+): BoundedRoomMembers {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 512) {
+    throw new RangeError('Invalid room member limit');
+  }
+
+  const countRow = db
+    .prepare('SELECT COUNT(*) AS count FROM memberships WHERE room_id = ?')
+    .get(roomId) as RoomMemberCountRow;
+  const rows = db
+    .prepare(
+      `SELECT device_id, broadcaster_name
+       FROM memberships
+       WHERE room_id = ?
+       ORDER BY device_id
+       LIMIT ?`,
+    )
+    .all(roomId, limit) as RoomMemberRow[];
+
+  if (
+    countRow.count > rows.length &&
+    !rows.some((row) => row.device_id === requiredDeviceId)
+  ) {
+    const caller = db
+      .prepare(
+        `SELECT device_id, broadcaster_name
+         FROM memberships
+         WHERE room_id = ? AND device_id = ?`,
+      )
+      .get(roomId, requiredDeviceId) as RoomMemberRow | undefined;
+    if (caller) {
+      rows[rows.length - 1] = caller;
+      rows.sort((left, right) =>
+        left.device_id < right.device_id ? -1 : left.device_id > right.device_id ? 1 : 0,
+      );
+    }
+  }
+
+  return {
+    members: rows.map(toRoomMemberDto),
+    totalMembers: countRow.count,
+  };
 }
 
 export function getRoomRevision(db: Database.Database, roomId: string): number {

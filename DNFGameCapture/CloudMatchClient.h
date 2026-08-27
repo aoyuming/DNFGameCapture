@@ -16,6 +16,8 @@ struct CloudMatchStatusSnapshot
     std::string roomName;
     std::string broadcasterName;
     std::string statusText;
+    std::uint64_t generation = 0;
+    std::uint64_t connectionGeneration = 0;
     std::uint64_t roomRevision = 0;
 };
 
@@ -42,12 +44,14 @@ public:
     bool Rename(const std::string& broadcasterName);
     bool LeaveRoom();
     bool UploadSnapshot(std::string snapshotJson);
-    bool RequestComparison(const std::string& requestId);
+    bool RequestComparison(const std::string& requestId,
+        const std::string& cursor = {}, std::uint32_t limit = 64);
     bool RequestComparison(unsigned int requestId);
     bool RequestSnapshot(const std::string& requestId,
         const std::string& targetDeviceId, std::uint64_t clientRevision);
     bool RequestSnapshot(unsigned int requestId,
         const std::string& targetDeviceId, std::uint64_t clientRevision);
+    bool CancelRequest(const std::string& requestId);
 
     CloudMatchStatusSnapshot GetStatusSnapshot() const;
     void SetMessageCallback(MessageCallback callback);
@@ -72,6 +76,9 @@ public:
         const std::string& broadcasterName);
     std::string RetryRememberedJoinForTesting();
     std::size_t RememberedJoinSendCountForTesting() const;
+    void SetConnectedForTesting(bool connected);
+    std::size_t PendingTransientRequestCountForTesting() const;
+    bool ExpireNextTransientRequestForTesting();
 #endif
 
 private:

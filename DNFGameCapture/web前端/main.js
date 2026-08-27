@@ -4913,6 +4913,9 @@ document.getElementById('cloud-room-overlay')?.addEventListener('click', (event)
     if (event.target?.id === 'cloud-room-overlay') closeCloudRoomPanel(false);
 });
 document.getElementById('btn-cloud-sync-close')?.addEventListener('click', closeCloudSyncPanel);
+document.getElementById('cloud-sync-overlay')?.addEventListener('click', (event) => {
+    if (event.target?.id === 'cloud-sync-overlay') closeCloudSyncPanel();
+});
 document.getElementById('btn-cloud-sync-refresh')?.addEventListener('click', () => {
     sendCloudSyncCommand('cmd_cloud_sync_refresh');
 });
@@ -4941,7 +4944,10 @@ document.getElementById('btn-cloud-sync-apply')?.addEventListener('click', () =>
         if (ok === true) sendCloudSyncCommand('cmd_cloud_sync_apply', {
             deviceId: String(preview.deviceId || ''),
             clientRevision: revision,
-            generation: Number(preview.generation || 0)
+            generation: Number(preview.generation || 0),
+            connectionGeneration: Number(preview.connectionGeneration || 0),
+            roomRevision: Number(preview.roomRevision || 0),
+            requestId: String(preview.requestId || '')
         });
     }, { okText: '确认覆盖本地', cancelText: '取消' });
 });

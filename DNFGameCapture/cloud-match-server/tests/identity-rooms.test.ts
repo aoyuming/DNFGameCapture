@@ -304,6 +304,39 @@ describe('fixed room membership', () => {
     });
   });
 
+  test('bounds comparison membership reads while retaining the caller', async () => {
+    const { app } = await startApp();
+    const insertDevice = app.db.prepare(
+      'insert into devices (id, token_hash, created_at, last_seen_at) values (?, ?, ?, ?)',
+    );
+    const insertMembership = app.db.prepare(
+      `insert into memberships (device_id, room_id, broadcaster_name, updated_at)
+       values (?, '59', ?, ?)`,
+    );
+    app.db.transaction(() => {
+      for (let index = 1; index <= 513; index += 1) {
+        const suffix = index.toString().padStart(4, '0');
+        const deviceId = `bounded-member-${suffix}`;
+        insertDevice.run(deviceId, `hash-${suffix}`, 1_700_000_000, 1_700_000_000);
+        insertMembership.run(deviceId, `Broadcaster ${index}`, 1_700_000_000);
+      }
+    })();
+
+    const result = roomStore.listRoomMembersBounded(
+      app.db,
+      '59',
+      'bounded-member-0513',
+      512,
+    );
+
+    expect(result.totalMembers).toBe(513);
+    expect(result.members).toHaveLength(512);
+    expect(result.members.at(-1)?.deviceId).toBe('bounded-member-0513');
+    expect(result.members.map((member) => member.deviceId)).not.toContain(
+      'bounded-member-0512',
+    );
+  });
+
   test('rejects unknown rooms, oversized room IDs, and unsafe broadcaster names', async () => {
     const { url } = await startApp();
     const socket = await connectRegistered(

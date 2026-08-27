@@ -46,6 +46,73 @@ foreach ($needle in @(
     }
 }
 
+foreach ($needle in @(
+    'm_matchMutationEpoch', 'm_cloudMatchSyncUndoPostApplyEpoch',
+    'm_cloudMatchSyncUndoRoomId', 'm_cloudMatchSyncUndoConnectionGeneration',
+    'DnfResolveCloudMatchRelativeSwap(', 'DnfIsCloudMatchPreviewCurrent(',
+    'DnfCanCloudMatchUndo(', 'm_cloudMatchSyncComparisonRoomRevision',
+    'm_cloudMatchSyncPreviewRequestId', 'CancelRequest('
+)) {
+    if (-not $dialogSource.Contains($needle) -and -not $dialogHeader.Contains($needle)) {
+        throw "Cloud match review safety contract is missing: $needle"
+    }
+}
+if (-not $dialogHeader.Contains('bool RefreshAfterTeamSyncApply()')) {
+    throw 'Cloud apply persistence aggregation must return a result.'
+}
+if (-not $dialogSource.Contains('if (!RefreshAfterTeamSyncApply())')) {
+    throw 'Cloud apply must not report success after persistence failure.'
+}
+
+function Assert-DialogBlockContains {
+    param(
+        [Parameter(Mandatory = $true)][string]$Start,
+        [Parameter(Mandatory = $true)][string]$End,
+        [Parameter(Mandatory = $true)][string]$Needle,
+        [Parameter(Mandatory = $true)][string]$Message
+    )
+    $startIndex = $dialogSource.IndexOf($Start)
+    $endIndex = $dialogSource.IndexOf($End, $startIndex + $Start.Length)
+    if ($startIndex -lt 0 -or $endIndex -le $startIndex) {
+        throw "Unable to locate mutation block: $Start"
+    }
+    $body = $dialogSource.Substring($startIndex, $endIndex - $startIndex)
+    if (-not $body.Contains($Needle)) {
+        throw $Message
+    }
+}
+
+foreach ($block in @(
+    @('bool CDNFGameCaptureDlg::ToggleReviewEvent(',
+      'void CDNFGameCaptureDlg::DoRetryMatchingTask(',
+      'MarkMatchMutation();', 'Review undo/restore must advance the mutation epoch.'),
+    @('void CDNFGameCaptureDlg::OnBnClickedFlip()',
+      'void CDNFGameCaptureDlg::OnBnClickedReset()',
+      'MarkMatchMutation();', 'Manual team flipping must advance the mutation epoch.'),
+    @('void CDNFGameCaptureDlg::OnBnClickedQuickAdd()',
+      'LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(',
+      'MarkMatchMutation();', 'Quick player entry must advance the mutation epoch.'),
+    @('void CDNFGameCaptureDlg::OnRClickTree(',
+      'CString CDNFGameCaptureDlg::CheckFieldConflict(',
+      'if (matchStateMutationCommand) MarkMatchMutation();',
+      'Native tree mutations must advance the mutation epoch per command.'),
+    @('void CDNFGameCaptureDlg::OnEndLabelEdit(',
+      'void CDNFGameCaptureDlg::OnCustomDrawTree(',
+      'MarkMatchMutation();', 'Native score/player edits must advance the mutation epoch.'),
+    @('else if (action == "cmd_delete_alias")',
+      'else if (action == "cmd_undo_event")',
+      'MarkMatchMutation();', 'Deleting an active alias must advance the mutation epoch.'),
+    @('else if (action == "cmd_set_output_seat_label")',
+      'else if (action == "cmd_set_red_pick_mode")',
+      'MarkMatchMutation();', 'TXT seat-order changes must advance the mutation epoch.'),
+    @('else if (action == "cmd_set_red_pick_mode")',
+      'else if (action == "cmd_set_scoreboard_text_styles")',
+      'MarkMatchMutation();', 'Pick-order changes must advance the mutation epoch.')
+)) {
+    Assert-DialogBlockContains -Start $block[0] -End $block[1] `
+        -Needle $block[2] -Message $block[3]
+}
+
 $handlerStart = $dialogSource.IndexOf('void CDNFGameCaptureDlg::HandleCloudMatchMessage(')
 $handlerEnd = $dialogSource.IndexOf('std::string CDNFGameCaptureDlg::BuildCloudMatchSnapshotPayload(', $handlerStart)
 if ($handlerStart -lt 0 -or $handlerEnd -le $handlerStart) {
@@ -110,6 +177,14 @@ foreach ($needle in @(
 }
 if (-not $webCss.Contains('overflow-y: auto')) {
     throw 'Cloud match panel must remain scrollable in short windows.'
+}
+foreach ($theme in @('dark-esports', 'frost-broadcast', 'black-gold')) {
+    if (-not $webCss.Contains("html[data-theme=`"$theme`"]")) {
+        throw "Cloud match panel is missing explicit theme variables for $theme."
+    }
+}
+if (-not $webMain.Contains("event.target?.id === 'cloud-sync-overlay'")) {
+    throw 'Cloud sync backdrop click must close only when the overlay itself is clicked.'
 }
 $memberHandlerStart = $webMain.IndexOf("document.getElementById('cloud-sync-member-list')")
 $applyHandlerStart = $webMain.IndexOf("document.getElementById('btn-cloud-sync-apply')", $memberHandlerStart)

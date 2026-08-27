@@ -4,7 +4,12 @@ import { z } from 'zod';
 import { compareRoomSnapshots, type RoomComparison } from './comparison.js';
 import { openDatabase } from './db.js';
 import { authenticateDevice, touchLastSeen } from './identity.js';
-import type { MembershipDto, RoomDto, RoomMemberDto } from './rooms.js';
+import type {
+  BoundedRoomMembers,
+  MembershipDto,
+  RoomDto,
+  RoomMemberDto,
+} from './rooms.js';
 import {
   deviceIdSchema,
   roomJoinSchema,
@@ -26,8 +31,16 @@ type MaybePromise<T> = T | Promise<T>;
 type Acknowledge = (response: unknown) => void;
 
 const MAX_SNAPSHOT_BYTES = 65_536;
+const MAX_COMPARISON_PAGE_SIZE = 8;
+const MAX_COMPARISON_MEMBERS = 512;
 const FIXED_ROOM_IDS = ['59', 'li-yong', 'wen-rou'] as const;
 const emptyPayloadSchema = z.object({}).strict();
+const comparisonRequestSchema = z
+  .object({
+    cursor: deviceIdSchema.optional(),
+    limit: z.number().int().min(1).max(64).optional(),
+  })
+  .strict();
 const snapshotUploadSchema = z.object({ snapshot: z.unknown() }).strict();
 const snapshotGetSchema = z
   .object({
@@ -46,6 +59,12 @@ export interface RoomService {
     db: DatabaseConnection,
     roomId: string,
   ): MaybePromise<RoomMemberDto[]>;
+  listRoomMembersBounded(
+    db: DatabaseConnection,
+    roomId: string,
+    requiredDeviceId: string,
+    limit: number,
+  ): MaybePromise<BoundedRoomMembers>;
   getRoomRevision(
     db: DatabaseConnection,
     roomId: string,
@@ -79,6 +98,7 @@ export interface SnapshotService {
   getRoomSnapshots(
     db: DatabaseConnection,
     roomId: string,
+    deviceIds?: readonly string[],
   ): MaybePromise<RoomSnapshotRow[]>;
 }
 
@@ -585,7 +605,8 @@ export function registerCloudMatchSocketHandlers(
     bindAckEvent(
       'room:comparison',
       async (payload) => {
-        if (!emptyPayloadSchema.safeParse(payload).success) {
+        const parsed = comparisonRequestSchema.safeParse(payload);
+        if (!parsed.success) {
           return { ok: false, code: 'invalid_request' };
         }
         const membership = await roomService.getMembership(db, deviceId);
@@ -595,12 +616,25 @@ export function registerCloudMatchSocketHandlers(
 
         const generatedAt = now();
         const roomId = membership.room.id;
-        const roomMembers = await roomService.listRoomMembers(db, roomId);
-        const snapshots = await snapshotService.getRoomSnapshots(db, roomId);
-        const inputRows = snapshots.map((row) => ({
-          ...row,
-          online: activeSockets.has(row.deviceId),
-        }));
+        const boundedRoom = await roomService.listRoomMembersBounded(
+          db,
+          roomId,
+          deviceId,
+          MAX_COMPARISON_MEMBERS,
+        );
+        const roomMembers = boundedRoom.members;
+        const boundedMemberIds = new Set(roomMembers.map((member) => member.deviceId));
+        const snapshots = await snapshotService.getRoomSnapshots(
+          db,
+          roomId,
+          [...boundedMemberIds],
+        );
+        const inputRows = snapshots
+          .filter((row) => boundedMemberIds.has(row.deviceId))
+          .map((row) => ({
+            ...row,
+            online: activeSockets.has(row.deviceId),
+          }));
         const comparison = await comparisonService.compareRoomSnapshots(
           inputRows,
           generatedAt,
@@ -624,13 +658,39 @@ export function registerCloudMatchSocketHandlers(
           };
         });
 
+        const startIndex = parsed.data.cursor
+          ? members.findIndex((member) => member.deviceId > parsed.data.cursor!)
+          : 0;
+        const pageStart = startIndex < 0 ? members.length : startIndex;
+        const requestedLimit = parsed.data.limit ?? MAX_COMPARISON_PAGE_SIZE;
+        const pageSize = Math.min(requestedLimit, MAX_COMPARISON_PAGE_SIZE);
+        const pageMembers = members.slice(pageStart, pageStart + pageSize);
+        const hasMore = pageStart + pageMembers.length < members.length;
+        const nextCursor = hasMore && pageMembers.length > 0
+          ? pageMembers.at(-1)!.deviceId
+          : null;
+        const pageMemberIds = new Set(pageMembers.map((member) => member.deviceId));
+        const groups = comparison.groups
+          .map((group) => ({
+            id: group.id,
+            memberDeviceIds: [...new Set(group.memberDeviceIds)].filter((id) =>
+              pageMemberIds.has(id),
+            ),
+          }))
+          .filter((group) => group.memberDeviceIds.length > 0);
+
         return {
           ok: true,
           generatedAt,
           roomRevision: await roomService.getRoomRevision(db, roomId),
           consensusDeviceId: comparison.consensusDeviceId,
-          members,
-          groups: comparison.groups,
+          members: pageMembers,
+          groups,
+          totalMembers: boundedRoom.totalMembers,
+          boundedMembers: members.length,
+          truncated: boundedRoom.totalMembers > members.length,
+          hasMore,
+          nextCursor,
         };
       },
       true,

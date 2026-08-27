@@ -469,6 +469,51 @@ void TestRememberedJoinRetriesAfterDispatchCapacityRelease()
         "duplicate retry must not send another remembered join");
 }
 
+void TestTransientRequestsFailOfflineCancelAndExpireWithoutReplay()
+{
+    CloudMatchClient client;
+    client.ConfigureForTesting();
+    client.SetConnectedForTesting(false);
+    for (std::size_t index = 0; index < 96; ++index) {
+        Require(!client.RequestComparison("offline-comparison-" + std::to_string(index)),
+            "offline comparison clicks must fail immediately");
+        Require(!client.RequestSnapshot("offline-snapshot-" + std::to_string(index),
+            "target-device-0001", 1),
+            "offline snapshot clicks must fail immediately");
+    }
+    Require(client.PendingTransientRequestCountForTesting() == 0,
+        "offline clicks must not consume command queue capacity");
+
+    client.SetConnectedForTesting(true);
+    Require(client.RequestComparison("cancel-comparison"),
+        "connected comparison request should queue");
+    Require(client.RequestSnapshot("cancel-snapshot", "target-device-0002", 2),
+        "connected snapshot request should queue");
+    Require(client.CancelRequest("cancel-comparison") &&
+        client.CancelRequest("cancel-snapshot"),
+        "panel lifecycle cancellation should remove requests by requestId");
+    Require(client.PendingTransientRequestCountForTesting() == 0 &&
+        !client.CompleteNextProtectedOperationForTesting(),
+        "canceled requests must never send or produce delayed results");
+
+    std::vector<std::string> messages;
+    client.SetMessageCallback([&](std::string message) {
+        messages.push_back(std::move(message));
+    });
+    Require(client.RequestComparison("expired-comparison"),
+        "connected comparison request should queue before expiry");
+    Require(client.ExpireNextTransientRequestForTesting(),
+        "test clock should expire the unsent transient request");
+    Require(client.DispatchMessages(4) == 1 &&
+        messages.back().find("\"code\":\"timeout\"") != std::string::npos,
+        "expired unsent request should report a recoverable timeout");
+    client.SetConnectedForTesting(false);
+    client.SetConnectedForTesting(true);
+    Require(client.PendingTransientRequestCountForTesting() == 0 &&
+        !client.CompleteNextProtectedOperationForTesting(),
+        "expired requests must not replay after reconnect");
+}
+
 } // namespace
 
 int main()
@@ -483,6 +528,7 @@ int main()
     TestSnapshotRequestsPreserveCorrelationAcrossFailuresAndGeneration();
     TestDispatchLifecycleGateWaitsAndRemainsReentrant();
     TestRememberedJoinRetriesAfterDispatchCapacityRelease();
+    TestTransientRequestsFailOfflineCancelAndExpireWithoutReplay();
     std::cout << "Cloud match client tests passed.\n";
     return 0;
 }

@@ -30,6 +30,7 @@ constexpr std::size_t kMaxPendingAcks = 64;
 constexpr std::size_t kMaxInboundMessageQueueSize = 128;
 constexpr std::size_t kMaxProtectedResultCapacity = 96;
 constexpr auto kAckTimeout = std::chrono::seconds(8);
+constexpr auto kTransientCommandTimeout = std::chrono::seconds(8);
 constexpr DWORD kNetworkTimeoutMs = 3000;
 constexpr DWORD kReceivePollTimeoutMs = 200;
 constexpr std::size_t kMaxRegistrationResponseBytes = 4096;
@@ -394,10 +395,25 @@ public:
         return true;
     }
 
-    bool RequestComparison(const std::string& requestId)
+    bool RequestComparison(const std::string& requestId,
+        const std::string& cursor, std::uint32_t limit)
     {
-        if (requestId.empty() || requestId.size() > 128) return false;
-        return EnqueueCommand(CommandKind::requestComparison, {}, {}, requestId);
+        if (requestId.empty() || requestId.size() > 128 || cursor.size() > 128 ||
+            limit == 0 || limit > 64) {
+            return false;
+        }
+        bool enqueued = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!status.connected) {
+                status.statusText = "not_connected";
+                return false;
+            }
+            enqueued = EnqueueCommandLocked(config.generation,
+                CommandKind::requestComparison, cursor, {}, requestId, 0, limit);
+        }
+        if (enqueued) condition.notify_all();
+        return enqueued;
     }
 
     bool RequestSnapshot(const std::string& requestId,
@@ -410,12 +426,51 @@ public:
         bool enqueued = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
+            if (!status.connected) {
+                status.statusText = "not_connected";
+                return false;
+            }
             enqueued = EnqueueCommandLocked(config.generation,
                 CommandKind::requestSnapshot, targetDeviceId, {}, requestId,
                 clientRevision);
         }
         if (enqueued) condition.notify_all();
         return enqueued;
+    }
+
+    bool CancelRequest(const std::string& requestId)
+    {
+        if (requestId.empty() || requestId.size() > 128) return false;
+        bool canceled = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            for (auto iterator = commands.begin(); iterator != commands.end();) {
+                if (IsTransientRequest(iterator->kind) &&
+                    iterator->requestId == requestId) {
+                    ReleaseProtectedReservationLocked(
+                        iterator->protectedResultReservation);
+                    iterator = commands.erase(iterator);
+                    canceled = true;
+                }
+                else {
+                    ++iterator;
+                }
+            }
+            for (auto iterator = pendingAcks.begin(); iterator != pendingAcks.end();) {
+                if (IsTransientRequest(iterator->second.kind) &&
+                    iterator->second.requestId == requestId) {
+                    ReleaseProtectedReservationLocked(
+                        iterator->second.protectedResultReservation);
+                    iterator = pendingAcks.erase(iterator);
+                    canceled = true;
+                }
+                else {
+                    ++iterator;
+                }
+            }
+        }
+        if (canceled) condition.notify_all();
+        return canceled;
     }
 
     CloudMatchStatusSnapshot GetStatusSnapshot() const
@@ -475,6 +530,7 @@ public:
         parsed.deviceId = "test-device";
         parsed.deviceToken = "test-token";
         ApplyConfig(std::move(parsed), true);
+        SetConnectedForTesting(true);
         return configGeneration.load(std::memory_order_acquire);
     }
 
@@ -694,6 +750,48 @@ public:
         std::lock_guard<std::mutex> lock(mutex);
         return rememberedJoinSendCountForTesting;
     }
+
+    void SetConnectedForTesting(bool connected)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (connected && !status.connected) {
+            ++connectionGenerationCounter;
+            status.connectionGeneration = connectionGenerationCounter;
+        }
+        status.connected = connected;
+        status.connecting = false;
+        status.reconnecting = !connected;
+        status.statusText = connected ? "connected" : "reconnecting";
+    }
+
+    std::size_t PendingTransientRequestCountForTesting() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto queued = std::count_if(commands.begin(), commands.end(),
+            [](const Command& command) { return IsTransientRequest(command.kind); });
+        const auto pending = std::count_if(pendingAcks.begin(), pendingAcks.end(),
+            [](const auto& entry) { return IsTransientRequest(entry.second.kind); });
+        return static_cast<std::size_t>(queued + pending);
+    }
+
+    bool ExpireNextTransientRequestForTesting()
+    {
+        Command expired;
+        bool found = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            const auto iterator = std::find_if(commands.begin(), commands.end(),
+                [](const Command& command) {
+                    return IsTransientRequest(command.kind);
+                });
+            if (iterator == commands.end()) return false;
+            expired = std::move(*iterator);
+            commands.erase(iterator);
+            found = true;
+        }
+        if (found) NotifyQueuedCommandFailure(expired, "timeout");
+        return found;
+    }
 #endif
 
 private:
@@ -707,6 +805,12 @@ private:
         requestComparison,
         requestSnapshot
     };
+
+    static bool IsTransientRequest(CommandKind kind) noexcept
+    {
+        return kind == CommandKind::requestComparison ||
+            kind == CommandKind::requestSnapshot;
+    }
 
     struct Config
     {
@@ -802,7 +906,8 @@ private:
 
         Command(Command&& other) noexcept
             : kind(other.kind), generation(other.generation), sequence(other.sequence),
-            clientRevision(other.clientRevision),
+            clientRevision(other.clientRevision), pageLimit(other.pageLimit),
+            deadline(other.deadline),
             protectedResultReservation(other.protectedResultReservation)
         {
             argument.swap(other.argument);
@@ -811,6 +916,8 @@ private:
             other.generation = 0;
             other.sequence = 0;
             other.clientRevision = 0;
+            other.pageLimit = 0;
+            other.deadline = {};
             other.protectedResultReservation = false;
         }
 
@@ -822,6 +929,8 @@ private:
                 generation = other.generation;
                 sequence = other.sequence;
                 clientRevision = other.clientRevision;
+                pageLimit = other.pageLimit;
+                deadline = other.deadline;
                 protectedResultReservation = other.protectedResultReservation;
                 argument.swap(other.argument);
                 secondArgument.swap(other.secondArgument);
@@ -829,6 +938,8 @@ private:
                 other.generation = 0;
                 other.sequence = 0;
                 other.clientRevision = 0;
+                other.pageLimit = 0;
+                other.deadline = {};
                 other.protectedResultReservation = false;
             }
             return *this;
@@ -841,6 +952,8 @@ private:
         std::uint64_t generation = 0;
         std::uint64_t sequence = 0;
         std::uint64_t clientRevision = 0;
+        std::uint32_t pageLimit = 0;
+        Clock::time_point deadline{};
         bool protectedResultReservation = false;
 
         void Clear() noexcept
@@ -851,6 +964,8 @@ private:
             generation = 0;
             sequence = 0;
             clientRevision = 0;
+            pageLimit = 0;
+            deadline = {};
             protectedResultReservation = false;
         }
     };
@@ -1093,6 +1208,14 @@ private:
         return true;
     }
 
+    void ReleaseProtectedReservationLocked(bool& reservation) noexcept
+    {
+        if (reservation && protectedResultReservations > 0) {
+            --protectedResultReservations;
+        }
+        reservation = false;
+    }
+
     void ResetProtectedCapacityLocked() noexcept
     {
         protectedResultsQueued = 0;
@@ -1270,6 +1393,7 @@ private:
             config = std::move(parsed);
             status = {};
             status.configured = config.credentialsValid;
+            status.generation = config.generation;
             status.statusText = validUrl ?
                 (config.credentialsValid ? "configured" : "credentials_required") :
                 "invalid_server_url";
@@ -1283,7 +1407,7 @@ private:
 
     bool EnqueueCommandLocked(std::uint64_t generation, CommandKind kind,
         std::string argument, std::string secondArgument, std::string requestId,
-        std::uint64_t clientRevision = 0)
+        std::uint64_t clientRevision = 0, std::uint32_t pageLimit = 0)
     {
         const bool registration = kind == CommandKind::registerDevice;
         if (stopping || config.generation != generation ||
@@ -1304,8 +1428,12 @@ private:
         command.secondArgument = std::move(secondArgument);
         command.requestId = std::move(requestId);
         command.clientRevision = clientRevision;
+        command.pageLimit = pageLimit;
         command.generation = generation;
         command.sequence = nextCommandSequence++;
+        if (IsTransientRequest(kind)) {
+            command.deadline = Clock::now() + kTransientCommandTimeout;
+        }
         command.protectedResultReservation = true;
         commands.push_back(std::move(command));
         return true;
@@ -1957,7 +2085,8 @@ private:
         case CommandKind::requestComparison:
             eventName = "room:comparison";
             resultType = "room_comparison_result";
-            payload = json::object();
+            payload = { { "limit", command.pageLimit == 0 ? 64 : command.pageLimit } };
+            if (!command.argument.empty()) payload["cursor"] = command.argument;
             break;
         case CommandKind::requestSnapshot:
             eventName = "snapshot:get";
@@ -2113,6 +2242,7 @@ private:
     {
         ProcessRegistrationCommands(activeConfig);
         if (ShouldAbort(activeConfig.generation)) return false;
+        ExpireQueuedTransientRequests(activeConfig.generation);
 
         for (;;) {
             Command command;
@@ -2424,6 +2554,69 @@ private:
             &pending.protectedResultReservation);
     }
 
+    void NotifyQueuedCommandFailure(Command& command, const char* code)
+    {
+        PendingAck pending;
+        pending.kind = command.kind;
+        pending.resultType = command.kind == CommandKind::requestSnapshot ?
+            "snapshot_result" : "room_comparison_result";
+        pending.requestId = command.requestId;
+        pending.clientRevision = command.clientRevision;
+        if (command.kind == CommandKind::requestSnapshot) {
+            pending.targetDeviceId = command.argument;
+        }
+        pending.protectedResultReservation = command.protectedResultReservation;
+        command.protectedResultReservation = false;
+        NotifyPendingAckFailure(command.generation, pending, code);
+    }
+
+    void FailQueuedTransientRequests(std::uint64_t generation, const char* code)
+    {
+        std::vector<Command> failed;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (config.generation != generation) return;
+            for (auto iterator = commands.begin(); iterator != commands.end();) {
+                if (iterator->generation == generation &&
+                    IsTransientRequest(iterator->kind)) {
+                    failed.push_back(std::move(*iterator));
+                    iterator = commands.erase(iterator);
+                }
+                else {
+                    ++iterator;
+                }
+            }
+        }
+        for (Command& command : failed) {
+            NotifyQueuedCommandFailure(command, code);
+        }
+    }
+
+    void ExpireQueuedTransientRequests(std::uint64_t generation)
+    {
+        std::vector<Command> expired;
+        const auto now = Clock::now();
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (config.generation != generation) return;
+            for (auto iterator = commands.begin(); iterator != commands.end();) {
+                if (iterator->generation == generation &&
+                    IsTransientRequest(iterator->kind) &&
+                    iterator->deadline != Clock::time_point{} &&
+                    iterator->deadline <= now) {
+                    expired.push_back(std::move(*iterator));
+                    iterator = commands.erase(iterator);
+                }
+                else {
+                    ++iterator;
+                }
+            }
+        }
+        for (Command& command : expired) {
+            NotifyQueuedCommandFailure(command, "timeout");
+        }
+    }
+
     void FailPendingAcks(const Config& activeConfig, const char* code)
     {
         std::unordered_map<std::uint64_t, PendingAck> failed;
@@ -2514,12 +2707,16 @@ private:
         }
 
         connectedOnce = true;
-        UpdateStatus(activeConfig.generation, [](CloudMatchStatusSnapshot& current) {
-            current.connecting = false;
-            current.connected = true;
-            current.reconnecting = false;
-            current.statusText = "connected";
-        });
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (config.generation != activeConfig.generation) return false;
+            ++connectionGenerationCounter;
+            status.connecting = false;
+            status.connected = true;
+            status.reconnecting = false;
+            status.connectionGeneration = connectionGenerationCounter;
+            status.statusText = "connected";
+        }
         const bool result = RunConnected(activeConfig, connection);
         if (connection.socket && !ShouldStop()) {
             WinHttpWebSocketClose(connection.socket.Get(),
@@ -2587,6 +2784,7 @@ private:
                 ClearPendingAcksLocked();
                 continue;
             }
+            FailQueuedTransientRequests(activeConfig.generation, "connection_lost");
             FailPendingAcks(activeConfig, "connection_lost");
 
             UpdateStatus(activeConfig.generation, [](CloudMatchStatusSnapshot& current) {
@@ -2633,6 +2831,7 @@ private:
     std::optional<std::uint64_t> desiredJoinPendingGeneration;
     std::optional<std::uint64_t> desiredJoinInFlightGeneration;
     std::uint64_t nextCommandSequence = 1;
+    std::uint64_t connectionGenerationCounter = 0;
     std::size_t currentOutboundLimit = cloud_match::kMaxCloudMatchPayloadBytes;
 
     CloudMatchStatusSnapshot status;
@@ -2707,14 +2906,15 @@ bool CloudMatchClient::UploadSnapshot(std::string snapshotJson)
     return impl_->UploadSnapshot(std::move(snapshotJson));
 }
 
-bool CloudMatchClient::RequestComparison(const std::string& requestId)
+bool CloudMatchClient::RequestComparison(const std::string& requestId,
+    const std::string& cursor, std::uint32_t limit)
 {
-    return impl_->RequestComparison(requestId);
+    return impl_->RequestComparison(requestId, cursor, limit);
 }
 
 bool CloudMatchClient::RequestComparison(unsigned int requestId)
 {
-    return RequestComparison(std::to_string(requestId));
+    return RequestComparison(std::to_string(requestId), {}, 64);
 }
 
 bool CloudMatchClient::RequestSnapshot(const std::string& requestId,
@@ -2727,6 +2927,11 @@ bool CloudMatchClient::RequestSnapshot(unsigned int requestId,
     const std::string& targetDeviceId, std::uint64_t clientRevision)
 {
     return RequestSnapshot(std::to_string(requestId), targetDeviceId, clientRevision);
+}
+
+bool CloudMatchClient::CancelRequest(const std::string& requestId)
+{
+    return impl_->CancelRequest(requestId);
 }
 
 CloudMatchStatusSnapshot CloudMatchClient::GetStatusSnapshot() const
@@ -2814,5 +3019,20 @@ std::string CloudMatchClient::RetryRememberedJoinForTesting()
 std::size_t CloudMatchClient::RememberedJoinSendCountForTesting() const
 {
     return impl_->RememberedJoinSendCountForTesting();
+}
+
+void CloudMatchClient::SetConnectedForTesting(bool connected)
+{
+    impl_->SetConnectedForTesting(connected);
+}
+
+std::size_t CloudMatchClient::PendingTransientRequestCountForTesting() const
+{
+    return impl_->PendingTransientRequestCountForTesting();
+}
+
+bool CloudMatchClient::ExpireNextTransientRequestForTesting()
+{
+    return impl_->ExpireNextTransientRequestForTesting();
 }
 #endif
