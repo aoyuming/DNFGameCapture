@@ -263,12 +263,12 @@ export function registerCloudMatchSocketHandlers(
     });
   };
 
-  const emitRoomPresence = async (
+  const emitRoomPresence = (
     roomId: string,
+    roomRevision: number,
     deviceId: string,
     online: boolean,
-  ): Promise<void> => {
-    const roomRevision = await roomService.getRoomRevision(db, roomId);
+  ): void => {
     announceRoomNotification(roomId, roomRevision, () => {
       io.to(roomNamespace(roomId)).emit('room:presence', {
         roomId,
@@ -328,10 +328,14 @@ export function registerCloudMatchSocketHandlers(
         previousSocket.disconnect(true);
       }
       if (restoredRoomId) {
-        await emitRoomPresence(restoredRoomId, deviceId, true);
+        const roomRevision = roomService.incrementRoomRevision(db, restoredRoomId);
+        emitRoomPresence(restoredRoomId, roomRevision, deviceId, true);
       }
     });
     void initialization.catch(async () => {
+      if (activeSockets.get(deviceId) === socket) {
+        activeSockets.delete(deviceId);
+      }
       if (restoredRoomId && socket.rooms.has(roomNamespace(restoredRoomId))) {
         try {
           await socketRoomAdapter.leave(socket, roomNamespace(restoredRoomId));
@@ -681,7 +685,16 @@ export function registerCloudMatchSocketHandlers(
           if (wasActive) {
             const membership = await roomService.getMembership(db, deviceId);
             if (membership) {
-              await emitRoomPresence(membership.room.id, deviceId, false);
+              const roomRevision = roomService.incrementRoomRevision(
+                db,
+                membership.room.id,
+              );
+              emitRoomPresence(
+                membership.room.id,
+                roomRevision,
+                deviceId,
+                false,
+              );
             }
           }
         } catch {

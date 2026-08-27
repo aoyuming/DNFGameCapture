@@ -35,6 +35,11 @@ interface RoomChanged {
   roomRevision: number;
 }
 
+interface RoomPresence extends RoomChanged {
+  deviceId: string;
+  online: boolean;
+}
+
 interface Deferred<T> {
   promise: Promise<T>;
   resolve(value: T): void;
@@ -390,7 +395,7 @@ describe('cloud match Socket.IO integration', () => {
     ).resolves.toEqual({ ok: false, code: 'not_in_room' });
   });
 
-  test('reports a disconnected member offline while retaining its last snapshot', async () => {
+  test('bumps presence revisions across disconnect, reconnect, and disconnect', async () => {
     const { app, url } = await startApp();
     const uploader = await createDevice(url, 'presence-uploader-0001');
     const viewer = await createDevice(url, 'presence-viewer-0002');
@@ -399,7 +404,14 @@ describe('cloud match Socket.IO integration', () => {
     await emitAck(uploader.socket, 'snapshot:upload', { snapshot: snapshot(7) });
     const revisionBeforeDisconnect = roomRevision(app, '59');
 
+    const firstOffline = waitForEvent<RoomPresence>(viewer.socket, 'room:presence');
     uploader.socket.disconnect();
+    await expect(firstOffline).resolves.toEqual({
+      roomId: '59',
+      roomRevision: revisionBeforeDisconnect + 1,
+      deviceId: uploader.deviceId,
+      online: false,
+    });
     await waitUntil(async () => {
       const comparison = await emitAck<{
         members: Array<Record<string, unknown>>;
@@ -416,6 +428,27 @@ describe('cloud match Socket.IO integration', () => {
       );
     }, 5_000);
 
+    const backOnline = waitForEvent<RoomPresence>(viewer.socket, 'room:presence');
+    const reconnected = await connectRegistered(url, {
+      deviceId: uploader.deviceId,
+      deviceToken: uploader.deviceToken,
+    });
+    await expect(backOnline).resolves.toEqual({
+      roomId: '59',
+      roomRevision: revisionBeforeDisconnect + 2,
+      deviceId: uploader.deviceId,
+      online: true,
+    });
+
+    const secondOffline = waitForEvent<RoomPresence>(viewer.socket, 'room:presence');
+    reconnected.disconnect();
+    await expect(secondOffline).resolves.toEqual({
+      roomId: '59',
+      roomRevision: revisionBeforeDisconnect + 3,
+      deviceId: uploader.deviceId,
+      online: false,
+    });
+
     await expect(
       emitAck(viewer.socket, 'snapshot:get', { targetDeviceId: uploader.deviceId }),
     ).resolves.toMatchObject({
@@ -425,7 +458,37 @@ describe('cloud match Socket.IO integration', () => {
       clientRevision: 7,
       snapshot: { clientRevision: 7 },
     });
-    expect(roomRevision(app, '59')).toBe(revisionBeforeDisconnect);
+    expect(roomRevision(app, '59')).toBe(revisionBeforeDisconnect + 3);
+  });
+
+  test('replacement connection emits no transient offline presence', async () => {
+    const { app, url } = await startApp();
+    const device = await createDevice(url, 'replacement-device-0001');
+    const observer = await createDevice(url, 'replacement-observer-0002');
+    await joinRoom(device.socket, '59', 'Replaced');
+    await joinRoom(observer.socket, '59', 'Observer');
+    const presence: RoomPresence[] = [];
+    observer.socket.on('room:presence', (event: RoomPresence) => presence.push(event));
+    const replaced = waitForEvent(device.socket, 'connection:replaced');
+
+    const replacement = await connectRegistered(url, {
+      deviceId: device.deviceId,
+      deviceToken: device.deviceToken,
+    });
+
+    await replaced;
+    await waitUntil(() => expect(presence).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(replacement.connected).toBe(true);
+    expect(presence).toEqual([
+      {
+        roomId: '59',
+        roomRevision: 3,
+        deviceId: device.deviceId,
+        online: true,
+      },
+    ]);
+    expect(roomRevision(app, '59')).toBe(3);
   });
 
   test('switching rooms notifies both rooms and never copies the old snapshot', async () => {
@@ -547,7 +610,7 @@ describe('cloud match Socket.IO integration', () => {
     expect(changes).toHaveLength(5);
   });
 
-  test('announces changed and presence revisions monotonically across device queues', async () => {
+  test('drops a delayed older changed revision after a newer announcement', async () => {
     const delayedLookupEntered = createDeferred<void>();
     const releaseDelayedLookup = createDeferred<void>();
     const delayedLookupReturned = createDeferred<void>();
@@ -566,33 +629,32 @@ describe('cloud match Socket.IO integration', () => {
         },
       },
     });
-    const disconnecting = await createDevice(url, 'ordering-device-0001');
+    const delayed = await createDevice(url, 'ordering-device-0001');
     const observer = await createDevice(url, 'ordering-device-0002');
-    await joinRoom(disconnecting.socket, '59', 'Disconnecting');
+    await joinRoom(delayed.socket, '59', 'Delayed');
     await joinRoom(observer.socket, '59', 'Observer');
 
-    const notifications: Array<RoomChanged & { event: string }> = [];
+    const notifications: RoomChanged[] = [];
     observer.socket.on('room:changed', (event: RoomChanged) => {
-      notifications.push({ event: 'room:changed', ...event });
-    });
-    observer.socket.on('room:presence', (event: RoomChanged) => {
-      notifications.push({ event: 'room:presence', ...event });
+      notifications.push(event);
     });
 
-    revisionToDelay = 2;
-    disconnecting.socket.disconnect();
+    revisionToDelay = 3;
+    const olderRename = emitAck(delayed.socket, 'room:rename', {
+      broadcasterName: 'Delayed Rename',
+    });
     await delayedLookupEntered.promise;
     await emitAck(observer.socket, 'room:rename', { broadcasterName: 'Renamed' });
     releaseDelayedLookup.resolve();
     await delayedLookupReturned.promise;
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await olderRename;
 
     const revisions = notifications.map((notification) => notification.roomRevision);
     expect(revisions.every((revision, index) => index === 0 || revision > revisions[index - 1]))
       .toBe(true);
-    expect(revisions.at(-1)).toBe(3);
+    expect(revisions.at(-1)).toBe(4);
     expect(notifications).toEqual([
-      { event: 'room:changed', roomId: '59', roomRevision: 3 },
+      { roomId: '59', roomRevision: 4 },
     ]);
   });
 
@@ -684,7 +746,7 @@ describe('cloud match Socket.IO integration', () => {
         }
       ).count,
     ).toBe(0);
-    expect(roomRevision(app, '59')).toBe(1);
+    expect(roomRevision(app, '59')).toBe(2);
 
     await expect(emitAck(unjoined.socket, 'room:list')).resolves.toMatchObject({
       ok: true,
