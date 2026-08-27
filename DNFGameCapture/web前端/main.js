@@ -603,7 +603,9 @@ if (window.chrome && window.chrome.webview) {
                 showAlert(msg.message);
             }
             else if (msg.action === 'cloud_room_prompt') {
-                openCloudRoomPanel(true);
+                if (!cloudMatchState) cloudMatchState = normalizeCloudMatchState({ shouldPrompt: true });
+                else cloudMatchState.shouldPrompt = true;
+                restoreCloudRoomPromptFromState();
             }
             else if (msg.action === 'auth_result' || msg.action === 'start_guard' || msg.action === 'patch_result' || msg.action === 'alias_submit_result' || msg.action === 'alias_sync_result' || msg.action === 'copy_window_clipboard_result' || msg.action === 'kill_obs_url_result' || msg.action === 'key_mapping_error') { showAlert(msg.message); }
             else if (msg.action === 'alias_direct_sync_result') {
@@ -2410,6 +2412,10 @@ function normalizeCloudMatchState(value = {}) {
     };
 }
 
+function isCloudRoomBusy(state = cloudMatchState) {
+    return !!(state?.joining || state?.registering || state?.renaming || state?.leaving);
+}
+
 function cloudRoomNameInfo(value) {
     const normalized = String(value || '').normalize('NFC').trim();
     const graphemeCount = cloudRoomNameSegmenter
@@ -2440,7 +2446,7 @@ function updateCloudRoomNameValidation() {
     if (!input || !joinButton) return false;
     const info = cloudRoomNameInfo(input.value);
     if (count) count.textContent = `${info.graphemeCount} / 32`;
-    const busy = cloudMatchState?.joining || cloudMatchState?.registering;
+    const busy = isCloudRoomBusy();
     joinButton.disabled = !cloudSelectedRoomId || !info.valid || !!busy;
     if (info.graphemeCount > 32) setCloudRoomInlineError('主播名称不能超过 32 个字符。');
     else if (info.normalized && !info.valid) setCloudRoomInlineError('主播名称包含不可用字符。');
@@ -2483,10 +2489,11 @@ function renderCloudRoomPanel() {
     if (renameInput && document.activeElement !== renameInput) {
         renameInput.value = state.broadcasterName;
     }
+    if (renameInput) renameInput.disabled = isCloudRoomBusy(state);
     const renameButton = document.getElementById('btn-cloud-room-rename');
     const changeButton = document.getElementById('btn-cloud-room-change');
     const leaveButton = document.getElementById('btn-cloud-room-leave');
-    const busy = state.joining || state.registering || state.renaming || state.leaving;
+    const busy = isCloudRoomBusy(state);
     if (renameButton) {
         renameButton.disabled = busy;
         renameButton.textContent = state.renaming ? '修改中...' : '修改名称';
@@ -2508,6 +2515,10 @@ function renderCloudRoomPanel() {
         ? `准备加入：${CLOUD_ROOM_NAMES[cloudSelectedRoomId]}` : '尚未选择房间';
     const joinButton = document.getElementById('btn-cloud-room-join');
     if (joinButton) joinButton.textContent = state.joining || state.registering ? '加入中...' : '加入房间';
+    const backButton = document.getElementById('btn-cloud-room-back');
+    if (backButton) backButton.disabled = busy;
+    const nameInput = document.getElementById('cloud-room-name-input');
+    if (nameInput) nameInput.disabled = busy;
     setCloudRoomInlineError(state.lastError);
     updateCloudRoomNameValidation();
 }
@@ -2533,6 +2544,13 @@ function closeCloudRoomPanel(force = false) {
     cloudRoomFirstRun = false;
     cloudRoomChoosing = false;
     cloudSelectedRoomId = '';
+}
+
+function restoreCloudRoomPromptFromState() {
+    if (!cloudMatchState || cloudMatchState.joined || isCloudRoomBusy()) return;
+    if (cloudMatchState.shouldPrompt && !isCloudRoomPanelOpen()) {
+        openCloudRoomPanel(true);
+    }
 }
 
 function sendCloudRoomCommand(action, payload = {}) {
@@ -3101,6 +3119,7 @@ function applyStateFromServer(state) {
     if (isKeyMappingPanelOpen()) renderKeyMappingPanel();
     if (isKeyLanPanelOpen()) renderKeyLanPanel();
     if (isCloudRoomPanelOpen()) renderCloudRoomPanel();
+    restoreCloudRoomPromptFromState();
     if (keyMappingSettings.lan.adminRequired && !keyMappingSettings.lan.isAdmin) {
         setTimeout(() => showKeyMappingAdminPrompt('DNF 以更高权限运行，按键映射需要管理员权限才能读取游戏内按键。'), 0);
     }
@@ -4612,6 +4631,7 @@ document.getElementById('cloud-room-overlay')?.addEventListener('click', (event)
 });
 document.querySelectorAll('.cloud-room-option').forEach(option => {
     option.addEventListener('click', () => {
+        if (isCloudRoomBusy()) return;
         const roomId = option.dataset.cloudRoomId || '';
         if (roomId === 'none') {
             if (cloudMatchState?.joined) {
@@ -4641,11 +4661,13 @@ document.getElementById('cloud-room-name-input')?.addEventListener('input', () =
     updateCloudRoomNameValidation();
 });
 document.getElementById('btn-cloud-room-back')?.addEventListener('click', () => {
+    if (isCloudRoomBusy()) return;
     cloudSelectedRoomId = '';
     setCloudRoomInlineError('');
     renderCloudRoomPanel();
 });
 document.getElementById('btn-cloud-room-join')?.addEventListener('click', () => {
+    if (isCloudRoomBusy()) return;
     const input = document.getElementById('cloud-room-name-input');
     const info = cloudRoomNameInfo(input?.value || '');
     if (!cloudSelectedRoomId || !info.valid) {
@@ -4662,6 +4684,7 @@ document.getElementById('btn-cloud-room-join')?.addEventListener('click', () => 
     });
 });
 document.getElementById('btn-cloud-room-rename')?.addEventListener('click', () => {
+    if (isCloudRoomBusy()) return;
     const input = document.getElementById('cloud-room-rename-input');
     const info = cloudRoomNameInfo(input?.value || '');
     if (!info.valid) {
@@ -4674,14 +4697,16 @@ document.getElementById('btn-cloud-room-rename')?.addEventListener('click', () =
     sendCloudRoomCommand('cmd_cloud_room_rename', { broadcasterName: info.normalized });
 });
 document.getElementById('btn-cloud-room-change')?.addEventListener('click', () => {
+    if (isCloudRoomBusy()) return;
     cloudRoomChoosing = true;
     cloudSelectedRoomId = '';
     setCloudRoomInlineError('');
     renderCloudRoomPanel();
 });
 document.getElementById('btn-cloud-room-leave')?.addEventListener('click', () => {
+    if (isCloudRoomBusy()) return;
     showConfirm('退出后会停止向当前云端房间上传，但不会清空本机比分、名单或战绩。确定退出吗？', (ok) => {
-        if (!ok) return;
+        if (!ok || isCloudRoomBusy()) return;
         cloudMatchState = normalizeCloudMatchState({ ...(cloudMatchState || {}),
             leaving: true, lastError: '' });
         renderCloudRoomPanel();

@@ -31,14 +31,15 @@ foreach ($field in @('ServerUrl', 'DeviceId', 'DeviceToken', 'RoomId',
 }
 Require-Text $source 'http://127.0.0.1:18880' 'Default CloudMatch server URL is missing.'
 
-foreach ($room in @('li-yong', 'wen-rou', '59')) {
-    Require-Text ($source + $index + $main) $room "Fixed cloud room '$room' is missing."
-}
-foreach ($roomName in @([string]([char]0x674E + [char]0x6C38 + [char]0x623F),
-    [string]([char]0x6E29 + [char]0x67D4 + [char]0x623F),
-    [string]('59' + [char]0x623F),
-    [string]([char]0x4E0D + [char]0x52A0 + [char]0x5165 + [char]0x623F + [char]0x95F4))) {
-    Require-Text ($source + $index + $main) $roomName "Cloud room option '$roomName' is missing."
+$roomOptions = @(
+    @{ Id = 'li-yong'; Name = [string]([char]0x674E + [char]0x6C38 + [char]0x623F) },
+    @{ Id = 'wen-rou'; Name = [string]([char]0x6E29 + [char]0x67D4 + [char]0x623F) },
+    @{ Id = '59'; Name = [string]('59' + [char]0x623F) },
+    @{ Id = 'none'; Name = [string]([char]0x4E0D + [char]0x52A0 + [char]0x5165 + [char]0x623F + [char]0x95F4) }
+)
+foreach ($room in $roomOptions) {
+    Require-Text $index ('data-cloud-room-id="' + $room.Id + '"') "Cloud room option '$($room.Id)' is missing from index.html."
+    Require-Text $index $room.Name "Cloud room label '$($room.Name)' is missing from index.html."
 }
 
 Require-Text $source 'DispatchMessages(' 'CloudMatch messages are not dispatched on the UI timer.'
@@ -70,6 +71,16 @@ Require-Text $style '.cloud-room-overlay' 'Cloud room panel styles are missing.'
 Require-Text $source 'm_cloudMatchSkipPromptThisRun' 'Skip-once state is missing.'
 Require-Text $source 'device_already_registered' 'Lost-token device identity retry is missing.'
 Require-Text $source 'UploadSnapshot' 'Cloud snapshot upload path is missing.'
+Require-Text $source 'if (m_cloudMatchJoining || m_cloudMatchRegistering ||' 'C++ does not reject concurrent cloud room mutations.'
+Require-Text $header 'm_cloudMatchExplicitOcrPayload' 'The explicit OCR snapshot payload marker is missing.'
+Require-Text $source 'MarkCloudMatchOcrStateChanged(BuildTeamSyncSnapshotPayloadUnlocked());' 'OCR commits do not capture their exact snapshot payload.'
+Require-Text $source 'm_cloudMatchExplicitOcrPayload == currentPayload' 'Cloud change source is not correlated with the exact OCR snapshot.'
+Require-Text $source 'source && *source ? source : "manual"' 'Missing cloud change sources must fall back to manual.'
+Require-Text $header 'm_cloudMatchPendingChangeSource = "manual"' 'Cloud snapshot source must initialize as manual.'
+Require-Text $main 'restoreCloudRoomPromptFromState' 'Web state does not restore the first-run room prompt after reload.'
+Require-Text $main 'cloudMatchState.shouldPrompt && !isCloudRoomPanelOpen()' 'Web prompt restoration is not guarded against duplicate display.'
+Require-Text $main 'backButton.disabled = busy;' 'The room chooser back button is not locked while joining.'
+Require-Text $main 'if (isCloudRoomBusy()) return;' 'Cloud room actions are not guarded while a request is busy.'
 
 foreach ($match in [regex]::Matches($source,
     '(?s)SetMessageCallback\s*\(\s*\[this\]\s*\([^)]*\)\s*\{(?<body>.*?)\}\s*\);')) {
@@ -77,6 +88,20 @@ foreach ($match in [regex]::Matches($source,
         throw 'CloudMatch callback must never apply a remote team snapshot directly.'
     }
 }
+
+$handlerStart = $source.IndexOf('void CDNFGameCaptureDlg::HandleCloudMatchMessage(')
+$handlerEnd = $source.IndexOf('std::string CDNFGameCaptureDlg::BuildCloudMatchSnapshotPayload(', $handlerStart)
+if ($handlerStart -lt 0 -or $handlerEnd -le $handlerStart) {
+    throw 'HandleCloudMatchMessage could not be inspected.'
+}
+$handlerBody = $source.Substring($handlerStart, $handlerEnd - $handlerStart)
+if ($handlerBody.Contains('ApplyTeamSyncSnapshot')) {
+    throw 'HandleCloudMatchMessage must never apply a remote team snapshot.'
+}
+Require-Text $handlerBody 'event["room"]' 'Join ACK handler does not inspect the accepted room payload.'
+Require-Text $handlerBody 'event["broadcasterName"]' 'Join ACK handler does not inspect the accepted broadcaster name.'
+Require-Text $handlerBody 'ackRoomId != m_cloudMatchPendingRoomId' 'Join ACK room correlation is missing.'
+Require-Text $handlerBody 'DnfCloudMatchNamesMatchForAck' 'Join ACK broadcaster-name correlation is missing.'
 
 $webStateStart = $source.IndexOf('DnfBuildSharedWebStateJson')
 if ($webStateStart -ge 0) {

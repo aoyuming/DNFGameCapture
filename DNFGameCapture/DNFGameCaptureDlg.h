@@ -288,6 +288,7 @@ private:
     void HandleCloudMatchMessage(std::string message);
     void PollCloudMatch();
     void OnMatchStateChanged(std::string matchPayload, const char* source);
+    void MarkCloudMatchOcrStateChanged(std::string matchPayload);
     std::string BuildCloudMatchSnapshotPayload(const std::string& matchPayload,
         std::uint64_t clientRevision, const std::string& changeSource) const;
     void SendCloudRoomPromptIfNeeded();
@@ -531,8 +532,9 @@ private:
     CString m_cloudMatchLastError;
     std::string m_cloudMatchLastObservedPayload;
     std::string m_cloudMatchPendingPayload;
-    std::string m_cloudMatchPendingChangeSource = "ocr";
-    std::string m_cloudMatchNextChangeSource = "ocr";
+    std::string m_cloudMatchPendingChangeSource = "manual";
+    std::mutex m_cloudMatchSourceMutex;
+    std::string m_cloudMatchExplicitOcrPayload;
     ULONGLONG m_cloudMatchUploadDueTick = 0;
     ULONGLONG m_cloudMatchLastObserveTick = 0;
     bool m_cloudMatchUploadPending = false;

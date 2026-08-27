@@ -210,53 +210,90 @@ static std::string DnfGenerateCloudMatchDeviceId()
     return std::string(CW2A(fallback, CP_UTF8));
 }
 
-static bool DnfIsCloudMatchNameValid(const CString& value, CString& normalized)
+static bool DnfIsCloudMatchInvisibleCodePoint(unsigned int codePoint)
 {
-    normalized = value;
-    normalized.Trim();
-    if (normalized.IsEmpty()) return false;
+    return codePoint <= 0x1Fu ||
+        (codePoint >= 0x7Fu && codePoint <= 0x9Fu) ||
+        codePoint == 0x00ADu || codePoint == 0x061Cu ||
+        (codePoint >= 0x0600u && codePoint <= 0x0605u) ||
+        codePoint == 0x06DDu || codePoint == 0x070Fu ||
+        (codePoint >= 0x0890u && codePoint <= 0x0891u) ||
+        codePoint == 0x08E2u || codePoint == 0x180Eu ||
+        (codePoint >= 0x200Bu && codePoint <= 0x200Fu) ||
+        codePoint == 0x2028u || codePoint == 0x2029u ||
+        (codePoint >= 0x202Au && codePoint <= 0x202Eu) ||
+        (codePoint >= 0x2060u && codePoint <= 0x206Fu) ||
+        codePoint == 0xFEFFu ||
+        (codePoint >= 0xFFF9u && codePoint <= 0xFFFBu) ||
+        codePoint == 0x110BDu || codePoint == 0x110CDu ||
+        (codePoint >= 0x13430u && codePoint <= 0x1343Fu) ||
+        (codePoint >= 0x1BCA0u && codePoint <= 0x1BCA3u) ||
+        (codePoint >= 0x1D173u && codePoint <= 0x1D17Au) ||
+        codePoint == 0xE0001u ||
+        (codePoint >= 0xE0020u && codePoint <= 0xE007Fu);
+}
 
-    int graphemes = 0;
-    bool previousWasBase = false;
-    for (int index = 0; index < normalized.GetLength();) {
-        const wchar_t first = normalized[index];
+static bool DnfIsCloudMatchNameSafeBoundary(const CString& value, CString& trimmed)
+{
+    trimmed = value;
+    trimmed.Trim();
+    if (trimmed.IsEmpty() || trimmed.GetLength() > 128) return false;
+
+    bool hasVisibleCodePoint = false;
+    for (int index = 0; index < trimmed.GetLength();) {
+        const wchar_t first = trimmed[index];
         unsigned int codePoint = static_cast<unsigned int>(first);
         int codeUnits = 1;
-        if (first >= 0xD800 && first <= 0xDBFF && index + 1 < normalized.GetLength()) {
-            const wchar_t second = normalized[index + 1];
-            if (second >= 0xDC00 && second <= 0xDFFF) {
-                codePoint = 0x10000u +
-                    ((static_cast<unsigned int>(first) - 0xD800u) << 10) +
-                    (static_cast<unsigned int>(second) - 0xDC00u);
-                codeUnits = 2;
-            }
+        if (first >= 0xD800 && first <= 0xDBFF) {
+            if (index + 1 >= trimmed.GetLength()) return false;
+            const wchar_t second = trimmed[index + 1];
+            if (second < 0xDC00 || second > 0xDFFF) return false;
+            codePoint = 0x10000u +
+                ((static_cast<unsigned int>(first) - 0xD800u) << 10) +
+                (static_cast<unsigned int>(second) - 0xDC00u);
+            codeUnits = 2;
+        }
+        else if (first >= 0xDC00 && first <= 0xDFFF) {
+            return false;
         }
 
-        const bool forbidden = codePoint <= 0x1Fu ||
-            (codePoint >= 0x7Fu && codePoint <= 0x9Fu) ||
-            codePoint == 0x2028u || codePoint == 0x2029u ||
-            (codePoint >= 0x200Bu && codePoint <= 0x200Fu) ||
-            (codePoint >= 0x202Au && codePoint <= 0x202Eu) ||
-            (codePoint >= 0x2060u && codePoint <= 0x206Fu) ||
-            codePoint == 0xFEFFu;
-        if (forbidden) return false;
-
-        WORD type3[2] = {};
-        const bool classified = ::GetStringTypeW(CT_CTYPE3,
-            normalized.GetString() + index, codeUnits, type3) != FALSE;
-        const bool extender = classified &&
-            (type3[0] & (C3_NONSPACING | C3_DIACRITIC | C3_VOWELMARK)) != 0;
-        const bool variationSelector =
-            (codePoint >= 0xFE00u && codePoint <= 0xFE0Fu) ||
-            (codePoint >= 0xE0100u && codePoint <= 0xE01EFu);
-        if (!previousWasBase || (!extender && !variationSelector)) {
-            ++graphemes;
-            previousWasBase = true;
-        }
-        if (graphemes > 32) return false;
+        if (DnfIsCloudMatchInvisibleCodePoint(codePoint)) return false;
+        if (!iswspace(first)) hasVisibleCodePoint = true;
         index += codeUnits;
     }
-    return graphemes >= 1 && graphemes <= 32;
+
+    const int utf8Length = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+        trimmed.GetString(), trimmed.GetLength(), nullptr, 0, nullptr, nullptr);
+    return hasVisibleCodePoint && utf8Length > 0 && utf8Length <= 512;
+}
+
+static bool DnfNormalizeCloudMatchNameForAck(const CString& value, CString& normalized)
+{
+    CString trimmed;
+    if (!DnfIsCloudMatchNameSafeBoundary(value, trimmed)) return false;
+
+    const int required = ::NormalizeString(NormalizationC, trimmed.GetString(),
+        trimmed.GetLength(), nullptr, 0);
+    if (required <= 0 || required > 128) return false;
+    wchar_t* output = normalized.GetBuffer(required);
+    const int written = ::NormalizeString(NormalizationC, trimmed.GetString(),
+        trimmed.GetLength(), output, required);
+    normalized.ReleaseBuffer(written > 0 ? written : 0);
+    if (written <= 0) return false;
+    CString safeNormalized;
+    if (!DnfIsCloudMatchNameSafeBoundary(normalized, safeNormalized)) return false;
+    normalized = safeNormalized;
+    return true;
+}
+
+static bool DnfCloudMatchNamesMatchForAck(const CString& acceptedName,
+    const CString& pendingName)
+{
+    CString acceptedNormalized;
+    CString pendingNormalized;
+    return DnfNormalizeCloudMatchNameForAck(acceptedName, acceptedNormalized) &&
+        DnfNormalizeCloudMatchNameForAck(pendingName, pendingNormalized) &&
+        acceptedNormalized == pendingNormalized;
 }
 
 static CString DnfCloudMatchErrorText(const std::string& code)
@@ -6839,6 +6876,12 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             }
 
             AddReviewEventUnlocked(review);
+            try {
+                MarkCloudMatchOcrStateChanged(BuildTeamSyncSnapshotPayloadUnlocked());
+            }
+            catch (...) {
+                // Cloud snapshot bookkeeping must never interrupt local OCR scoring.
+            }
             PostMessage(WM_UPDATE_ALL_UI, 0, 0);
         }
         else {
@@ -10821,8 +10864,12 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             if (m_cloudMatchRoomId.empty()) {
                 m_cloudMatchLastError = L"请先加入一个云端比赛房间。";
             }
-            else if (!DnfIsCloudMatchNameValid(broadcasterName, normalizedName)) {
-                m_cloudMatchLastError = L"主播名称需要填写 1 到 32 个可见字符。";
+            else if (m_cloudMatchJoining || m_cloudMatchRegistering ||
+                m_cloudMatchRenaming || m_cloudMatchLeaving) {
+                m_cloudMatchLastError = L"云端房间操作正在处理中，请稍候。";
+            }
+            else if (!DnfIsCloudMatchNameSafeBoundary(broadcasterName, normalizedName)) {
+                m_cloudMatchLastError = L"主播名称不能为空，且不能包含控制、不可见字符或过长编码。";
             }
             else {
                 m_cloudMatchPendingBroadcasterName = normalizedName;
@@ -10841,6 +10888,10 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             if (m_cloudMatchRoomId.empty()) {
                 m_cloudMatchSkipPromptThisRun = true;
                 m_cloudMatchLastError.Empty();
+            }
+            else if (m_cloudMatchJoining || m_cloudMatchRegistering ||
+                m_cloudMatchRenaming || m_cloudMatchLeaving) {
+                m_cloudMatchLastError = L"云端房间操作正在处理中，请稍候。";
             }
             else {
                 m_cloudMatchLeaving = m_cloudMatchClient.LeaveRoom();
@@ -10911,7 +10962,6 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             }
         }
         else if (action == "update_state") {
-            m_cloudMatchNextChangeSource = "manual";
             std::lock_guard<std::mutex> lock(m_dataMutex);
             auto& data = j["data"];
 
@@ -11019,7 +11069,6 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             PostMessage(WM_UPDATE_ALL_UI, 0, 0);
         }
         else if (action == "cmd_swap") {
-            m_cloudMatchNextChangeSource = "manual";
             m_chkFlip.SetCheck(m_chkFlip.GetCheck() == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED);
             OnBnClickedFlip();
         }
@@ -11044,7 +11093,6 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             BroadcastStateToWeb();
         }
         else if (action == "cmd_set_output_seat_label") {
-            m_cloudMatchNextChangeSource = "manual";
             m_bOutputSeatLabelToKillFile = j.value("enabled", false);
             ::WritePrivateProfileString(L"Settings", L"OutputSeatLabelToKillFile", m_bOutputSeatLabelToKillFile ? L"1" : L"0", m_iniPath);
             WriteScoreToFile();
@@ -11052,7 +11100,6 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             BroadcastStateToWeb();
         }
         else if (action == "cmd_set_red_pick_mode") {
-            m_cloudMatchNextChangeSource = "manual";
             std::string mode = j.value("mode", "first");
             m_bRedPickFirst = (mode != "second");
             ::WritePrivateProfileString(L"Settings", L"RedPickFirst", m_bRedPickFirst ? L"1" : L"0", m_iniPath);
@@ -11625,7 +11672,6 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             PostMessage(WM_UPDATE_ALL_UI, 0, 0);
         }
         else if (action == "cmd_reset_stats") {
-            m_cloudMatchNextChangeSource = "manual";
             const bool clearPlayers = j.value("clearPlayers", false);
             {
                 std::lock_guard<std::mutex> dataLock(m_dataMutex);
@@ -12095,7 +12141,7 @@ void CDNFGameCaptureDlg::LoadCloudMatchSettings()
         !m_cloudMatchDeviceToken.empty();
     if ((!m_cloudMatchRoomId.empty() && !DnfIsCloudMatchRoomId(m_cloudMatchRoomId)) ||
         (!m_cloudMatchRoomId.empty() &&
-            !DnfIsCloudMatchNameValid(m_cloudMatchBroadcasterName, normalizedName)) ||
+            !DnfIsCloudMatchNameSafeBoundary(m_cloudMatchBroadcasterName, normalizedName)) ||
         (!m_cloudMatchRoomId.empty() && !completeIdentity)) {
         m_cloudMatchRoomId.clear();
         m_cloudMatchBroadcasterName.Empty();
@@ -12175,14 +12221,21 @@ void CDNFGameCaptureDlg::BeginCloudDeviceRegistration()
 void CDNFGameCaptureDlg::BeginCloudRoomJoin(const std::string& roomId,
     const CString& broadcasterName)
 {
+    if (m_cloudMatchJoining || m_cloudMatchRegistering ||
+        m_cloudMatchRenaming || m_cloudMatchLeaving) {
+        m_cloudMatchLastError = L"云端房间操作正在处理中，请稍候。";
+        BroadcastStateToWeb();
+        return;
+    }
+
     CString normalizedName;
     if (!DnfIsCloudMatchRoomId(roomId)) {
         m_cloudMatchLastError = L"请选择有效的比赛房间。";
         BroadcastStateToWeb();
         return;
     }
-    if (!DnfIsCloudMatchNameValid(broadcasterName, normalizedName)) {
-        m_cloudMatchLastError = L"主播名称需要填写 1 到 32 个可见字符。";
+    if (!DnfIsCloudMatchNameSafeBoundary(broadcasterName, normalizedName)) {
+        m_cloudMatchLastError = L"主播名称不能为空，且不能包含控制、不可见字符或过长编码。";
         BroadcastStateToWeb();
         return;
     }
@@ -12285,18 +12338,30 @@ void CDNFGameCaptureDlg::HandleCloudMatchMessage(std::string message)
         }
     }
     else if (type == "room_join_result") {
-        m_cloudMatchJoining = false;
-        if (ok && DnfIsCloudMatchRoomId(m_cloudMatchPendingRoomId)) {
-            CString acceptedName = m_cloudMatchPendingBroadcasterName;
-            if (event.contains("broadcasterName") && event["broadcasterName"].is_string()) {
-                acceptedName = CA2W(event["broadcasterName"].get<std::string>().c_str(), CP_UTF8);
+        if (ok) {
+            if (!event.contains("room") || !event["room"].is_object() ||
+                !event["room"].contains("id") || !event["room"]["id"].is_string() ||
+                !event.contains("broadcasterName") ||
+                !event["broadcasterName"].is_string()) {
+                event.clear();
+                return;
             }
-            CString normalizedName;
-            if (!DnfIsCloudMatchNameValid(acceptedName, normalizedName)) {
-                normalizedName = m_cloudMatchPendingBroadcasterName;
+
+            const std::string ackRoomId = event["room"]["id"].get<std::string>();
+            CString acceptedName = CA2W(
+                event["broadcasterName"].get<std::string>().c_str(), CP_UTF8);
+            CString acceptedSafeName;
+            if (ackRoomId != m_cloudMatchPendingRoomId ||
+                !DnfCloudMatchNamesMatchForAck(acceptedName,
+                    m_cloudMatchPendingBroadcasterName) ||
+                !DnfIsCloudMatchNameSafeBoundary(acceptedName, acceptedSafeName)) {
+                event.clear();
+                return;
             }
+
+            m_cloudMatchJoining = false;
             m_cloudMatchRoomId = m_cloudMatchPendingRoomId;
-            m_cloudMatchBroadcasterName = normalizedName;
+            m_cloudMatchBroadcasterName = acceptedSafeName;
             m_cloudMatchLastError.Empty();
             m_cloudMatchPromptSent = true;
             SaveCloudMatchSettings();
@@ -12306,24 +12371,35 @@ void CDNFGameCaptureDlg::HandleCloudMatchMessage(std::string message)
             m_cloudMatchUploadDueTick = ::GetTickCount64();
         }
         else {
+            m_cloudMatchJoining = false;
             m_cloudMatchLastError = DnfCloudMatchErrorText(code);
         }
     }
     else if (type == "room_rename_result") {
-        m_cloudMatchRenaming = false;
         if (ok) {
-            CString acceptedName = m_cloudMatchPendingBroadcasterName;
-            if (event.contains("broadcasterName") && event["broadcasterName"].is_string()) {
-                acceptedName = CA2W(event["broadcasterName"].get<std::string>().c_str(), CP_UTF8);
+            if (!event.contains("broadcasterName") ||
+                !event["broadcasterName"].is_string()) {
+                event.clear();
+                return;
             }
-            CString normalizedName;
-            if (DnfIsCloudMatchNameValid(acceptedName, normalizedName)) {
-                m_cloudMatchBroadcasterName = normalizedName;
-                SaveCloudMatchSettings();
+
+            CString acceptedName = CA2W(
+                event["broadcasterName"].get<std::string>().c_str(), CP_UTF8);
+            CString acceptedSafeName;
+            if (!DnfCloudMatchNamesMatchForAck(acceptedName,
+                m_cloudMatchPendingBroadcasterName) ||
+                !DnfIsCloudMatchNameSafeBoundary(acceptedName, acceptedSafeName)) {
+                event.clear();
+                return;
             }
+
+            m_cloudMatchRenaming = false;
+            m_cloudMatchBroadcasterName = acceptedSafeName;
+            SaveCloudMatchSettings();
             m_cloudMatchLastError.Empty();
         }
         else {
+            m_cloudMatchRenaming = false;
             m_cloudMatchLastError = DnfCloudMatchErrorText(code);
         }
     }
@@ -12449,9 +12525,15 @@ void CDNFGameCaptureDlg::OnMatchStateChanged(std::string matchPayload,
     if (matchPayload.empty() || matchPayload == m_cloudMatchLastObservedPayload) return;
     m_cloudMatchLastObservedPayload = matchPayload;
     m_cloudMatchPendingPayload = std::move(matchPayload);
-    m_cloudMatchPendingChangeSource = source && *source ? source : "ocr";
+    m_cloudMatchPendingChangeSource = source && *source ? source : "manual";
     m_cloudMatchUploadPending = true;
     m_cloudMatchUploadDueTick = ::GetTickCount64() + 400;
+}
+
+void CDNFGameCaptureDlg::MarkCloudMatchOcrStateChanged(std::string matchPayload)
+{
+    std::lock_guard<std::mutex> lock(m_cloudMatchSourceMutex);
+    m_cloudMatchExplicitOcrPayload = std::move(matchPayload);
 }
 
 void CDNFGameCaptureDlg::PollCloudMatch()
@@ -12470,12 +12552,19 @@ void CDNFGameCaptureDlg::PollCloudMatch()
         }
         if (m_cloudMatchLastObservedPayload.empty()) {
             m_cloudMatchLastObservedPayload = std::move(currentPayload);
+            std::lock_guard<std::mutex> sourceLock(m_cloudMatchSourceMutex);
+            m_cloudMatchExplicitOcrPayload.clear();
         }
         else if (!currentPayload.empty() && currentPayload != m_cloudMatchLastObservedPayload) {
-            const std::string source = m_cloudMatchNextChangeSource;
-            OnMatchStateChanged(std::move(currentPayload), source.c_str());
+            bool fromOcr = false;
+            {
+                std::lock_guard<std::mutex> sourceLock(m_cloudMatchSourceMutex);
+                fromOcr = !m_cloudMatchExplicitOcrPayload.empty() &&
+                    m_cloudMatchExplicitOcrPayload == currentPayload;
+                m_cloudMatchExplicitOcrPayload.clear();
+            }
+            OnMatchStateChanged(std::move(currentPayload), fromOcr ? "ocr" : "manual");
         }
-        m_cloudMatchNextChangeSource = "ocr";
     }
 
     if (!m_cloudMatchUploadPending || now < m_cloudMatchUploadDueTick ||
