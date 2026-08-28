@@ -34,6 +34,7 @@ constexpr auto kTransientCommandTimeout = std::chrono::seconds(8);
 constexpr DWORD kNetworkTimeoutMs = 3000;
 constexpr DWORD kReceivePollTimeoutMs = 200;
 constexpr std::size_t kMaxRegistrationResponseBytes = 4096;
+constexpr std::size_t kMaxBroadcasterNameBytes = 512;
 constexpr std::array<int, 5> kReconnectDelaysSeconds{ 1, 2, 5, 10, 20 };
 constexpr std::uint64_t kSnapshotSizingAckId =
     (std::numeric_limits<std::uint64_t>::max)() - 1;
@@ -113,6 +114,50 @@ std::wstring Utf8ToWide(std::string_view text)
         return {};
     }
     return result;
+}
+
+bool EqualsAsciiCaseInsensitive(std::wstring_view value,
+    std::wstring_view expected) noexcept
+{
+    if (value.size() != expected.size()) return false;
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        wchar_t character = value[index];
+        if (character >= L'A' && character <= L'Z') {
+            character = static_cast<wchar_t>(character - L'A' + L'a');
+        }
+        if (character != expected[index]) return false;
+    }
+    return true;
+}
+
+bool IsIpv4LoopbackHost(std::wstring_view host) noexcept
+{
+    unsigned int octets[4]{};
+    std::size_t octetIndex = 0;
+    std::size_t index = 0;
+    while (index < host.size() && octetIndex < 4) {
+        if (host[index] < L'0' || host[index] > L'9') return false;
+        unsigned int value = 0;
+        std::size_t digits = 0;
+        while (index < host.size() && host[index] >= L'0' && host[index] <= L'9') {
+            value = value * 10 + static_cast<unsigned int>(host[index] - L'0');
+            if (value > 255) return false;
+            ++index;
+            ++digits;
+        }
+        if (digits == 0) return false;
+        octets[octetIndex++] = value;
+        if (index == host.size()) break;
+        if (host[index] != L'.') return false;
+        ++index;
+    }
+    return index == host.size() && octetIndex == 4 && octets[0] == 127;
+}
+
+bool IsExplicitLoopbackHttpHost(std::wstring_view host) noexcept
+{
+    return EqualsAsciiCaseInsensitive(host, L"localhost") ||
+        host == L"::1" || host == L"[::1]" || IsIpv4LoopbackHost(host);
 }
 
 std::string SanitizeServerText(const json& value, const char* key,
@@ -313,7 +358,7 @@ public:
     bool JoinRoom(const std::string& roomId, const std::string& broadcasterName)
     {
         if (roomId.empty() || roomId.size() > 64 || broadcasterName.empty() ||
-            broadcasterName.size() > 128) {
+            broadcasterName.size() > kMaxBroadcasterNameBytes) {
             return false;
         }
         {
@@ -326,16 +371,14 @@ public:
 
     bool Rename(const std::string& broadcasterName)
     {
-        if (broadcasterName.empty() || broadcasterName.size() > 128) return false;
+        if (broadcasterName.empty() ||
+            broadcasterName.size() > kMaxBroadcasterNameBytes) return false;
         {
             std::lock_guard<std::mutex> lock(mutex);
             const std::uint64_t generation = config.generation;
             if (!EnqueueCommandLocked(generation, CommandKind::renameRoom,
                 broadcasterName, {}, {})) {
                 return false;
-            }
-            if (desiredRoom && desiredRoom->generation == generation) {
-                desiredRoom->broadcasterName = broadcasterName;
             }
         }
         condition.notify_all();
@@ -792,6 +835,97 @@ public:
         return rememberedJoinSendCountForTesting;
     }
 
+    std::string RememberedBroadcasterNameForTesting() const
+    {
+        std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
+        std::lock_guard<std::mutex> lock(mutex);
+        return desiredRoom ? desiredRoom->broadcasterName : std::string();
+    }
+
+    std::uint64_t SendNextRenameForTesting()
+    {
+        std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto commandIterator = std::find_if(commands.begin(), commands.end(),
+            [](const Command& command) {
+                return command.kind == CommandKind::renameRoom;
+            });
+        if (commandIterator == commands.end() ||
+            commandIterator->generation != config.generation ||
+            nextAckId == (std::numeric_limits<std::uint64_t>::max)()) {
+            return 0;
+        }
+        Command command = std::move(*commandIterator);
+        commands.erase(commandIterator);
+        const std::uint64_t ackId = nextAckId++;
+        PendingAck pending;
+        pending.kind = CommandKind::renameRoom;
+        pending.resultType = "room_rename_result";
+        pending.deadline = Clock::now() + kAckTimeout;
+        pending.protectedResultReservation = command.protectedResultReservation;
+        pending.commandSequence = command.sequence;
+        command.protectedResultReservation = false;
+        pendingAcks.emplace(ackId, std::move(pending));
+        return ackId;
+    }
+
+    bool CompleteRenameAckForTesting(std::uint64_t ackId, bool ok,
+        const std::string& confirmedBroadcasterName, const std::string& code)
+    {
+        std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
+        Config activeConfig;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            const auto found = pendingAcks.find(ackId);
+            if (found == pendingAcks.end() ||
+                found->second.kind != CommandKind::renameRoom) return false;
+            activeConfig = config;
+        }
+        cloud_match::SocketIoAck ack;
+        ack.id = ackId;
+        ack.payload = ok ? json{
+            { "ok", true }, { "broadcasterName", confirmedBroadcasterName }
+        } : json{
+            { "ok", false }, { "code", code.empty() ? "server_error" : code }
+        };
+        HandleAck(activeConfig, ack);
+        return true;
+    }
+
+    bool ExpireRenameAckForTesting(std::uint64_t ackId)
+    {
+        std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
+        Config activeConfig;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            const auto found = pendingAcks.find(ackId);
+            if (found == pendingAcks.end() ||
+                found->second.kind != CommandKind::renameRoom) return false;
+            found->second.deadline = (Clock::time_point::min)();
+            activeConfig = config;
+        }
+        ExpireAcks(activeConfig);
+        return true;
+    }
+
+    bool FailPendingRenameAcksForTesting(const std::string& code)
+    {
+        std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
+        Config activeConfig;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            const bool found = std::any_of(pendingAcks.begin(), pendingAcks.end(),
+                [](const auto& entry) {
+                    return entry.second.kind == CommandKind::renameRoom;
+                });
+            if (!found) return false;
+            activeConfig = config;
+        }
+        FailPendingAcks(activeConfig,
+            code.empty() ? "connection_lost" : code.c_str());
+        return true;
+    }
+
     void SetConnectedForTesting(bool connected)
     {
         std::lock_guard<std::mutex> lock(mutex);
@@ -1033,6 +1167,7 @@ private:
         std::string roomId;
         std::string broadcasterName;
         std::uint64_t generation = 0;
+        std::uint64_t confirmedRenameSequence = 0;
 
         ~DesiredRoom()
         {
@@ -1100,6 +1235,7 @@ private:
         Clock::time_point deadline;
         bool protectedResultReservation = false;
         std::string targetDeviceId;
+        std::uint64_t commandSequence = 0;
 
         void Clear() noexcept
         {
@@ -1108,6 +1244,7 @@ private:
             SecureClear(targetDeviceId);
             clientRevision = 0;
             protectedResultReservation = false;
+            commandSequence = 0;
         }
     };
 
@@ -1409,7 +1546,7 @@ private:
         components.dwUrlPathLength = static_cast<DWORD>(-1);
         components.dwExtraInfoLength = static_cast<DWORD>(-1);
         if (!WinHttpCrackUrl(mutableUrl.data(), static_cast<DWORD>(mutableUrl.size()),
-            ICU_DECODE, &components)) {
+            0, &components)) {
             return false;
         }
         if ((components.nScheme != INTERNET_SCHEME_HTTP &&
@@ -1419,10 +1556,10 @@ private:
             return false;
         }
 
-        result.serverValid = true;
         result.secure = components.nScheme == INTERNET_SCHEME_HTTPS;
         result.port = components.nPort;
         result.host.assign(components.lpszHostName, components.dwHostNameLength);
+        if (!result.secure && !IsExplicitLoopbackHttpHost(result.host)) return false;
         if (components.dwUrlPathLength > 0) {
             result.basePath.assign(components.lpszUrlPath, components.dwUrlPathLength);
         }
@@ -1430,7 +1567,8 @@ private:
         while (!result.basePath.empty() && result.basePath.back() == L'/') {
             result.basePath.pop_back();
         }
-        return !result.host.empty();
+        result.serverValid = !result.host.empty();
+        return result.serverValid;
     }
 
     bool ApplyConfig(Config&& parsed, bool validUrl)
@@ -2163,14 +2301,14 @@ private:
         }
         return SendEventWithAck(activeConfig, connection, eventName, payload, command.kind,
             resultType, command.requestId, command.argument, command.clientRevision,
-            command.protectedResultReservation);
+            command.sequence, command.protectedResultReservation);
     }
 
     bool SendEventWithAck(const Config& activeConfig, WebSocketConnection& connection,
         const std::string& eventName, const json& payload, CommandKind kind,
         const std::string& resultType, const std::string& requestId,
         const std::string& targetDeviceId, std::uint64_t clientRevision,
-        bool& protectedResultReservation)
+        std::uint64_t commandSequence, bool& protectedResultReservation)
     {
         std::uint64_t ackId = 0;
         {
@@ -2193,11 +2331,13 @@ private:
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (config.generation != activeConfig.generation) return false;
-            pendingAcks.emplace(ackId, PendingAck{
+            PendingAck pending{
                 kind, resultType, requestId, clientRevision,
                 Clock::now() + kAckTimeout, protectedResultReservation,
                 kind == CommandKind::requestSnapshot ? targetDeviceId : std::string()
-            });
+            };
+            pending.commandSequence = commandSequence;
+            pendingAcks.emplace(ackId, std::move(pending));
             if (kind == CommandKind::joinRoom && desiredRoom &&
                 desiredRoom->generation == activeConfig.generation &&
                 desiredJoinPendingGeneration == activeConfig.generation) {
@@ -2474,7 +2614,14 @@ private:
         const bool ok = validOk && okValue->get<bool>();
         if (ok) {
             normalized = ack.payload;
-            UpdateStatusFromAck(activeConfig.generation, pending.kind, ack.payload);
+            bool updateStatus = true;
+            if (pending.kind == CommandKind::renameRoom) {
+                updateStatus = CommitRememberedRenameFromAck(activeConfig.generation,
+                    pending.commandSequence, ack.payload);
+            }
+            if (updateStatus) {
+                UpdateStatusFromAck(activeConfig.generation, pending.kind, ack.payload);
+            }
         }
         else {
             normalized = {
@@ -2504,6 +2651,34 @@ private:
         }
         NotifyJson(activeConfig.generation, normalized, {}, false,
             &pending.protectedResultReservation);
+    }
+
+    bool CommitRememberedRenameFromAck(std::uint64_t generation,
+        std::uint64_t commandSequence, const json& payload)
+    {
+        if (commandSequence == 0) return false;
+        std::string confirmedName;
+        try {
+            const auto found = payload.find("broadcasterName");
+            if (found == payload.end() || !found->is_string()) return false;
+            confirmedName = found->get<std::string>();
+        }
+        catch (...) {
+            return false;
+        }
+        if (confirmedName.empty() ||
+            confirmedName.size() > kMaxBroadcasterNameBytes) return false;
+
+        std::lock_guard<std::mutex> lock(mutex);
+        if (config.generation != generation || !desiredRoom ||
+            desiredRoom->generation != generation ||
+            commandSequence <= desiredRoom->confirmedRenameSequence) {
+            return false;
+        }
+        SecureClear(desiredRoom->broadcasterName);
+        desiredRoom->broadcasterName.swap(confirmedName);
+        desiredRoom->confirmedRenameSequence = commandSequence;
+        return true;
     }
 
     void UpdateStatusFromAck(std::uint64_t generation, CommandKind kind, const json& payload)
@@ -3114,6 +3289,33 @@ std::string CloudMatchClient::RetryRememberedJoinForTesting()
 std::size_t CloudMatchClient::RememberedJoinSendCountForTesting() const
 {
     return impl_->RememberedJoinSendCountForTesting();
+}
+
+std::string CloudMatchClient::RememberedBroadcasterNameForTesting() const
+{
+    return impl_->RememberedBroadcasterNameForTesting();
+}
+
+std::uint64_t CloudMatchClient::SendNextRenameForTesting()
+{
+    return impl_->SendNextRenameForTesting();
+}
+
+bool CloudMatchClient::CompleteRenameAckForTesting(std::uint64_t ackId, bool ok,
+    const std::string& confirmedBroadcasterName, const std::string& code)
+{
+    return impl_->CompleteRenameAckForTesting(ackId, ok,
+        confirmedBroadcasterName, code);
+}
+
+bool CloudMatchClient::ExpireRenameAckForTesting(std::uint64_t ackId)
+{
+    return impl_->ExpireRenameAckForTesting(ackId);
+}
+
+bool CloudMatchClient::FailPendingRenameAcksForTesting(const std::string& code)
+{
+    return impl_->FailPendingRenameAcksForTesting(code);
 }
 
 void CloudMatchClient::SetConnectedForTesting(bool connected)

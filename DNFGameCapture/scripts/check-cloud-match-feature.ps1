@@ -131,9 +131,13 @@ foreach ($command in @(
 Require-Text $index 'id="btn-cloud-match"' 'More menu cloud sync entry is missing.'
 Require-Text $index 'id="cloud-room-overlay"' 'Cloud room panel is missing.'
 Require-Text $index 'id="cloud-room-first-run"' 'First-run cloud room chooser is missing.'
+Require-Text $index 'id="cloud-room-rename-input" type="text" maxlength="512"' 'Cloud room rename input must allow the server 512-byte boundary.'
+Require-Text $index 'id="cloud-room-name-input" type="text" maxlength="512"' 'Cloud room join input must allow the server 512-byte boundary.'
 Require-Text $main 'cloud_room_prompt' 'Web does not handle the first-run room prompt.'
 Require-Text $main 'Intl.Segmenter' 'Broadcaster name grapheme validation is missing.'
 Require-Text $style '.cloud-room-overlay' 'Cloud room panel styles are missing.'
+Require-Text $source 'trimmed.GetLength() > 512' 'C++ broadcaster input must not reject the server 512-byte boundary by an older UTF-16 limit.'
+Require-Text $source 'required > 512' 'C++ broadcaster normalization must align with the server 512-byte boundary.'
 
 Require-Text $source 'm_cloudMatchSkipPromptThisRun' 'Skip-once state is missing.'
 Require-Text $source 'device_already_registered' 'Lost-token device identity retry is missing.'

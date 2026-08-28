@@ -79,6 +79,12 @@ public:
         const std::string& broadcasterName);
     std::string RetryRememberedJoinForTesting();
     std::size_t RememberedJoinSendCountForTesting() const;
+    std::string RememberedBroadcasterNameForTesting() const;
+    std::uint64_t SendNextRenameForTesting();
+    bool CompleteRenameAckForTesting(std::uint64_t ackId, bool ok,
+        const std::string& confirmedBroadcasterName, const std::string& code);
+    bool ExpireRenameAckForTesting(std::uint64_t ackId);
+    bool FailPendingRenameAcksForTesting(const std::string& code);
     void SetConnectedForTesting(bool connected);
     std::size_t PendingTransientRequestCountForTesting() const;
     bool ExpireNextTransientRequestForTesting();

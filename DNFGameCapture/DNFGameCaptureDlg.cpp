@@ -251,7 +251,7 @@ static bool DnfIsCloudMatchNameSafeBoundary(const CString& value, CString& trimm
 {
     trimmed = value;
     trimmed.Trim();
-    if (trimmed.IsEmpty() || trimmed.GetLength() > 128) return false;
+    if (trimmed.IsEmpty() || trimmed.GetLength() > 512) return false;
 
     bool hasVisibleCodePoint = false;
     for (int index = 0; index < trimmed.GetLength();) {
@@ -288,7 +288,7 @@ static bool DnfNormalizeCloudMatchNameForAck(const CString& value, CString& norm
 
     const int required = ::NormalizeString(NormalizationC, trimmed.GetString(),
         trimmed.GetLength(), nullptr, 0);
-    if (required <= 0 || required > 128) return false;
+    if (required <= 0 || required > 512) return false;
     wchar_t* output = normalized.GetBuffer(required);
     const int written = ::NormalizeString(NormalizationC, trimmed.GetString(),
         trimmed.GetLength(), output, required);

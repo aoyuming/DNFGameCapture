@@ -246,6 +246,63 @@ void TestConfigureDiscardsOldGenerationMessages()
     client.Stop();
 }
 
+void TestServerUrlTransportPolicy()
+{
+    struct UrlCase
+    {
+        const wchar_t* url;
+        bool allowed;
+    };
+    const UrlCase cases[] = {
+        { L"http://localhost:18880", true },
+        { L"http://LOCALHOST:18880/base", true },
+        { L"http://127.0.0.1:18880", true },
+        { L"http://127.42.3.4:18880", true },
+        { L"http://[::1]:18880", true },
+        { L"http://8.8.8.8:18880", false },
+        { L"http://10.0.0.5:18880", false },
+        { L"http://192.168.1.5:18880", false },
+        { L"http://example.com:18880", false },
+        { L"http://127.example.com:18880", false },
+        { L"https://8.8.8.8:18880", true },
+        { L"https://10.0.0.5:18880", true },
+        { L"https://example.com:18880/base", true },
+        { L"http://user:password@localhost:18880", false },
+        { L"https://user:password@example.com:18880", false },
+        { L"http://localhost:18880/base?query=1", false },
+        { L"https://example.com:18880/base#fragment", false },
+    };
+
+    for (const UrlCase& test : cases) {
+        CloudMatchClient client;
+        const bool configured = client.Configure(test.url,
+            "url-policy-device", "url-policy-token");
+        if (configured != test.allowed) {
+            std::wcerr << L"URL policy mismatch: " << test.url << L" expected="
+                << test.allowed << L" actual=" << configured << L'\n';
+        }
+        Require(configured == test.allowed,
+            "server URL transport policy must match the loopback HTTP allowlist");
+    }
+}
+
+void TestBroadcasterNameByteBoundaries()
+{
+    CloudMatchClient client;
+    client.ConfigureForTesting();
+    const std::string exactly512Bytes(512, 'a');
+    const std::string over512Bytes(513, 'a');
+
+    Require(client.JoinRoom("59", exactly512Bytes),
+        "a 512-byte broadcaster name should reach server-side validation");
+    Require(client.Rename(exactly512Bytes),
+        "a 512-byte rename should reach server-side validation");
+    Require(!client.JoinRoom("59", over512Bytes),
+        "a broadcaster name over 512 bytes must be rejected locally");
+    Require(!client.Rename(over512Bytes),
+        "a rename over 512 bytes must be rejected locally");
+}
+
 void TestProtectedResultCapacityBackpressuresAndRecovers()
 {
     CloudMatchClient client;
@@ -322,6 +379,83 @@ void TestDesiredRoomCannotCrossConfigurationGeneration()
         "the active generation should still accept joins");
     Require(client.DesiredRoomGenerationForTesting() == newGeneration,
         "the remembered room should belong to the active generation");
+}
+
+void TestRenameOnlyCommitsRememberedIdentityAfterCurrentSuccessfulAck()
+{
+    CloudMatchClient client;
+    client.ConfigureForTesting();
+    client.SetDesiredJoinForReplayForTesting("59", "Confirmed Old Name");
+
+    Require(client.Rename("Rejected Name"), "failed-ACK rename should queue");
+    Require(client.RememberedBroadcasterNameForTesting() == "Confirmed Old Name",
+        "queueing rename must not change remembered join identity");
+    const std::uint64_t failedAck = client.SendNextRenameForTesting();
+    Require(failedAck != 0 && client.CompleteRenameAckForTesting(failedAck, false,
+        {}, "rate_limited"), "failed rename ACK should use the production handler");
+    Require(client.RememberedBroadcasterNameForTesting() == "Confirmed Old Name",
+        "failed rename ACK must preserve remembered join identity");
+
+    Require(client.Rename("Timed Out Name"), "timeout rename should queue");
+    const std::uint64_t timedOutAck = client.SendNextRenameForTesting();
+    Require(timedOutAck != 0 && client.ExpireRenameAckForTesting(timedOutAck),
+        "rename timeout should use the production expiry path");
+    Require(client.RememberedBroadcasterNameForTesting() == "Confirmed Old Name",
+        "rename timeout must preserve remembered join identity");
+
+    Require(client.Rename("Disconnected Name"), "disconnect rename should queue");
+    Require(client.SendNextRenameForTesting() != 0,
+        "disconnect rename should enter pending ACK state");
+    Require(client.FailPendingRenameAcksForTesting("connection_lost"),
+        "connection loss should use the production pending-ACK failure path");
+    Require(client.RememberedBroadcasterNameForTesting() == "Confirmed Old Name",
+        "connection loss must preserve remembered join identity");
+
+    Require(client.Rename("  Requested Name  "), "successful rename should queue");
+    const std::uint64_t successfulAck = client.SendNextRenameForTesting();
+    Require(successfulAck != 0 && client.CompleteRenameAckForTesting(successfulAck,
+        true, "Requested Name", {}),
+        "successful rename ACK should use the server-confirmed normalized name");
+    Require(client.RememberedBroadcasterNameForTesting() == "Requested Name",
+        "successful current-generation ACK must commit the confirmed name");
+}
+
+void TestRenameAckGenerationAndOrderingCannotRollbackRememberedIdentity()
+{
+    CloudMatchClient client;
+    client.ConfigureForTesting();
+    client.SetDesiredJoinForReplayForTesting("59", "Original Name");
+
+    Require(client.Rename("First Name") && client.Rename("Second Name"),
+        "rapid consecutive renames should queue on one connection");
+    Require(client.RememberedBroadcasterNameForTesting() == "Original Name",
+        "queued rapid renames must not mutate confirmed identity");
+    const std::uint64_t firstAck = client.SendNextRenameForTesting();
+    const std::uint64_t secondAck = client.SendNextRenameForTesting();
+    Require(firstAck != 0 && secondAck != 0,
+        "both rapid renames should enter pending ACK state");
+    Require(client.CompleteRenameAckForTesting(secondAck, true, "Second Name", {}),
+        "newer rename ACK should complete first");
+    Require(client.RememberedBroadcasterNameForTesting() == "Second Name",
+        "newer successful ACK should commit its confirmed name");
+    Require(client.CompleteRenameAckForTesting(firstAck, true, "First Name", {}),
+        "older rename ACK should still be consumed");
+    Require(client.RememberedBroadcasterNameForTesting() == "Second Name",
+        "late older ACK must not roll back the newer confirmed name");
+    Require(client.GetStatusSnapshot().broadcasterName == "Second Name",
+        "late older ACK must not roll back the confirmed status identity");
+
+    Require(client.Rename("Stale Generation Name"),
+        "stale-generation rename should queue before reconfigure");
+    const std::uint64_t staleAck = client.SendNextRenameForTesting();
+    Require(staleAck != 0, "stale-generation rename should enter pending ACK state");
+    client.ConfigureForTesting();
+    client.SetDesiredJoinForReplayForTesting("59", "Current Generation Name");
+    Require(!client.CompleteRenameAckForTesting(staleAck, true,
+        "Stale Generation Name", {}),
+        "reconfigure must discard old-generation pending ACKs");
+    Require(client.RememberedBroadcasterNameForTesting() == "Current Generation Name",
+        "old-generation ACK must not change current remembered identity");
 }
 
 void TestSnapshotRequestsPreserveCorrelationAcrossFailuresAndGeneration()
@@ -597,8 +731,12 @@ int main()
     TestMalformedAckOkTypeBecomesInvalidResponse();
     TestDispatchRunsCallbackOnCallerAndAllowsStop();
     TestConfigureDiscardsOldGenerationMessages();
+    TestServerUrlTransportPolicy();
+    TestBroadcasterNameByteBoundaries();
     TestProtectedResultCapacityBackpressuresAndRecovers();
     TestDesiredRoomCannotCrossConfigurationGeneration();
+    TestRenameOnlyCommitsRememberedIdentityAfterCurrentSuccessfulAck();
+    TestRenameAckGenerationAndOrderingCannotRollbackRememberedIdentity();
     TestSnapshotRequestsPreserveCorrelationAcrossFailuresAndGeneration();
     TestDispatchLifecycleGateWaitsAndRemainsReentrant();
     TestRememberedJoinRetriesAfterDispatchCapacityRelease();
