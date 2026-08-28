@@ -756,6 +756,8 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     width: 100%;
     min-width: 0;
     height: 30px;
+    flex: 0 0 30px;
+    margin-bottom: 8px;
     padding: 4px 10px;
     overflow: hidden;
     border: 1px solid var(--cloud-status-border);
@@ -777,13 +779,13 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 }
 
 .cloud-room-status[data-state="online"] { color: var(--cloud-status-online); }
-.cloud-room-status[data-state="working"] { color: var(--cloud-status-working); }
+.cloud-room-status[data-state="reconnecting"] { color: var(--cloud-status-reconnecting); }
 .cloud-room-status[data-state="offline"] { color: var(--cloud-status-offline); }
 .cloud-room-status[data-state="not-joined"] { color: var(--cloud-status-idle); }
 
 html[data-theme="dark-esports"] .cloud-room-status {
     --cloud-status-online: #63dfa4;
-    --cloud-status-working: #ffd16d;
+    --cloud-status-reconnecting: #ffd16d;
     --cloud-status-offline: #ff879f;
     --cloud-status-idle: #9dafb8;
     --cloud-status-bg: #111b24;
@@ -792,7 +794,7 @@ html[data-theme="dark-esports"] .cloud-room-status {
 
 html[data-theme="frost-broadcast"] .cloud-room-status {
     --cloud-status-online: #167347;
-    --cloud-status-working: #795814;
+    --cloud-status-reconnecting: #795814;
     --cloud-status-offline: #a3263f;
     --cloud-status-idle: #536d79;
     --cloud-status-bg: #edf4f7;
@@ -801,7 +803,7 @@ html[data-theme="frost-broadcast"] .cloud-room-status {
 
 html[data-theme="black-gold"] .cloud-room-status {
     --cloud-status-online: #9fc18b;
-    --cloud-status-working: #efd48f;
+    --cloud-status-reconnecting: #efd48f;
     --cloud-status-offline: #ff8a91;
     --cloud-status-idle: #b9ac8d;
     --cloud-status-bg: #15140f;

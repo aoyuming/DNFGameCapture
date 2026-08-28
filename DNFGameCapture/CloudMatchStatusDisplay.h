@@ -7,7 +7,7 @@
 enum class CloudMatchDisplayState
 {
     online,
-    working,
+    reconnecting,
     offline,
     notJoined
 };

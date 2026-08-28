@@ -63,7 +63,6 @@ const int ID_BTN_DEATH_X_CALIBRATE = 1036;
 const int ID_BTN_DEATH_X_SAVE = 1037;
 const int ID_BTN_DEATH_X_CANCEL = 1038;
 const int ID_BTN_DEATH_X_DEFAULT = 1039;
-const int ID_STATIC_CLOUD_MATCH_STATUS = 1040;
 const CString PLACEHOLDER_TEXT = L"输入：主号(小号1)(小号2)...";
 
 constexpr int DEATH_X_ALGO_COLOR = 0;      // 当前颜色采样算法
@@ -4799,11 +4798,26 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_status.Create(L"就绪", WS_CHILD | WS_VISIBLE | SS_CENTER, CRect(155, row1_Y + 4, 205, row1_Y + 25), this, 1003); m_status.SetFont(&m_font);
     const int cloudStatusRight = (std::max)(210,
         (std::min)(530, static_cast<int>(r.right) - 140));
-    m_cloudMatchStatus.Create(L"未加入云端房间",
-        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS,
-        CRect(10, row1_Y + 32, cloudStatusRight, row1_Y + 54), this,
-        ID_STATIC_CLOUD_MATCH_STATUS);
-    m_cloudMatchStatus.SetFont(&m_font);
+    HWND cloudStatusResourceHost = ::CreateDialogParamW(AfxGetInstanceHandle(),
+        MAKEINTRESOURCEW(IDD_DNFGAMECAPTURE_DIALOG), GetSafeHwnd(),
+        [](HWND, UINT, WPARAM, LPARAM) -> INT_PTR { return FALSE; }, 0);
+    if (cloudStatusResourceHost) {
+        HWND cloudStatusHwnd = ::GetDlgItem(cloudStatusResourceHost,
+            IDC_STATIC_CLOUD_ROOM_STATUS);
+        if (cloudStatusHwnd &&
+            ::SetParent(cloudStatusHwnd, GetSafeHwnd()) == cloudStatusResourceHost) {
+            if (m_cloudMatchStatus.SubclassWindow(cloudStatusHwnd)) {
+                m_cloudMatchStatus.MoveWindow(CRect(10, row1_Y + 32,
+                    cloudStatusRight, row1_Y + 54));
+                m_cloudMatchStatus.SetFont(&m_font);
+                m_cloudMatchStatus.ShowWindow(SW_SHOW);
+            }
+            else {
+                ::DestroyWindow(cloudStatusHwnd);
+            }
+        }
+        ::DestroyWindow(cloudStatusResourceHost);
+    }
     RefreshCloudMatchStatusDisplay(m_cloudMatchClient.GetStatusSnapshot());
 
     HWND hDeathAlgoLabel = ::CreateWindowW(
@@ -15682,7 +15696,7 @@ HBRUSH CDNFGameCaptureDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor) {
         case CloudMatchDisplayState::online:
             pDC->SetTextColor(RGB(35, 143, 85));
             break;
-        case CloudMatchDisplayState::working:
+        case CloudMatchDisplayState::reconnecting:
             pDC->SetTextColor(RGB(188, 135, 0));
             break;
         case CloudMatchDisplayState::offline:

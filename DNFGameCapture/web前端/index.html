@@ -4,13 +4,16 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DNF 赛事计分板 - WebView2 版</title>
-    <meta name="dnf-web-layout-version" content="20260828-cloud-match-status-1">
-    <link rel="stylesheet" href="style.css?v=20260828-cloud-match-status-1">
+    <meta name="dnf-web-layout-version" content="20260828-cloud-match-status-2">
+    <link rel="stylesheet" href="style.css?v=20260828-cloud-match-status-2">
 </head>
 <body>
 
     <div class="app-shell">
         <div class="left-stack">
+            <button type="button" class="cloud-room-status" id="cloud-room-status"
+                data-state="not-joined" title="未加入云端房间">未加入云端房间</button>
+
             <div class="main-container" id="main-container">
                 <div class="teams-wrap" id="teams-wrap">
                     <div class="team-panel team-red" id="team-red">
@@ -99,9 +102,6 @@
                         </div>
                     </div>
                 </div>
-
-                <button type="button" class="cloud-room-status" id="cloud-room-status"
-                    data-state="not-joined" title="打开云端比赛同步">未加入云端房间</button>
 
                 <div class="dir-bar" id="dir-display" title="点击可更改 TXT 输出目录">📁 战绩输出目录：获取中...</div>
             </div>
@@ -543,6 +543,6 @@
         </div>
     </div>
 
-    <script src="main.js?v=20260828-cloud-match-status-1" defer></script>
+    <script src="main.js?v=20260828-cloud-match-status-2" defer></script>
 </body>
 </html>

@@ -6,24 +6,24 @@ CloudMatchDisplayStatus BuildCloudMatchDisplayStatus(
 {
     const bool hasRoom = context.hasJoinedRoom || context.hasPendingRoom;
     if (!hasRoom) {
-        return { CloudMatchDisplayState::notJoined, L"未加入云端房间" };
+        return { CloudMatchDisplayState::notJoined, L"\u672A\u52A0\u5165\u4E91\u7AEF\u623F\u95F4" };
     }
 
-    const bool working = context.hasPendingRoom || context.joining ||
+    const bool reconnecting = context.hasPendingRoom || context.joining ||
         context.registering || context.restoring || clientStatus.connecting ||
         clientStatus.reconnecting;
-    if (working) {
-        return { CloudMatchDisplayState::working,
-            context.roomName + L" · 重连中" };
+    if (reconnecting) {
+        return { CloudMatchDisplayState::reconnecting,
+            context.roomName + L" \u00B7 \u91CD\u8FDE\u4E2D" };
     }
 
     if (clientStatus.connected && context.roomConfirmed) {
         return { CloudMatchDisplayState::online,
-            context.roomName + L" · " + context.broadcasterName };
+            context.roomName + L" \u00B7 " + context.broadcasterName };
     }
 
     return { CloudMatchDisplayState::offline,
-        context.roomName + L" · 离线" };
+        context.roomName + L" \u00B7 \u79BB\u7EBF" };
 }
 
 const char* CloudMatchDisplayStateName(CloudMatchDisplayState state)
@@ -31,8 +31,8 @@ const char* CloudMatchDisplayStateName(CloudMatchDisplayState state)
     switch (state) {
     case CloudMatchDisplayState::online:
         return "online";
-    case CloudMatchDisplayState::working:
-        return "working";
+    case CloudMatchDisplayState::reconnecting:
+        return "reconnecting";
     case CloudMatchDisplayState::offline:
         return "offline";
     case CloudMatchDisplayState::notJoined:

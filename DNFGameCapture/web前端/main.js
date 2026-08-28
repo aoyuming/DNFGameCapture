@@ -2407,7 +2407,7 @@ const CLOUD_ROOM_NAMES = Object.freeze({
     'wen-rou': '温柔房',
     '59': '59房'
 });
-const CLOUD_MATCH_DISPLAY_STATES = new Set(['online', 'working', 'offline', 'not-joined']);
+const CLOUD_MATCH_DISPLAY_STATES = new Set(['online', 'reconnecting', 'offline', 'not-joined']);
 const cloudRoomNameSegmenter = typeof Intl.Segmenter === 'function'
     ? new Intl.Segmenter('zh-CN', { granularity: 'grapheme' }) : null;
 
@@ -2473,7 +2473,7 @@ function renderCloudRoomStatus() {
     const state = cloudMatchState || normalizeCloudMatchState();
     status.dataset.state = state.displayState;
     status.textContent = state.displayText;
-    status.title = `${state.displayText}，点击打开云端比赛同步`;
+    status.title = state.displayText;
 }
 
 function cloudRoomNameInfo(value) {

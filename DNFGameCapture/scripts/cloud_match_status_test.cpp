@@ -44,13 +44,13 @@ int main()
     client.connected = false;
     client.connecting = true;
     RequireStatus(BuildCloudMatchDisplayStatus(client, context),
-        CloudMatchDisplayState::working, L"李永房 · 重连中",
+        CloudMatchDisplayState::reconnecting, L"李永房 · 重连中",
         "an initial connection must use the shared reconnecting label");
 
     client.connecting = false;
     client.reconnecting = true;
     RequireStatus(BuildCloudMatchDisplayStatus(client, context),
-        CloudMatchDisplayState::working, L"李永房 · 重连中",
+        CloudMatchDisplayState::reconnecting, L"李永房 · 重连中",
         "a reconnect must use the shared reconnecting label");
 
     client.reconnecting = false;
@@ -64,15 +64,15 @@ int main()
     context.roomName = L"温柔房";
     context.broadcasterName = L"主播乙";
     RequireStatus(BuildCloudMatchDisplayStatus(client, context),
-        CloudMatchDisplayState::working, L"温柔房 · 重连中",
+        CloudMatchDisplayState::reconnecting, L"温柔房 · 重连中",
         "an in-progress room join must expose the target room");
 
     Require(std::string(CloudMatchDisplayStateName(
         CloudMatchDisplayState::online)) == "online",
         "online state name must be stable for Web JSON");
     Require(std::string(CloudMatchDisplayStateName(
-        CloudMatchDisplayState::working)) == "working",
-        "working state name must be stable for Web JSON");
+        CloudMatchDisplayState::reconnecting)) == "reconnecting",
+        "reconnecting state name must be stable for Web JSON");
     Require(std::string(CloudMatchDisplayStateName(
         CloudMatchDisplayState::offline)) == "offline",
         "offline state name must be stable for Web JSON");
