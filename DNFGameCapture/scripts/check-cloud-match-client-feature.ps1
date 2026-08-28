@@ -60,7 +60,6 @@ foreach ($needle in @(
     'kMaxProtectedResultCapacity = 96',
     'kAckTimeout = std::chrono::seconds(8)',
     'kNetworkTimeoutMs = 3000',
-    'kReceivePollTimeoutMs = 200',
     'kReconnectDelaysSeconds{ 1, 2, 5, 10, 20 }',
     'std::thread worker',
     'std::condition_variable condition',
@@ -222,10 +221,10 @@ foreach ($needle in @(
         throw "CloudMatchClient move-only command hygiene is missing: $needle"
     }
 }
-if ($source -notmatch 'PublishCancelableHandle\(HINTERNET handle,\s*std::uint64_t generation\)') {
+if ($source -notmatch 'PublishCancelableHandle\(HINTERNET handle,\s*std::uint64_t generation(?:\s*,\s*const std::atomic<bool>\* localCancel\s*=\s*nullptr)?\s*\)') {
     throw 'Cancelable handles must be published against an explicit configuration generation.'
 }
-if ($source -notmatch '(?s)PublishCancelableHandle\(HINTERNET handle,\s*std::uint64_t generation\).*?configGeneration\.load.*?generation.*?compare_exchange_strong.*?configGeneration\.load.*?generation') {
+if ($source -notmatch '(?s)PublishCancelableHandle\(HINTERNET handle,\s*std::uint64_t generation.*?configGeneration\.load.*?generation.*?compare_exchange_strong.*?configGeneration\.load.*?generation') {
     throw 'PublishCancelableHandle must reject stale generations before and after publication.'
 }
 if ($source -notmatch '(?s)bool SendText\(.*?std::uint64_t generation.*?ShouldAbort\(generation\).*?WinHttpWebSocketSend.*?ShouldAbort\(generation\)') {
@@ -307,6 +306,9 @@ if ($source -notmatch '(?s)ActiveHandleScope requestScope.*?WinHttpSendRequest')
 }
 if ($source -notmatch '(?s)ActiveHandleScope socketScope.*?WinHttpWebSocketReceive') {
     throw 'The WebSocket must be published for cancellation before a blocking receive.'
+}
+if ($source -match '(?s)WinHttpSetOption\(connection\.socket\.Get\(\),\s*WINHTTP_OPTION_(RECEIVE|SEND)_TIMEOUT') {
+    throw 'WinHTTP timeout options are unsupported on upgraded WebSocket handles.'
 }
 if ($source -notmatch '(?s)if \(stopping\).*?condition\.wait\(lock.*?!stopping') {
     throw 'Concurrent Stop calls must wait for the in-progress join instead of racing it.'

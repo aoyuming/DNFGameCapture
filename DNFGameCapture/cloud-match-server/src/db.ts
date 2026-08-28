@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 
 import { pruneSnapshotAudit } from './snapshots.js';
+export const ALL_BROADCASTERS_ROOM_ID = 'all-broadcasters';
 
 const ROOM_SEEDS = [
   { id: '59', displayName: '59房' },

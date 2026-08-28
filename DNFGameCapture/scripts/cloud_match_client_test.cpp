@@ -259,11 +259,11 @@ void TestServerUrlTransportPolicy()
         { L"http://127.0.0.1:18880", true },
         { L"http://127.42.3.4:18880", true },
         { L"http://[::1]:18880", true },
-        { L"http://8.8.8.8:18880", false },
-        { L"http://10.0.0.5:18880", false },
-        { L"http://192.168.1.5:18880", false },
-        { L"http://example.com:18880", false },
-        { L"http://127.example.com:18880", false },
+        { L"http://8.8.8.8:18880", true },
+        { L"http://10.0.0.5:18880", true },
+        { L"http://192.168.1.5:18880", true },
+        { L"http://example.com:18880", true },
+        { L"http://127.example.com:18880", true },
         { L"https://8.8.8.8:18880", true },
         { L"https://10.0.0.5:18880", true },
         { L"https://example.com:18880/base", true },
@@ -282,7 +282,7 @@ void TestServerUrlTransportPolicy()
                 << test.allowed << L" actual=" << configured << L'\n';
         }
         Require(configured == test.allowed,
-            "server URL transport policy must match the loopback HTTP allowlist");
+            "server URL transport policy must allow explicit HTTP or HTTPS endpoints");
     }
 }
 
@@ -721,6 +721,30 @@ void TestRateLimitedSnapshotAckPreservesRetryDelay()
         "rate-limited upload result must retain retry delay and client revision");
 }
 
+void TestRealtimeSnapshotsCoalescePerBroadcaster()
+{
+    CloudMatchClient client;
+    client.ConfigureForTesting();
+    std::vector<std::string> messages;
+    client.SetMessageCallback([&](std::string message) {
+        messages.push_back(std::move(message));
+    });
+
+    Require(client.HandleServerEventForTesting("sync:realtime_snapshot",
+        R"({"sourceDeviceId":"new-target-0002","snapshotRevision":2,"snapshot":{"clientRevision":2}})"),
+        "new realtime target fixture should use the production event handler");
+    Require(client.HandleServerEventForTesting("sync:realtime_snapshot",
+        R"({"sourceDeviceId":"old-target-0001","snapshotRevision":1,"snapshot":{"clientRevision":1}})"),
+        "late old-target fixture should use the production event handler");
+
+    Require(client.DispatchMessages(8) == 2,
+        "realtime snapshots from different broadcasters must not overwrite each other");
+    Require(messages.size() == 2 &&
+        messages[0].find("\"sourceDeviceId\":\"new-target-0002\"") != std::string::npos &&
+        messages[1].find("\"sourceDeviceId\":\"old-target-0001\"") != std::string::npos,
+        "realtime snapshots must retain source order for the UI-thread target filter");
+}
+
 } // namespace
 
 int main()
@@ -743,6 +767,7 @@ int main()
     TestTransientRequestsFailOfflineCancelAndExpireWithoutReplay();
     TestPresenceRevisionDoesNotAdvanceComparisonRevision();
     TestRateLimitedSnapshotAckPreservesRetryDelay();
+    TestRealtimeSnapshotsCoalescePerBroadcaster();
     std::cout << "Cloud match client tests passed.\n";
     return 0;
 }

@@ -5,6 +5,8 @@ let playerDB = {};
 let savedDB = {};
 let isSyncingFromServer = false;
 let hasReceivedInitialData = false;
+let bridgeAckReceived = false;
+let bridgeMessageObserved = false;
 let isMonitoring = false;
 let isStartPending = false;
 let isProMode = false;
@@ -26,6 +28,11 @@ let cloudRoomFirstRun = false;
 let cloudSelectedRoomId = '';
 let cloudRoomChoosing = false;
 let cloudRoomJoinTarget = null;
+let cloudServerDraft = '';
+let cloudNamePromptVisible = false;
+let cloudNamePromptHandled = false;
+let cloudLastNameErrorPrompt = '';
+let cloudPreviewDeviceId = '';
 let systemFonts = [];
 let appearanceScope = 'scoreboard';
 let activeScoreboardStyleKey = 'teamName';
@@ -54,7 +61,7 @@ let pendingAliasPopoverName = '';
 let pendingAliasPopoverInput = null;
 let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
-const WEB_LAYOUT_VERSION = '20260828-cloud-match-room';
+const WEB_LAYOUT_VERSION = '20260828-unified-broadcaster-pool';
 const CLOUD_MATCH_WEB_THEMES = new Set([
     'dark-esports', 'frost-broadcast', 'black-gold'
 ]);
@@ -531,7 +538,18 @@ if (window.chrome && window.chrome.webview) {
     window.chrome.webview.addEventListener('message', function (event) {
         try {
             const msg = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
-            if (msg.action === 'sync_state') {
+            if (!bridgeMessageObserved && window.chrome?.webview) {
+                bridgeMessageObserved = true;
+                window.chrome.webview.postMessage({
+                    action: 'web_bridge_received',
+                    receivedAction: String(msg?.action || '')
+                });
+            }
+            if (msg.action === 'web_bridge_ack') {
+                bridgeAckReceived = true;
+                console.info('[web bridge] C++ message channel acknowledged');
+            }
+            else if (msg.action === 'sync_state') {
                 hasReceivedInitialData = true;
 
                 if (msg.data.fullAliasDB) {
@@ -622,10 +640,10 @@ if (window.chrome && window.chrome.webview) {
                 pendingTeamSyncSnapshot = null;
                 showAlert(msg.message);
             }
-            else if (msg.action === 'cloud_room_prompt') {
+            else if (msg.action === 'cloud_broadcaster_prompt' || msg.action === 'cloud_room_prompt') {
                 if (!cloudMatchState) cloudMatchState = normalizeCloudMatchState({ shouldPrompt: true });
                 else cloudMatchState.shouldPrompt = true;
-                restoreCloudRoomPromptFromState();
+                setTimeout(() => promptForBroadcasterName(), 0);
             }
             else if (msg.action === 'auth_result' || msg.action === 'start_guard' || msg.action === 'patch_result' || msg.action === 'alias_submit_result' || msg.action === 'alias_sync_result' || msg.action === 'copy_window_clipboard_result' || msg.action === 'kill_obs_url_result' || msg.action === 'key_mapping_error') { showAlert(msg.message); }
             else if (msg.action === 'alias_direct_sync_result') {
@@ -2407,26 +2425,37 @@ const CLOUD_ROOM_NAMES = Object.freeze({
     'wen-rou': '温柔房',
     '59': '59房'
 });
+const CLOUD_MATCH_DEFAULT_SERVER_URL = 'http://47.109.149.111:18880';
 const CLOUD_MATCH_DISPLAY_STATES = new Set(['online', 'reconnecting', 'offline', 'not-joined']);
 const cloudRoomNameSegmenter = typeof Intl.Segmenter === 'function'
     ? new Intl.Segmenter('zh-CN', { granularity: 'grapheme' }) : null;
 
 function normalizeCloudMatchState(value = {}) {
-    const roomId = Object.prototype.hasOwnProperty.call(CLOUD_ROOM_NAMES, value.roomId)
-        ? value.roomId : '';
+    const unified = value.unifiedPool && typeof value.unifiedPool === 'object'
+        ? value.unifiedPool : {};
+    const broadcasters = Array.isArray(value.broadcasters) ? value.broadcasters : [];
+    const realtimeRelations = Array.isArray(value.realtimeRelations)
+        ? value.realtimeRelations : [];
+    const syncHistory = value.syncHistory && typeof value.syncHistory === 'object'
+        ? value.syncHistory : {};
+    const roomId = value.roomId === 'all-broadcasters' || unified.joined === true
+        ? 'all-broadcasters' : (Object.prototype.hasOwnProperty.call(CLOUD_ROOM_NAMES, value.roomId)
+            ? value.roomId : '');
+    const broadcasterName = String(unified.broadcasterName || value.broadcasterName || '');
     const displayState = CLOUD_MATCH_DISPLAY_STATES.has(value.displayState)
         ? value.displayState : 'not-joined';
     return {
-        joined: value.joined === true && !!roomId,
+        joined: (value.joined === true || unified.joined === true) && !!roomId,
         roomId,
-        roomName: String(value.roomName || CLOUD_ROOM_NAMES[roomId] || ''),
-        broadcasterName: String(value.broadcasterName || ''),
+        roomName: '',
+        broadcasterName,
+        serverUrl: String(value.serverUrl || CLOUD_MATCH_DEFAULT_SERVER_URL),
         configured: value.configured === true,
         connected: value.connected === true,
         connecting: value.connecting === true,
         reconnecting: value.reconnecting === true,
         displayState,
-        displayText: String(value.displayText || '未加入云端房间'),
+        displayText: String(value.displayText || (broadcasterName ? '统一在线主播池' : '未连接云端')),
         joining: value.joining === true,
         registering: value.registering === true,
         restoring: value.restoring === true,
@@ -2436,8 +2465,380 @@ function normalizeCloudMatchState(value = {}) {
         lastError: String(value.lastError || ''),
         clientRevision: Math.max(0, Number(value.clientRevision || 0)),
         shouldPrompt: value.shouldPrompt === true,
-        syncPanel: normalizeCloudSyncPanel(value.syncPanel)
+        syncPanel: normalizeCloudSyncPanel(value.syncPanel),
+        unifiedPool: {
+            joined: unified.joined === true || (value.joined === true && roomId === 'all-broadcasters'),
+            deviceId: String(unified.deviceId || value.deviceId || ''),
+            broadcasterName
+        },
+        broadcasters,
+        syncHistory: {
+            incoming: Array.isArray(syncHistory.incoming) ? syncHistory.incoming : [],
+            outgoing: Array.isArray(syncHistory.outgoing) ? syncHistory.outgoing : [],
+            all: Array.isArray(syncHistory.all) ? syncHistory.all : []
+        },
+        realtimeRelations,
+        previewSnapshot: value.previewSnapshot && typeof value.previewSnapshot === 'object'
+            ? value.previewSnapshot : null,
+        realtimeFollowing: value.realtimeFollowing === true,
+        realtimeTargetDeviceId: String(value.realtimeTargetDeviceId || '')
     };
+}
+
+function cloudBroadcasterName(deviceId) {
+    const normalizedId = String(deviceId || '');
+    const member = cloudMatchState?.broadcasters?.find(item =>
+        String(item?.deviceId || '') === normalizedId);
+    if (member?.broadcasterName) return String(member.broadcasterName);
+    const history = cloudMatchState?.syncHistory?.all || [];
+    for (const record of history) {
+        if (String(record?.sourceDeviceId || '') === normalizedId && record?.sourceName) {
+            return String(record.sourceName);
+        }
+        if (String(record?.targetDeviceId || '') === normalizedId && record?.targetName) {
+            return String(record.targetName);
+        }
+    }
+    return normalizedId ? `主播 ·${normalizedId.slice(-4)}` : '未知主播';
+}
+
+function cloudBroadcasterTime(seconds, includeDate = false) {
+    const value = Number(seconds || 0);
+    if (!Number.isFinite(value) || value <= 0) return '暂无快照';
+    const date = new Date(value * 1000);
+    if (Number.isNaN(date.getTime())) return '时间未知';
+    return date.toLocaleString('zh-CN', includeDate ? {
+        month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
+    } : { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function cloudOfflineRemaining(offlineExpiresAt) {
+    const seconds = Math.max(0, Number(offlineExpiresAt || 0) - Date.now() / 1000);
+    if (!Number.isFinite(seconds) || seconds <= 0) return '即将清理';
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.max(1, Math.ceil((seconds % 3600) / 60));
+    return hours > 0 ? `剩余 ${hours}小时${minutes}分` : `剩余 ${minutes}分钟`;
+}
+
+function cloudRelationSummary(deviceId) {
+    const id = String(deviceId || '');
+    const history = cloudMatchState?.syncHistory?.all || [];
+    const relations = cloudMatchState?.realtimeRelations || [];
+    const syncedBy = new Set();
+    const syncedTargets = new Set();
+    const realtimeViewers = new Set();
+    const realtimeTargets = new Set();
+    history.forEach(record => {
+        if (String(record?.sourceDeviceId || '') === id) {
+            syncedBy.add(String(record?.targetName || cloudBroadcasterName(record?.targetDeviceId)));
+        }
+        if (String(record?.targetDeviceId || '') === id) {
+            syncedTargets.add(String(record?.sourceName || cloudBroadcasterName(record?.sourceDeviceId)));
+        }
+    });
+    relations.forEach(relation => {
+        if (String(relation?.targetDeviceId || '') === id) {
+            realtimeViewers.add(String(relation?.viewerName || cloudBroadcasterName(relation?.viewerDeviceId)));
+        }
+        if (String(relation?.viewerDeviceId || '') === id) {
+            realtimeTargets.add(String(relation?.targetName || cloudBroadcasterName(relation?.targetDeviceId)));
+        }
+    });
+    return {
+        syncedBy: [...syncedBy],
+        syncedTargets: [...syncedTargets],
+        realtimeViewers: [...realtimeViewers],
+        realtimeTargets: [...realtimeTargets]
+    };
+}
+
+function appendBroadcasterRelation(container, text, kind = '') {
+    const tag = document.createElement('span');
+    tag.className = `broadcaster-relation-tag ${kind}`.trim();
+    tag.textContent = text;
+    container.appendChild(tag);
+}
+
+function buildBroadcasterCard(member) {
+    const button = document.createElement('button');
+    const deviceId = String(member?.deviceId || '');
+    const hasSnapshot = Number(member?.snapshotRevision || 0) > 0;
+    button.type = 'button';
+    button.className = `broadcaster-card ${member?.online ? 'online' : 'offline'}`;
+    button.dataset.deviceId = deviceId;
+    button.disabled = !hasSnapshot;
+
+    const heading = document.createElement('span');
+    heading.className = 'broadcaster-card-heading';
+    const dot = document.createElement('span');
+    dot.className = 'broadcaster-presence-dot';
+    const name = document.createElement('span');
+    name.className = 'broadcaster-card-name';
+    name.textContent = String(member?.broadcasterName || '未命名主播');
+    heading.append(dot, name);
+
+    const meta = document.createElement('span');
+    meta.className = 'broadcaster-card-meta';
+    meta.textContent = hasSnapshot
+        ? `${member?.online ? '在线' : '离线数据'} · 更新 ${cloudBroadcasterTime(member?.receivedAt)}`
+        : `${member?.online ? '在线' : '离线'} · 暂无比赛快照`;
+    const retention = document.createElement('span');
+    retention.className = 'broadcaster-card-retention';
+    retention.textContent = member?.online ? '' : cloudOfflineRemaining(member?.offlineExpiresAt);
+
+    const relations = document.createElement('span');
+    relations.className = 'broadcaster-card-relations';
+    const summary = cloudRelationSummary(deviceId);
+    if (summary.syncedBy.length) appendBroadcasterRelation(relations,
+        `被 ${summary.syncedBy.join('、')} 同步过`);
+    if (summary.realtimeViewers.length) appendBroadcasterRelation(relations,
+        `正在被 ${summary.realtimeViewers.join('、')} 实时同步`, 'live');
+    if (summary.realtimeTargets.length) appendBroadcasterRelation(relations,
+        `正在实时同步 ${summary.realtimeTargets.join('、')}`, 'following');
+    if (!relations.childElementCount) appendBroadcasterRelation(relations, '暂无同步关系', 'muted');
+
+    button.append(heading, meta, retention, relations);
+    return button;
+}
+
+function renderBroadcasterSidebar() {
+    const state = cloudMatchState || normalizeCloudMatchState();
+    const status = document.getElementById('broadcaster-cloud-status');
+    if (status) {
+        status.dataset.state = state.connected ? 'online' :
+            (state.connecting || state.reconnecting ? 'working' : 'offline');
+        status.textContent = state.connected ? '云端已连接' :
+            (state.connecting || state.reconnecting ? '正在连接云端' :
+                (state.lastError || '云端离线，本地功能不受影响'));
+        status.title = state.lastError || status.textContent;
+    }
+
+    const input = document.getElementById('cloud-broadcaster-name-input');
+    if (input && document.activeElement !== input) input.value = state.broadcasterName || '';
+    const save = document.getElementById('btn-cloud-rename-broadcaster');
+    if (save) {
+        save.disabled = state.renaming || state.joining || state.registering;
+        save.textContent = state.renaming || state.joining ? '保存中' : '保存';
+    }
+
+    const selfId = String(state.unifiedPool?.deviceId || '');
+    const members = (state.broadcasters || []).filter(member =>
+        String(member?.deviceId || '') !== selfId);
+    const online = members.filter(member => member?.online === true);
+    const offline = members.filter(member => member?.online !== true &&
+        Number(member?.offlineExpiresAt || 0) > Date.now() / 1000);
+    const onlineList = document.getElementById('broadcaster-online-list');
+    const offlineList = document.getElementById('broadcaster-offline-list');
+    const renderList = (container, items, emptyText) => {
+        if (!container) return;
+        container.replaceChildren();
+        if (!items.length) {
+            const empty = document.createElement('div');
+            empty.className = 'broadcaster-list-empty';
+            empty.textContent = emptyText;
+            container.appendChild(empty);
+            return;
+        }
+        items.forEach(member => container.appendChild(buildBroadcasterCard(member)));
+    };
+    renderList(onlineList, online, state.connected ? '暂无其他在线主播' : '连接云端后显示在线主播');
+    renderList(offlineList, offline, '最近 24 小时没有离线主播');
+    const onlineCount = document.getElementById('broadcaster-online-count');
+    const offlineCount = document.getElementById('broadcaster-offline-count');
+    if (onlineCount) onlineCount.textContent = String(online.length);
+    if (offlineCount) offlineCount.textContent = String(offline.length);
+
+    const selfSummary = document.getElementById('broadcaster-relation-summary');
+    if (selfSummary) {
+        const relation = cloudRelationSummary(selfId);
+        const lines = [];
+        if (relation.syncedBy.length) lines.push(`被 ${relation.syncedBy.join('、')} 同步过`);
+        if (relation.syncedTargets.length) lines.push(`同步过 ${relation.syncedTargets.join('、')}`);
+        if (relation.realtimeViewers.length) lines.push(`正在被 ${relation.realtimeViewers.join('、')} 实时同步`);
+        if (relation.realtimeTargets.length) lines.push(`正在实时同步 ${relation.realtimeTargets.join('、')}`);
+        selfSummary.textContent = lines.join(' · ') || (state.connected ? '本机暂无同步关系' : '同步关系将在连接后显示');
+    }
+}
+
+function isBroadcasterPreviewOpen() {
+    return document.getElementById('broadcaster-preview-overlay')?.classList.contains('active') === true;
+}
+
+function openBroadcasterPreview(deviceId) {
+    const normalizedId = String(deviceId || '');
+    if (!normalizedId) return;
+    cloudPreviewDeviceId = normalizedId;
+    const overlay = document.getElementById('broadcaster-preview-overlay');
+    if (!overlay) return;
+    overlay.classList.add('active');
+    overlay.setAttribute('aria-hidden', 'false');
+    renderBroadcasterPreview();
+    window.chrome?.webview?.postMessage({
+        action: 'cmd_cloud_preview_broadcaster', deviceId: normalizedId
+    });
+}
+
+function closeBroadcasterPreview() {
+    const overlay = document.getElementById('broadcaster-preview-overlay');
+    if (overlay) {
+        overlay.classList.remove('active');
+        overlay.setAttribute('aria-hidden', 'true');
+    }
+    cloudPreviewDeviceId = '';
+}
+
+function appendPreviewMetric(container, label, value) {
+    const item = document.createElement('div');
+    item.className = 'broadcaster-preview-metric';
+    const heading = document.createElement('span');
+    heading.textContent = label;
+    const content = document.createElement('strong');
+    content.textContent = String(value ?? '-');
+    item.append(heading, content);
+    container.appendChild(item);
+}
+
+function buildPreviewTeam(teamName, players, teamClass) {
+    const section = document.createElement('section');
+    section.className = `broadcaster-preview-team ${teamClass}`;
+    const heading = document.createElement('div');
+    heading.className = 'broadcaster-preview-team-title';
+    heading.textContent = teamName;
+    section.appendChild(heading);
+    (players || []).forEach((player, index) => {
+        const row = document.createElement('div');
+        row.className = 'broadcaster-preview-player';
+        const identity = document.createElement('div');
+        identity.className = 'broadcaster-preview-player-identity';
+        const main = document.createElement('strong');
+        main.textContent = `${index + 1}. ${String(player?.name || '空位')}`;
+        const aliases = document.createElement('span');
+        const aliasList = Array.isArray(player?.aliases) ? player.aliases : [];
+        aliases.textContent = aliasList.length ? `小号：${aliasList.join('、')}` : '小号：无';
+        identity.append(main, aliases);
+        const stats = document.createElement('div');
+        stats.className = 'broadcaster-preview-player-stats';
+        stats.textContent = `杀 ${Number(player?.kills || 0)} · 死 ${Number(player?.deaths || 0)} · AK ${Number(player?.akCount || 0)} · 连杀 ${Number(player?.currentStreak || 0)}`;
+        row.append(identity, stats);
+        section.appendChild(row);
+    });
+    return section;
+}
+
+function renderBroadcasterPreview() {
+    const title = document.getElementById('broadcaster-preview-title');
+    const meta = document.getElementById('broadcaster-preview-meta');
+    const body = document.getElementById('broadcaster-preview-body');
+    const relationsBody = document.getElementById('broadcaster-preview-relations-body');
+    if (!body || !relationsBody) return;
+    const member = cloudMatchState?.broadcasters?.find(item =>
+        String(item?.deviceId || '') === cloudPreviewDeviceId);
+    const preview = cloudMatchState?.previewSnapshot;
+    const matches = preview && String(preview.sourceDeviceId || '') === cloudPreviewDeviceId;
+    const name = String(member?.broadcasterName || preview?.sourceName || cloudBroadcasterName(cloudPreviewDeviceId));
+    if (title) title.textContent = `${name} · 数据预览`;
+    if (meta) {
+        meta.textContent = matches
+            ? `${preview.online === false ? '离线数据' : '在线'} · 更新 ${cloudBroadcasterTime(preview.receivedAt, true)} · 版本 ${Number(preview.snapshotRevision || 0)}`
+            : (cloudMatchState?.lastError || '正在读取主播快照...');
+    }
+    body.replaceChildren();
+    if (!matches || !preview.snapshot) {
+        const loading = document.createElement('div');
+        loading.className = 'broadcaster-preview-empty';
+        loading.textContent = cloudMatchState?.lastError || '正在读取完整比赛数据...';
+        body.appendChild(loading);
+    } else {
+        const snapshot = preview.snapshot;
+        const summary = document.createElement('div');
+        summary.className = 'broadcaster-preview-summary';
+        appendPreviewMetric(summary, '比分', `${Number(snapshot.redScore || 0)} : ${Number(snapshot.blueScore || 0)}`);
+        appendPreviewMetric(summary, '红方', snapshot.redPickMode === 'first' ? '先手' : '后手');
+        appendPreviewMetric(summary, '红蓝方向', snapshot.isFlipped ? '已翻转' : '标准');
+        appendPreviewMetric(summary, 'TXT顺序', snapshot.outputSeatLabelToKillFile ? '开启' : '关闭');
+        body.appendChild(summary);
+        const teams = document.createElement('div');
+        teams.className = 'broadcaster-preview-teams';
+        const players = Array.isArray(snapshot.players) ? snapshot.players : [];
+        teams.append(
+            buildPreviewTeam('红队', players.slice(0, 4), 'red'),
+            buildPreviewTeam('蓝队', players.slice(4, 8), 'blue')
+        );
+        body.appendChild(teams);
+
+        const recognitions = document.createElement('section');
+        recognitions.className = 'broadcaster-preview-recognitions';
+        const recognitionsTitle = document.createElement('div');
+        recognitionsTitle.className = 'broadcaster-preview-section-title';
+        recognitionsTitle.textContent = '最近识别';
+        recognitions.appendChild(recognitionsTitle);
+        const events = Array.isArray(preview.recentEvents) ? preview.recentEvents.slice(0, 8) : [];
+        if (!events.length) {
+            const empty = document.createElement('div');
+            empty.className = 'broadcaster-preview-empty-inline';
+            empty.textContent = '暂无最近识别记录';
+            recognitions.appendChild(empty);
+        } else {
+            events.forEach(event => {
+                const line = document.createElement('div');
+                line.className = 'broadcaster-preview-recognition';
+                const result = event?.killer || event?.dead
+                    ? `${event?.killer || '待确认'} 击杀 ${event?.dead || '待确认'}`
+                    : String(event?.status || event?.text || '识别事件');
+                line.textContent = `${event?.time || ''} ${result}`.trim();
+                recognitions.appendChild(line);
+            });
+        }
+        body.appendChild(recognitions);
+    }
+
+    relationsBody.replaceChildren();
+    const relation = cloudRelationSummary(cloudPreviewDeviceId);
+    const relationLines = [];
+    if (relation.syncedBy.length) relationLines.push(`被 ${relation.syncedBy.join('、')} 同步过`);
+    if (relation.syncedTargets.length) relationLines.push(`同步过 ${relation.syncedTargets.join('、')}`);
+    if (relation.realtimeViewers.length) relationLines.push(`正在被 ${relation.realtimeViewers.join('、')} 实时同步`);
+    if (relation.realtimeTargets.length) relationLines.push(`正在实时同步 ${relation.realtimeTargets.join('、')}`);
+    (relationLines.length ? relationLines : ['暂无同步关系']).forEach(text => {
+        const line = document.createElement('div');
+        line.className = 'broadcaster-preview-relation-line';
+        line.textContent = text;
+        relationsBody.appendChild(line);
+    });
+
+    const selfId = String(cloudMatchState?.unifiedPool?.deviceId || '');
+    const isSelf = cloudPreviewDeviceId === selfId;
+    const canSync = !!matches && !isSelf && Number(preview?.snapshotRevision || 0) > 0;
+    const followingThis = cloudMatchState?.realtimeFollowing === true &&
+        cloudMatchState?.realtimeTargetDeviceId === cloudPreviewDeviceId;
+    const once = document.getElementById('btn-broadcaster-sync-once');
+    const realtime = document.getElementById('btn-broadcaster-sync-realtime');
+    const stop = document.getElementById('btn-broadcaster-stop-realtime');
+    if (once) once.disabled = !canSync || cloudMatchState?.realtimeFollowing === true;
+    if (realtime) {
+        realtime.disabled = !canSync || preview?.online === false || cloudMatchState?.realtimeFollowing === true;
+        realtime.hidden = followingThis;
+    }
+    if (stop) stop.hidden = !followingThis;
+}
+
+function promptForBroadcasterName(message = '') {
+    if (cloudNamePromptVisible || cloudMatchState?.unifiedPool?.joined) return;
+    cloudNamePromptVisible = true;
+    const prompt = message || '请输入主播名称。该名称会显示给其他主播，用于查看和同步比分、名单与战绩。';
+    showPrompt(escapeHtml(prompt), value => {
+        cloudNamePromptVisible = false;
+        if (value === null) return;
+        const info = cloudRoomNameInfo(value);
+        if (!info.valid) {
+            showAlert('主播名称需要填写 1 到 32 个可见字符。', () => promptForBroadcasterName());
+            return;
+        }
+        window.chrome?.webview?.postMessage({ action: 'cmd_cloud_join_unified', name: info.normalized });
+    }, {
+        value: cloudMatchState?.broadcasterName || '',
+        placeholder: '例如：主播小明'
+    });
 }
 
 function normalizeCloudSyncPanel(value = {}) {
@@ -2490,6 +2891,24 @@ function cloudRoomNameInfo(value) {
     };
 }
 
+function cloudRoomServerUrlInfo(value) {
+    let normalized = String(value || '').trim();
+    if (normalized && !/^[a-z][a-z0-9+.-]*:\/\//i.test(normalized)) {
+        normalized = `http://${normalized}`;
+    }
+    try {
+        const parsed = new URL(normalized);
+        const validProtocol = parsed.protocol === 'http:' || parsed.protocol === 'https:';
+        const valid = validProtocol && !!parsed.hostname && !parsed.username &&
+            !parsed.password && !parsed.search && !parsed.hash;
+        if (!valid) return { normalized, valid: false };
+        const path = parsed.pathname === '/' ? '' : parsed.pathname.replace(/\/$/, '');
+        return { normalized: `${parsed.protocol}//${parsed.host}${path}`, valid: true };
+    } catch {
+        return { normalized, valid: false };
+    }
+}
+
 function isCloudRoomPanelOpen() {
     return document.getElementById('cloud-room-overlay')?.classList.contains('active') === true;
 }
@@ -2505,18 +2924,40 @@ function updateCloudRoomNameValidation() {
     const count = document.getElementById('cloud-room-name-count');
     if (!input || !joinButton) return false;
     const info = cloudRoomNameInfo(input.value);
+    const serverInfo = cloudRoomServerUrlInfo(cloudServerDraft ||
+        document.getElementById('cloud-room-server-input')?.value || '');
     if (count) count.textContent = `${info.graphemeCount} / 32`;
     const busy = isCloudRoomBusy();
-    joinButton.disabled = !cloudSelectedRoomId || !info.valid || !!busy;
-    if (info.graphemeCount > 32) setCloudRoomInlineError('主播名称不能超过 32 个字符。');
+    joinButton.disabled = !cloudSelectedRoomId || !info.valid || !serverInfo.valid || !!busy;
+    if (!serverInfo.valid) setCloudRoomInlineError('请输入有效的服务器地址，例如 47.109.149.111:18880。');
+    else if (info.graphemeCount > 32) setCloudRoomInlineError('主播名称不能超过 32 个字符。');
     else if (info.normalized && !info.valid) setCloudRoomInlineError('主播名称包含不可用字符。');
     else if (!cloudMatchState?.lastError) setCloudRoomInlineError('');
     return info.valid;
 }
 
+function cloudRoomJoinProgressText(state = {}) {
+    if (state.registering) return '正在注册本机身份...';
+    if (state.restoring) return '正在恢复原房间...';
+    if (state.reconnecting) return '连接失败，正在重试...';
+    if (state.connecting) return '正在连接云端服务器...';
+    if (state.joining) return '正在确认加入房间...';
+    return '';
+}
+
 function renderCloudRoomPanel() {
     if (!cloudMatchState) cloudMatchState = normalizeCloudMatchState();
     const state = cloudMatchState;
+    const serverInput = document.getElementById('cloud-room-server-input');
+    if (!cloudServerDraft) cloudServerDraft = state.serverUrl || CLOUD_MATCH_DEFAULT_SERVER_URL;
+    if (serverInput && document.activeElement !== serverInput) {
+        serverInput.value = cloudServerDraft;
+    }
+    if (serverInput) serverInput.disabled = isCloudRoomBusy(state) || state.joined;
+    const serverHint = document.getElementById('cloud-room-server-hint');
+    if (serverHint) serverHint.textContent = state.joined
+        ? '退出当前房间后可以修改服务器地址'
+        : '加入房间时自动保存，允许填写 IP:端口或完整网址';
     const current = document.getElementById('cloud-room-current');
     const chooser = document.getElementById('cloud-room-first-run');
     const nameStage = document.getElementById('cloud-room-name-stage');
@@ -2579,8 +3020,14 @@ function renderCloudRoomPanel() {
         option.disabled = busy;
     });
     const selectedLabel = document.getElementById('cloud-room-selected');
-    if (selectedLabel) selectedLabel.textContent = cloudSelectedRoomId
-        ? `准备加入：${CLOUD_ROOM_NAMES[cloudSelectedRoomId]}` : '尚未选择房间';
+    if (selectedLabel) {
+        const joinProgress = cloudRoomJoinProgressText(state);
+        selectedLabel.textContent = cloudSelectedRoomId
+            ? (joinProgress
+                ? `${CLOUD_ROOM_NAMES[cloudSelectedRoomId]} · ${joinProgress}`
+                : `准备加入：${CLOUD_ROOM_NAMES[cloudSelectedRoomId]}`)
+            : '尚未选择房间';
+    }
     const joinButton = document.getElementById('btn-cloud-room-join');
     const joinBusy = state.joining || state.registering;
     if (joinButton) {
@@ -2609,6 +3056,7 @@ function openCloudRoomPanel(firstRun = false) {
     cloudRoomChoosing = !cloudMatchState?.joined;
     cloudSelectedRoomId = '';
     cloudRoomJoinTarget = null;
+    cloudServerDraft = cloudMatchState?.serverUrl || CLOUD_MATCH_DEFAULT_SERVER_URL;
     overlay.classList.add('active');
     overlay.setAttribute('aria-hidden', 'false');
     renderCloudRoomPanel();
@@ -2624,6 +3072,7 @@ function closeCloudRoomPanel(force = false) {
     cloudRoomChoosing = false;
     cloudSelectedRoomId = '';
     cloudRoomJoinTarget = null;
+    cloudServerDraft = '';
 }
 
 function restoreCloudRoomPromptFromState() {
@@ -2857,8 +3306,9 @@ function renderCloudSyncPanel() {
 
     const status = document.getElementById('cloud-sync-status-line');
     if (status) {
-        status.classList.toggle('error', !!panel.error);
-        status.textContent = panel.error || (panel.loading ? '正在读取云端数据...' : panel.lastResult);
+        const displayError = cloudMatchState?.lastError || panel.error;
+        status.classList.toggle('error', !!displayError);
+        status.textContent = displayError || (panel.loading ? '正在读取云端数据...' : panel.lastResult);
     }
     renderCloudSyncMembers(panel);
     renderCloudSyncGroups(panel);
@@ -3429,14 +3879,27 @@ function applyStateFromServer(state) {
     killDisplaySettings = normalizeKillDisplaySettings(state.killDisplaySettings);
     keyMappingSettings = normalizeKeyMappingSettings(state.keyMappingSettings || keyMappingSettings || {});
     cloudMatchState = normalizeCloudMatchState(state.cloudMatch || cloudMatchState || {});
-    renderCloudRoomStatus();
+    renderBroadcasterSidebar();
+    if (isBroadcasterPreviewOpen()) renderBroadcasterPreview();
     applyScoreboardTextStyles(scoreboardTextStyles);
     applyKillDisplaySettings(killDisplaySettings);
     if (isKeyMappingPanelOpen()) renderKeyMappingPanel();
     if (isKeyLanPanelOpen()) renderKeyLanPanel();
-    if (isCloudRoomPanelOpen()) renderCloudRoomPanel();
-    if (isCloudSyncPanelOpen()) renderCloudSyncPanel();
-    restoreCloudRoomPromptFromState();
+    if (cloudMatchState.shouldPrompt && !cloudNamePromptHandled) {
+        cloudNamePromptHandled = true;
+        setTimeout(() => promptForBroadcasterName(), 0);
+    }
+    const duplicateNameError = !cloudMatchState.joined &&
+        cloudMatchState.lastError.includes('名称') &&
+        (cloudMatchState.lastError.includes('重复') ||
+            cloudMatchState.lastError.includes('已存在') ||
+            cloudMatchState.lastError.includes('被在线主播使用'));
+    if (duplicateNameError && cloudLastNameErrorPrompt !== cloudMatchState.lastError) {
+        cloudLastNameErrorPrompt = cloudMatchState.lastError;
+        setTimeout(() => promptForBroadcasterName(cloudMatchState.lastError), 0);
+    } else if (!duplicateNameError) {
+        cloudLastNameErrorPrompt = '';
+    }
     if (keyMappingSettings.lan.adminRequired && !keyMappingSettings.lan.isAdmin) {
         setTimeout(() => showKeyMappingAdminPrompt('DNF 以更高权限运行，按键映射需要管理员权限才能读取游戏内按键。'), 0);
     }
@@ -4883,8 +5346,6 @@ document.getElementById('btn-random-teams')?.addEventListener('click', openRando
 document.getElementById('btn-key-mapping')?.addEventListener('click', openKeyMappingPanel);
 document.getElementById('btn-key-lan')?.addEventListener('click', openKeyLanPanel);
 document.getElementById('btn-cloud-sync')?.addEventListener('click', openCloudSyncPanel);
-document.getElementById('cloud-room-status')?.addEventListener('click', openCloudSyncPanel);
-document.getElementById('btn-cloud-match')?.addEventListener('click', () => openCloudRoomPanel(false));
 document.getElementById('btn-more-controls')?.addEventListener('click', (e) => {
     e.stopPropagation();
     toggleMoreControlsMenu();
@@ -4944,158 +5405,61 @@ document.getElementById('btn-key-lan-close')?.addEventListener('click', closeKey
 document.getElementById('key-lan-overlay')?.addEventListener('click', (event) => {
     if (event.target?.id === 'key-lan-overlay') closeKeyLanPanel();
 });
-document.getElementById('btn-cloud-room-close')?.addEventListener('click', () => closeCloudRoomPanel(false));
-document.getElementById('cloud-room-overlay')?.addEventListener('click', (event) => {
-    if (event.target?.id === 'cloud-room-overlay') closeCloudRoomPanel(false);
+document.getElementById('btn-cloud-refresh-broadcasters')?.addEventListener('click', () => {
+    window.chrome?.webview?.postMessage({ action: 'cmd_cloud_refresh_broadcasters' });
 });
-document.getElementById('btn-cloud-sync-close')?.addEventListener('click', closeCloudSyncPanel);
-document.getElementById('cloud-sync-overlay')?.addEventListener('click', (event) => {
-    if (event.target?.id === 'cloud-sync-overlay') closeCloudSyncPanel();
+document.getElementById('broadcaster-sidebar')?.addEventListener('click', event => {
+    const card = event.target.closest('.broadcaster-card');
+    if (!card || card.disabled) return;
+    openBroadcasterPreview(card.dataset.deviceId || '');
 });
-document.getElementById('btn-cloud-sync-refresh')?.addEventListener('click', () => {
-    sendCloudSyncCommand('cmd_cloud_sync_refresh');
-});
-document.getElementById('btn-cloud-sync-room-settings')?.addEventListener('click', () => {
-    closeCloudSyncPanel();
-    openCloudRoomPanel(false);
-});
-document.getElementById('cloud-sync-member-list')?.addEventListener('click', (event) => {
-    const member = event.target.closest('.cloud-sync-member');
-    if (!member || member.disabled) return;
-    sendCloudSyncCommand('cmd_cloud_sync_select', {
-        deviceId: member.dataset.deviceId || '',
-        clientRevision: Number(member.dataset.clientRevision || 0)
-    });
-});
-document.getElementById('btn-cloud-sync-cancel-preview')?.addEventListener('click', () => {
-    sendCloudSyncCommand('cmd_cloud_sync_cancel_preview');
-});
-document.getElementById('btn-cloud-sync-apply')?.addEventListener('click', () => {
-    const panel = cloudMatchState?.syncPanel;
-    const preview = panel?.preview;
-    if (!panel?.canApply || !preview || panel.busy) return;
-    const targetName = cloudSyncMemberName(preview.deviceId);
-    const revision = Number(preview.clientRevision || 0);
-    showConfirm(`确认使用【${escapeHtml(targetName)}】的版本 ${revision} 覆盖本地比赛数据？<br>比分、名单、战绩和比赛状态都会更新。`, (ok) => {
-        if (ok === true) sendCloudSyncCommand('cmd_cloud_sync_apply', {
-            deviceId: String(preview.deviceId || ''),
-            clientRevision: revision,
-            generation: Number(preview.generation || 0),
-            connectionGeneration: Number(preview.connectionGeneration || 0),
-            roomRevision: Number(preview.roomRevision || 0),
-            requestId: String(preview.requestId || '')
-        });
-    }, { okText: '确认覆盖本地', cancelText: '取消' });
-});
-document.getElementById('btn-cloud-sync-undo')?.addEventListener('click', () => {
-    if (!cloudMatchState?.syncPanel?.undoAvailable) return;
-    showConfirm('确认撤销最近一次云端同步并恢复同步前的本地比赛数据？', (ok) => {
-        if (ok === true) sendCloudSyncCommand('cmd_cloud_sync_undo');
-    }, { okText: '撤销本次同步', cancelText: '取消' });
-});
-document.querySelectorAll('.cloud-room-option').forEach(option => {
-    option.addEventListener('click', () => {
-        if (isCloudRoomBusy()) return;
-        const roomId = option.dataset.cloudRoomId || '';
-        if (roomId === 'none') {
-            cloudRoomJoinTarget = null;
-            if (cloudMatchState?.joined) {
-                cloudRoomChoosing = false;
-                cloudSelectedRoomId = '';
-                renderCloudRoomPanel();
-            } else {
-                sendCloudRoomCommand('cmd_cloud_room_skip_once');
-                if (cloudMatchState) cloudMatchState.shouldPrompt = false;
-                closeCloudRoomPanel(true);
-            }
-            return;
-        }
-        if (!Object.prototype.hasOwnProperty.call(CLOUD_ROOM_NAMES, roomId)) return;
-        cloudSelectedRoomId = roomId;
-        cloudRoomJoinTarget = null;
-        setCloudRoomInlineError('');
-        const input = document.getElementById('cloud-room-name-input');
-        if (input && !input.value.trim() && cloudMatchState?.broadcasterName) {
-            input.value = cloudMatchState.broadcasterName;
-        }
-        renderCloudRoomPanel();
-        input?.focus();
-    });
-});
-document.getElementById('cloud-room-name-input')?.addEventListener('input', () => {
-    if (cloudMatchState) cloudMatchState.lastError = '';
-    updateCloudRoomNameValidation();
-});
-document.getElementById('btn-cloud-room-back')?.addEventListener('click', () => {
-    if (isCloudRoomBusy()) return;
-    cloudSelectedRoomId = '';
-    cloudRoomJoinTarget = null;
-    setCloudRoomInlineError('');
-    renderCloudRoomPanel();
-});
-document.getElementById('btn-cloud-room-join')?.addEventListener('click', () => {
-    if (isCloudRoomBusy()) return;
-    const input = document.getElementById('cloud-room-name-input');
-    const info = cloudRoomNameInfo(input?.value || '');
-    if (!cloudSelectedRoomId || !info.valid) {
-        updateCloudRoomNameValidation();
-        if (!info.normalized) setCloudRoomInlineError('请输入主播名称。');
-        return;
-    }
-    cloudRoomJoinTarget = {
-        roomId: cloudSelectedRoomId,
-        broadcasterName: info.normalized
-    };
-    cloudMatchState = normalizeCloudMatchState({ ...(cloudMatchState || {}),
-        joining: true, lastError: '' });
-    renderCloudRoomPanel();
-    sendCloudRoomCommand('cmd_cloud_room_join', {
-        roomId: cloudSelectedRoomId,
-        broadcasterName: info.normalized
-    });
-});
-document.getElementById('btn-cloud-room-cancel-join')?.addEventListener('click', () => {
-    if (!cloudMatchState?.joining && !cloudMatchState?.registering) return;
-    cloudRoomJoinTarget = null;
-    cloudSelectedRoomId = '';
-    renderCloudRoomPanel();
-    const button = document.getElementById('btn-cloud-room-cancel-join');
-    if (button) {
-        button.disabled = true;
-        button.textContent = '取消中...';
-    }
-    sendCloudRoomCommand('cmd_cloud_room_cancel_join');
-});
-document.getElementById('btn-cloud-room-rename')?.addEventListener('click', () => {
-    if (isCloudRoomBusy()) return;
-    const input = document.getElementById('cloud-room-rename-input');
+document.getElementById('btn-cloud-rename-broadcaster')?.addEventListener('click', () => {
+    const input = document.getElementById('cloud-broadcaster-name-input');
     const info = cloudRoomNameInfo(input?.value || '');
     if (!info.valid) {
         showAlert('主播名称需要填写 1 到 32 个可见字符。');
         return;
     }
-    cloudMatchState = normalizeCloudMatchState({ ...(cloudMatchState || {}),
-        renaming: true, lastError: '' });
-    renderCloudRoomPanel();
-    sendCloudRoomCommand('cmd_cloud_room_rename', { broadcasterName: info.normalized });
+    const action = cloudMatchState?.unifiedPool?.joined
+        ? 'cmd_cloud_rename_broadcaster' : 'cmd_cloud_join_unified';
+    window.chrome?.webview?.postMessage({ action, name: info.normalized });
 });
-document.getElementById('btn-cloud-room-change')?.addEventListener('click', () => {
-    if (isCloudRoomBusy()) return;
-    cloudRoomChoosing = true;
-    cloudSelectedRoomId = '';
-    cloudRoomJoinTarget = null;
-    setCloudRoomInlineError('');
-    renderCloudRoomPanel();
+document.getElementById('cloud-broadcaster-name-input')?.addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+        event.preventDefault();
+        document.getElementById('btn-cloud-rename-broadcaster')?.click();
+    }
 });
-document.getElementById('btn-cloud-room-leave')?.addEventListener('click', () => {
-    if (isCloudRoomBusy()) return;
-    showConfirm('退出后会停止向当前云端房间上传，但不会清空本机比分、名单或战绩。确定退出吗？', (ok) => {
-        if (!ok || isCloudRoomBusy()) return;
-        cloudMatchState = normalizeCloudMatchState({ ...(cloudMatchState || {}),
-            leaving: true, lastError: '' });
-        renderCloudRoomPanel();
-        sendCloudRoomCommand('cmd_cloud_room_leave');
-    }, { okText: '退出房间', cancelText: '取消' });
+document.getElementById('btn-broadcaster-preview-close')?.addEventListener('click', closeBroadcasterPreview);
+document.getElementById('broadcaster-preview-overlay')?.addEventListener('click', event => {
+    if (event.target?.id === 'broadcaster-preview-overlay') closeBroadcasterPreview();
+});
+document.getElementById('btn-broadcaster-sync-once')?.addEventListener('click', () => {
+    const preview = cloudMatchState?.previewSnapshot;
+    if (!preview || String(preview.sourceDeviceId || '') !== cloudPreviewDeviceId) return;
+    const name = String(preview.sourceName || cloudBroadcasterName(cloudPreviewDeviceId));
+    showConfirm(`确认同步【${escapeHtml(name)}】的当前比赛数据？<br><br>` +
+        '比分、战绩、先后手和红蓝方向采用该主播数据；主号和小号会与本地合并。', ok => {
+        if (!ok) return;
+        window.chrome?.webview?.postMessage({
+            action: 'cmd_cloud_sync_broadcaster',
+            deviceId: cloudPreviewDeviceId,
+            snapshotRevision: Number(preview.snapshotRevision || 0)
+        });
+    }, { okText: '确认同步', cancelText: '取消' });
+});
+document.getElementById('btn-broadcaster-sync-realtime')?.addEventListener('click', () => {
+    const preview = cloudMatchState?.previewSnapshot;
+    if (!preview || preview.online === false ||
+        String(preview.sourceDeviceId || '') !== cloudPreviewDeviceId) return;
+    window.chrome?.webview?.postMessage({
+        action: 'cmd_cloud_realtime_start',
+        deviceId: cloudPreviewDeviceId,
+        name: String(preview.sourceName || cloudBroadcasterName(cloudPreviewDeviceId))
+    });
+});
+document.getElementById('btn-broadcaster-stop-realtime')?.addEventListener('click', () => {
+    window.chrome?.webview?.postMessage({ action: 'cmd_cloud_realtime_stop' });
 });
 document.getElementById('key-mapping-enabled')?.addEventListener('change', function () {
     keyMappingSettings.enabled = this.checked;
@@ -5464,18 +5828,9 @@ document.addEventListener('keydown', function (e) {
     else if (e.key === 'Escape') {
         // 对话框激活：由对话框自己的监听器处理（那边已经 stopImmediatePropagation）
         if (customModal.classList.contains('active')) return;
-        if (isCloudSyncPanelOpen()) {
+        if (isBroadcasterPreviewOpen()) {
             e.preventDefault();
-            if (cloudMatchState?.syncPanel?.preview) {
-                sendCloudSyncCommand('cmd_cloud_sync_cancel_preview');
-            } else {
-                closeCloudSyncPanel();
-            }
-            return;
-        }
-        if (isCloudRoomPanelOpen()) {
-            e.preventDefault();
-            closeCloudRoomPanel(false);
+            closeBroadcasterPreview();
             return;
         }
         if (isKeyMappingPanelOpen()) {

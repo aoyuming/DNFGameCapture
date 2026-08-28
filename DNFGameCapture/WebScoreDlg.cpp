@@ -8,7 +8,7 @@ void WriteMatchLog(const CString& logLine);
 
 namespace {
     // 参考图1的紧凑 CSS 视口尺寸。窗口外框会按当前系统边框自动反推。
-    constexpr int kReferenceClientWidth = 720;
+    constexpr int kReferenceClientWidth = 980;
     constexpr int kReferenceClientHeight = 480;
     constexpr int kAppearanceExtraClientHeight = 300;
     constexpr double kTargetVisualScale = 1.25;
@@ -174,8 +174,33 @@ void CWebScoreDlg::OnSize(UINT nType, int cx, int cy)
 // 暴露给主窗口的方法：向网页发数据
 void CWebScoreDlg::SendStateToWeb(const CString& jsonStr)
 {
-	if (m_webview != nullptr) {
-		m_webview->PostWebMessageAsJson(jsonStr.GetString());
+	if (m_webview == nullptr) {
+		const ULONGLONG now = ::GetTickCount64();
+		if (m_lastWebMessageFailure != E_POINTER ||
+		    now - m_lastWebMessageFailureTick >= 2000) {
+			WriteMatchLog(L"[WebView桥] 消息未发送：WebView2 页面对象尚未创建。");
+			m_lastWebMessageFailure = E_POINTER;
+			m_lastWebMessageFailureTick = now;
+		}
+		return;
+	}
+
+	HRESULT hr = m_webview->PostWebMessageAsJson(jsonStr.GetString());
+	if (FAILED(hr)) {
+		const ULONGLONG now = ::GetTickCount64();
+		if (hr != m_lastWebMessageFailure ||
+		    now - m_lastWebMessageFailureTick >= 2000) {
+			CString line;
+			line.Format(L"[WebView桥] PostWebMessageAsJson失败；hr=0x%08X；UTF-16长度=%d；窗口句柄=%p。",
+				static_cast<unsigned int>(hr), jsonStr.GetLength(), m_hWnd);
+			WriteMatchLog(line);
+			m_lastWebMessageFailure = hr;
+			m_lastWebMessageFailureTick = now;
+		}
+	}
+	else if (!m_webMessageSuccessLogged) {
+		WriteMatchLog(L"[WebView桥] PostWebMessageAsJson首次发送成功。");
+		m_webMessageSuccessLogged = true;
 	}
 }
 

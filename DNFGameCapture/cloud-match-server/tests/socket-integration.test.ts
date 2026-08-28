@@ -1711,4 +1711,97 @@ describe('cloud match Socket.IO integration', () => {
       emitAck(device.socket, 'room:comparison', {}),
     ).resolves.toMatchObject({ ok: true, roomRevision: 2 });
   });
+
+  test('announces realtime following before delivering the initial snapshot', async () => {
+    const { url } = await startApp();
+    const target = await createDevice(url, 'realtime-target-0001');
+    const viewer = await createDevice(url, 'realtime-viewer-0002');
+    await expect(emitAck(target.socket, 'broadcaster:join', {
+      broadcasterName: 'Realtime Target',
+    })).resolves.toMatchObject({ ok: true });
+    await expect(emitAck(viewer.socket, 'broadcaster:join', {
+      broadcasterName: 'Realtime Viewer',
+    })).resolves.toMatchObject({ ok: true });
+    await expect(emitAck(target.socket, 'snapshot:upload', {
+      snapshot: snapshot(1),
+    })).resolves.toMatchObject({ ok: true, acceptedRevision: 1 });
+
+    const received: string[] = [];
+    viewer.socket.on('sync:relations_changed', () => received.push('relations'));
+    viewer.socket.on('sync:realtime_snapshot', () => received.push('snapshot'));
+
+    await expect(emitAck(viewer.socket, 'sync:realtime:start', {
+      targetDeviceId: target.deviceId,
+      targetName: 'Realtime Target',
+    })).resolves.toMatchObject({ ok: true });
+    await waitUntil(() => expect(received).toHaveLength(2));
+    expect(received).toEqual(['relations', 'snapshot']);
+
+    await expect(emitAck(viewer.socket, 'sync:relations', {})).resolves.toMatchObject({
+      ok: true,
+      relations: [
+        {
+          viewerDeviceId: viewer.deviceId,
+          targetDeviceId: target.deviceId,
+        },
+      ],
+    });
+  });
+
+  test('removes temporary multi-instance broadcasters after disconnect grace period', async () => {
+    const { app, url } = await startApp();
+    const observer = await createDevice(url, 'temporary-observer-0001');
+    const temporary = await createDevice(url, 'dnf-tmp-session-0001');
+    await expect(emitAck(observer.socket, 'broadcaster:join', {
+      broadcasterName: 'Observer',
+    })).resolves.toMatchObject({ ok: true });
+    await expect(emitAck(temporary.socket, 'broadcaster:join', {
+      broadcasterName: 'Temporary Tester',
+    })).resolves.toMatchObject({ ok: true });
+    await expect(emitAck(temporary.socket, 'snapshot:upload', {
+      snapshot: snapshot(1),
+    })).resolves.toMatchObject({ ok: true, acceptedRevision: 1 });
+    app.db.prepare(
+      `INSERT INTO sync_history (
+         source_device_id, source_name, target_device_id, target_name,
+         sync_type, snapshot_revision, merged, created_at, expires_at
+       ) VALUES (?, ?, ?, ?, 'once', 1, 1, ?, ?)`,
+    ).run(
+      temporary.deviceId,
+      'Temporary Tester',
+      observer.deviceId,
+      'Observer',
+      1_700_000_000,
+      1_700_086_400,
+    );
+
+    temporary.socket.disconnect();
+    await waitUntil(() => {
+      expect(
+        (app.db.prepare('SELECT COUNT(*) AS count FROM devices WHERE id = ?')
+          .get(temporary.deviceId) as { count: number }).count,
+      ).toBe(0);
+    }, 5_000);
+
+    for (const [table, column] of [
+      ['memberships', 'device_id'],
+      ['snapshots', 'device_id'],
+      ['snapshot_audit', 'device_id'],
+    ] as const) {
+      expect(
+        (app.db.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE ${column} = ?`)
+          .get(temporary.deviceId) as { count: number }).count,
+      ).toBe(0);
+    }
+    expect(
+      (app.db.prepare(
+        `SELECT COUNT(*) AS count FROM sync_history
+         WHERE source_device_id = ? OR target_device_id = ?`,
+      ).get(temporary.deviceId, temporary.deviceId) as { count: number }).count,
+    ).toBe(0);
+    expect(
+      (app.db.prepare('SELECT COUNT(*) AS count FROM devices WHERE id = ?')
+        .get(observer.deviceId) as { count: number }).count,
+    ).toBe(1);
+  });
 });

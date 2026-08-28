@@ -287,17 +287,21 @@ private:
         const CString& broadcasterNameOverride);
     bool SaveCloudMatchRevision();
     void StartSavedCloudMatchSession();
-    void BeginCloudRoomJoin(const std::string& roomId, const CString& broadcasterName);
+    void BeginCloudRoomJoin(const std::string& roomId, const CString& broadcasterName,
+        const CString& requestedServerUrl);
     void BeginCloudDeviceRegistration();
     bool BeginCloudRoomRestore(const CString& reason);
     void CancelCloudRoomJoin(const CString& reason);
     void HandleCloudMatchSnapshotUploadResult(const nlohmann::json& event);
     void HandleCloudMatchMessage(std::string message);
+    bool RejectLocalMatchEditWhileRealtime();
     void InvalidateCloudMatchSyncPreview(bool clearMembers = true);
     void InvalidateCloudMatchSyncUndo();
     void BeginCloudMatchComparisonRequest();
     void HandleCloudMatchComparisonResult(const nlohmann::json& event);
     void HandleCloudMatchSnapshotResult(const nlohmann::json& event);
+    void HandleUnifiedCloudSnapshot(const nlohmann::json& event, bool realtime);
+    void RequestUnifiedCloudDirectory();
     void QueueCloudMatchSyncedUpload(const std::string& sourceDeviceId,
         std::uint64_t sourceRevision);
     void PollCloudMatch();
@@ -541,9 +545,10 @@ private:
     int m_teamSyncBackupEventBoundaryId = 0;
 
     CloudMatchClient m_cloudMatchClient;
-    CString m_cloudMatchServerUrl = L"http://127.0.0.1:18880";
+    CString m_cloudMatchServerUrl = L"http://47.109.149.111:18880";
     std::string m_cloudMatchDeviceId;
     std::string m_cloudMatchDeviceToken;
+    bool m_cloudMatchTemporaryInstance = false;
     std::string m_cloudMatchRoomId;
     CString m_cloudMatchBroadcasterName;
     std::uint64_t m_cloudMatchClientRevision = 0;
@@ -622,6 +627,20 @@ private:
     std::atomic<std::uint64_t> m_matchMutationEpoch{ 1 };
     CString m_cloudMatchSyncError;
     CString m_cloudMatchSyncLastResult;
+
+    // Unified broadcaster pool state. Legacy room fields remain only for migration.
+    nlohmann::json m_cloudBroadcasters = nlohmann::json::array();
+    nlohmann::json m_cloudSyncHistory = nlohmann::json::object();
+    nlohmann::json m_cloudRealtimeRelations = nlohmann::json::array();
+    nlohmann::json m_cloudPreviewSnapshot = nlohmann::json::object();
+    std::string m_cloudDirectoryRequestId;
+    std::string m_cloudPreviewRequestId;
+    std::string m_cloudSyncRecordRequestId;
+    std::string m_cloudRealtimeRequestId;
+    std::string m_cloudRealtimeTargetDeviceId;
+    bool m_cloudRealtimeFollowing = false;
+    ULONGLONG m_cloudRealtimeHeartbeatDueTick = 0;
+    bool m_cloudCloudStateApplying = false;
 
     int m_totalScoreRed;
     int m_totalScoreBlue;
@@ -706,7 +725,8 @@ private:
 
     // 把下面这两行覆盖原来的声明
     bool VerifyKey(CString inputKey, CString machineID);
-    CString CheckCloudBinding(CString key, CString hwid, long long duration, long long& outExpTime);
+    CString CheckCloudBinding(CString key, CString hwid, long long duration,
+        long long& outExpTime, CString& outCloudServerUrl);
     bool BeginLicenseCloudCheck(const CString& inputKey, bool manualCheck);
     CString SubmitAliasDbForReview(const std::string& aliasDbPayload, int mainCount, int pairCount);
     CString DirectSyncAliasDbToCloud(const std::string& aliasDbPayload, int mainCount, int pairCount);

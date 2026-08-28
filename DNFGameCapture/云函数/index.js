@@ -18,6 +18,7 @@ const MAX_ALIASES_PER_MAIN = 20;
 const MAX_PUBLIC_ALIAS_MAINS = 5000;
 const MAX_PUBLIC_ALIASES_PER_MAIN = 100;
 const MAX_NAME_LENGTH = 60;
+const CLOUD_MATCH_SERVER_URL = process.env.CLOUD_MATCH_SERVER_URL || 'http://47.109.149.111:18880';
 
 function createOssClient() {
     const accessKeyId = process.env.ALIBABA_CLOUD_ACCESS_KEY_ID;
@@ -549,7 +550,12 @@ async function handleVerifyLicense(client, data, res) {
     if (record.exists) {
         const valid = validateBoundLicense(record, hwid);
         if (!valid.ok) return res.json({ status: 'error', msg: valid.msg });
-        return res.json({ status: 'ok', msg: '验证通过', expireTime: record.expireTime });
+        return res.json({
+            status: 'ok',
+            msg: '验证通过',
+            expireTime: record.expireTime,
+            cloudServerUrl: CLOUD_MATCH_SERVER_URL
+        });
     }
 
     let expireTime = 0;
@@ -562,7 +568,12 @@ async function handleVerifyLicense(client, data, res) {
         await client.put(`${LICENSE_PREFIX}${licenseKey}.txt`, Buffer.from(writeContent), {
             headers: { 'x-oss-forbid-overwrite': 'true' }
         });
-        return res.json({ status: 'ok', msg: '首次激活，绑定成功！', expireTime });
+        return res.json({
+            status: 'ok',
+            msg: '首次激活，绑定成功！',
+            expireTime,
+            cloudServerUrl: CLOUD_MATCH_SERVER_URL
+        });
     } catch (putErr) {
         return res.json({ status: 'error', msg: '激活冲突，请重试！' });
     }

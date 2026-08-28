@@ -43,9 +43,24 @@ public:
 
     bool RegisterDevice(const std::string& deviceId);
     bool JoinRoom(const std::string& roomId, const std::string& broadcasterName);
+    bool JoinUnifiedPool(const std::string& broadcasterName);
     bool Rename(const std::string& broadcasterName);
+    bool RenameUnified(const std::string& broadcasterName);
     bool LeaveRoom();
     bool UploadSnapshot(std::string snapshotJson);
+    bool RequestBroadcasterDirectory(const std::string& requestId);
+    bool RequestBroadcasterSnapshot(const std::string& requestId,
+        const std::string& targetDeviceId);
+    bool RequestSyncHistory(const std::string& requestId);
+    bool RequestSyncRelations(const std::string& requestId);
+    bool RecordCloudSync(const std::string& requestId,
+        const std::string& targetDeviceId, const std::string& targetName,
+        const std::string& syncType, std::uint64_t snapshotRevision,
+        bool merged);
+    bool StartRealtimeSync(const std::string& requestId,
+        const std::string& targetDeviceId, const std::string& targetName);
+    bool HeartbeatRealtimeSync(const std::string& requestId);
+    bool StopRealtimeSync(const std::string& requestId);
     bool RequestComparison(const std::string& requestId,
         const std::string& cursor = {}, std::uint32_t limit = 64,
         const std::string& comparisonToken = {});

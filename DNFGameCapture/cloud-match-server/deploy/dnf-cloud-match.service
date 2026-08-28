@@ -1,0 +1,23 @@
+[Unit]
+Description=DNF Cloud Broadcaster Sync Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dnfcloud
+Group=dnfcloud
+WorkingDirectory=/opt/dnf-cloud-match-server
+EnvironmentFile=/etc/default/dnf-cloud-match
+ExecStart=/usr/bin/node /opt/dnf-cloud-match-server/dist/server.js
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/dnf-cloud-match
+
+[Install]
+WantedBy=multi-user.target

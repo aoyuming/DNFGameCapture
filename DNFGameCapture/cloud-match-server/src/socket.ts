@@ -3,7 +3,7 @@ import type { Server as SocketIoServer, Socket } from 'socket.io';
 import { z } from 'zod';
 
 import { compareRoomSnapshots, type RoomComparison } from './comparison.js';
-import { openDatabase } from './db.js';
+import { ALL_BROADCASTERS_ROOM_ID, openDatabase } from './db.js';
 import { authenticateDevice, touchLastSeen } from './identity.js';
 import type { CloudMatchRateLimitService } from './rate-limits.js';
 import type {
@@ -27,6 +27,25 @@ import {
   type SaveSnapshotResult,
   type StoredSnapshot,
 } from './snapshots.js';
+import {
+  listAllRealtimeSync,
+  listAllSyncHistory,
+  listRealtimeSyncForDevice,
+  listSyncHistory,
+  recordSuccessfulSync,
+  startRealtimeSync,
+  heartbeatRealtimeSync,
+  stopRealtimeSync,
+  stopRealtimeSyncForTarget,
+  pruneStaleRealtimeSync,
+} from './sync-relations.js';
+import {
+  isUnifiedBroadcasterNameTaken,
+  joinUnifiedPool,
+  listUnifiedBroadcasters,
+  pruneExpiredBroadcasters,
+  renameUnifiedBroadcaster,
+} from './unified.js';
 
 type DatabaseConnection = ReturnType<typeof openDatabase>;
 type MaybePromise<T> = T | Promise<T>;
@@ -42,8 +61,38 @@ const MAX_SHARED_COMPARISONS = 8;
 const SHARED_COMPARISON_TTL_SECONDS = 5;
 const COMPARISON_SESSION_TTL_SECONDS = 30;
 const PRESENCE_DEBOUNCE_MS = 300;
-const FIXED_ROOM_IDS = ['59', 'li-yong', 'wen-rou'] as const;
+const TEMPORARY_DEVICE_PREFIX = 'dnf-tmp-';
+const TEMPORARY_DEVICE_DISCONNECT_GRACE_MS = 2_000;
 const requestIdSchema = z.string().min(1).max(128);
+const FIXED_ROOM_IDS = ['59', 'li-yong', 'wen-rou'] as const;
+const UNIFIED_POOL_NAMESPACE = 'broadcasters:all';
+const unifiedNameSchema = z.object({
+  broadcasterName: z.string().min(1).max(512),
+  requestId: requestIdSchema.optional(),
+}).strict();
+const unifiedTargetSchema = z.object({
+  targetDeviceId: deviceIdSchema,
+  snapshotRevision: z.number().int().safe().min(1),
+  requestId: requestIdSchema.optional(),
+}).strict();
+const broadcasterSnapshotSchema = z.object({
+  targetDeviceId: deviceIdSchema,
+  requestId: requestIdSchema.optional(),
+}).strict();
+const realtimeStartSchema = z.object({
+  targetDeviceId: deviceIdSchema,
+  targetName: z.string().min(1).max(512),
+  requestId: requestIdSchema.optional(),
+}).strict();
+const realtimeHeartbeatSchema = z.object({ requestId: requestIdSchema.optional() }).strict();
+const syncRecordSchema = z.object({
+  targetDeviceId: deviceIdSchema,
+  targetName: z.string().min(1).max(512),
+  syncType: z.enum(['once', 'realtime']).default('once'),
+  snapshotRevision: z.number().int().safe().min(1),
+  merged: z.boolean().default(true),
+  requestId: requestIdSchema.optional(),
+}).strict();
 const emptyPayloadSchema = z.object({ requestId: requestIdSchema.optional() }).strict();
 const socketRoomJoinSchema = roomJoinSchema.extend({
   requestId: requestIdSchema.optional(),
@@ -164,6 +213,33 @@ export interface CloudMatchSocketHandlerRegistration {
 
 interface AuthenticatedSocketData {
   deviceId: string;
+}
+
+function isTemporaryCloudDeviceId(deviceId: string): boolean {
+  return deviceId.startsWith(TEMPORARY_DEVICE_PREFIX);
+}
+
+function deleteTemporaryCloudDevice(
+  db: DatabaseConnection,
+  deviceId: string,
+): { deleted: boolean; removedRelations: number } {
+  if (!isTemporaryCloudDeviceId(deviceId)) {
+    return { deleted: false, removedRelations: 0 };
+  }
+  return db.transaction(() => {
+    db.prepare(
+      `DELETE FROM sync_history
+       WHERE source_device_id = ? OR target_device_id = ?`,
+    ).run(deviceId, deviceId);
+    const removedRelations = db.prepare(
+      `DELETE FROM realtime_sync
+       WHERE viewer_device_id = ? OR target_device_id = ?`,
+    ).run(deviceId, deviceId).changes;
+    db.prepare('DELETE FROM snapshot_audit WHERE device_id = ?').run(deviceId);
+    const deleted = db.prepare('DELETE FROM devices WHERE id = ?')
+      .run(deviceId).changes === 1;
+    return { deleted, removedRelations };
+  })();
 }
 
 interface MaterializedComparison {
@@ -330,12 +406,60 @@ export function registerCloudMatchSocketHandlers(
   } = context;
   const activeSockets = new Map<string, Socket>();
   const deviceQueues = new Map<string, Promise<void>>();
+  const temporaryCleanupTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
   const comparisonCache = new Map<string, SharedComparison>();
   const pendingPresence = new Map<string, PendingPresenceState>();
   const lastAnnouncedDataRevision = new Map<string, number>(
     FIXED_ROOM_IDS.map((roomId) => [roomId, -1]),
   );
   let notificationsClosed = false;
+
+  const buildUnifiedDirectory = (forDeviceId = '') => {
+    const activeDeviceIds = new Set(activeSockets.keys());
+    const broadcasters = listUnifiedBroadcasters(db, activeDeviceIds, now());
+    const relations = listAllRealtimeSync(db, now());
+    return {
+      broadcasters,
+      relations,
+      history: listAllSyncHistory(db, now()),
+      self: broadcasters.find((item) => item.deviceId === forDeviceId) ?? null,
+    };
+  };
+
+  const emitUnifiedChanged = (reason: string): void => {
+    if (notificationsClosed) return;
+    try {
+      const directory = buildUnifiedDirectory();
+      io.emit('broadcasters:changed', {
+        ...directory,
+        reason,
+        generatedAt: now(),
+      });
+    } catch {
+      // A disconnected client must never interrupt the mutation that caused this event.
+    }
+  };
+
+  const cleanupTimer = setInterval(() => {
+    if (notificationsClosed) return;
+    try {
+      const current = now();
+      const removedBroadcasters = pruneExpiredBroadcasters(db, current);
+      const removedRelations = pruneStaleRealtimeSync(db, current);
+      if (removedRelations > 0) {
+        io.emit('sync:relations_changed', {
+          relations: listAllRealtimeSync(db, current),
+        });
+      }
+      if (removedBroadcasters > 0) emitUnifiedChanged('retention_cleanup');
+    } catch {
+      // Cleanup retries on the next interval; the active session remains usable.
+    }
+  }, 1_000);
+  cleanupTimer.unref?.();
 
   const removeSettledDeviceQueue = (
     deviceId: string,
@@ -361,6 +485,32 @@ export function registerCloudMatchSocketHandlers(
     deviceQueues.set(deviceId, tail);
     removeSettledDeviceQueue(deviceId, tail);
     return result;
+  };
+
+  const cancelTemporaryDeviceCleanup = (deviceId: string): void => {
+    const timer = temporaryCleanupTimers.get(deviceId);
+    if (timer) clearTimeout(timer);
+    temporaryCleanupTimers.delete(deviceId);
+  };
+
+  const scheduleTemporaryDeviceCleanup = (deviceId: string): void => {
+    if (!isTemporaryCloudDeviceId(deviceId)) return;
+    cancelTemporaryDeviceCleanup(deviceId);
+    const timer = setTimeout(() => {
+      temporaryCleanupTimers.delete(deviceId);
+      void enqueueDeviceOperation(deviceId, async () => {
+        if (activeSockets.has(deviceId) || notificationsClosed) return;
+        const removed = deleteTemporaryCloudDevice(db, deviceId);
+        if (removed.removedRelations > 0) {
+          io.emit('sync:relations_changed', {
+            relations: listAllRealtimeSync(db, now()),
+          });
+        }
+        if (removed.deleted) emitUnifiedChanged('temporary_device_cleanup');
+      });
+    }, TEMPORARY_DEVICE_DISCONNECT_GRACE_MS);
+    timer.unref?.();
+    temporaryCleanupTimers.set(deviceId, timer);
   };
 
   const rememberComparison = (
@@ -674,6 +824,7 @@ export function registerCloudMatchSocketHandlers(
       if (!socket.connected) {
         return;
       }
+      cancelTemporaryDeviceCleanup(deviceId);
       const previousSocket = activeSockets.get(deviceId);
       activeSockets.set(deviceId, socket);
       if (previousSocket && previousSocket.id !== socket.id) {
@@ -980,6 +1131,235 @@ export function registerCloudMatchSocketHandlers(
       true,
     );
 
+    // New clients use the unified broadcaster pool. The old room handlers above remain
+    // available only for protocol compatibility with older desktop builds.
+    bindAckEvent(
+      'broadcaster:join',
+      async (payload) => {
+        const parsed = unifiedNameSchema.safeParse(payload);
+        const requestId = safeRequestId(payload);
+        if (!parsed.success) {
+          return { ok: false, code: 'invalid_broadcaster_name', ...(requestId ? { requestId } : {}) };
+        }
+        const mutation = rateLimitService.allowMembershipMutation(
+          deviceId,
+          socketIpAddress,
+          now(),
+        );
+        if (!mutation.allowed) {
+          return {
+            ok: false,
+            code: 'rate_limited',
+            retryAfterMs: mutation.retryAfterMs,
+            ...(requestId ? { requestId } : {}),
+          };
+        }
+        if (isUnifiedBroadcasterNameTaken(
+          db,
+          parsed.data.broadcasterName,
+          new Set(activeSockets.keys()),
+          deviceId,
+        )) {
+          return { ok: false, code: 'broadcaster_name_taken', ...(requestId ? { requestId } : {}) };
+        }
+        const membership = joinUnifiedPool(
+          db,
+          deviceId,
+          parsed.data.broadcasterName,
+          now(),
+        );
+        if (!membership) {
+          return { ok: false, code: 'invalid_broadcaster_name', ...(requestId ? { requestId } : {}) };
+        }
+        await socketRoomAdapter.join(socket, UNIFIED_POOL_NAMESPACE);
+        emitUnifiedChanged('joined');
+        return {
+          ok: true,
+          pool: 'unified',
+          broadcasterName: membership.broadcasterName,
+          ...(requestId ? { requestId } : {}),
+        };
+      },
+      true,
+    );
+
+    bindAckEvent(
+      'broadcaster:rename',
+      async (payload) => {
+        const parsed = unifiedNameSchema.safeParse(payload);
+        const requestId = safeRequestId(payload);
+        if (!parsed.success) {
+          return { ok: false, code: 'invalid_broadcaster_name', ...(requestId ? { requestId } : {}) };
+        }
+        const mutation = rateLimitService.allowMembershipMutation(
+          deviceId,
+          socketIpAddress,
+          now(),
+        );
+        if (!mutation.allowed) {
+          return { ok: false, code: 'rate_limited', retryAfterMs: mutation.retryAfterMs, ...(requestId ? { requestId } : {}) };
+        }
+        if (isUnifiedBroadcasterNameTaken(
+          db,
+          parsed.data.broadcasterName,
+          new Set(activeSockets.keys()),
+          deviceId,
+        )) {
+          return { ok: false, code: 'broadcaster_name_taken', ...(requestId ? { requestId } : {}) };
+        }
+        const membership = renameUnifiedBroadcaster(db, deviceId, parsed.data.broadcasterName, now());
+        if (!membership) return { ok: false, code: 'not_registered', ...(requestId ? { requestId } : {}) };
+        emitUnifiedChanged('renamed');
+        return { ok: true, ...membership, ...(requestId ? { requestId } : {}) };
+      },
+      true,
+    );
+
+    bindAckEvent(
+      'broadcasters:list',
+      async () => {
+        const directory = buildUnifiedDirectory(deviceId);
+        return { ok: true, ...directory, generatedAt: now() };
+      },
+      true,
+    );
+
+    bindAckEvent(
+      'broadcaster:snapshot',
+      async (payload) => {
+        const parsed = broadcasterSnapshotSchema.safeParse(payload);
+        const requestId = safeRequestId(payload);
+        if (!parsed.success) return { ok: false, code: 'invalid_request', ...(requestId ? { requestId } : {}) };
+        const target = listUnifiedBroadcasters(db, new Set(activeSockets.keys()), now())
+          .find((item) => item.deviceId === parsed.data.targetDeviceId);
+        if (!target) return { ok: false, code: 'target_not_found', ...(requestId ? { requestId } : {}) };
+        const stored = await snapshotService.getSnapshot(db, target.deviceId);
+        if (!stored || stored.roomId !== ALL_BROADCASTERS_ROOM_ID) {
+          return { ok: false, code: 'target_has_no_snapshot', ...(requestId ? { requestId } : {}) };
+        }
+        return boundedResponse({
+          ok: true,
+          targetDeviceId: target.deviceId,
+          broadcasterName: target.broadcasterName,
+          online: target.online,
+          receivedAt: stored.receivedAt,
+          snapshotRevision: stored.snapshot.clientRevision,
+          snapshot: stored.snapshot,
+          ...(requestId ? { requestId } : {}),
+        }, MAX_PROTOCOL_ACK_BYTES);
+      },
+      true,
+    );
+
+    bindAckEvent(
+      'sync:history',
+      async () => ({ ok: true, ...listSyncHistory(db, deviceId, now()) }),
+      true,
+    );
+
+    bindAckEvent(
+      'sync:relations',
+      async () => {
+        const relations = listRealtimeSyncForDevice(db, deviceId, now());
+        return {
+          ok: true,
+          ...relations,
+          relations: [...relations.incoming, ...relations.outgoing],
+        };
+      },
+      true,
+    );
+
+    bindAckEvent(
+      'sync:record',
+      async (payload) => {
+        const parsed = syncRecordSchema.safeParse(payload);
+        const requestId = safeRequestId(payload);
+        if (!parsed.success) return { ok: false, code: 'invalid_request', ...(requestId ? { requestId } : {}) };
+        const entries = listUnifiedBroadcasters(db, new Set(activeSockets.keys()), now());
+        // The requesting client is the target that receives the selected broadcaster's
+        // data. Keep history semantics consistent with the UI: source = data owner,
+        // target = local broadcaster.
+        const source = entries.find((item) => item.deviceId === parsed.data.targetDeviceId);
+        const target = entries.find((item) => item.deviceId === deviceId);
+        if (!source || !target || source.deviceId === target.deviceId) {
+          return { ok: false, code: 'target_not_found', ...(requestId ? { requestId } : {}) };
+        }
+        if (source.snapshotRevision !== parsed.data.snapshotRevision) {
+          return { ok: false, code: 'snapshot_revision_changed', ...(requestId ? { requestId } : {}) };
+        }
+        const record = recordSuccessfulSync(db, {
+          sourceDeviceId: source.deviceId,
+          sourceName: source.broadcasterName,
+          targetDeviceId: target.deviceId,
+          targetName: target.broadcasterName,
+          syncType: parsed.data.syncType,
+          snapshotRevision: parsed.data.snapshotRevision,
+          merged: parsed.data.merged,
+          createdAt: now(),
+        });
+        emitUnifiedChanged('sync_recorded');
+        return { ok: true, record, ...(requestId ? { requestId } : {}) };
+      },
+      true,
+    );
+
+    bindAckEvent(
+      'sync:realtime:start',
+      async (payload) => {
+        const parsed = realtimeStartSchema.safeParse(payload);
+        const requestId = safeRequestId(payload);
+        if (!parsed.success) return { ok: false, code: 'invalid_request', ...(requestId ? { requestId } : {}) };
+        const entries = listUnifiedBroadcasters(db, new Set(activeSockets.keys()), now());
+        const source = entries.find((item) => item.deviceId === deviceId);
+        const target = entries.find((item) => item.deviceId === parsed.data.targetDeviceId);
+        if (!source || !target) return { ok: false, code: 'target_not_found', ...(requestId ? { requestId } : {}) };
+        if (!target.online) return { ok: false, code: 'target_offline', ...(requestId ? { requestId } : {}) };
+        const relation = startRealtimeSync(db, {
+          viewerDeviceId: deviceId,
+          viewerName: source.broadcasterName,
+          targetDeviceId: target.deviceId,
+          targetName: target.broadcasterName,
+          startedAt: now(),
+        });
+        io.emit('sync:relations_changed', { relations: listAllRealtimeSync(db, now()) });
+        const stored = await snapshotService.getSnapshot(db, target.deviceId);
+        if (stored) {
+          socket.emit('sync:realtime_snapshot', {
+            sourceDeviceId: target.deviceId,
+            sourceName: target.broadcasterName,
+            snapshotRevision: stored.snapshot.clientRevision,
+            snapshot: stored.snapshot,
+          });
+        }
+        return { ok: true, relation, ...(requestId ? { requestId } : {}) };
+      },
+      true,
+    );
+
+    bindAckEvent(
+      'sync:realtime:heartbeat',
+      async (payload) => {
+        const parsed = realtimeHeartbeatSchema.safeParse(payload ?? {});
+        const requestId = safeRequestId(payload);
+        if (!parsed.success) return { ok: false, code: 'invalid_request', ...(requestId ? { requestId } : {}) };
+        const updated = heartbeatRealtimeSync(db, deviceId, now());
+        return { ok: updated, ...(updated ? {} : { code: 'not_following' }), ...(requestId ? { requestId } : {}) };
+      },
+      true,
+    );
+
+    bindAckEvent(
+      'sync:realtime:stop',
+      async (payload) => {
+        const requestId = safeRequestId(payload);
+        const stopped = stopRealtimeSync(db, deviceId);
+        if (stopped) io.emit('sync:relations_changed', { relations: listAllRealtimeSync(db, now()) });
+        return { ok: true, stopped, ...(requestId ? { requestId } : {}) };
+      },
+      true,
+    );
+
     bindAckEvent(
       'snapshot:upload',
       async (payload) => {
@@ -1063,6 +1443,24 @@ export function registerCloudMatchSocketHandlers(
         const result = accept();
         if (result.ok) {
           emitRoomChanged(socket, roomId, result.roomRevision);
+          if (roomId === ALL_BROADCASTERS_ROOM_ID) {
+            emitUnifiedChanged('snapshot_changed');
+            const stored = await snapshotService.getSnapshot(db, deviceId);
+            if (stored) {
+              for (const relation of listAllRealtimeSync(db, now())) {
+                if (relation.targetDeviceId !== deviceId) continue;
+                const viewer = activeSockets.get(relation.viewerDeviceId);
+                if (viewer?.connected) {
+                  viewer.emit('sync:realtime_snapshot', {
+                    sourceDeviceId: deviceId,
+                    sourceName: relation.targetName,
+                    snapshotRevision: stored.snapshot.clientRevision,
+                    snapshot: stored.snapshot,
+                  });
+                }
+              }
+            }
+          }
         }
         return result;
       },
@@ -1231,7 +1629,18 @@ export function registerCloudMatchSocketHandlers(
             const membership = await roomService.getMembership(db, deviceId);
             if (membership) {
               scheduleRoomPresence(membership.room.id, deviceId, false);
+              if (membership.room.id === ALL_BROADCASTERS_ROOM_ID) {
+                const removedViewer = stopRealtimeSync(db, deviceId);
+                const removedTarget = stopRealtimeSyncForTarget(db, deviceId);
+                if (removedViewer || removedTarget) {
+                  io.emit('sync:relations_changed', {
+                    relations: listAllRealtimeSync(db, now()),
+                  });
+                }
+                emitUnifiedChanged('disconnected');
+              }
             }
+            scheduleTemporaryDeviceCleanup(deviceId);
           }
         } catch {
           // Shutdown may close the database while disconnect notifications drain.
@@ -1243,10 +1652,13 @@ export function registerCloudMatchSocketHandlers(
   return {
     close(): void {
       notificationsClosed = true;
+      clearInterval(cleanupTimer);
       for (const state of pendingPresence.values()) {
         if (state.timer) clearTimeout(state.timer);
       }
       pendingPresence.clear();
+      for (const timer of temporaryCleanupTimers.values()) clearTimeout(timer);
+      temporaryCleanupTimers.clear();
       lastAnnouncedDataRevision.clear();
       comparisonCache.clear();
     },

@@ -25,6 +25,42 @@ bool HasExactKeys(const json& value, std::initializer_list<const char*> keys)
     return true;
 }
 
+bool HasExactKeysWithOptionalRecentEvents(const json& value,
+    std::initializer_list<const char*> keys)
+{
+    if (!value.is_object()) return false;
+    const bool hasRecentEvents = value.contains("recentEvents");
+    if (value.size() != keys.size() + (hasRecentEvents ? 1u : 0u)) return false;
+    for (const char* key : keys) {
+        if (!value.contains(key)) return false;
+    }
+    return !hasRecentEvents || value["recentEvents"].is_array();
+}
+
+bool IsSafeRecentEventText(const json& value)
+{
+    if (!value.is_string()) return false;
+    const std::string& text = value.get_ref<const std::string&>();
+    return text.size() <= 1024 && text.find('\r') == std::string::npos &&
+        text.find('\n') == std::string::npos && text.find('\0') == std::string::npos;
+}
+
+bool ValidateRecentEvents(const json& cloudSnapshot)
+{
+    const auto recent = cloudSnapshot.find("recentEvents");
+    if (recent == cloudSnapshot.end()) return true;
+    if (!recent->is_array() || recent->size() > 10) return false;
+    for (const auto& event : *recent) {
+        if (!HasExactKeys(event, { "time", "killer", "dead", "status" })) {
+            return false;
+        }
+        for (const char* key : { "time", "killer", "dead", "status" }) {
+            if (!IsSafeRecentEventText(event[key])) return false;
+        }
+    }
+    return true;
+}
+
 bool ReadUnsigned(const json& value, const char* key, std::uint64_t minimum,
     std::uint64_t maximum, std::uint64_t& output)
 {
@@ -144,19 +180,20 @@ bool DnfConvertCloudMatchSnapshot(const json& cloudSnapshot,
     if (!allowedSource) return fail("invalid_snapshot");
 
     if (cloudSync) {
-        if (!HasExactKeys(cloudSnapshot,
+        if (!HasExactKeysWithOptionalRecentEvents(cloudSnapshot,
             { "schemaVersion", "clientRevision", "clientTime", "changeSource",
               "syncedFrom", "redScore", "blueScore", "redPlayers", "bluePlayers",
               "redPickFirst", "teamsFlipped", "outputSeatLabel", "lastKillTeam" })) {
             return fail("invalid_snapshot");
         }
     }
-    else if (!HasExactKeys(cloudSnapshot,
+    else if (!HasExactKeysWithOptionalRecentEvents(cloudSnapshot,
         { "schemaVersion", "clientRevision", "clientTime", "changeSource",
           "redScore", "blueScore", "redPlayers", "bluePlayers", "redPickFirst",
           "teamsFlipped", "outputSeatLabel", "lastKillTeam" })) {
         return fail("invalid_snapshot");
     }
+    if (!ValidateRecentEvents(cloudSnapshot)) return fail("invalid_snapshot");
 
     std::uint64_t schemaVersion = 0;
     std::uint64_t clientRevision = 0;

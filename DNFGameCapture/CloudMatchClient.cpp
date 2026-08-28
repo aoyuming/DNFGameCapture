@@ -32,7 +32,6 @@ constexpr std::size_t kMaxProtectedResultCapacity = 96;
 constexpr auto kAckTimeout = std::chrono::seconds(8);
 constexpr auto kTransientCommandTimeout = std::chrono::seconds(8);
 constexpr DWORD kNetworkTimeoutMs = 3000;
-constexpr DWORD kReceivePollTimeoutMs = 200;
 constexpr std::size_t kMaxRegistrationResponseBytes = 4096;
 constexpr std::size_t kMaxBroadcasterNameBytes = 512;
 constexpr std::array<int, 5> kReconnectDelaysSeconds{ 1, 2, 5, 10, 20 };
@@ -128,36 +127,6 @@ bool EqualsAsciiCaseInsensitive(std::wstring_view value,
         if (character != expected[index]) return false;
     }
     return true;
-}
-
-bool IsIpv4LoopbackHost(std::wstring_view host) noexcept
-{
-    unsigned int octets[4]{};
-    std::size_t octetIndex = 0;
-    std::size_t index = 0;
-    while (index < host.size() && octetIndex < 4) {
-        if (host[index] < L'0' || host[index] > L'9') return false;
-        unsigned int value = 0;
-        std::size_t digits = 0;
-        while (index < host.size() && host[index] >= L'0' && host[index] <= L'9') {
-            value = value * 10 + static_cast<unsigned int>(host[index] - L'0');
-            if (value > 255) return false;
-            ++index;
-            ++digits;
-        }
-        if (digits == 0) return false;
-        octets[octetIndex++] = value;
-        if (index == host.size()) break;
-        if (host[index] != L'.') return false;
-        ++index;
-    }
-    return index == host.size() && octetIndex == 4 && octets[0] == 127;
-}
-
-bool IsExplicitLoopbackHttpHost(std::wstring_view host) noexcept
-{
-    return EqualsAsciiCaseInsensitive(host, L"localhost") ||
-        host == L"::1" || host == L"[::1]" || IsIpv4LoopbackHost(host);
 }
 
 std::string SanitizeServerText(const json& value, const char* key,
@@ -369,6 +338,14 @@ public:
         return true;
     }
 
+    bool JoinUnifiedPool(const std::string& broadcasterName)
+    {
+        if (broadcasterName.empty() || broadcasterName.size() > kMaxBroadcasterNameBytes) {
+            return false;
+        }
+        return EnqueueCommand(CommandKind::joinUnified, broadcasterName, {}, {});
+    }
+
     bool Rename(const std::string& broadcasterName)
     {
         if (broadcasterName.empty() ||
@@ -383,6 +360,14 @@ public:
         }
         condition.notify_all();
         return true;
+    }
+
+    bool RenameUnified(const std::string& broadcasterName)
+    {
+        if (broadcasterName.empty() || broadcasterName.size() > kMaxBroadcasterNameBytes) {
+            return false;
+        }
+        return EnqueueCommand(CommandKind::renameUnified, broadcasterName, {}, {});
     }
 
     bool LeaveRoom()
@@ -460,6 +445,68 @@ public:
         }
         condition.notify_all();
         return true;
+    }
+
+    bool RequestBroadcasterDirectory(const std::string& requestId)
+    {
+        return EnqueueCommand(CommandKind::requestBroadcasters, {}, {}, requestId);
+    }
+
+    bool RequestBroadcasterSnapshot(const std::string& requestId,
+        const std::string& targetDeviceId)
+    {
+        if (requestId.empty() || targetDeviceId.empty() || targetDeviceId.size() > 128) return false;
+        return EnqueueCommand(CommandKind::requestBroadcasterSnapshot,
+            targetDeviceId, {}, requestId);
+    }
+
+    bool RequestSyncHistory(const std::string& requestId)
+    {
+        return EnqueueCommand(CommandKind::requestSyncHistory, {}, {}, requestId);
+    }
+
+    bool RequestSyncRelations(const std::string& requestId)
+    {
+        return EnqueueCommand(CommandKind::requestSyncRelations, {}, {}, requestId);
+    }
+
+    bool RecordCloudSync(const std::string& requestId,
+        const std::string& targetDeviceId, const std::string& targetName,
+        const std::string& syncType, std::uint64_t snapshotRevision, bool merged)
+    {
+        if (requestId.empty() || targetDeviceId.empty() || targetName.empty() ||
+            (syncType != "once" && syncType != "realtime") || snapshotRevision == 0) {
+            return false;
+        }
+        json payload = {
+            { "targetDeviceId", targetDeviceId },
+            { "targetName", targetName },
+            { "syncType", syncType },
+            { "snapshotRevision", snapshotRevision },
+            { "merged", merged },
+        };
+        return EnqueueCommand(CommandKind::recordSync, payload.dump(), {}, requestId);
+    }
+
+    bool StartRealtimeSync(const std::string& requestId,
+        const std::string& targetDeviceId, const std::string& targetName)
+    {
+        if (requestId.empty() || targetDeviceId.empty() || targetName.empty()) return false;
+        json payload = {
+            { "targetDeviceId", targetDeviceId },
+            { "targetName", targetName },
+        };
+        return EnqueueCommand(CommandKind::startRealtime, payload.dump(), {}, requestId);
+    }
+
+    bool HeartbeatRealtimeSync(const std::string& requestId)
+    {
+        return EnqueueCommand(CommandKind::heartbeatRealtime, {}, {}, requestId);
+    }
+
+    bool StopRealtimeSync(const std::string& requestId)
+    {
+        return EnqueueCommand(CommandKind::stopRealtime, {}, {}, requestId);
     }
 
     bool RequestComparison(const std::string& requestId,
@@ -644,6 +691,36 @@ public:
         case CommandKind::requestSnapshot:
             type = "snapshot_result";
             break;
+        case CommandKind::joinUnified:
+            type = "broadcaster_join_result";
+            break;
+        case CommandKind::renameUnified:
+            type = "broadcaster_rename_result";
+            break;
+        case CommandKind::requestBroadcasters:
+            type = "broadcasters_list_result";
+            break;
+        case CommandKind::requestBroadcasterSnapshot:
+            type = "broadcaster_snapshot_result";
+            break;
+        case CommandKind::requestSyncHistory:
+            type = "sync_history_result";
+            break;
+        case CommandKind::requestSyncRelations:
+            type = "sync_relations_result";
+            break;
+        case CommandKind::recordSync:
+            type = "sync_record_result";
+            break;
+        case CommandKind::startRealtime:
+            type = "realtime_start_result";
+            break;
+        case CommandKind::heartbeatRealtime:
+            type = "realtime_heartbeat_result";
+            break;
+        case CommandKind::stopRealtime:
+            type = "realtime_stop_result";
+            break;
         }
         json result = {
             { "type", type },
@@ -680,11 +757,11 @@ public:
 
         PendingAck pending;
         pending.kind = command.kind;
-        pending.resultType = command.kind == CommandKind::requestSnapshot ?
-            "snapshot_result" : "room_comparison_result";
+        pending.resultType = ResultTypeForCommand(command.kind);
         pending.requestId = command.requestId;
         pending.clientRevision = command.clientRevision;
-        pending.targetDeviceId = command.kind == CommandKind::requestSnapshot ?
+        pending.targetDeviceId = (command.kind == CommandKind::requestSnapshot ||
+            command.kind == CommandKind::requestBroadcasterSnapshot) ?
             command.argument : std::string();
         pending.protectedResultReservation = command.protectedResultReservation;
         command.protectedResultReservation = false;
@@ -995,13 +1072,51 @@ private:
         leaveRoom,
         uploadSnapshot,
         requestComparison,
-        requestSnapshot
+        requestSnapshot,
+        joinUnified,
+        renameUnified,
+        requestBroadcasters,
+        requestBroadcasterSnapshot,
+        requestSyncHistory,
+        requestSyncRelations,
+        recordSync,
+        startRealtime,
+        heartbeatRealtime,
+        stopRealtime
     };
 
     static bool IsTransientRequest(CommandKind kind) noexcept
     {
         return kind == CommandKind::requestComparison ||
-            kind == CommandKind::requestSnapshot;
+            kind == CommandKind::requestSnapshot ||
+            kind == CommandKind::requestBroadcasters ||
+            kind == CommandKind::requestBroadcasterSnapshot ||
+            kind == CommandKind::requestSyncHistory ||
+            kind == CommandKind::requestSyncRelations;
+    }
+
+    static const char* ResultTypeForCommand(CommandKind kind) noexcept
+    {
+        switch (kind) {
+        case CommandKind::registerDevice: return "device_registration_error";
+        case CommandKind::joinRoom: return "room_join_result";
+        case CommandKind::renameRoom: return "room_rename_result";
+        case CommandKind::leaveRoom: return "room_leave_result";
+        case CommandKind::uploadSnapshot: return "snapshot_upload_result";
+        case CommandKind::requestComparison: return "room_comparison_result";
+        case CommandKind::requestSnapshot: return "snapshot_result";
+        case CommandKind::joinUnified: return "broadcaster_join_result";
+        case CommandKind::renameUnified: return "broadcaster_rename_result";
+        case CommandKind::requestBroadcasters: return "broadcasters_list_result";
+        case CommandKind::requestBroadcasterSnapshot: return "broadcaster_snapshot_result";
+        case CommandKind::requestSyncHistory: return "sync_history_result";
+        case CommandKind::requestSyncRelations: return "sync_relations_result";
+        case CommandKind::recordSync: return "sync_record_result";
+        case CommandKind::startRealtime: return "realtime_start_result";
+        case CommandKind::heartbeatRealtime: return "realtime_heartbeat_result";
+        case CommandKind::stopRealtime: return "realtime_stop_result";
+        }
+        return "cloud_request_result";
     }
 
     struct Config
@@ -1105,6 +1220,7 @@ private:
             argument.swap(other.argument);
             secondArgument.swap(other.secondArgument);
             requestId.swap(other.requestId);
+            payload.swap(other.payload);
             other.generation = 0;
             other.sequence = 0;
             other.clientRevision = 0;
@@ -1127,6 +1243,7 @@ private:
                 argument.swap(other.argument);
                 secondArgument.swap(other.secondArgument);
                 requestId.swap(other.requestId);
+                payload.swap(other.payload);
                 other.generation = 0;
                 other.sequence = 0;
                 other.clientRevision = 0;
@@ -1141,6 +1258,7 @@ private:
         std::string argument;
         std::string secondArgument;
         std::string requestId;
+        std::string payload;
         std::uint64_t generation = 0;
         std::uint64_t sequence = 0;
         std::uint64_t clientRevision = 0;
@@ -1153,6 +1271,7 @@ private:
             SecureClear(argument);
             SecureClear(secondArgument);
             SecureClear(requestId);
+            SecureClear(payload);
             generation = 0;
             sequence = 0;
             clientRevision = 0;
@@ -1319,6 +1438,7 @@ private:
         std::uint32_t pingTimeoutMs = 20000;
         std::size_t outboundLimit = cloud_match::kMaxCloudMatchPayloadBytes;
         Clock::time_point lastServerActivity = Clock::now();
+        bool receiveThreadActive = false;
     };
 
     enum class ReceiveResult
@@ -1328,6 +1448,12 @@ private:
         closed,
         rejected,
         failed
+    };
+
+    struct ReceivedPacket
+    {
+        ReceiveResult result = ReceiveResult::failed;
+        std::string payload;
     };
 
     enum class CancelablePublishResult
@@ -1363,7 +1489,9 @@ private:
 
     static bool IsCoalescibleNotification(std::string_view type) noexcept
     {
-        return type == "room_changed" || type == "room_presence";
+        return type == "room_changed" || type == "room_presence" ||
+            type == "broadcasters_changed" || type == "sync_relations_changed" ||
+            type == "realtime_snapshot";
     }
 
     static bool IsProtectedInboundResult(std::string_view type) noexcept
@@ -1371,7 +1499,12 @@ private:
         return type == "device_registered" || type == "device_registration_error" ||
             type == "room_join_result" || type == "snapshot_upload_result" ||
             type == "room_rename_result" || type == "room_leave_result" ||
-            type == "room_comparison_result" || type == "snapshot_result";
+            type == "room_comparison_result" || type == "snapshot_result" ||
+            type == "broadcaster_join_result" || type == "broadcaster_rename_result" ||
+            type == "broadcasters_list_result" || type == "broadcaster_snapshot_result" ||
+            type == "sync_history_result" || type == "sync_relations_result" ||
+            type == "sync_record_result" || type == "realtime_start_result" ||
+            type == "realtime_heartbeat_result" || type == "realtime_stop_result";
     }
 
     bool DropOldestNotificationLocked() noexcept
@@ -1463,9 +1596,10 @@ private:
     }
 
     CancelablePublishResult PublishCancelableHandle(HINTERNET handle,
-        std::uint64_t generation) noexcept
+        std::uint64_t generation, const std::atomic<bool>* localCancel = nullptr) noexcept
     {
-        if (!handle || stopRequested.load(std::memory_order_acquire) ||
+        if (!handle || (localCancel && localCancel->load(std::memory_order_acquire)) ||
+            stopRequested.load(std::memory_order_acquire) ||
             configGeneration.load(std::memory_order_acquire) != generation) {
             return CancelablePublishResult::notPublished;
         }
@@ -1475,7 +1609,8 @@ private:
             std::memory_order_acq_rel)) {
             return CancelablePublishResult::notPublished;
         }
-        if (!stopRequested.load(std::memory_order_acquire) &&
+        if ((!localCancel || !localCancel->load(std::memory_order_acquire)) &&
+            !stopRequested.load(std::memory_order_acquire) &&
             configGeneration.load(std::memory_order_acquire) == generation) {
             return CancelablePublishResult::published;
         }
@@ -1499,11 +1634,12 @@ private:
     {
     public:
         ActiveHandleScope(Impl& owner, WinHttpHandle& handleOwner,
-            std::uint64_t generation) noexcept
+            std::uint64_t generation,
+            const std::atomic<bool>* localCancel = nullptr) noexcept
             : owner_(owner), handleOwner_(handleOwner)
         {
             const CancelablePublishResult result =
-                owner_.PublishCancelableHandle(handleOwner_.Get(), generation);
+                owner_.PublishCancelableHandle(handleOwner_.Get(), generation, localCancel);
             active_ = result == CancelablePublishResult::published;
             if (result == CancelablePublishResult::cancelled) handleOwner_.Release();
         }
@@ -1559,7 +1695,6 @@ private:
         result.secure = components.nScheme == INTERNET_SCHEME_HTTPS;
         result.port = components.nPort;
         result.host.assign(components.lpszHostName, components.dwHostNameLength);
-        if (!result.secure && !IsExplicitLoopbackHttpHost(result.host)) return false;
         if (components.dwUrlPathLength > 0) {
             result.basePath.assign(components.lpszUrlPath, components.dwUrlPathLength);
         }
@@ -2106,21 +2241,12 @@ private:
         connection.socket.Reset(WinHttpWebSocketCompleteUpgrade(request.Get(), 0));
         if (!connection.socket || ShouldAbort(activeConfig.generation)) return false;
         requestScope.Finish();
-
-        DWORD receiveTimeout = kReceivePollTimeoutMs;
-        DWORD sendTimeout = kNetworkTimeoutMs;
-        if (!WinHttpSetOption(connection.socket.Get(), WINHTTP_OPTION_RECEIVE_TIMEOUT,
-            &receiveTimeout, sizeof(receiveTimeout)) ||
-            !WinHttpSetOption(connection.socket.Get(), WINHTTP_OPTION_SEND_TIMEOUT,
-                &sendTimeout, sizeof(sendTimeout))) {
-            return false;
-        }
         connection.lastServerActivity = Clock::now();
         return true;
     }
 
     bool SendText(WebSocketConnection& connection, std::string_view message,
-        std::uint64_t generation)
+        std::uint64_t generation, bool cancellable = true)
     {
         if (ShouldAbort(generation) || message.empty() ||
             message.size() > connection.outboundLimit ||
@@ -2128,33 +2254,51 @@ private:
             static_cast<std::size_t>((std::numeric_limits<DWORD>::max)())) {
             return false;
         }
-        ActiveHandleScope socketScope(*this, connection.socket, generation);
-        if (!socketScope) return false;
-        const DWORD error = WinHttpWebSocketSend(connection.socket.Get(),
-            WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-            const_cast<char*>(message.data()), static_cast<DWORD>(message.size()));
+        const auto send = [&]() {
+            return WinHttpWebSocketSend(connection.socket.Get(),
+                WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+                const_cast<char*>(message.data()), static_cast<DWORD>(message.size()));
+        };
+        DWORD error = ERROR_SUCCESS;
+        if (cancellable && !connection.receiveThreadActive) {
+            ActiveHandleScope socketScope(*this, connection.socket, generation);
+            if (!socketScope) return false;
+            error = send();
+        }
+        else {
+            // The receiver owns the socket's cancelable-operation slot while the
+            // connection is idle. Sending remains on this worker thread so the
+            // two directions never share a worker-side command queue.
+            error = send();
+        }
         if (ShouldAbort(generation)) return false;
         if (error == ERROR_WINHTTP_OPERATION_CANCELLED && ShouldStop()) return false;
         return error == NO_ERROR;
     }
 
     ReceiveResult ReceiveText(WebSocketConnection& connection, std::string& message,
-        std::uint64_t generation)
+        std::uint64_t generation, const std::atomic<bool>* localCancel = nullptr)
     {
-        if (ShouldAbort(generation)) return ReceiveResult::closed;
+        if (ShouldAbort(generation) || (localCancel &&
+            localCancel->load(std::memory_order_acquire))) {
+            return ReceiveResult::closed;
+        }
         std::array<unsigned char, 8192> buffer{};
         DWORD bytesRead = 0;
         WINHTTP_WEB_SOCKET_BUFFER_TYPE bufferType = WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE;
         DWORD error = ERROR_SUCCESS;
         {
-            ActiveHandleScope socketScope(*this, connection.socket, generation);
+            ActiveHandleScope socketScope(*this, connection.socket, generation, localCancel);
             if (!socketScope) {
-                return ShouldAbort(generation) ? ReceiveResult::closed : ReceiveResult::failed;
+                return (ShouldAbort(generation) || (localCancel &&
+                    localCancel->load(std::memory_order_acquire))) ?
+                    ReceiveResult::closed : ReceiveResult::failed;
             }
             error = WinHttpWebSocketReceive(connection.socket.Get(), buffer.data(),
                 static_cast<DWORD>(buffer.size()), &bytesRead, &bufferType);
         }
-        if (ShouldAbort(generation)) return ReceiveResult::closed;
+        if (ShouldAbort(generation) || (localCancel &&
+            localCancel->load(std::memory_order_acquire))) return ReceiveResult::closed;
         if (error == ERROR_WINHTTP_TIMEOUT) return ReceiveResult::poll;
         if (error == ERROR_WINHTTP_OPERATION_CANCELLED && ShouldStop()) {
             return ReceiveResult::closed;
@@ -2295,6 +2439,58 @@ private:
                 { "clientRevision", command.clientRevision }
             };
             break;
+        case CommandKind::joinUnified:
+            eventName = "broadcaster:join";
+            resultType = "broadcaster_join_result";
+            payload = { { "broadcasterName", command.argument } };
+            break;
+        case CommandKind::renameUnified:
+            eventName = "broadcaster:rename";
+            resultType = "broadcaster_rename_result";
+            payload = { { "broadcasterName", command.argument } };
+            break;
+        case CommandKind::requestBroadcasters:
+            eventName = "broadcasters:list";
+            resultType = "broadcasters_list_result";
+            payload = json::object();
+            break;
+        case CommandKind::requestBroadcasterSnapshot:
+            eventName = "broadcaster:snapshot";
+            resultType = "broadcaster_snapshot_result";
+            payload = { { "targetDeviceId", command.argument } };
+            break;
+        case CommandKind::requestSyncHistory:
+            eventName = "sync:history";
+            resultType = "sync_history_result";
+            payload = json::object();
+            break;
+        case CommandKind::requestSyncRelations:
+            eventName = "sync:relations";
+            resultType = "sync_relations_result";
+            payload = json::object();
+            break;
+        case CommandKind::recordSync:
+            eventName = "sync:record";
+            resultType = "sync_record_result";
+            payload = json::parse(command.argument, nullptr, false);
+            if (payload.is_discarded() || !payload.is_object()) return false;
+            break;
+        case CommandKind::startRealtime:
+            eventName = "sync:realtime:start";
+            resultType = "realtime_start_result";
+            payload = json::parse(command.argument, nullptr, false);
+            if (payload.is_discarded() || !payload.is_object()) return false;
+            break;
+        case CommandKind::heartbeatRealtime:
+            eventName = "sync:realtime:heartbeat";
+            resultType = "realtime_heartbeat_result";
+            payload = json::object();
+            break;
+        case CommandKind::stopRealtime:
+            eventName = "sync:realtime:stop";
+            resultType = "realtime_stop_result";
+            payload = json::object();
+            break;
         case CommandKind::uploadSnapshot:
         case CommandKind::registerDevice:
             return true;
@@ -2334,7 +2530,9 @@ private:
             PendingAck pending{
                 kind, resultType, requestId, clientRevision,
                 Clock::now() + kAckTimeout, protectedResultReservation,
-                kind == CommandKind::requestSnapshot ? targetDeviceId : std::string()
+                (kind == CommandKind::requestSnapshot ||
+                 kind == CommandKind::requestBroadcasterSnapshot) ?
+                    targetDeviceId : std::string()
             };
             pending.commandSequence = commandSequence;
             pendingAcks.emplace(ackId, std::move(pending));
@@ -2645,7 +2843,8 @@ private:
         if (pending.kind == CommandKind::uploadSnapshot) {
             normalized["clientRevision"] = pending.clientRevision;
         }
-        else if (pending.kind == CommandKind::requestSnapshot) {
+        else if (pending.kind == CommandKind::requestSnapshot ||
+            pending.kind == CommandKind::requestBroadcasterSnapshot) {
             normalized["targetDeviceId"] = pending.targetDeviceId;
             normalized["clientRevision"] = pending.clientRevision;
         }
@@ -2695,7 +2894,8 @@ private:
                     current.comparisonRevision, revision);
                 current.roomRevision = current.comparisonRevision;
             };
-            if (kind == CommandKind::joinRoom || kind == CommandKind::renameRoom) {
+            if (kind == CommandKind::joinRoom || kind == CommandKind::renameRoom ||
+                kind == CommandKind::joinUnified || kind == CommandKind::renameUnified) {
                 const auto room = payload.find("room");
                 if (room != payload.end() && room->is_object()) {
                     current.roomId = room->value("id", current.roomId);
@@ -2704,7 +2904,8 @@ private:
                 current.broadcasterName = payload.value("broadcasterName",
                     current.broadcasterName);
                 updateComparisonRevision();
-                current.statusText = "in_room";
+                current.statusText = kind == CommandKind::joinUnified ||
+                    kind == CommandKind::renameUnified ? "in_unified_pool" : "in_room";
             }
             else if (kind == CommandKind::leaveRoom) {
                 current.roomId.clear();
@@ -2766,6 +2967,26 @@ private:
             NotifyJson(activeConfig.generation, normalized, std::move(coalesceKey));
             return;
         }
+        if (event.name == "broadcasters:changed" ||
+            event.name == "sync:relations_changed" ||
+            event.name == "sync:realtime_snapshot") {
+            if (!event.payload.is_object()) {
+                NotifyCloudError(activeConfig.generation, "invalid_event_payload");
+                return;
+            }
+            const std::string type = event.name == "broadcasters:changed" ?
+                "broadcasters_changed" : (event.name == "sync:relations_changed" ?
+                    "sync_relations_changed" : "realtime_snapshot");
+            json normalized = event.payload;
+            normalized["type"] = type;
+            std::string coalesceKey;
+            if (event.name == "sync:realtime_snapshot") {
+                coalesceKey = event.payload.value("sourceDeviceId", std::string{});
+            }
+            NotifyJson(activeConfig.generation, normalized, std::move(coalesceKey),
+                event.name == "sync:realtime_snapshot");
+            return;
+        }
         if (event.name == "session:error") {
             if (event.payload.is_object()) {
                 NotifyCloudError(activeConfig.generation,
@@ -2815,7 +3036,8 @@ private:
         if (pending.kind == CommandKind::uploadSnapshot) {
             normalized["clientRevision"] = pending.clientRevision;
         }
-        else if (pending.kind == CommandKind::requestSnapshot) {
+        else if (pending.kind == CommandKind::requestSnapshot ||
+            pending.kind == CommandKind::requestBroadcasterSnapshot) {
             normalized["targetDeviceId"] = pending.targetDeviceId;
             normalized["clientRevision"] = pending.clientRevision;
         }
@@ -2827,11 +3049,11 @@ private:
     {
         PendingAck pending;
         pending.kind = command.kind;
-        pending.resultType = command.kind == CommandKind::requestSnapshot ?
-            "snapshot_result" : "room_comparison_result";
+        pending.resultType = ResultTypeForCommand(command.kind);
         pending.requestId = command.requestId;
         pending.clientRevision = command.clientRevision;
-        if (command.kind == CommandKind::requestSnapshot) {
+        if (command.kind == CommandKind::requestSnapshot ||
+            command.kind == CommandKind::requestBroadcasterSnapshot) {
             pending.targetDeviceId = command.argument;
         }
         pending.protectedResultReservation = command.protectedResultReservation;
@@ -2909,42 +3131,157 @@ private:
     bool RunConnected(const Config& activeConfig, WebSocketConnection& connection)
     {
         MarkDesiredJoinPendingForConnection(activeConfig.generation);
+
+        // WinHTTP's WebSocket receive call can wait indefinitely when the
+        // server is quiet. Keep that blocking call off the command worker so
+        // room management and comparison requests are still sent immediately.
+        std::mutex receiveMutex;
+        std::condition_variable receiveCondition;
+        std::deque<ReceivedPacket> receiveQueue;
+        constexpr std::size_t kReceiveQueueCapacity = 64;
+        std::atomic<bool> receiveStop{ false };
+        bool receiveFinished = false;
+        const auto stopReceiver = [&]() noexcept {
+            receiveStop.store(true, std::memory_order_release);
+            // The receive thread publishes the socket as its cancelable
+            // operation. Closing it wakes WinHttpWebSocketReceive.
+            CancelActiveOperation();
+            receiveCondition.notify_all();
+        };
+
+        std::thread receiveThread([&]() {
+            for (;;) {
+                if (receiveStop.load(std::memory_order_acquire)) break;
+
+                ReceivedPacket incoming;
+                try {
+                    incoming.result = ReceiveText(connection, incoming.payload,
+                        activeConfig.generation, &receiveStop);
+                }
+                catch (...) {
+                    incoming.result = ReceiveResult::failed;
+                }
+
+                if (incoming.result == ReceiveResult::poll) continue;
+
+                std::unique_lock<std::mutex> lock(receiveMutex);
+                receiveCondition.wait(lock, [&]() {
+                    return receiveStop.load(std::memory_order_acquire) ||
+                        receiveQueue.size() < kReceiveQueueCapacity;
+                });
+                if (receiveStop.load(std::memory_order_acquire)) break;
+                receiveQueue.push_back(std::move(incoming));
+                const bool terminal = receiveQueue.back().result != ReceiveResult::message;
+                if (terminal) {
+                    receiveFinished = true;
+                    lock.unlock();
+                    receiveCondition.notify_all();
+                    return;
+                }
+                lock.unlock();
+                receiveCondition.notify_all();
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(receiveMutex);
+                receiveFinished = true;
+            }
+            receiveCondition.notify_all();
+        });
+        connection.receiveThreadActive = true;
+
+        const auto joinReceiver = [&]() noexcept {
+            stopReceiver();
+            if (receiveThread.joinable()) receiveThread.join();
+            connection.receiveThreadActive = false;
+        };
+
+        Clock::time_point lastServerActivity = Clock::now();
+        bool connectionFailed = false;
         while (!ShouldAbort(activeConfig.generation)) {
             const RememberedJoinResult rememberedJoin =
                 SendRememberedJoinIfNeeded(activeConfig, connection);
-            if (rememberedJoin == RememberedJoinResult::networkFailure) return false;
-            if (!ProcessOutgoing(activeConfig, connection)) return false;
+            if (rememberedJoin == RememberedJoinResult::networkFailure) {
+                connectionFailed = true;
+                break;
+            }
+            if (!ProcessOutgoing(activeConfig, connection)) {
+                connectionFailed = true;
+                break;
+            }
             ExpireAcks(activeConfig);
 
-            std::string packet;
-            SecureClearGuard packetGuard(packet);
-            const ReceiveResult received = ReceiveText(connection, packet,
-                activeConfig.generation);
-            if (received == ReceiveResult::closed || received == ReceiveResult::failed) return false;
+            ReceivedPacket incoming;
+            bool hasPacket = false;
+            {
+                std::unique_lock<std::mutex> lock(receiveMutex);
+                if (receiveQueue.empty() && !receiveFinished) {
+                    receiveCondition.wait_for(lock, std::chrono::milliseconds(25), [&]() {
+                        return receiveStop.load(std::memory_order_acquire) ||
+                            !receiveQueue.empty() || receiveFinished;
+                    });
+                }
+                if (!receiveQueue.empty()) {
+                    incoming = std::move(receiveQueue.front());
+                    receiveQueue.pop_front();
+                    hasPacket = true;
+                }
+                else if (receiveFinished) {
+                    connectionFailed = true;
+                }
+            }
+            receiveCondition.notify_all();
+
+            if (connectionFailed) break;
+            if (!hasPacket) {
+                const auto staleAfter = std::chrono::milliseconds(
+                    static_cast<std::uint64_t>(connection.pingIntervalMs) +
+                    connection.pingTimeoutMs);
+                if (Clock::now() - lastServerActivity > staleAfter) {
+                    NotifyCloudError(activeConfig.generation, "connection_stale");
+                    connectionFailed = true;
+                    break;
+                }
+                continue;
+            }
+
+            SecureClearGuard packetGuard(incoming.payload);
+            const ReceiveResult received = incoming.result;
+            if (received == ReceiveResult::closed || received == ReceiveResult::failed) {
+                connectionFailed = true;
+                break;
+            }
             if (received == ReceiveResult::rejected) {
                 NotifyCloudError(activeConfig.generation, "binary_or_invalid_message");
-                return false;
+                connectionFailed = true;
+                break;
             }
             if (received == ReceiveResult::message) {
-                if (cloud_match::IsEngineIoPingPacket(packet)) {
+                lastServerActivity = Clock::now();
+                if (cloud_match::IsEngineIoPingPacket(incoming.payload)) {
                     if (!SendText(connection, cloud_match::MakeEngineIoPongPacket(),
-                        activeConfig.generation)) return false;
+                        activeConfig.generation, false)) {
+                        connectionFailed = true;
+                        break;
+                    }
                 }
-                else if (cloud_match::IsSocketIoDisconnectPacket(packet)) {
-                    return false;
+                else if (cloud_match::IsSocketIoDisconnectPacket(incoming.payload)) {
+                    connectionFailed = true;
+                    break;
                 }
                 else {
                     cloud_match::SocketIoAck ack;
                     cloud_match::SocketIoEvent event;
-                    if (cloud_match::ParseSocketIoAck(packet, ack)) {
+                    if (cloud_match::ParseSocketIoAck(incoming.payload, ack)) {
                         HandleAck(activeConfig, ack);
                     }
-                    else if (cloud_match::ParseSocketIoEvent(packet, event)) {
+                    else if (cloud_match::ParseSocketIoEvent(incoming.payload, event)) {
                         HandleServerEvent(activeConfig, event);
                     }
                     else {
                         NotifyCloudError(activeConfig.generation, "unknown_packet");
-                        return false;
+                        connectionFailed = true;
+                        break;
                     }
                 }
             }
@@ -2952,11 +3289,13 @@ private:
             const auto staleAfter = std::chrono::milliseconds(
                 static_cast<std::uint64_t>(connection.pingIntervalMs) +
                 connection.pingTimeoutMs);
-            if (Clock::now() - connection.lastServerActivity > staleAfter) {
+            if (Clock::now() - lastServerActivity > staleAfter) {
                 NotifyCloudError(activeConfig.generation, "connection_stale");
-                return false;
+                connectionFailed = true;
+                break;
             }
         }
+        joinReceiver();
         return false;
     }
 
@@ -3160,9 +3499,19 @@ bool CloudMatchClient::JoinRoom(const std::string& roomId,
     return impl_->JoinRoom(roomId, broadcasterName);
 }
 
+bool CloudMatchClient::JoinUnifiedPool(const std::string& broadcasterName)
+{
+    return impl_->JoinUnifiedPool(broadcasterName);
+}
+
 bool CloudMatchClient::Rename(const std::string& broadcasterName)
 {
     return impl_->Rename(broadcasterName);
+}
+
+bool CloudMatchClient::RenameUnified(const std::string& broadcasterName)
+{
+    return impl_->RenameUnified(broadcasterName);
 }
 
 bool CloudMatchClient::LeaveRoom()
@@ -3173,6 +3522,51 @@ bool CloudMatchClient::LeaveRoom()
 bool CloudMatchClient::UploadSnapshot(std::string snapshotJson)
 {
     return impl_->UploadSnapshot(std::move(snapshotJson));
+}
+
+bool CloudMatchClient::RequestBroadcasterDirectory(const std::string& requestId)
+{
+    return impl_->RequestBroadcasterDirectory(requestId);
+}
+
+bool CloudMatchClient::RequestBroadcasterSnapshot(const std::string& requestId,
+    const std::string& targetDeviceId)
+{
+    return impl_->RequestBroadcasterSnapshot(requestId, targetDeviceId);
+}
+
+bool CloudMatchClient::RequestSyncHistory(const std::string& requestId)
+{
+    return impl_->RequestSyncHistory(requestId);
+}
+
+bool CloudMatchClient::RequestSyncRelations(const std::string& requestId)
+{
+    return impl_->RequestSyncRelations(requestId);
+}
+
+bool CloudMatchClient::RecordCloudSync(const std::string& requestId,
+    const std::string& targetDeviceId, const std::string& targetName,
+    const std::string& syncType, std::uint64_t snapshotRevision, bool merged)
+{
+    return impl_->RecordCloudSync(requestId, targetDeviceId, targetName, syncType,
+        snapshotRevision, merged);
+}
+
+bool CloudMatchClient::StartRealtimeSync(const std::string& requestId,
+    const std::string& targetDeviceId, const std::string& targetName)
+{
+    return impl_->StartRealtimeSync(requestId, targetDeviceId, targetName);
+}
+
+bool CloudMatchClient::HeartbeatRealtimeSync(const std::string& requestId)
+{
+    return impl_->HeartbeatRealtimeSync(requestId);
+}
+
+bool CloudMatchClient::StopRealtimeSync(const std::string& requestId)
+{
+    return impl_->StopRealtimeSync(requestId);
 }
 
 bool CloudMatchClient::RequestComparison(const std::string& requestId,

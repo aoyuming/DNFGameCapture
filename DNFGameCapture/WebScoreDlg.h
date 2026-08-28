@@ -53,6 +53,9 @@ private:
 	bool m_initialWindowSizeApplied = false;
 	double m_currentWebZoom = 0.0;
 	bool m_webZoomCalibrated = false;
+	HRESULT m_lastWebMessageFailure = S_OK;
+	ULONGLONG m_lastWebMessageFailureTick = 0;
+	bool m_webMessageSuccessLogged = false;
 
 	void InitWebView2();
 	void ApplyDpiNormalizedZoom();

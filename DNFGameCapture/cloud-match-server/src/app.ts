@@ -25,6 +25,10 @@ import {
   type SocketRoomAdapter,
 } from './socket.js';
 import { getRoomSnapshots, getSnapshot, saveSnapshot } from './snapshots.js';
+import {
+  initializeSyncRelationSchema,
+  pruneSyncRelationData,
+} from './sync-relations.js';
 
 type DatabaseConnection = ReturnType<typeof openDatabase>;
 
@@ -117,6 +121,8 @@ export function createCloudMatchApp(
       },
     };
   const db = openDatabase(options.databasePath ?? serverConfig.databasePath);
+  initializeSyncRelationSchema(db);
+  pruneSyncRelationData(db, now());
   const expressApp = express();
   const httpServer = createServer(expressApp);
   const io = new SocketIoServer(httpServer, { maxHttpBufferSize: 65_536 });

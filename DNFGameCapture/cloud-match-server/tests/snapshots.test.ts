@@ -99,6 +99,20 @@ afterEach(() => {
 });
 
 describe('match snapshot schema and persistence', () => {
+  test('accepts up to ten recent recognition summaries and rejects oversized history', () => {
+    const recentEvents = Array.from({ length: 10 }, (_, index) => ({
+      time: `19:25:${String(index).padStart(2, '0')}`,
+      killer: `杀手${index}`,
+      dead: `死者${index}`,
+      status: '已确认',
+    }));
+
+    expect(matchSnapshotSchema.safeParse(snapshot({ recentEvents })).success).toBe(true);
+    expect(matchSnapshotSchema.safeParse(snapshot({
+      recentEvents: [...recentEvents, recentEvents[0]],
+    })).success).toBe(false);
+  });
+
   test('bounds audit history per device and keeps the newest rejected records', () => {
     const db = createDatabase();
     addDevice(db, 'audit-device-0001', '59');

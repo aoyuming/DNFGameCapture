@@ -31,6 +31,14 @@ export type MatchSnapshot = {
   teamsFlipped: boolean;
   outputSeatLabel: boolean;
   lastKillTeam: 'red' | 'blue' | '';
+  recentEvents?: RecentRecognitionEvent[];
+};
+
+export type RecentRecognitionEvent = {
+  time: string;
+  killer: string;
+  dead: string;
+  status: string;
 };
 
 export function normalizePlayerName(value: string): string {
@@ -117,6 +125,17 @@ const syncedFromSchema = z
   })
   .strict();
 
+const recentRecognitionTextSchema = z.string().max(256).refine(
+  (value) => !/[\r\n\0]/u.test(value),
+);
+
+const recentRecognitionEventSchema = z.object({
+  time: recentRecognitionTextSchema,
+  killer: recentRecognitionTextSchema,
+  dead: recentRecognitionTextSchema,
+  status: recentRecognitionTextSchema,
+}).strict();
+
 export const matchSnapshotSchema: z.ZodType<MatchSnapshot> = z
   .object({
     schemaVersion: z.literal(1),
@@ -132,6 +151,7 @@ export const matchSnapshotSchema: z.ZodType<MatchSnapshot> = z
     teamsFlipped: z.boolean(),
     outputSeatLabel: z.boolean(),
     lastKillTeam: z.enum(['red', 'blue', '']),
+    recentEvents: z.array(recentRecognitionEventSchema).max(10).optional(),
   })
   .strict()
   .superRefine((value, context) => {

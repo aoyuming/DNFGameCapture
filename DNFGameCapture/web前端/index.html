@@ -4,16 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DNF 赛事计分板 - WebView2 版</title>
-    <meta name="dnf-web-layout-version" content="20260828-cloud-match-status-2">
-    <link rel="stylesheet" href="style.css?v=20260828-cloud-match-status-2">
+    <meta name="dnf-web-layout-version" content="20260828-unified-broadcaster-pool">
+    <link rel="stylesheet" href="style.css?v=20260828-unified-broadcaster-pool">
 </head>
 <body>
 
     <div class="app-shell">
         <div class="left-stack">
-            <button type="button" class="cloud-room-status" id="cloud-room-status"
-                data-state="not-joined" title="未加入云端房间">未加入云端房间</button>
-
             <div class="main-container" id="main-container">
                 <div class="teams-wrap" id="teams-wrap">
                     <div class="team-panel team-red" id="team-red">
@@ -47,8 +44,8 @@
                     <button class="ctrl-btn btn-swap" id="btn-swap">🔄 翻转红蓝</button>
                     <button class="ctrl-btn btn-monitor-start" id="btn-monitor">▶ 运行</button>
                     <button class="ctrl-btn btn-reset" id="btn-reset">✨ 重置战绩</button>
-                    <button class="ctrl-btn btn-pro" id="btn-pro">👑 专业模式</button>
                     <button class="ctrl-btn btn-kill-display-toggle" id="btn-kill-display-toggle" aria-pressed="false">🖥 展示页面</button>
+                    <button class="ctrl-btn btn-pro" id="btn-pro">👑 专业模式</button>
                 </div>
                 <div class="control-row control-row-aux">
                     <button class="ctrl-btn btn-review-toggle" id="btn-review-toggle" aria-expanded="false">
@@ -73,16 +70,14 @@
                                 <button class="ctrl-btn btn-random" id="btn-random-teams">🎲 分组和抽签</button>
                                 <button class="ctrl-btn btn-key-mapping" id="btn-key-mapping">⌨ 按键映射</button>
                                 <button class="ctrl-btn btn-key-lan" id="btn-key-lan">局域网同步</button>
-                                <button class="ctrl-btn btn-cloud-sync" id="btn-cloud-sync">云端比赛同步</button>
-                                <button class="ctrl-btn btn-console-toggle" id="btn-console-toggle" aria-expanded="false">
+                        <button class="ctrl-btn btn-console-toggle" id="btn-console-toggle" aria-expanded="false">
                                     <span>C++日志</span>
                                     <span class="console-toggle-count" id="console-toggle-count">0</span>
                                 </button>
                             </div>
                             <div class="more-controls-section">
                                 <div class="more-controls-title">数据</div>
-                                <button class="ctrl-btn btn-cloud-match" id="btn-cloud-match">云端房间设置</button>
-                                <button class="ctrl-btn btn-sync-db" id="btn-sync-alias-db">☁ 同步云端库</button>
+                        <button class="ctrl-btn btn-sync-db" id="btn-sync-alias-db">☁ 同步云端库</button>
                                 <button class="ctrl-btn btn-push-db" id="btn-push-alias-db">⬆ 推送本地库</button>
                             </div>
                             <div class="more-controls-section">
@@ -106,6 +101,33 @@
                 <div class="dir-bar" id="dir-display" title="点击可更改 TXT 输出目录">📁 战绩输出目录：获取中...</div>
             </div>
         </div>
+
+        <aside class="broadcaster-sidebar" id="broadcaster-sidebar" aria-label="在线主播">
+            <div class="broadcaster-sidebar-header">
+                <div>
+                    <div class="broadcaster-sidebar-title">在线主播</div>
+                    <div class="broadcaster-sidebar-subtitle" id="broadcaster-cloud-status">尚未连接云端</div>
+                </div>
+                <button class="broadcaster-refresh" id="btn-cloud-refresh-broadcasters" title="刷新主播列表" aria-label="刷新主播列表">↻</button>
+            </div>
+            <div class="broadcaster-self" id="broadcaster-self">
+                <div class="broadcaster-self-label">本机主播</div>
+                <div class="broadcaster-self-row">
+                    <input id="cloud-broadcaster-name-input" type="text" maxlength="32" placeholder="首次联网后填写名称" autocomplete="off">
+                    <button id="btn-cloud-rename-broadcaster" title="修改主播名称">保存</button>
+                </div>
+                <div class="broadcaster-self-note">名称用于其他主播识别和同步比赛数据</div>
+            </div>
+            <section class="broadcaster-list-section">
+                <div class="broadcaster-section-heading"><span>在线</span><span id="broadcaster-online-count">0</span></div>
+                <div class="broadcaster-list" id="broadcaster-online-list"></div>
+            </section>
+            <section class="broadcaster-list-section offline-section">
+                <div class="broadcaster-section-heading"><span>最近离线 · 24小时</span><span id="broadcaster-offline-count">0</span></div>
+                <div class="broadcaster-list" id="broadcaster-offline-list"></div>
+            </section>
+            <div class="broadcaster-relation-summary" id="broadcaster-relation-summary">同步关系将在连接后显示</div>
+        </aside>
 
         <div class="review-backdrop" id="review-backdrop"></div>
         <div class="review-panel" id="review-panel" role="dialog" aria-modal="false" aria-hidden="true" aria-labelledby="review-panel-title">
@@ -328,125 +350,26 @@
         </div>
     </div>
 
-    <div class="cloud-room-overlay" id="cloud-room-overlay" aria-hidden="true">
-        <div class="cloud-room-dialog" role="dialog" aria-modal="true" aria-labelledby="cloud-room-title">
-            <div class="cloud-room-header">
+    <div class="broadcaster-preview-overlay" id="broadcaster-preview-overlay" aria-hidden="true">
+        <div class="broadcaster-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="broadcaster-preview-title">
+            <header class="broadcaster-preview-header">
                 <div>
-                    <div class="cloud-room-title" id="cloud-room-title">云端比赛同步</div>
-                    <div class="cloud-room-subtitle">本机数据变化后自动上传，远端数据不会自动覆盖本机</div>
+                    <div class="broadcaster-preview-title" id="broadcaster-preview-title">主播数据预览</div>
+                    <div class="broadcaster-preview-subtitle" id="broadcaster-preview-meta">正在读取</div>
                 </div>
-                <button class="cloud-room-close" id="btn-cloud-room-close" title="关闭">&times;</button>
-            </div>
-
-            <div class="cloud-room-body">
-                <section class="cloud-room-current" id="cloud-room-current" hidden>
-                    <div class="cloud-room-section-label">当前身份</div>
-                    <div class="cloud-room-current-line">
-                        <strong id="cloud-room-current-room">未加入房间</strong>
-                        <span id="cloud-room-connection">离线</span>
-                    </div>
-                    <label class="cloud-room-field">
-                        <span>主播名称</span>
-                        <input id="cloud-room-rename-input" type="text" maxlength="512" autocomplete="off">
-                    </label>
-                    <div class="cloud-room-actions">
-                        <button class="cloud-room-button" id="btn-cloud-room-rename">修改名称</button>
-                        <button class="cloud-room-button" id="btn-cloud-room-change">切换房间</button>
-                        <button class="cloud-room-button danger" id="btn-cloud-room-leave">退出房间</button>
-                    </div>
-                </section>
-
-                <section class="cloud-room-first-run" id="cloud-room-first-run">
-                    <div class="cloud-room-step">1</div>
-                    <div class="cloud-room-step-copy">
-                        <div class="cloud-room-section-label">选择要加入的比赛房间</div>
-                        <div class="cloud-room-options" role="radiogroup" aria-label="比赛房间">
-                            <button class="cloud-room-option" data-cloud-room-id="li-yong" role="radio" aria-checked="false">李永房</button>
-                            <button class="cloud-room-option" data-cloud-room-id="wen-rou" role="radio" aria-checked="false">温柔房</button>
-                            <button class="cloud-room-option" data-cloud-room-id="59" role="radio" aria-checked="false">59房</button>
-                            <button class="cloud-room-option muted" data-cloud-room-id="none" role="radio" aria-checked="false">不加入房间</button>
-                        </div>
-                    </div>
-                </section>
-
-                <section class="cloud-room-name-stage" id="cloud-room-name-stage" hidden>
-                    <div class="cloud-room-step">2</div>
-                    <div class="cloud-room-step-copy">
-                        <div class="cloud-room-section-label">填写本机主播名称</div>
-                        <div class="cloud-room-selected" id="cloud-room-selected">尚未选择房间</div>
-                        <label class="cloud-room-field">
-                            <span>用于区分房间内不同主播</span>
-                            <input id="cloud-room-name-input" type="text" maxlength="512" autocomplete="off" placeholder="请输入主播名称">
-                        </label>
-                        <div class="cloud-room-name-meta">
-                            <span id="cloud-room-error" role="alert"></span>
-                            <span id="cloud-room-name-count">0 / 32</span>
-                        </div>
-                        <div class="cloud-room-actions">
-                            <button class="cloud-room-button" id="btn-cloud-room-back">重新选房</button>
-                            <button class="cloud-room-button primary" id="btn-cloud-room-join" disabled>加入房间</button>
-                            <button class="cloud-room-button danger" id="btn-cloud-room-cancel-join" hidden>取消加入</button>
-                        </div>
-                    </div>
-                </section>
-            </div>
-        </div>
-    </div>
-
-    <div class="cloud-sync-overlay" id="cloud-sync-overlay" aria-hidden="true">
-        <div class="cloud-sync-panel" role="dialog" aria-modal="true" aria-labelledby="cloud-sync-title">
-            <header class="cloud-sync-header">
-                <div>
-                    <div class="cloud-sync-title" id="cloud-sync-title">云端比赛同步</div>
-                    <div class="cloud-sync-context" id="cloud-sync-context">正在读取房间信息</div>
-                </div>
-                <div class="cloud-sync-header-actions">
-                    <button class="cloud-sync-icon-button" id="btn-cloud-sync-refresh" title="刷新房间对比" aria-label="刷新房间对比">↻</button>
-                    <button class="cloud-sync-icon-button" id="btn-cloud-sync-close" title="关闭" aria-label="关闭">&times;</button>
-                </div>
+                <button class="broadcaster-preview-close" id="btn-broadcaster-preview-close" title="关闭">&times;</button>
             </header>
-
-            <div class="cloud-sync-scroll">
-                <div class="cloud-sync-not-joined" id="cloud-sync-not-joined" hidden>
-                    <strong>尚未加入云端比赛房间</strong>
-                    <span>先设置房间和本机主播名称，之后才能查看各主播数据。</span>
-                    <button class="cloud-sync-button" id="btn-cloud-sync-room-settings">进入房间设置</button>
-                </div>
-
-                <div class="cloud-sync-status-line" id="cloud-sync-status-line" role="status"></div>
-
-                <div class="cloud-sync-workspace" id="cloud-sync-workspace">
-                    <aside class="cloud-sync-members-pane">
-                        <div class="cloud-sync-pane-heading">
-                            <span>房间成员</span>
-                            <span id="cloud-sync-member-count">0</span>
-                        </div>
-                        <div class="cloud-sync-member-list" id="cloud-sync-member-list"></div>
-                        <div class="cloud-sync-groups-wrap">
-                            <div class="cloud-sync-subheading">相似组</div>
-                            <div class="cloud-sync-groups" id="cloud-sync-groups"></div>
-                        </div>
-                    </aside>
-
-                    <section class="cloud-sync-preview-pane">
-                        <div class="cloud-sync-pane-heading">
-                            <span>差异预览</span>
-                            <span id="cloud-sync-orientation"></span>
-                        </div>
-                        <div class="cloud-sync-preview-empty" id="cloud-sync-preview-empty">选择一位有快照的主播查看差异。</div>
-                        <div class="cloud-sync-difference-groups" id="cloud-sync-difference-groups"></div>
-                        <div class="cloud-sync-preview-actions" id="cloud-sync-preview-actions" hidden>
-                            <button class="cloud-sync-button danger" id="btn-cloud-sync-apply">确认覆盖本地</button>
-                            <button class="cloud-sync-button" id="btn-cloud-sync-cancel-preview">取消预览</button>
-                        </div>
-                    </section>
-                </div>
-
-                <footer class="cloud-sync-footer">
-                    <div class="cloud-sync-undo-copy" id="cloud-sync-undo-reason">当前没有可撤销的云端同步。</div>
-                    <button class="cloud-sync-button undo" id="btn-cloud-sync-undo" disabled>撤销本次同步</button>
-                </footer>
-            </div>
+            <div class="broadcaster-preview-notice">仅预览，不会修改本地数据</div>
+            <div class="broadcaster-preview-body" id="broadcaster-preview-body"></div>
+            <section class="broadcaster-preview-relations">
+                <div class="broadcaster-preview-section-title">同步关系</div>
+                <div id="broadcaster-preview-relations-body">暂无记录</div>
+            </section>
+            <footer class="broadcaster-preview-actions">
+                <button class="broadcaster-action" id="btn-broadcaster-sync-once" disabled>同步一次</button>
+                <button class="broadcaster-action primary" id="btn-broadcaster-sync-realtime" disabled>实时同步</button>
+                <button class="broadcaster-action danger" id="btn-broadcaster-stop-realtime" hidden>停止实时同步</button>
+            </footer>
         </div>
     </div>
 
@@ -543,6 +466,6 @@
         </div>
     </div>
 
-    <script src="main.js?v=20260828-cloud-match-status-2" defer></script>
+    <script src="main.js?v=20260828-unified-broadcaster-pool" defer></script>
 </body>
 </html>
