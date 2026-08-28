@@ -77,8 +77,28 @@ chown -R root:root "${INSTALL_DIR}"
 
 echo "[6/7] Installing systemd service..."
 if [[ ! -f "${ENV_FILE}" ]]; then
-    install -m 0644 "${SCRIPT_DIR}/server.env" "${ENV_FILE}"
+    install -m 0600 "${SCRIPT_DIR}/server.env" "${ENV_FILE}"
 fi
+
+set_env_value() {
+    local key="$1"
+    local value="$2"
+    if grep -q "^${key}=" "${ENV_FILE}"; then
+        sed -i "s|^${key}=.*|${key}=${value}|" "${ENV_FILE}"
+    else
+        printf '%s=%s\n' "${key}" "${value}" >> "${ENV_FILE}"
+    fi
+}
+
+set_env_value "ADMIN_HOST" "0.0.0.0"
+set_env_value "ADMIN_PORT" "18881"
+ADMIN_PASSWORD="$(sed -n 's/^ADMIN_PASSWORD=//p' "${ENV_FILE}" | tail -n 1)"
+if [[ -z "${ADMIN_PASSWORD}" ]]; then
+    ADMIN_PASSWORD="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    set_env_value "ADMIN_PASSWORD" "${ADMIN_PASSWORD}"
+fi
+chmod 0600 "${ENV_FILE}"
+
 install -m 0644 "${SCRIPT_DIR}/dnf-cloud-match.service" "${UNIT_FILE}"
 systemctl daemon-reload
 systemctl enable "${SERVICE_NAME}.service"
@@ -86,14 +106,19 @@ systemctl restart "${SERVICE_NAME}.service"
 
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
     ufw allow 18880/tcp
+    ufw allow 18881/tcp
 fi
 
 echo "[7/7] Checking service health..."
 for _ in {1..15}; do
-    if curl -fsS http://127.0.0.1:18880/health >/dev/null; then
+    if curl -fsS http://127.0.0.1:18880/health >/dev/null &&
+        curl -fsS http://127.0.0.1:18881/admin/health >/dev/null; then
         echo
         echo "DNF cloud match server is running on TCP port 18880."
         echo "Public URL: http://<server-ip>:18880"
+        echo "Admin URL: http://<server-ip>:18881/admin"
+        echo "Admin user: admin"
+        echo "Admin password: ${ADMIN_PASSWORD}"
         echo "Logs: journalctl -u ${SERVICE_NAME} -f"
         exit 0
     fi

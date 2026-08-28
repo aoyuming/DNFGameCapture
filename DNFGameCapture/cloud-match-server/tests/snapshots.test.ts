@@ -99,6 +99,14 @@ afterEach(() => {
 });
 
 describe('match snapshot schema and persistence', () => {
+  test('accepts snapshots without local presentation settings', () => {
+    const source = snapshot();
+    delete source.teamsFlipped;
+    delete source.outputSeatLabel;
+
+    expect(matchSnapshotSchema.safeParse(source).success).toBe(true);
+  });
+
   test('accepts up to ten recent recognition summaries and rejects oversized history', () => {
     const recentEvents = Array.from({ length: 10 }, (_, index) => ({
       time: `19:25:${String(index).padStart(2, '0')}`,

@@ -52,6 +52,19 @@ json Snapshot()
     return snapshot;
 }
 
+void TestUnicodeNameNormalizerAcceptsSupplementaryPlaneEmoji()
+{
+    std::string normalized;
+    Require(DnfNormalizeCloudMatchUtf8Name(u8"阿旺🐢", normalized) &&
+        normalized == u8"阿旺🐢",
+        "supplementary-plane emoji in a player name must remain valid");
+    Require(DnfNormalizeCloudMatchUtf8Name(u8"老⚽", normalized) &&
+        normalized == u8"老⚽",
+        "BMP symbols in a player name must remain valid");
+    Require(!DnfNormalizeCloudMatchUtf8Name("bad\nname", normalized),
+        "control characters must remain invalid");
+}
+
 void TestStrictConversionAndSwappedOrientation()
 {
     json converted;
@@ -75,9 +88,25 @@ void TestStrictConversionAndSwappedOrientation()
     Require(converted["redPickMode"] == "second" &&
         converted["lastKillerTeam"] == 1,
         "swapped orientation should transform team-relative state");
-    Require(converted["isFlipped"] == false &&
-        converted["outputSeatLabelToKillFile"] == true,
-        "swapped orientation should preserve direct metadata state");
+    Require(!converted.contains("isFlipped") &&
+        !converted.contains("outputSeatLabelToKillFile"),
+        "cloud conversion must not import local presentation settings");
+}
+
+void TestCloudPresentationFieldsAreOptionalForLegacySnapshots()
+{
+    json converted;
+    std::string error;
+    json source = Snapshot();
+    source.erase("teamsFlipped");
+    source.erase("outputSeatLabel");
+
+    Require(DnfConvertCloudMatchSnapshot(source, 17, false, NormalizeTestName,
+        converted, error),
+        "new cloud snapshots without local presentation settings must convert");
+    Require(!converted.contains("isFlipped") &&
+        !converted.contains("outputSeatLabelToKillFile"),
+        "missing cloud presentation settings must remain absent after conversion");
 }
 
 void TestStrictCloudSchemaRejections()
@@ -244,7 +273,9 @@ void TestUndoRequiresEpochHashRoomAndConnectionGeneration()
 
 int main()
 {
+    TestUnicodeNameNormalizerAcceptsSupplementaryPlaneEmoji();
     TestStrictConversionAndSwappedOrientation();
+    TestCloudPresentationFieldsAreOptionalForLegacySnapshots();
     TestStrictCloudSchemaRejections();
     TestSnapshotRevisionCorrelation();
     TestStructuredDifferencePreview();

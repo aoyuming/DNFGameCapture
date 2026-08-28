@@ -10,16 +10,12 @@ type StatField = 'kills' | 'deaths' | 'ak' | 'streak';
 type ScoreField = 'redScore' | 'blueScore';
 type StateField =
   | 'redPickFirst'
-  | 'teamsFlipped'
-  | 'outputSeatLabel'
   | 'lastKillTeam';
 
 const STAT_FIELDS: StatField[] = ['kills', 'deaths', 'ak', 'streak'];
 const SCORE_FIELDS: ScoreField[] = ['redScore', 'blueScore'];
 const STATE_FIELDS: StateField[] = [
   'redPickFirst',
-  'teamsFlipped',
-  'outputSeatLabel',
   'lastKillTeam',
 ];
 
@@ -96,8 +92,6 @@ export interface ComparisonMember {
   redScore: number;
   blueScore: number;
   redPickFirst: boolean;
-  teamsFlipped: boolean;
-  outputSeatLabel: boolean;
   lastKillTeam: 'red' | 'blue' | '';
 }
 
@@ -137,8 +131,6 @@ interface OrientedState {
   redScore: number;
   blueScore: number;
   redPickFirst: boolean;
-  teamsFlipped: boolean;
-  outputSeatLabel: boolean;
   lastKillTeam: 'red' | 'blue' | '';
 }
 
@@ -339,8 +331,6 @@ function orientedState(snapshot: MatchSnapshot, swapped: boolean): OrientedState
     redScore: swapped ? snapshot.blueScore : snapshot.redScore,
     blueScore: swapped ? snapshot.redScore : snapshot.blueScore,
     redPickFirst: swapped ? !snapshot.redPickFirst : snapshot.redPickFirst,
-    teamsFlipped: snapshot.teamsFlipped,
-    outputSeatLabel: snapshot.outputSeatLabel,
     lastKillTeam: swapped ? swapLastKillTeam(snapshot.lastKillTeam) : snapshot.lastKillTeam,
   };
 }
@@ -448,7 +438,7 @@ function compareWithOrientation(
     (matchedCount / 8) * 40 +
       (exactStatFields / 32) * 35 +
       (exactScores / 2) * 15 +
-      (exactStates / 4) * 10,
+      (exactStates / STATE_FIELDS.length) * 10,
   );
 
   return {

@@ -1,8 +1,11 @@
 #include "CloudMatchSync.h"
 
+#include <Windows.h>
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cwctype>
 #include <limits>
 #include <iomanip>
 #include <sstream>
@@ -16,6 +19,29 @@ namespace {
 constexpr std::size_t kMaxCloudSnapshotBytes = 65536;
 constexpr std::uint64_t kMaxSafeInteger = 9007199254740991ULL;
 
+bool IsInvisibleUnicodeCodePoint(unsigned int codePoint)
+{
+    return codePoint <= 0x1Fu ||
+        (codePoint >= 0x7Fu && codePoint <= 0x9Fu) ||
+        codePoint == 0x00ADu || codePoint == 0x061Cu ||
+        (codePoint >= 0x0600u && codePoint <= 0x0605u) ||
+        codePoint == 0x06DDu || codePoint == 0x070Fu ||
+        (codePoint >= 0x0890u && codePoint <= 0x0891u) ||
+        codePoint == 0x08E2u || codePoint == 0x180Eu ||
+        (codePoint >= 0x200Bu && codePoint <= 0x200Fu) ||
+        codePoint == 0x2028u || codePoint == 0x2029u ||
+        (codePoint >= 0x202Au && codePoint <= 0x202Eu) ||
+        (codePoint >= 0x2060u && codePoint <= 0x206Fu) ||
+        codePoint == 0xFEFFu ||
+        (codePoint >= 0xFFF9u && codePoint <= 0xFFFBu) ||
+        codePoint == 0x110BDu || codePoint == 0x110CDu ||
+        (codePoint >= 0x13430u && codePoint <= 0x13455u) ||
+        (codePoint >= 0x1BCA0u && codePoint <= 0x1BCA3u) ||
+        (codePoint >= 0x1D173u && codePoint <= 0x1D17Au) ||
+        codePoint == 0xE0001u ||
+        (codePoint >= 0xE0020u && codePoint <= 0xE007Fu);
+}
+
 bool HasExactKeys(const json& value, std::initializer_list<const char*> keys)
 {
     if (!value.is_object() || value.size() != keys.size()) return false;
@@ -25,16 +51,26 @@ bool HasExactKeys(const json& value, std::initializer_list<const char*> keys)
     return true;
 }
 
-bool HasExactKeysWithOptionalRecentEvents(const json& value,
+// These fields were part of older cloud snapshots, but they are local
+// presentation settings and must not be imported from another broadcaster.
+bool HasExactKeysWithOptionalCloudPresentation(const json& value,
     std::initializer_list<const char*> keys)
 {
     if (!value.is_object()) return false;
     const bool hasRecentEvents = value.contains("recentEvents");
-    if (value.size() != keys.size() + (hasRecentEvents ? 1u : 0u)) return false;
+    const bool hasTeamsFlipped = value.contains("teamsFlipped");
+    const bool hasOutputSeatLabel = value.contains("outputSeatLabel");
+    const std::size_t expectedSize = keys.size() +
+        (hasRecentEvents ? 1u : 0u) +
+        (hasTeamsFlipped ? 1u : 0u) +
+        (hasOutputSeatLabel ? 1u : 0u);
+    if (value.size() != expectedSize) return false;
     for (const char* key : keys) {
         if (!value.contains(key)) return false;
     }
-    return !hasRecentEvents || value["recentEvents"].is_array();
+    return (!hasRecentEvents || value["recentEvents"].is_array()) &&
+        (!hasTeamsFlipped || value["teamsFlipped"].is_boolean()) &&
+        (!hasOutputSeatLabel || value["outputSeatLabel"].is_boolean());
 }
 
 bool IsSafeRecentEventText(const json& value)
@@ -153,6 +189,93 @@ json DifferenceGroup(const char* id)
 
 } // namespace
 
+bool DnfNormalizeCloudMatchUtf8Name(const std::string& input,
+    std::string& normalized)
+{
+    normalized.clear();
+    if (input.empty() || input.size() > 2048) return false;
+
+    const int wideLength = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        input.data(), static_cast<int>(input.size()), nullptr, 0);
+    if (wideLength <= 0) return false;
+    std::wstring wide(static_cast<std::size_t>(wideLength), L'\0');
+    if (::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input.data(),
+        static_cast<int>(input.size()), wide.data(), wideLength) != wideLength) {
+        return false;
+    }
+
+    auto first = wide.begin();
+    while (first != wide.end() && std::iswspace(*first)) ++first;
+    auto last = wide.end();
+    while (last != first && std::iswspace(*(last - 1))) --last;
+    if (first == last) return false;
+    std::wstring trimmed(first, last);
+
+    std::wstring candidate;
+    const int normalizedLength = ::NormalizeString(NormalizationC,
+        trimmed.data(), static_cast<int>(trimmed.size()), nullptr, 0);
+    if (normalizedLength > 0 && normalizedLength <= 256) {
+        candidate.assign(static_cast<std::size_t>(normalizedLength), L'\0');
+        const int written = ::NormalizeString(NormalizationC, trimmed.data(),
+            static_cast<int>(trimmed.size()), candidate.data(), normalizedLength);
+        if (written <= 0 || written > normalizedLength) return false;
+        candidate.resize(static_cast<std::size_t>(written));
+    }
+    else {
+        // Windows normalization can reject otherwise valid supplementary characters.
+        // The server repeats NFC normalization before accepting the snapshot.
+        candidate = std::move(trimmed);
+    }
+    if (candidate.empty() || candidate.size() > 256) return false;
+
+    int scalarCount = 0;
+    bool hasVisibleBase = false;
+    for (std::size_t index = 0; index < candidate.size();) {
+        const wchar_t firstUnit = candidate[index];
+        unsigned int codePoint = static_cast<unsigned int>(firstUnit);
+        int codeUnits = 1;
+        if (firstUnit >= 0xD800 && firstUnit <= 0xDBFF) {
+            if (index + 1 >= candidate.size()) return false;
+            const wchar_t secondUnit = candidate[index + 1];
+            if (secondUnit < 0xDC00 || secondUnit > 0xDFFF) return false;
+            codePoint = 0x10000u +
+                ((static_cast<unsigned int>(firstUnit) - 0xD800u) << 10) +
+                (static_cast<unsigned int>(secondUnit) - 0xDC00u);
+            codeUnits = 2;
+        }
+        else if (firstUnit >= 0xDC00 && firstUnit <= 0xDFFF) {
+            return false;
+        }
+
+        ++scalarCount;
+        if (scalarCount > 64 || IsInvisibleUnicodeCodePoint(codePoint)) return false;
+        if (codePoint > 0xFFFFu) {
+            hasVisibleBase = true;
+        }
+        else {
+            WORD type1 = 0;
+            WORD type3 = 0;
+            ::GetStringTypeW(CT_CTYPE1, candidate.data() + index, 1, &type1);
+            ::GetStringTypeW(CT_CTYPE3, candidate.data() + index, 1, &type3);
+            if ((type1 & (C1_ALPHA | C1_DIGIT | C1_PUNCT)) != 0 ||
+                (type3 & C3_SYMBOL) != 0) {
+                hasVisibleBase = true;
+            }
+        }
+        index += static_cast<std::size_t>(codeUnits);
+    }
+    if (!hasVisibleBase) return false;
+
+    const int utf8Length = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+        candidate.data(), static_cast<int>(candidate.size()), nullptr, 0,
+        nullptr, nullptr);
+    if (utf8Length <= 0 || utf8Length > 512) return false;
+    normalized.assign(static_cast<std::size_t>(utf8Length), '\0');
+    return ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+        candidate.data(), static_cast<int>(candidate.size()), normalized.data(),
+        utf8Length, nullptr, nullptr) == utf8Length;
+}
+
 bool DnfConvertCloudMatchSnapshot(const json& cloudSnapshot,
     std::uint64_t expectedClientRevision, bool swapped,
     const DnfCloudMatchNameNormalizer& normalizeName, json& teamSnapshot,
@@ -180,17 +303,17 @@ bool DnfConvertCloudMatchSnapshot(const json& cloudSnapshot,
     if (!allowedSource) return fail("invalid_snapshot");
 
     if (cloudSync) {
-        if (!HasExactKeysWithOptionalRecentEvents(cloudSnapshot,
+        if (!HasExactKeysWithOptionalCloudPresentation(cloudSnapshot,
             { "schemaVersion", "clientRevision", "clientTime", "changeSource",
               "syncedFrom", "redScore", "blueScore", "redPlayers", "bluePlayers",
-              "redPickFirst", "teamsFlipped", "outputSeatLabel", "lastKillTeam" })) {
+              "redPickFirst", "lastKillTeam" })) {
             return fail("invalid_snapshot");
         }
     }
-    else if (!HasExactKeysWithOptionalRecentEvents(cloudSnapshot,
+    else if (!HasExactKeysWithOptionalCloudPresentation(cloudSnapshot,
         { "schemaVersion", "clientRevision", "clientTime", "changeSource",
           "redScore", "blueScore", "redPlayers", "bluePlayers", "redPickFirst",
-          "teamsFlipped", "outputSeatLabel", "lastKillTeam" })) {
+          "lastKillTeam" })) {
         return fail("invalid_snapshot");
     }
     if (!ValidateRecentEvents(cloudSnapshot)) return fail("invalid_snapshot");
@@ -214,8 +337,6 @@ bool DnfConvertCloudMatchSnapshot(const json& cloudSnapshot,
         !cloudSnapshot["bluePlayers"].is_array() ||
         cloudSnapshot["bluePlayers"].size() != 4 ||
         !cloudSnapshot["redPickFirst"].is_boolean() ||
-        !cloudSnapshot["teamsFlipped"].is_boolean() ||
-        !cloudSnapshot["outputSeatLabel"].is_boolean() ||
         !cloudSnapshot["lastKillTeam"].is_string()) {
         return fail("invalid_snapshot");
     }
@@ -243,8 +364,6 @@ bool DnfConvertCloudMatchSnapshot(const json& cloudSnapshot,
         { "blueScore", swapped ? redScore : blueScore },
         { "redPickMode", cloudSnapshot["redPickFirst"].get<bool>() != swapped ?
             "first" : "second" },
-        { "isFlipped", cloudSnapshot["teamsFlipped"] },
-        { "outputSeatLabelToKillFile", cloudSnapshot["outputSeatLabel"] },
         { "lastKillerTeam", lastKillTeam.empty() ? -1 :
             ((lastKillTeam == "red") != swapped ? 0 : 1) },
         { "players", json::array() }
@@ -264,6 +383,9 @@ bool DnfConvertCloudMatchSnapshot(const json& cloudSnapshot,
             return fail("invalid_snapshot");
         }
         teamSnapshot["players"].push_back(std::move(player));
+    }
+    if (cloudSnapshot.contains("recentEvents")) {
+        teamSnapshot["recentEvents"] = cloudSnapshot["recentEvents"];
     }
     return true;
 }
@@ -294,11 +416,6 @@ json DnfBuildCloudMatchPreview(const json& localTeamSnapshot,
     json state = DifferenceGroup("state");
     AddDifference(state, "redPickFirst", localTeamSnapshot["redPickMode"],
         remoteTeamSnapshot["redPickMode"]);
-    AddDifference(state, "teamsFlipped", localTeamSnapshot["isFlipped"],
-        remoteTeamSnapshot["isFlipped"]);
-    AddDifference(state, "outputSeatLabel",
-        localTeamSnapshot["outputSeatLabelToKillFile"],
-        remoteTeamSnapshot["outputSeatLabelToKillFile"]);
     AddDifference(state, "lastKillTeam", localTeamSnapshot["lastKillerTeam"],
         remoteTeamSnapshot["lastKillerTeam"]);
 

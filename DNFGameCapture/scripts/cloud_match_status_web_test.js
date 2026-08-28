@@ -37,9 +37,11 @@ vm.runInContext(
     `${roomNames}\n${defaultServerUrl}\n${displayStates}\n` +
     `${extractFunction(source, 'normalizeCloudSyncPanel')}\n` +
     `${extractFunction(source, 'normalizeCloudMatchState')}\n` +
-    `${extractFunction(source, 'cloudOfflineRemaining')}\n` +
+    `${extractFunction(source, 'cloudOfflineElapsed')}\n` +
+    `${extractFunction(source, 'sortBroadcasterDirectory')}\n` +
     `this.normalizeFixture = normalizeCloudMatchState;\n` +
-    `this.offlineRemaining = cloudOfflineRemaining;\n`, sandbox);
+    `this.offlineElapsed = cloudOfflineElapsed;\n` +
+    `this.sortDirectory = sortBroadcasterDirectory;\n`, sandbox);
 
 const normalized = sandbox.normalizeFixture({
     joined: true,
@@ -62,8 +64,20 @@ requireCondition(normalized.broadcasters.length === 1, 'Broadcaster directory wa
 requireCondition(normalized.syncHistory.all.length === 1, 'Global sync history was lost.');
 requireCondition(normalized.realtimeRelations.length === 1, 'Realtime relations were lost.');
 
-const remaining = sandbox.offlineRemaining(Math.floor(Date.now() / 1000) + 3600);
-requireCondition(typeof remaining === 'string' && remaining.length > 0,
-    'Offline broadcaster retention countdown is missing.');
+const nowSeconds = 2_000_000;
+const elapsed = sandbox.offlineElapsed(nowSeconds + 24 * 60 * 60 - 18 * 60, nowSeconds);
+requireCondition(elapsed === '离线 18分钟',
+    `Offline elapsed label is wrong: ${elapsed}`);
+
+const sorted = sandbox.sortDirectory([
+    { deviceId: 'offline-old', online: false, offlineExpiresAt: nowSeconds + 100 },
+    { deviceId: 'online-old', online: true, receivedAt: 20 },
+    { deviceId: 'expired', online: false, offlineExpiresAt: nowSeconds - 1 },
+    { deviceId: 'offline-new', online: false, offlineExpiresAt: nowSeconds + 200 },
+    { deviceId: 'online-new', online: true, receivedAt: 30 }
+], nowSeconds);
+requireCondition(Array.from(sorted, item => item.deviceId).join(',') ===
+    'online-new,online-old,offline-new,offline-old',
+    'Broadcaster directory must put online entries first, sort by recency, and drop expired entries.');
 
 console.log('Unified broadcaster Web state tests passed.');

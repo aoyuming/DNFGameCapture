@@ -35,16 +35,19 @@ $cloudFunction = Read-RequiredFile $cloudFunctionPath
 Require-Text $header '#include "CloudMatchClient.h"' 'Main dialog does not include CloudMatchClient.'
 Require-Text $header 'CloudMatchClient m_cloudMatchClient' 'Main dialog does not own CloudMatchClient.'
 Require-Text $source 'L"CloudMatch"' 'The [CloudMatch] config section is missing.'
-foreach ($field in @('ServerUrl', 'DeviceId', 'DeviceToken', 'RoomId',
+foreach ($field in @('DeviceId', 'DeviceToken', 'RoomId',
     'BroadcasterName', 'ClientRevision')) {
     Require-Text $source ('L"' + $field + '"') "CloudMatch config field '$field' is missing."
 }
-Require-Text $source 'http://47.109.149.111:18880' 'Public fallback server URL is missing.'
+Reject-Text $source 'GetPrivateProfileString(L"CloudMatch", L"ServerUrl"' `
+    'Cloud match still restores its server URL from local configuration.'
+Reject-Text $source 'writeSetting(L"ServerUrl"' `
+    'Cloud match still persists its server URL locally.'
 Require-Text $cloudFunction 'cloudServerUrl: CLOUD_MATCH_SERVER_URL' 'Authorization does not supply cloudServerUrl.'
 Require-Text $source 'authSuccess->cloudServerUrl' 'C++ does not apply the authorized server URL.'
 
 foreach ($id in @(
-    'broadcaster-sidebar', 'broadcaster-online-list', 'broadcaster-offline-list',
+    'broadcaster-sidebar', 'broadcaster-list', 'broadcaster-list-count',
     'cloud-broadcaster-name-input', 'broadcaster-preview-overlay',
     'btn-broadcaster-sync-once', 'btn-broadcaster-sync-realtime',
     'btn-broadcaster-stop-realtime'
@@ -130,6 +133,14 @@ foreach ($secret in @('deviceToken', 'authorizationCode', 'screenshot', 'imagePa
 foreach ($field in @('schemaVersion', 'clientRevision', 'changeSource', 'recentEvents')) {
     Require-Text $snapshotBuilder $field "Cloud snapshot field '$field' is missing."
 }
+Require-Text $snapshotBuilder '{ "teamsFlipped", false }' `
+    'Cloud snapshots must retain the neutral legacy flip placeholder.'
+Require-Text $snapshotBuilder '{ "outputSeatLabel", false }' `
+    'Cloud snapshots must retain the neutral legacy TXT-label placeholder.'
+Reject-Text $snapshotBuilder 'm_bFlipSides' `
+    'Cloud snapshots must not upload the local red/blue presentation direction.'
+Reject-Text $snapshotBuilder 'm_bOutputSeatLabelToKillFile' `
+    'Cloud snapshots must not upload the local TXT seat-label setting.'
 Require-Text $snapshotBuilder "text.find('\0')" 'Recent recognition text does not reject embedded NUL.'
 Require-Text $syncSource 'ValidateRecentEvents' 'Downloaded recent recognition data is not validated.'
 

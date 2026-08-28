@@ -41,7 +41,6 @@ $required = @(
     @{ File = "index.html"; Needle = "btn-appearance" },
     @{ File = "index.html"; Needle = "output-seat-label-toggle" },
     @{ File = "index.html"; Needle = "btn-random-teams" },
-    @{ File = "index.html"; Needle = "btn-console-toggle" },
     @{ File = "index.html"; Needle = "btn-sync-alias-db" },
     @{ File = "index.html"; Needle = "btn-push-alias-db" },
     @{ File = "index.html"; Needle = "btn-pro" },
@@ -70,15 +69,15 @@ foreach ($item in $required) {
     }
 }
 
-if ($text["index.html"] -notmatch '<div class="control-row control-row-match">[\s\S]*btn-swap[\s\S]*btn-monitor[\s\S]*btn-reset[\s\S]*btn-pro[\s\S]*btn-kill-display-toggle[\s\S]*</div>\s*<div class="control-row control-row-aux">') {
-    $errors.Add("First control row must contain swap, run, reset, professional mode, and display page in order.")
+if ($text["index.html"] -notmatch '<div class="control-row control-row-match">[\s\S]*btn-swap[\s\S]*btn-monitor[\s\S]*btn-reset[\s\S]*btn-kill-display-toggle[\s\S]*btn-pro[\s\S]*</div>\s*<div class="control-row control-row-aux">') {
+    $errors.Add("First control row must contain swap, run, reset, display page, and professional mode in order.")
 }
 
 if ($text["index.html"] -notmatch '<div class="control-row control-row-aux">[\s\S]*btn-review-toggle[\s\S]*btn-auth[\s\S]*btn-appearance[\s\S]*output-seat-label-toggle[\s\S]*kill-show-death-toggle-main[\s\S]*btn-more-controls') {
     $errors.Add("Second control row must contain recent review, auth, appearance, pick order, show death, and more in order.")
 }
 
-if ($text["index.html"] -notmatch '<div class="more-controls-menu"[\s\S]*btn-random-teams[\s\S]*btn-console-toggle[\s\S]*btn-sync-alias-db[\s\S]*btn-push-alias-db[\s\S]*death-algo-select[\s\S]*btn-clear-teams') {
+if ($text["index.html"] -notmatch '<div class="more-controls-menu"[\s\S]*btn-random-teams[\s\S]*btn-sync-alias-db[\s\S]*btn-push-alias-db[\s\S]*death-algo-select[\s\S]*btn-clear-teams') {
     $errors.Add("More controls menu must contain only the low-frequency tool, data, system, and danger actions.")
 }
 

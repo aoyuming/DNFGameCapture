@@ -33,10 +33,11 @@ $cloudFunction = Read-RequiredFile (Join-Path $root ([string]([char]0x4E91 + [ch
 
 foreach ($id in @(
     'broadcaster-sidebar',
-    'broadcaster-online-list',
-    'broadcaster-offline-list',
+    'broadcaster-list',
+    'broadcaster-list-count',
     'cloud-broadcaster-name-input',
     'broadcaster-preview-overlay',
+    'broadcaster-preview-notice',
     'btn-broadcaster-sync-once',
     'btn-broadcaster-sync-realtime',
     'btn-broadcaster-stop-realtime'
@@ -79,6 +80,8 @@ Require-Text $main ("lastError.includes('" + $onlineNameTaken + "')") 'Duplicate
 Require-Text $main 'offlineExpiresAt' 'Web does not render the offline retention countdown.'
 Require-Text $main 'realtimeRelations' 'Web does not render realtime sync relations.'
 Require-Text $main 'syncHistory' 'Web does not render sync history.'
+Require-Text $main 'function cloudReverseSyncBlocked(' 'Web does not detect active reverse realtime relationships.'
+Require-Text $main 'reverseSyncBlocked' 'Web preview actions are not guarded against reverse synchronization.'
 Reject-Text $main "document.getElementById('btn-cloud-room-join')?.addEventListener" 'Legacy room event bindings remain active.'
 Reject-Text $main "document.getElementById('btn-cloud-sync-apply')?.addEventListener" 'Legacy room sync event bindings remain active.'
 
@@ -95,13 +98,16 @@ foreach ($selector in @(
 Require-Text $dialog '{ "action", "cloud_broadcaster_prompt" }' 'C++ still sends the room chooser prompt.'
 Reject-Text $dialog '{ "action", "cloud_room_prompt" }' 'C++ still sends the legacy room prompt.'
 Require-Text $dialog 'WS_CHILD | SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS' 'The professional cloud status control is not hidden.'
-Require-Text $webDialog 'constexpr int kReferenceClientWidth = 980;' 'The Web scoreboard reference width is not 980 CSS px.'
+Require-Text $webDialog 'constexpr int kCompactClientWidth = 980;' 'The compact Web scoreboard width is not 980 CSS px.'
+Require-Text $webDialog 'constexpr int kExpandedClientWidth = 1240;' 'The expanded Web scoreboard width is not 1240 CSS px.'
 Require-Text $dialog 'm_bOcrStartPending.exchange(false)' 'Starting realtime sync does not cancel a pending local OCR start.'
-Require-Text $dialog 'm_cloudMatchTemporaryInstance' 'C++ does not track temporary multi-instance cloud identities.'
-Require-Text $dialog 'dnf-tmp-' 'C++ does not generate isolated temporary cloud device IDs.'
-Require-Text $dialog 'm_cloudMatchTemporaryInstance = GetLastError() == ERROR_ALREADY_EXISTS;' 'C++ does not classify additional local clients as temporary instances.'
+Require-Text $dialog 'IsCloudReverseSyncBlocked(targetDeviceId)' 'C++ does not block reverse broadcaster synchronization.'
+Require-Text $dialog 'reverse_sync_conflict' 'C++ does not map the reverse synchronization conflict error.'
+Reject-Text $dialog 'm_cloudMatchTemporaryInstance = GetLastError()' 'Duplicate clients must be rejected by the application mutex.'
 
 Require-Text $relations 'export function listAllSyncHistory(' 'Server cannot expose global 24-hour sync history.'
+Require-Text $relations 'export function isReverseRealtimeSyncBlocked(' 'Server has no reverse realtime relation query.'
+Require-Text $serverSocket "code: 'reverse_sync_conflict'" 'Server does not reject reverse realtime synchronization.'
 Require-Text $serverSocket 'history: listAllSyncHistory(db, now())' 'Broadcaster directory does not include sync history.'
 Require-Text $serverSocket 'isTemporaryCloudDeviceId' 'Server does not identify temporary multi-instance devices.'
 Require-Text $serverSocket 'deleteTemporaryCloudDevice' 'Server does not purge temporary broadcaster data after disconnect.'
@@ -115,6 +121,6 @@ Reject-Text $cloudFunction 'process.env.CLOUD_MATCH_SERVER_URL' 'The authorizati
 Require-Text $cloudFunction 'cloudServerUrl: CLOUD_MATCH_SERVER_URL' 'Successful authorization does not return cloudServerUrl.'
 Require-Text $dialog 'outCloudServerUrl' 'The C++ authorization bridge does not receive cloudServerUrl.'
 Require-Text $dialog 'authSuccess->cloudServerUrl' 'Authorization success does not apply cloudServerUrl on the UI thread.'
-Require-Text $dialog 'SaveCloudMatchSettings();' 'The authorized cloud server URL is not persisted.'
+Reject-Text $dialog 'writeSetting(L"ServerUrl"' 'The authorized cloud server URL is still persisted.'
 
 Write-Host 'Unified broadcaster pool static checks passed.'

@@ -4,12 +4,22 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DNF 赛事计分板 - WebView2 版</title>
-    <meta name="dnf-web-layout-version" content="20260828-unified-broadcaster-pool">
-    <link rel="stylesheet" href="style.css?v=20260828-unified-broadcaster-pool">
+    <meta name="dnf-web-layout-version" content="20260829-console-on-demand">
+    <link rel="stylesheet" href="style.css?v=20260829-console-on-demand">
 </head>
 <body>
 
     <div class="app-shell">
+        <aside class="console-sidebar" id="console-panel" aria-labelledby="console-panel-title" hidden aria-hidden="true">
+            <div class="console-header">
+                <span id="console-panel-title">运行日志</span>
+                <span class="console-count" id="console-count">0</span>
+                <button class="console-clear" id="btn-console-clear" title="清空运行日志">清空</button>
+                <button class="console-close" id="btn-console-close" title="关闭运行日志" aria-label="关闭运行日志">&times;</button>
+            </div>
+            <div class="console-list" id="console-list" aria-live="polite"></div>
+        </aside>
+
         <div class="left-stack">
             <div class="main-container" id="main-container">
                 <div class="teams-wrap" id="teams-wrap">
@@ -70,10 +80,7 @@
                                 <button class="ctrl-btn btn-random" id="btn-random-teams">🎲 分组和抽签</button>
                                 <button class="ctrl-btn btn-key-mapping" id="btn-key-mapping">⌨ 按键映射</button>
                                 <button class="ctrl-btn btn-key-lan" id="btn-key-lan">局域网同步</button>
-                        <button class="ctrl-btn btn-console-toggle" id="btn-console-toggle" aria-expanded="false">
-                                    <span>C++日志</span>
-                                    <span class="console-toggle-count" id="console-toggle-count">0</span>
-                                </button>
+                                <button class="ctrl-btn btn-console-toggle" id="btn-console-open">🧾 C++日志 <span class="console-toggle-count" id="console-toggle-count">0</span></button>
                             </div>
                             <div class="more-controls-section">
                                 <div class="more-controls-title">数据</div>
@@ -102,10 +109,10 @@
             </div>
         </div>
 
-        <aside class="broadcaster-sidebar" id="broadcaster-sidebar" aria-label="在线主播">
+        <aside class="broadcaster-sidebar" id="broadcaster-sidebar" aria-label="主播列表">
             <div class="broadcaster-sidebar-header">
                 <div>
-                    <div class="broadcaster-sidebar-title">在线主播</div>
+                    <div class="broadcaster-sidebar-title">主播列表</div>
                     <div class="broadcaster-sidebar-subtitle" id="broadcaster-cloud-status">尚未连接云端</div>
                 </div>
                 <button class="broadcaster-refresh" id="btn-cloud-refresh-broadcasters" title="刷新主播列表" aria-label="刷新主播列表">↻</button>
@@ -118,13 +125,12 @@
                 </div>
                 <div class="broadcaster-self-note">名称用于其他主播识别和同步比赛数据</div>
             </div>
-            <section class="broadcaster-list-section">
-                <div class="broadcaster-section-heading"><span>在线</span><span id="broadcaster-online-count">0</span></div>
-                <div class="broadcaster-list" id="broadcaster-online-list"></div>
-            </section>
-            <section class="broadcaster-list-section offline-section">
-                <div class="broadcaster-section-heading"><span>最近离线 · 24小时</span><span id="broadcaster-offline-count">0</span></div>
-                <div class="broadcaster-list" id="broadcaster-offline-list"></div>
+            <section class="broadcaster-list-section unified">
+                <div class="broadcaster-section-heading">
+                    <span>全部主播</span>
+                    <span id="broadcaster-list-count">0 在线 · 0 离线</span>
+                </div>
+                <div class="broadcaster-list" id="broadcaster-list"></div>
             </section>
             <div class="broadcaster-relation-summary" id="broadcaster-relation-summary">同步关系将在连接后显示</div>
         </aside>
@@ -137,15 +143,6 @@
                 <button class="review-close" id="btn-review-close" title="关闭">&times;</button>
             </div>
             <div class="review-list" id="review-list"></div>
-        </div>
-        <div class="console-panel" id="console-panel" role="dialog" aria-modal="false" aria-hidden="true" aria-labelledby="console-panel-title">
-            <div class="console-header">
-                <span id="console-panel-title">C++ 控制台</span>
-                <span class="console-count" id="console-count">0</span>
-                <button class="console-clear" id="btn-console-clear" title="清空">清空</button>
-                <button class="console-close" id="btn-console-close" title="关闭">&times;</button>
-            </div>
-            <div class="console-list" id="console-list"></div>
         </div>
     </div>
 
@@ -359,7 +356,7 @@
                 </div>
                 <button class="broadcaster-preview-close" id="btn-broadcaster-preview-close" title="关闭">&times;</button>
             </header>
-            <div class="broadcaster-preview-notice">仅预览，不会修改本地数据</div>
+            <div class="broadcaster-preview-notice" id="broadcaster-preview-notice">仅预览，不会修改本地数据</div>
             <div class="broadcaster-preview-body" id="broadcaster-preview-body"></div>
             <section class="broadcaster-preview-relations">
                 <div class="broadcaster-preview-section-title">同步关系</div>
@@ -466,6 +463,6 @@
         </div>
     </div>
 
-    <script src="main.js?v=20260828-unified-broadcaster-pool" defer></script>
+    <script src="main.js?v=20260829-console-on-demand" defer></script>
 </body>
 </html>

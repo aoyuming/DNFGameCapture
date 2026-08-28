@@ -8,9 +8,11 @@ void WriteMatchLog(const CString& logLine);
 
 namespace {
     // 参考图1的紧凑 CSS 视口尺寸。窗口外框会按当前系统边框自动反推。
-    constexpr int kReferenceClientWidth = 980;
+    constexpr int kCompactClientWidth = 980;
+    constexpr int kExpandedClientWidth = 1240;
     constexpr int kReferenceClientHeight = 480;
     constexpr int kAppearanceExtraClientHeight = 300;
+    constexpr int kBroadcasterPreviewClientHeight = 760;
     constexpr double kTargetVisualScale = 1.25;
 
     double GetDpiScaleForWindow(HWND hwnd)
@@ -340,7 +342,9 @@ bool CWebScoreDlg::CalibrateZoomFromWebMetrics(int innerWidth, int innerHeight, 
         actualZoom = controllerZoom;
     }
 
-    const double widthRatio = static_cast<double>(innerWidth) / static_cast<double>(kReferenceClientWidth);
+    const int referenceClientWidth = GetReferenceClientWidth();
+    const double widthRatio = static_cast<double>(innerWidth) /
+        static_cast<double>(referenceClientWidth);
     const double heightRatio = static_cast<double>(innerHeight) / static_cast<double>(kReferenceClientHeight);
     double measuredRatio = widthRatio;
     if (heightRatio > 0.0 && heightRatio < measuredRatio) measuredRatio = heightRatio;
@@ -356,7 +360,7 @@ bool CWebScoreDlg::CalibrateZoomFromWebMetrics(int innerWidth, int innerHeight, 
     line.Format(L"[Web布局诊断][C++] 自动校正WebViewZoom：原因=%s；JS inner=%dx%d；目标CSS=%dx%d；原Zoom=%.3f；新Zoom=%.3f；说明=按前端实测视口反推，修正系统/兼容性DPI未被GetDpiForWindow捕获的额外缩放。",
         reason.GetString(),
         innerWidth, innerHeight,
-        kReferenceClientWidth, kReferenceClientHeight,
+        referenceClientWidth, kReferenceClientHeight,
         actualZoom, correctedZoom);
     WriteMatchLog(line);
 
@@ -395,7 +399,7 @@ void CWebScoreDlg::WriteWebHostDiagnostics(const CString& reason)
         clientRect.Width(), clientRect.Height(),
         GetDpiScaleForWindow(m_hWnd),
         zoom,
-        kReferenceClientWidth, kReferenceClientHeight,
+        GetReferenceClientWidth(), kReferenceClientHeight,
         kTargetVisualScale);
     WriteMatchLog(line);
 }
@@ -413,12 +417,29 @@ void CWebScoreDlg::ApplyFixedWindowHeight()
     m_initialWindowSizeApplied = true;
 
     // 窗口按目标视觉基准缩放一次即可；WebView2 Zoom 已经负责抵消系统 DPI。
-    ResizeWindowForClientSize(
-        ScaleCssSizeToNativePixels(kReferenceClientWidth, kTargetVisualScale),
-        ScaleCssSizeToNativePixels(
-            kReferenceClientHeight + (m_appearanceExpanded ? kAppearanceExtraClientHeight : 0),
-            kTargetVisualScale));
+    ApplyExpandedWindowSize();
     WriteWebHostDiagnostics(L"固定Web窗口尺寸已应用");
+}
+
+void CWebScoreDlg::ApplyExpandedWindowSize()
+{
+    int targetClientHeight = kReferenceClientHeight;
+    if (m_appearanceExpanded) {
+        targetClientHeight = max(targetClientHeight,
+            kReferenceClientHeight + kAppearanceExtraClientHeight);
+    }
+    if (m_broadcasterPreviewExpanded) {
+        targetClientHeight = max(targetClientHeight, kBroadcasterPreviewClientHeight);
+    }
+
+    ResizeWindowForClientSize(
+        ScaleCssSizeToNativePixels(GetReferenceClientWidth(), kTargetVisualScale),
+        ScaleCssSizeToNativePixels(targetClientHeight, kTargetVisualScale));
+}
+
+int CWebScoreDlg::GetReferenceClientWidth() const
+{
+    return m_consolePanelExpanded ? kExpandedClientWidth : kCompactClientWidth;
 }
 
 void CWebScoreDlg::SetAppearancePanelExpanded(bool expanded)
@@ -426,10 +447,26 @@ void CWebScoreDlg::SetAppearancePanelExpanded(bool expanded)
     if (m_appearanceExpanded == expanded) return;
     m_appearanceExpanded = expanded;
 
-    ResizeWindowForClientSize(
-        ScaleCssSizeToNativePixels(kReferenceClientWidth, kTargetVisualScale),
-        ScaleCssSizeToNativePixels(
-            kReferenceClientHeight + (m_appearanceExpanded ? kAppearanceExtraClientHeight : 0),
-            kTargetVisualScale));
+    ApplyExpandedWindowSize();
     WriteWebHostDiagnostics(m_appearanceExpanded ? L"外观面板打开扩高" : L"外观面板关闭还原");
+}
+
+void CWebScoreDlg::SetBroadcasterPreviewExpanded(bool expanded)
+{
+    if (m_broadcasterPreviewExpanded == expanded) return;
+    m_broadcasterPreviewExpanded = expanded;
+
+    ApplyExpandedWindowSize();
+    WriteWebHostDiagnostics(m_broadcasterPreviewExpanded ?
+        L"主播预览打开扩高" : L"主播预览关闭还原");
+}
+
+void CWebScoreDlg::SetConsolePanelExpanded(bool expanded)
+{
+    if (m_consolePanelExpanded == expanded) return;
+    m_consolePanelExpanded = expanded;
+
+    ApplyExpandedWindowSize();
+    WriteWebHostDiagnostics(m_consolePanelExpanded ?
+        L"C++日志面板打开扩宽" : L"C++日志面板关闭还原");
 }

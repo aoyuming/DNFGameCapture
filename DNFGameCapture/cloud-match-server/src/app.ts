@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { createServer, type Server as HttpServer } from 'node:http';
 import express, {
   type Express,
@@ -7,6 +8,7 @@ import express, {
 } from 'express';
 import { Server as SocketIoServer } from 'socket.io';
 
+import { createCloudMatchAdminApp } from './admin.js';
 import { compareRoomSnapshots } from './comparison.js';
 import { serverConfig } from './config.js';
 import { openDatabase } from './db.js';
@@ -51,11 +53,15 @@ export interface CreateCloudMatchAppOptions {
     remoteAddress: string,
   ) => string;
   socketRoomAdapter?: SocketRoomAdapter;
+  adminCsrfToken?: string;
+  adminPassword?: string;
 }
 
 export interface CloudMatchApp {
   expressApp: Express;
   httpServer: HttpServer;
+  adminExpressApp: Express;
+  adminHttpServer: HttpServer;
   io: SocketIoServer;
   db: DatabaseConnection;
   close(): Promise<void>;
@@ -167,6 +173,16 @@ export function createCloudMatchApp(
     resolveClientIp: (remoteAddress) => resolveClientIp('socket', remoteAddress),
     socketRoomAdapter,
   });
+  const adminCsrfToken = options.adminCsrfToken ?? randomBytes(32).toString('base64url');
+  const adminPassword = options.adminPassword ?? randomBytes(24).toString('base64url');
+  const adminExpressApp = createCloudMatchAdminApp({
+    db,
+    now,
+    csrfToken: adminCsrfToken,
+    adminPassword,
+    socketController: socketHandlers,
+  });
+  const adminHttpServer = createServer(adminExpressApp);
 
   const close = (): Promise<void> => {
     if (!closePromise) {
@@ -180,6 +196,11 @@ export function createCloudMatchApp(
               httpServer.close((error) => (error ? reject(error) : resolve()));
             });
           }
+          if (adminHttpServer.listening) {
+            await new Promise<void>((resolve, reject) => {
+              adminHttpServer.close((error) => (error ? reject(error) : resolve()));
+            });
+          }
         } finally {
           socketHandlers.close();
           if (db.open) {
@@ -191,5 +212,13 @@ export function createCloudMatchApp(
     return closePromise;
   };
 
-  return { expressApp, httpServer, io, db, close };
+  return {
+    expressApp,
+    httpServer,
+    adminExpressApp,
+    adminHttpServer,
+    io,
+    db,
+    close,
+  };
 }

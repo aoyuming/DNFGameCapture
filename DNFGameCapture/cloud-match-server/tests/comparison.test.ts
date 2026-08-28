@@ -97,6 +97,21 @@ function member(
 }
 
 describe('room snapshot comparison', () => {
+  test('ignores local presentation settings when comparing broadcasters', () => {
+    const local = snapshot();
+    const remote = snapshot({ teamsFlipped: true, outputSeatLabel: false });
+
+    const result = compareRoomSnapshots(
+      [row('device-local', local), row('device-remote', remote)],
+      1_000,
+    );
+
+    expect(member(result, 'device-remote')).toMatchObject({
+      similarity: 100,
+      differences: [],
+    });
+  });
+
   test('normalizes a complete red-blue swap to 100 percent similarity', () => {
     const a = snapshot();
     const b = swapSnapshot(a);

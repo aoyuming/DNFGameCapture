@@ -1748,6 +1748,68 @@ describe('cloud match Socket.IO integration', () => {
     });
   });
 
+  test('rejects reverse realtime synchronization while the opposite relation is active', async () => {
+    const { url } = await startApp();
+    const first = await createDevice(url, 'reverse-first-0001');
+    const second = await createDevice(url, 'reverse-second-0002');
+    await expect(emitAck(first.socket, 'broadcaster:join', {
+      broadcasterName: 'Reverse First',
+    })).resolves.toMatchObject({ ok: true });
+    await expect(emitAck(second.socket, 'broadcaster:join', {
+      broadcasterName: 'Reverse Second',
+    })).resolves.toMatchObject({ ok: true });
+
+    await expect(emitAck(first.socket, 'sync:realtime:start', {
+      targetDeviceId: second.deviceId,
+      targetName: 'Reverse Second',
+    })).resolves.toMatchObject({ ok: true });
+
+    await expect(emitAck(second.socket, 'sync:realtime:start', {
+      targetDeviceId: first.deviceId,
+      targetName: 'Reverse First',
+    })).resolves.toEqual({ ok: false, code: 'reverse_sync_conflict' });
+
+    await expect(emitAck(first.socket, 'sync:realtime:stop', {}))
+      .resolves.toMatchObject({ ok: true, stopped: true });
+    await expect(emitAck(second.socket, 'sync:realtime:start', {
+      targetDeviceId: first.deviceId,
+      targetName: 'Reverse First',
+    })).resolves.toMatchObject({ ok: true });
+  });
+
+  test('lets the localhost admin controller stop realtime sync and disconnect a broadcaster', async () => {
+    const adminCsrfToken = 'socket-admin-integration-token';
+    const adminPassword = 'socket-admin-password';
+    const { app, url } = await startApp({ adminCsrfToken, adminPassword });
+    const target = await createDevice(url, 'admin-target-0001');
+    const viewer = await createDevice(url, 'admin-viewer-0002');
+    await expect(emitAck(target.socket, 'broadcaster:join', {
+      broadcasterName: 'Admin Target',
+    })).resolves.toMatchObject({ ok: true });
+    await expect(emitAck(viewer.socket, 'broadcaster:join', {
+      broadcasterName: 'Admin Viewer',
+    })).resolves.toMatchObject({ ok: true });
+    await expect(emitAck(viewer.socket, 'sync:realtime:start', {
+      targetDeviceId: target.deviceId,
+      targetName: 'Admin Target',
+    })).resolves.toMatchObject({ ok: true });
+
+    await request(app.adminExpressApp)
+      .post(`/admin/api/realtime/${viewer.deviceId}/stop`)
+      .auth('admin', adminPassword)
+      .set('x-dnf-admin-csrf', adminCsrfToken)
+      .expect(200, { ok: true });
+    await expect(emitAck(viewer.socket, 'sync:relations', {}))
+      .resolves.toMatchObject({ ok: true, relations: [] });
+
+    await request(app.adminExpressApp)
+      .post(`/admin/api/broadcasters/${target.deviceId}/disconnect`)
+      .auth('admin', adminPassword)
+      .set('x-dnf-admin-csrf', adminCsrfToken)
+      .expect(200, { ok: true });
+    await waitUntil(() => expect(target.socket.connected).toBe(false));
+  });
+
   test('removes temporary multi-instance broadcasters after disconnect grace period', async () => {
     const { app, url } = await startApp();
     const observer = await createDevice(url, 'temporary-observer-0001');

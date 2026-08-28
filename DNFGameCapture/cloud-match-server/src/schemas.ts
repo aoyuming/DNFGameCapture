@@ -28,8 +28,10 @@ export type MatchSnapshot = {
   redPlayers: [Player, Player, Player, Player];
   bluePlayers: [Player, Player, Player, Player];
   redPickFirst: boolean;
-  teamsFlipped: boolean;
-  outputSeatLabel: boolean;
+  // Optional for compatibility with new clients. These are local display
+  // settings and are ignored by comparison/sync; old clients may still send them.
+  teamsFlipped?: boolean;
+  outputSeatLabel?: boolean;
   lastKillTeam: 'red' | 'blue' | '';
   recentEvents?: RecentRecognitionEvent[];
 };
@@ -148,8 +150,8 @@ export const matchSnapshotSchema: z.ZodType<MatchSnapshot> = z
     redPlayers: z.tuple([playerSchema, playerSchema, playerSchema, playerSchema]),
     bluePlayers: z.tuple([playerSchema, playerSchema, playerSchema, playerSchema]),
     redPickFirst: z.boolean(),
-    teamsFlipped: z.boolean(),
-    outputSeatLabel: z.boolean(),
+    teamsFlipped: z.boolean().optional(),
+    outputSeatLabel: z.boolean().optional(),
     lastKillTeam: z.enum(['red', 'blue', '']),
     recentEvents: z.array(recentRecognitionEventSchema).max(10).optional(),
   })

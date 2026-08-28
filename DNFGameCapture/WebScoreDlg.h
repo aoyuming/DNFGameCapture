@@ -20,6 +20,8 @@ public:
 	void SendStateToWeb(const CString& jsonStr);
 	void ApplyFixedWindowHeight();
 	void SetAppearancePanelExpanded(bool expanded);
+	void SetBroadcasterPreviewExpanded(bool expanded);
+	void SetConsolePanelExpanded(bool expanded);
 	void ResizeWindowToSize(int targetWindowW, int targetWindowH);
 	void ResizeWindowForClientSize(int targetClientW, int targetClientH);
 	void WriteWebHostDiagnostics(const CString& reason);
@@ -50,6 +52,8 @@ private:
 	int m_baseWindowWidth = 0;
 	int m_baseWindowHeight = 0;
 	bool m_appearanceExpanded = false;
+	bool m_broadcasterPreviewExpanded = false;
+	bool m_consolePanelExpanded = false;
 	bool m_initialWindowSizeApplied = false;
 	double m_currentWebZoom = 0.0;
 	bool m_webZoomCalibrated = false;
@@ -59,4 +63,6 @@ private:
 
 	void InitWebView2();
 	void ApplyDpiNormalizedZoom();
+	void ApplyExpandedWindowSize();
+	int GetReferenceClientWidth() const;
 };

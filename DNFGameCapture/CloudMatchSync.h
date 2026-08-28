@@ -34,6 +34,9 @@ struct DnfCloudMatchUndoGuard
 using DnfCloudMatchNameNormalizer =
     std::function<bool(const std::string&, std::string&)>;
 
+bool DnfNormalizeCloudMatchUtf8Name(const std::string& input,
+    std::string& normalized);
+
 bool DnfConvertCloudMatchSnapshot(const nlohmann::json& cloudSnapshot,
     std::uint64_t expectedClientRevision, bool swapped,
     const DnfCloudMatchNameNormalizer& normalizeName,

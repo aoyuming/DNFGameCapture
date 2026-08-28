@@ -55,8 +55,8 @@ if ($resourceScript.Contains('IDC_STATIC_CLOUD_ROOM_STATUS')) {
 foreach ($needle in @(
     'id="broadcaster-sidebar"',
     'id="broadcaster-cloud-status"',
-    'id="broadcaster-online-list"',
-    'id="broadcaster-offline-list"'
+    'id="broadcaster-list"',
+    'id="broadcaster-list-count"'
 )) {
     if (-not $webHtml.Contains($needle)) { throw "Broadcaster status markup is missing: $needle" }
 }
@@ -68,7 +68,8 @@ foreach ($needle in @(
     'function renderBroadcasterSidebar()',
     "document.getElementById('broadcaster-cloud-status')",
     'renderBroadcasterSidebar();',
-    'cloudOfflineRemaining('
+    'cloudOfflineElapsed(',
+    'sortBroadcasterDirectory('
 )) {
     if (-not $webMain.Contains($needle)) { throw "Broadcaster status wiring is missing: $needle" }
 }
@@ -82,8 +83,9 @@ foreach ($needle in @(
 )) {
     if (-not $webCss.Contains($needle)) { throw "Broadcaster status style is missing: $needle" }
 }
-if (-not $webDialogSource.Contains('constexpr int kReferenceClientWidth = 980;')) {
-    throw 'The Web window does not reserve 980 CSS px for the broadcaster sidebar.'
+if (-not $webDialogSource.Contains('constexpr int kCompactClientWidth = 980;') -or
+    -not $webDialogSource.Contains('constexpr int kExpandedClientWidth = 1240;')) {
+    throw 'The Web window does not reserve compact and expanded sidebar widths.'
 }
 
 & node --check $webMainPath

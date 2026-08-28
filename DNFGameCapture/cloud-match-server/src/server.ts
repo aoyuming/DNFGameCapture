@@ -2,10 +2,19 @@ import { serverConfig } from './config.js';
 import { createCloudMatchApp } from './app.js';
 
 const host = process.env.HOST ?? '0.0.0.0';
-const app = createCloudMatchApp();
+if (!serverConfig.adminPassword) {
+  console.error('ADMIN_PASSWORD is required before the server can start.');
+  process.exit(1);
+}
+const app = createCloudMatchApp({ adminPassword: serverConfig.adminPassword });
 
 app.httpServer.listen(serverConfig.port, host, () => {
   console.log(`Cloud match server listening on ${host}:${serverConfig.port}`);
+});
+app.adminHttpServer.listen(serverConfig.adminPort, serverConfig.adminHost, () => {
+  console.log(
+    `Cloud match admin listening on ${serverConfig.adminHost}:${serverConfig.adminPort}`,
+  );
 });
 
 let shutdownPromise: Promise<void> | undefined;

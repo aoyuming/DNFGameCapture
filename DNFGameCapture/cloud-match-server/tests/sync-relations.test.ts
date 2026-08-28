@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { openDatabase } from '../src/db.js';
 import {
   initializeSyncRelationSchema,
+  isReverseRealtimeSyncBlocked,
   listAllRealtimeSync,
   listAllSyncHistory,
   listRealtimeSyncForDevice,
@@ -139,6 +140,52 @@ describe('sync relation persistence', () => {
 
     expect(stopRealtimeSync(db, 'viewer-a')).toBe(true);
     expect(listAllRealtimeSync(db, 1_700_000_003)).toEqual([]);
+  });
+
+  test('blocks only the reverse direction of an active realtime relation', () => {
+    const { db } = createDatabase();
+    startRealtimeSync(db, {
+      viewerDeviceId: 'viewer-a',
+      viewerName: '主播甲',
+      targetDeviceId: 'target-b',
+      targetName: '主播乙',
+      startedAt: 1_700_000_000,
+    });
+
+    expect(
+      isReverseRealtimeSyncBlocked(
+        db,
+        'target-b',
+        'viewer-a',
+        1_700_000_001,
+      ),
+    ).toBe(true);
+    expect(
+      isReverseRealtimeSyncBlocked(
+        db,
+        'viewer-a',
+        'target-b',
+        1_700_000_001,
+      ),
+    ).toBe(false);
+    expect(
+      isReverseRealtimeSyncBlocked(
+        db,
+        'unrelated-c',
+        'viewer-a',
+        1_700_000_001,
+      ),
+    ).toBe(false);
+
+    stopRealtimeSync(db, 'viewer-a');
+    expect(
+      isReverseRealtimeSyncBlocked(
+        db,
+        'target-b',
+        'viewer-a',
+        1_700_000_002,
+      ),
+    ).toBe(false);
   });
 
   test('reports stale realtime relations removed by heartbeat cleanup', () => {

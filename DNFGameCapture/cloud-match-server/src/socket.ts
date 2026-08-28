@@ -28,6 +28,7 @@ import {
   type StoredSnapshot,
 } from './snapshots.js';
 import {
+  isReverseRealtimeSyncBlocked,
   listAllRealtimeSync,
   listAllSyncHistory,
   listRealtimeSyncForDevice,
@@ -208,6 +209,10 @@ export interface RegisterCloudMatchSocketHandlersContext {
 }
 
 export interface CloudMatchSocketHandlerRegistration {
+  getActiveDeviceIds(): ReadonlySet<string>;
+  disconnectDevice(deviceId: string): boolean;
+  stopRealtimeViewer(viewerDeviceId: string): boolean;
+  notifyDirectoryChanged(reason: string): void;
   close(): void;
 }
 
@@ -1315,6 +1320,13 @@ export function registerCloudMatchSocketHandlers(
         const target = entries.find((item) => item.deviceId === parsed.data.targetDeviceId);
         if (!source || !target) return { ok: false, code: 'target_not_found', ...(requestId ? { requestId } : {}) };
         if (!target.online) return { ok: false, code: 'target_offline', ...(requestId ? { requestId } : {}) };
+        if (isReverseRealtimeSyncBlocked(db, deviceId, target.deviceId, now())) {
+          return {
+            ok: false,
+            code: 'reverse_sync_conflict',
+            ...(requestId ? { requestId } : {}),
+          };
+        }
         const relation = startRealtimeSync(db, {
           viewerDeviceId: deviceId,
           viewerName: source.broadcasterName,
@@ -1650,6 +1662,27 @@ export function registerCloudMatchSocketHandlers(
   });
 
   return {
+    getActiveDeviceIds(): ReadonlySet<string> {
+      return new Set(activeSockets.keys());
+    },
+    disconnectDevice(deviceId: string): boolean {
+      const activeSocket = activeSockets.get(deviceId);
+      if (!activeSocket?.connected) return false;
+      activeSocket.disconnect(true);
+      return true;
+    },
+    stopRealtimeViewer(viewerDeviceId: string): boolean {
+      const stopped = stopRealtimeSync(db, viewerDeviceId);
+      if (stopped) {
+        io.emit('sync:relations_changed', {
+          relations: listAllRealtimeSync(db, now()),
+        });
+      }
+      return stopped;
+    },
+    notifyDirectoryChanged(reason: string): void {
+      emitUnifiedChanged(reason);
+    },
     close(): void {
       notificationsClosed = true;
       clearInterval(cleanupTimer);

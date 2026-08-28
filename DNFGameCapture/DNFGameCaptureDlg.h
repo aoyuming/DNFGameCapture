@@ -26,6 +26,8 @@
 #include "CloudMatchStatusDisplay.h"
 #include "json.hpp"
 
+void DnfReleaseSingleInstanceMutex() noexcept;
+
 struct ScorePointF {
     float x = 0.0f;
     float y = 0.0f;
@@ -35,7 +37,7 @@ struct ScorePointF {
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"4.3.0"    //当前版本号
+#define CURRENT_VERSION L"5.0.0"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -123,6 +125,7 @@ struct RecentEvent {
     CString candidateSummary;
     CString algorithmName;
     CString snapshotPath;
+    bool cloudSynced = false;
 };
 
 struct OcrResultData {
@@ -240,7 +243,7 @@ private:
 
     void Capture();
     void CheckColorTrigger();
-    void Draw(CDC& dc);
+    void Draw(CDC& dc, HBITMAP previewFrame, int previewW, int previewH);
     OcrResultData RunOCR_Internal(HBITMAP hTargetBmp, int nAreaIndex);
 
     void DoRetryMatchingTask(int triggerSide);
@@ -259,6 +262,8 @@ private:
     void NotifyIdentityRoundReset(const CString& reason);
     void AddReviewEvent(const RecentEvent& ev);
     void AddReviewEventUnlocked(const RecentEvent& ev);
+    bool MergeCloudRecentEvents(const nlohmann::json& events,
+        const std::string& sourceName);
     bool ToggleReviewEvent(int eventId);
 
     void FilterLivePlatformPrefixes();
@@ -286,15 +291,17 @@ private:
     bool SaveCloudMatchSettingsForRoomIdentity(const std::string& roomIdOverride,
         const CString& broadcasterNameOverride);
     bool SaveCloudMatchRevision();
+    bool HasAuthorizedCloudMatchEndpoint() const;
+    void DisableCloudMatchForAuthorization(const CString& reason);
     void StartSavedCloudMatchSession();
-    void BeginCloudRoomJoin(const std::string& roomId, const CString& broadcasterName,
-        const CString& requestedServerUrl);
+    void BeginCloudRoomJoin(const std::string& roomId, const CString& broadcasterName);
     void BeginCloudDeviceRegistration();
     bool BeginCloudRoomRestore(const CString& reason);
     void CancelCloudRoomJoin(const CString& reason);
     void HandleCloudMatchSnapshotUploadResult(const nlohmann::json& event);
     void HandleCloudMatchMessage(std::string message);
     bool RejectLocalMatchEditWhileRealtime();
+    bool IsCloudReverseSyncBlocked(const std::string& targetDeviceId) const;
     void InvalidateCloudMatchSyncPreview(bool clearMembers = true);
     void InvalidateCloudMatchSyncUndo();
     void BeginCloudMatchComparisonRequest();
@@ -318,7 +325,7 @@ private:
     void SendCloudRoomPromptIfNeeded();
     bool ValidateTeamSyncSnapshot(const nlohmann::json& snapshot, CString& errorMessage) const;
     bool ApplyTeamSyncSnapshot(const nlohmann::json& snapshot, bool createBackup,
-        CString& errorMessage, bool automatic = false);
+        CString& errorMessage, bool automatic = false, bool preserveLocalFlip = false);
     bool RefreshAfterTeamSyncApply();
     void ClearTeamSyncState();
     void OpenKeyDisplayWindow();
@@ -545,7 +552,7 @@ private:
     int m_teamSyncBackupEventBoundaryId = 0;
 
     CloudMatchClient m_cloudMatchClient;
-    CString m_cloudMatchServerUrl = L"http://47.109.149.111:18880";
+    CString m_cloudMatchServerUrl;
     std::string m_cloudMatchDeviceId;
     std::string m_cloudMatchDeviceToken;
     bool m_cloudMatchTemporaryInstance = false;
@@ -718,6 +725,7 @@ private:
     void CheckTrialAndLicense();
     // 🚨 【新增】：标记是否是用户手动点击的授权验证
     bool m_bIsManualAuthCheck = false;
+    std::uint64_t m_cloudAuthRequestGeneration = 0;
 
     // 【新增】：云端授权回调变量与消息
     long long m_keyDuration = 0;     // 存放解析出的时长
@@ -760,10 +768,6 @@ private:
     std::atomic<bool> m_bOcrHealthCheckPending{ false };
     std::atomic<bool> m_bOcrRecoveryPending{ false };
     std::atomic<DWORD> m_ocrRecoveryRequestId{ 0 };
-
-    // 【新增】：用于防止多开的互斥体句柄
-    HANDLE m_hSingleInstanceMutex;
-
 
     CTreeCtrl m_treePlayers;   // 树状展示列表
 

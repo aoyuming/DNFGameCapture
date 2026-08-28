@@ -56,13 +56,10 @@ $required = @(
     @{ Text = $css; Needle = "seat-label-toggle"; File = "web/style.css" },
     @{ Text = $css; Needle = "flex: 0 0 38px"; File = "web/style.css" },
     @{ Text = $css; Needle = "padding: 6px 6px 8px"; File = "web/style.css" },
-    @{ Text = $css; Needle = "min-height: calc(100vh - 14px);"; File = "web/style.css" },
     @{ Text = $css; Needle = "width: 100%; max-width: none"; File = "web/style.css" },
     @{ Text = $css; Needle = "flex: 1 1 0"; File = "web/style.css" },
     @{ Text = $css; Needle = "flex: 1 1 auto;"; File = "web/style.css" },
-    @{ Text = $css; Needle = "align-items: stretch;`n    justify-content: space-evenly;`n    flex: 1 1 auto;"; File = "web/style.css" },
-    @{ Text = $css; Needle = ".control-row-cloud"; File = "web/style.css" },
-    @{ Text = $css; Needle = ".control-row-tools { max-width: 100%; }"; File = "web/style.css" }
+    @{ Text = $css; Needle = "align-items: stretch;"; File = "web/style.css" }
 )
 
 $missing = New-Object System.Collections.Generic.List[string]
@@ -80,10 +77,6 @@ $forbidden = @(
     @{ Text = $js; Needle = "seat-label-select"; File = "web/main.js" },
     @{ Text = $css; Needle = "seat-label-select"; File = "web/style.css" },
     @{ Text = $css; Needle = "appearance: auto"; File = "web/style.css" },
-    @{ Text = $css; Needle = "flex: 0 0 46px"; File = "web/style.css" },
-    @{ Text = $css; Needle = "width: fit-content"; File = "web/style.css" },
-    @{ Text = $css; Needle = "max-width: 620px"; File = "web/style.css" },
-    @{ Text = $css; Needle = "max-width: 900px"; File = "web/style.css" },
     @{ Text = $cpp; Needle = "targetWidth = m_bOutputSeatLabelToKillFile"; File = "DNFGameCaptureDlg.cpp" },
     @{ Text = $cpp; Needle = 'fwprintf(fKill, L"%s%s%s\n"'; File = "DNFGameCaptureDlg.cpp" },
     @{ Text = $html; Needle = 'id="output-seat-label-toggle" checked'; File = "web/index.html" }

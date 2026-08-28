@@ -239,6 +239,22 @@ export function startRealtimeSync(
   return { ...input, lastHeartbeatAt: now };
 }
 
+export function isReverseRealtimeSyncBlocked(
+  db: Database.Database,
+  viewerDeviceId: string,
+  targetDeviceId: string,
+  nowSec: number,
+): boolean {
+  pruneStaleRealtimeSync(db, nowSec);
+  const row = db.prepare(
+    `SELECT 1
+     FROM realtime_sync
+     WHERE viewer_device_id = ? AND target_device_id = ?
+     LIMIT 1`,
+  ).get(targetDeviceId, viewerDeviceId);
+  return row !== undefined;
+}
+
 export function heartbeatRealtimeSync(
   db: Database.Database,
   viewerDeviceId: string,

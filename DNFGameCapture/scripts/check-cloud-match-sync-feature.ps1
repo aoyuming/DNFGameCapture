@@ -28,6 +28,7 @@ foreach ($path in @($headerPath, $sourcePath, $dialogHeaderPath, $dialogSourcePa
 
 $dialogHeader = Get-Content -LiteralPath $dialogHeaderPath -Raw -Encoding UTF8
 $dialogSource = Get-Content -LiteralPath $dialogSourcePath -Raw -Encoding UTF8
+$syncSource = Get-Content -LiteralPath $sourcePath -Raw -Encoding UTF8
 $webMain = Get-Content -LiteralPath $webMainPath -Raw -Encoding UTF8
 $webHtml = Get-Content -LiteralPath $webHtmlPath -Raw -Encoding UTF8
 $webCss = Get-Content -LiteralPath $webCssPath -Raw -Encoding UTF8
@@ -59,6 +60,15 @@ foreach ($needle in @(
 )) {
     if (-not $dialogSource.Contains($needle) -and -not $dialogHeader.Contains($needle)) {
         throw "Cloud match review safety contract is missing: $needle"
+    }
+}
+foreach ($needle in @(
+    'HasExactKeysWithOptionalCloudPresentation',
+    'if (!preserveLocalFlip && snapshot.contains("isFlipped"))',
+    'if (!preserveLocalFlip && snapshot.contains("outputSeatLabelToKillFile"))'
+)) {
+    if (-not $dialogSource.Contains($needle) -and -not $syncSource.Contains($needle)) {
+        throw "Cloud presentation settings compatibility contract is missing: $needle"
     }
 }
 if (-not $dialogSource.Contains('event["comparisonToken"].get<std::string>()')) {
@@ -191,53 +201,45 @@ if (-not $dialogSource.Contains(
 }
 
 foreach ($needle in @(
-    'btn-cloud-sync', 'cloud-sync-panel', 'cloud-sync-member-list',
-    'cloud-sync-difference-groups', 'btn-cloud-sync-apply', 'btn-cloud-sync-undo',
-    'cmd_cloud_sync_apply', 'cmd_cloud_sync_cancel_preview', 'cmd_cloud_sync_undo'
+    'broadcaster-preview-overlay', 'btn-broadcaster-sync-once',
+    'btn-broadcaster-sync-realtime', 'btn-broadcaster-stop-realtime',
+    'cmd_cloud_sync_broadcaster', 'cmd_cloud_realtime_start',
+    'cmd_cloud_realtime_stop'
 )) {
     if (-not $webMain.Contains($needle) -and -not $webHtml.Contains($needle)) {
-        throw "Cloud match Web UI contract is missing: $needle"
+        throw "Unified broadcaster sync UI contract is missing: $needle"
+    }
+}
+foreach ($legacyNeedle in @(
+    'id="cloud-sync-panel"', 'id="cloud-sync-member-list"',
+    'id="btn-cloud-sync-apply"', 'id="btn-cloud-sync-undo"'
+)) {
+    if ($webHtml.Contains($legacyNeedle)) {
+        throw "Legacy room sync UI must remain removed: $legacyNeedle"
     }
 }
 if (-not $webCss.Contains('overflow-y: auto')) {
-    throw 'Cloud match panel must remain scrollable in short windows.'
+    throw 'Broadcaster preview must remain scrollable in short windows.'
 }
 foreach ($theme in @('dark-esports', 'frost-broadcast', 'black-gold')) {
     if (-not $webCss.Contains("html[data-theme=`"$theme`"]")) {
         throw "Cloud match panel is missing explicit theme variables for $theme."
     }
 }
-if (-not $webMain.Contains("event.target?.id === 'cloud-sync-overlay'")) {
-    throw 'Cloud sync backdrop click must close only when the overlay itself is clicked.'
+if (-not $webMain.Contains("event.target?.id === 'broadcaster-preview-overlay'")) {
+    throw 'Broadcaster preview backdrop click must close only when the overlay itself is clicked.'
 }
 & node $themeTestPath
 if ($LASTEXITCODE -ne 0) {
     throw 'Cloud match theme runtime tests failed.'
 }
-$memberHandlerStart = $webMain.IndexOf("document.getElementById('cloud-sync-member-list')")
-$applyHandlerStart = $webMain.IndexOf("document.getElementById('btn-cloud-sync-apply')", $memberHandlerStart)
-if ($memberHandlerStart -lt 0 -or $applyHandlerStart -le $memberHandlerStart) {
-    throw 'Unable to locate cloud member selection and apply handlers.'
-}
-$memberHandler = $webMain.Substring($memberHandlerStart,
-    $applyHandlerStart - $memberHandlerStart)
-if ($memberHandler.Contains('cmd_cloud_sync_apply')) {
-    throw 'Selecting a cloud member must not send the apply command.'
-}
-$renderMembersStart = $webMain.IndexOf('function renderCloudSyncMembers(')
-$renderMembersEnd = $webMain.IndexOf('function renderCloudSyncGroups(', $renderMembersStart)
-$renderMembers = $webMain.Substring($renderMembersStart,
-    $renderMembersEnd - $renderMembersStart)
-if ($renderMembers.Contains('excludedFromConsensus === true || panel.busy')) {
-    throw 'Consensus exclusion must remain a warning badge, not disable manual preview.'
-}
 foreach ($needle in @(
-    'deviceId: String(preview.deviceId || '''')',
-    'clientRevision: revision',
-    'generation: Number(preview.generation || 0)'
+    'deviceId: cloudPreviewDeviceId',
+    'snapshotRevision: Number(preview.snapshotRevision || 0)',
+    'showConfirm(`'
 )) {
     if (-not $webMain.Contains($needle)) {
-        throw "Web apply confirmation correlation is missing: $needle"
+        throw "Unified broadcaster apply confirmation is missing: $needle"
     }
 }
 
