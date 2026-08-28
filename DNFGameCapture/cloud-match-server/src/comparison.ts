@@ -110,7 +110,11 @@ export interface RoomComparison {
   consensusDeviceId: string | null;
   groups: SimilarGroup[];
   members: ComparisonMember[];
-  pairwise: PairwiseComparison[];
+  pairwise?: PairwiseComparison[];
+}
+
+export interface RoomComparisonOptions {
+  includePairwise?: boolean;
 }
 
 interface IndexedPlayer {
@@ -148,6 +152,8 @@ interface SnapshotComparison {
   statDifference: number;
 }
 
+const playerIdentityKeys = new WeakMap<Player, Set<string>>();
+
 function compareDeviceIds(left: string, right: string): number {
   if (left < right) {
     return -1;
@@ -165,10 +171,16 @@ function identityKey(value: string): string {
 }
 
 function identityKeys(player: Player): Set<string> {
+  const cached = playerIdentityKeys.get(player);
+  if (cached) {
+    return cached;
+  }
   const names = [player.mainName, ...player.aliases]
     .map(identityKey)
     .filter((name) => name.length > 0);
-  return new Set(names);
+  const keys = new Set(names);
+  playerIdentityKeys.set(player, keys);
+  return keys;
 }
 
 function identitiesIntersect(left: Player, right: Player): boolean {
@@ -410,6 +422,7 @@ function compareWithOrientation(
   reference: MatchSnapshot,
   member: MatchSnapshot,
   swapped: boolean,
+  includeDifferences: boolean,
 ): SnapshotComparison {
   const referencePlayers = indexedPlayers(reference, false);
   const memberPlayers = indexedPlayers(member, swapped);
@@ -444,13 +457,15 @@ function compareWithOrientation(
     statDifference: matching.statDifference,
     identityMatchPercent: Math.round((matchedCount / 8) * 100),
     similarity,
-    differences: buildDifferences(
-      referencePlayers,
-      memberPlayers,
-      matching,
-      referenceState,
-      memberState,
-    ),
+    differences: includeDifferences
+      ? buildDifferences(
+          referencePlayers,
+          memberPlayers,
+          matching,
+          referenceState,
+          memberState,
+        )
+      : [],
     orientedState: memberState,
   };
 }
@@ -458,9 +473,10 @@ function compareWithOrientation(
 function compareSnapshots(
   reference: MatchSnapshot,
   member: MatchSnapshot,
+  includeDifferences = true,
 ): SnapshotComparison {
-  const normal = compareWithOrientation(reference, member, false);
-  const swapped = compareWithOrientation(reference, member, true);
+  const normal = compareWithOrientation(reference, member, false, includeDifferences);
+  const swapped = compareWithOrientation(reference, member, true, includeDifferences);
   if (swapped.matchedCount > normal.matchedCount) {
     return swapped;
   }
@@ -521,6 +537,7 @@ function selectConsensus(
   rows: ComparisonInputRow[],
   sourceRoots: string[],
   nowSec: number,
+  compareRows: (left: ComparisonInputRow, right: ComparisonInputRow) => SnapshotComparison,
 ): ComparisonInputRow | null {
   const representatives = new Map<string, ComparisonInputRow>();
   rows.forEach((row, index) => {
@@ -547,7 +564,7 @@ function selectConsensus(
         ? 100
         : peers.reduce(
             (total, peer) =>
-              total + compareSnapshots(candidate.snapshot, peer.snapshot).similarity,
+              total + compareRows(candidate, peer).similarity,
             0,
           ) / peers.length;
     if (
@@ -564,14 +581,14 @@ function selectConsensus(
   return best;
 }
 
-function buildPairwise(rows: ComparisonInputRow[]): PairwiseComparison[] {
+function buildPairwise(
+  rows: ComparisonInputRow[],
+  compareRows: (left: ComparisonInputRow, right: ComparisonInputRow) => SnapshotComparison,
+): PairwiseComparison[] {
   const pairwise: PairwiseComparison[] = [];
   for (let leftIndex = 0; leftIndex < rows.length; leftIndex += 1) {
     for (let rightIndex = leftIndex + 1; rightIndex < rows.length; rightIndex += 1) {
-      const compared = compareSnapshots(
-        rows[leftIndex].snapshot,
-        rows[rightIndex].snapshot,
-      );
+      const compared = compareRows(rows[leftIndex], rows[rightIndex]);
       pairwise.push({
         leftDeviceId: rows[leftIndex].deviceId,
         rightDeviceId: rows[rightIndex].deviceId,
@@ -588,6 +605,7 @@ function buildPairwise(rows: ComparisonInputRow[]): PairwiseComparison[] {
 function buildGroups(
   rows: ComparisonInputRow[],
   nowSec: number,
+  compareRows: (left: ComparisonInputRow, right: ComparisonInputRow) => SnapshotComparison,
 ): SimilarGroup[] {
   const eligible = rows.filter((row) => nowSec - row.receivedAt <= 120);
   const adjacency = new Map<string, Set<string>>(
@@ -595,10 +613,7 @@ function buildGroups(
   );
   for (let leftIndex = 0; leftIndex < eligible.length; leftIndex += 1) {
     for (let rightIndex = leftIndex + 1; rightIndex < eligible.length; rightIndex += 1) {
-      const compared = compareSnapshots(
-        eligible[leftIndex].snapshot,
-        eligible[rightIndex].snapshot,
-      );
+      const compared = compareRows(eligible[leftIndex], eligible[rightIndex]);
       if (compared.similarity >= 90 && compared.identityMatchPercent >= 75) {
         adjacency.get(eligible[leftIndex].deviceId)?.add(eligible[rightIndex].deviceId);
         adjacency.get(eligible[rightIndex].deviceId)?.add(eligible[leftIndex].deviceId);
@@ -642,7 +657,34 @@ function buildGroups(
 export function compareRoomSnapshots(
   rows: ComparisonInputRow[],
   nowSec: number,
+  options: RoomComparisonOptions = {},
 ): RoomComparison {
+  const rowIndexes = new Map<ComparisonInputRow, number>(
+    rows.map((row, index) => [row, index]),
+  );
+  const comparisonCache = new Map<string, SnapshotComparison>();
+  const compareRows = (
+    left: ComparisonInputRow,
+    right: ComparisonInputRow,
+  ): SnapshotComparison => {
+    const leftIndex = rowIndexes.get(left);
+    const rightIndex = rowIndexes.get(right);
+    if (leftIndex === undefined || rightIndex === undefined) {
+      return compareSnapshots(left.snapshot, right.snapshot, false);
+    }
+    const forward = leftIndex <= rightIndex;
+    const key = forward ? `${leftIndex}:${rightIndex}` : `${rightIndex}:${leftIndex}`;
+    const cached = comparisonCache.get(key);
+    if (cached && forward) {
+      return cached;
+    }
+    if (cached) {
+      return compareSnapshots(left.snapshot, right.snapshot, false);
+    }
+    const compared = compareSnapshots(left.snapshot, right.snapshot, false);
+    comparisonCache.set(key, compared);
+    return compared;
+  };
   const rowsByDeviceId = new Map<string, ComparisonInputRow>();
   for (const row of rows) {
     const current = rowsByDeviceId.get(row.deviceId);
@@ -651,7 +693,7 @@ export function compareRoomSnapshots(
     }
   }
   const sourceRoots = rows.map((row) => resolveSourceRoot(row, rowsByDeviceId));
-  const consensus = selectConsensus(rows, sourceRoots, nowSec);
+  const consensus = selectConsensus(rows, sourceRoots, nowSec, compareRows);
   const members = rows.map((row, index): ComparisonMember => {
     const compared = consensus
       ? compareSnapshots(consensus.snapshot, row.snapshot)
@@ -681,10 +723,16 @@ export function compareRoomSnapshots(
     };
   });
 
-  return {
+  const result: RoomComparison = {
     consensusDeviceId: consensus?.deviceId ?? null,
-    groups: buildGroups(rows, nowSec),
+    groups: buildGroups(rows, nowSec, compareRows),
     members,
-    pairwise: buildPairwise(rows),
   };
+  if (options.includePairwise) {
+    result.pairwise = buildPairwise(
+      rows,
+      (left, right) => compareSnapshots(left.snapshot, right.snapshot),
+    );
+  }
+  return result;
 }

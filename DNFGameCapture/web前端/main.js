@@ -55,6 +55,9 @@ let pendingAliasPopoverInput = null;
 let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
 const WEB_LAYOUT_VERSION = '20260828-cloud-match-room';
+const CLOUD_MATCH_WEB_THEMES = new Set([
+    'dark-esports', 'frost-broadcast', 'black-gold'
+]);
 const KEY_MAPPING_SLOT_COUNT = 14;
 const KEY_MAPPING_DEFAULT_LABELS = ['Q', 'W', 'E', 'R', 'T', 'Y', 'Ctrl', 'A', 'S', 'D', 'F', 'G', 'H', 'Alt'];
 const KEY_MAPPING_DEFAULT_VKS = [81, 87, 69, 82, 84, 89, 17, 65, 83, 68, 70, 71, 72, 18];
@@ -68,6 +71,14 @@ const randomToolState = {
     activeSuggestLine: -1
 };
 let pendingClearAllUntil = 0;
+
+function applyWebTheme(value) {
+    const theme = CLOUD_MATCH_WEB_THEMES.has(value) ? value : 'dark-esports';
+    document.documentElement.dataset.theme = theme;
+    return theme;
+}
+
+applyWebTheme('dark-esports');
 
 // Ctrl 选择互换模式状态（与所在行无关，模块级即可，但放在 createPlayerRow 外更好）
 // 建议放在文件顶部全局区域，或至少在 createPlayerRow 外定义
@@ -3360,6 +3371,7 @@ document.addEventListener('keydown', (event) => {
 
 function applyStateFromServer(state) {
     isSyncingFromServer = true;
+    applyWebTheme(state.webTheme);
 
     isMonitoring = state.isMonitoring;
     isStartPending = !!state.isStartPending && !isMonitoring;

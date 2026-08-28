@@ -136,6 +136,36 @@ void TestOversizedProtectedFallbackPreservesCorrelation()
         "oversized protected request fallback must preserve requestId");
 }
 
+void TestComparisonPaginationCarriesImmutableToken()
+{
+    CloudMatchClient client;
+    client.ConfigureForTesting();
+    std::vector<std::string> messages;
+    client.SetMessageCallback([&](std::string message) {
+        messages.push_back(std::move(message));
+    });
+
+    const std::string token = "abcdefghijklmnopqrstuvwxyzABCDEF";
+    Require(client.RequestComparison("comparison-page-2", "member-cursor-0008",
+        8, token), "comparison continuation should accept a bounded token");
+    Require(client.CompleteNextProtectedOperationForTesting(),
+        "comparison continuation should preserve queued correlation fields");
+    Require(client.DispatchMessages(4) == 1,
+        "comparison continuation should dispatch one result");
+    Require(messages.back().find("\"requestId\":\"comparison-page-2\"") !=
+        std::string::npos &&
+        messages.back().find("\"cursor\":\"member-cursor-0008\"") !=
+        std::string::npos &&
+        messages.back().find("\"comparisonToken\":\"" + token + "\"") !=
+        std::string::npos,
+        "comparison continuation must retain requestId, cursor, and token");
+
+    Require(!client.RequestComparison("missing-token", "member-cursor-0008", 8),
+        "a continuation cursor without a token must be rejected");
+    Require(!client.RequestComparison("bad-token", "member-cursor-0008", 8,
+        std::string(32, '!')), "an unsafe comparison token must be rejected");
+}
+
 void TestMalformedAckOkTypeBecomesInvalidResponse()
 {
     CloudMatchClient client;
@@ -520,6 +550,7 @@ int main()
 {
     TestSnapshotResultsCarryLocalRevisionAndFilterOldGeneration();
     TestOversizedProtectedFallbackPreservesCorrelation();
+    TestComparisonPaginationCarriesImmutableToken();
     TestMalformedAckOkTypeBecomesInvalidResponse();
     TestDispatchRunsCallbackOnCallerAndAllowsStop();
     TestConfigureDiscardsOldGenerationMessages();

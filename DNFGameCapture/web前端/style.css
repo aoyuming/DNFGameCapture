@@ -1930,6 +1930,9 @@ html[data-theme="dark-esports"] {
     --cloud-sync-warning: #f2ce7a;
     --cloud-sync-warning-bg: #3e351f;
     --cloud-sync-success: #82c69a;
+    --cloud-sync-preview-bg: #0f171f;
+    --cloud-sync-group-bg: #182731;
+    --cloud-sync-empty: #788d98;
 }
 
 html[data-theme="frost-broadcast"] {
@@ -1948,6 +1951,9 @@ html[data-theme="frost-broadcast"] {
     --cloud-sync-warning: #795814;
     --cloud-sync-warning-bg: #fff2c9;
     --cloud-sync-success: #237345;
+    --cloud-sync-preview-bg: #ffffff;
+    --cloud-sync-group-bg: #e4f0f4;
+    --cloud-sync-empty: #607984;
 }
 
 html[data-theme="black-gold"] {
@@ -1966,6 +1972,9 @@ html[data-theme="black-gold"] {
     --cloud-sync-warning: #efd48f;
     --cloud-sync-warning-bg: #3b321c;
     --cloud-sync-success: #9fc18b;
+    --cloud-sync-preview-bg: #13120f;
+    --cloud-sync-group-bg: #242116;
+    --cloud-sync-empty: #9f947b;
 }
 
 html[data-theme] .modal-box {
@@ -2069,9 +2078,9 @@ html[data-theme] .modal-btn.btn-confirm {
     gap: 8px;
     margin: 14px 16px 0;
     padding: 14px;
-    border-left: 3px solid #f2bf55;
-    background: #272415;
-    color: #f5e7be;
+    border-left: 3px solid var(--cloud-sync-warning);
+    background: var(--cloud-sync-warning-bg);
+    color: var(--cloud-sync-text);
 }
 
 .cloud-sync-not-joined[hidden] {
@@ -2079,7 +2088,7 @@ html[data-theme] .modal-btn.btn-confirm {
 }
 
 .cloud-sync-not-joined span {
-    color: #cbbf9e;
+    color: var(--cloud-sync-muted);
     font-size: 12px;
 }
 
@@ -2188,31 +2197,31 @@ html[data-theme] .modal-btn.btn-confirm {
 
 .cloud-sync-badge {
     padding: 2px 5px;
-    border: 1px solid rgba(255, 255, 255, 0.13);
+    border: 1px solid var(--cloud-sync-border-soft);
     border-radius: 3px;
-    color: #9fb3bd;
+    color: var(--cloud-sync-muted);
     font-size: 10px;
 }
 
 .cloud-sync-badge.reference {
-    border-color: rgba(242, 191, 85, 0.5);
+    border-color: var(--cloud-sync-warning);
     color: var(--cloud-sync-warning, #f2ce7a);
 }
 
 .cloud-sync-badge.warning {
-    border-color: rgba(255, 111, 132, 0.5);
+    border-color: var(--cloud-sync-danger);
     color: var(--cloud-sync-danger, #ff9cab);
 }
 
 .cloud-sync-groups-wrap {
     margin-top: 14px;
     padding-top: 12px;
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    border-top: 1px solid var(--cloud-sync-border-soft);
 }
 
 .cloud-sync-subheading {
     margin-bottom: 7px;
-    color: #a9bec7;
+    color: var(--cloud-sync-muted);
     font-size: 11px;
     font-weight: 800;
 }
@@ -2225,19 +2234,19 @@ html[data-theme] .modal-btn.btn-confirm {
 
 .cloud-sync-group {
     padding: 4px 7px;
-    border-left: 2px solid #50bfd9;
-    color: #b8cbd2;
-    background: #182731;
+    border-left: 2px solid var(--cloud-sync-accent);
+    color: var(--cloud-sync-muted);
+    background: var(--cloud-sync-group-bg);
     font-size: 11px;
 }
 
 .cloud-sync-preview-pane {
-    background: #0f171f;
+    background: var(--cloud-sync-preview-bg);
 }
 
 .cloud-sync-preview-empty {
     padding: 42px 12px;
-    color: #788d98;
+    color: var(--cloud-sync-empty);
     text-align: center;
 }
 
@@ -2359,7 +2368,7 @@ html[data-theme] .modal-btn.btn-confirm {
 
     .cloud-sync-members-pane {
         border-right: 0;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        border-bottom: 1px solid var(--cloud-sync-border-soft);
     }
 
     .cloud-sync-difference-item {

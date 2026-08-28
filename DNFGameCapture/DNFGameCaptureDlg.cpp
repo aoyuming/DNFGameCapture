@@ -407,13 +407,17 @@ static CString DnfCloudMatchErrorText(const std::string& code)
     if (code == "unsupported_protocol" || code == "protocol_mismatch") return L"云端协议版本不兼容，请升级软件或服务器。";
     if (code == "room_not_found") return L"选择的比赛房间不存在。";
     if (code == "invalid_response") return L"云端服务器返回了无效数据。";
-    if (code == "queue_full") return L"云端请求较多，请稍后再试。";
+    if (code == "queue_full" || code == "rate_limited") return L"云端请求较多，请稍后再试。";
     if (code == "timeout" || code == "ack_timeout") return L"云端响应超时，请稍后再试。";
     if (code == "payload_too_large" || code == "snapshot_too_large") return L"比赛数据过大，暂时无法上传。";
     if (code == "invalid_payload" || code == "invalid_snapshot" ||
         code == "invalid_request") return L"比赛数据格式无效，已停止重试；请检查名单内容。";
     if (code == "stale_revision") return L"云端版本号较新，请重新加入房间后再试。";
     if (code == "snapshot_revision_changed") return L"目标主播快照已更新，请刷新房间数据后重试。";
+    if (code == "comparison_changed") return L"房间数据在刷新过程中发生变化，请重新刷新。";
+    if (code == "comparison_expired" || code == "invalid_comparison_token" ||
+        code == "invalid_comparison_cursor") return L"房间对比已过期，请手动重新刷新。";
+    if (code == "response_too_large") return L"云端对比结果超过安全大小，请稍后重试。";
     if (code == "target_not_found" || code == "target_has_no_snapshot") return L"目标主播快照当前不可用。";
     if (code == "not_in_room") return L"当前未加入云端比赛房间。";
     return L"云端比赛同步操作失败，请稍后重试。";
@@ -13086,8 +13090,13 @@ void CDNFGameCaptureDlg::InvalidateCloudMatchSyncPreview(bool clearMembers)
     m_cloudMatchSyncError.Empty();
     if (clearMembers) {
         m_cloudMatchSyncComparisonCursor.clear();
+        m_cloudMatchSyncComparisonToken.clear();
         m_cloudMatchSyncComparisonPageCount = 0;
         m_cloudMatchSyncComparisonRoomRevision = 0;
+        m_cloudMatchSyncComparisonGeneratedAt = 0;
+        m_cloudMatchSyncComparisonTotalMembers = 0;
+        m_cloudMatchSyncComparisonBoundedMembers = 0;
+        m_cloudMatchSyncComparisonTruncated = false;
         m_cloudMatchSyncRequestConnectionGeneration = 0;
         m_cloudMatchSyncRequestRoomId.clear();
         m_cloudMatchSyncPendingMembers = json::array();
@@ -13152,28 +13161,71 @@ void CDNFGameCaptureDlg::HandleCloudMatchComparisonResult(const json& event)
     }
     m_cloudMatchSyncComparisonRequestId.clear();
     if (!event.value("ok", false)) {
-        m_cloudMatchSyncError = DnfCloudMatchErrorText(
-            event.value("code", std::string("invalid_response")));
+        const std::string code = event.value("code",
+            std::string("invalid_response"));
+        if (code == "comparison_changed" || code == "comparison_expired" ||
+            code == "invalid_comparison_token" ||
+            code == "invalid_comparison_cursor") {
+            InvalidateCloudMatchSyncPreview(true);
+        }
+        m_cloudMatchSyncError = DnfCloudMatchErrorText(code);
         return;
     }
     std::uint64_t roomRevision = 0;
+    std::uint64_t generatedAt = 0;
     std::uint64_t totalMembers = 0;
     std::uint64_t boundedMembers = 0;
     if (!DnfReadCloudMatchUnsigned(event, "roomRevision", 1,
             9007199254740991ULL, roomRevision) ||
+        !DnfReadCloudMatchUnsigned(event, "generatedAt", 0,
+            9007199254740991ULL, generatedAt) ||
         !DnfReadCloudMatchUnsigned(event, "totalMembers", 1,
             9007199254740991ULL, totalMembers) ||
-        !DnfReadCloudMatchUnsigned(event, "boundedMembers", 1, 512,
+        !DnfReadCloudMatchUnsigned(event, "boundedMembers", 1, 128,
             boundedMembers) ||
         !event.contains("hasMore") || !event["hasMore"].is_boolean() ||
-        !event.contains("truncated") || !event["truncated"].is_boolean()) {
+        !event.contains("truncated") || !event["truncated"].is_boolean() ||
+        !event.contains("comparisonToken") ||
+        !event["comparisonToken"].is_string() ||
+        !event.contains("cursor")) {
         m_cloudMatchSyncError = DnfCloudMatchErrorText("invalid_response");
         return;
     }
-    if (m_cloudMatchSyncComparisonRoomRevision == 0) {
-        m_cloudMatchSyncComparisonRoomRevision = roomRevision;
+    const std::string comparisonToken =
+        event["comparisonToken"].get<std::string>();
+    const bool tokenSafe = comparisonToken.size() >= 32 &&
+        comparisonToken.size() <= 128 &&
+        std::all_of(comparisonToken.begin(), comparisonToken.end(),
+            [](unsigned char value) {
+                return (value >= 'A' && value <= 'Z') ||
+                    (value >= 'a' && value <= 'z') ||
+                    (value >= '0' && value <= '9') || value == '_' || value == '-';
+            });
+    const bool firstPage = m_cloudMatchSyncComparisonToken.empty();
+    const bool cursorMatches = firstPage ? event["cursor"].is_null() :
+        (event["cursor"].is_string() &&
+            event["cursor"].get<std::string>() == m_cloudMatchSyncComparisonCursor);
+    const bool truncated = event["truncated"].get<bool>();
+    if (!tokenSafe || !cursorMatches || totalMembers < boundedMembers ||
+        truncated != (totalMembers > boundedMembers)) {
+        InvalidateCloudMatchSyncPreview(true);
+        m_cloudMatchSyncError = DnfCloudMatchErrorText("invalid_response");
+        return;
     }
-    else if (m_cloudMatchSyncComparisonRoomRevision != roomRevision) {
+    if (firstPage) {
+        m_cloudMatchSyncComparisonToken = comparisonToken;
+        m_cloudMatchSyncComparisonRoomRevision = roomRevision;
+        m_cloudMatchSyncComparisonGeneratedAt = generatedAt;
+        m_cloudMatchSyncComparisonTotalMembers = totalMembers;
+        m_cloudMatchSyncComparisonBoundedMembers = boundedMembers;
+        m_cloudMatchSyncComparisonTruncated = truncated;
+    }
+    else if (m_cloudMatchSyncComparisonToken != comparisonToken ||
+        m_cloudMatchSyncComparisonRoomRevision != roomRevision ||
+        m_cloudMatchSyncComparisonGeneratedAt != generatedAt ||
+        m_cloudMatchSyncComparisonTotalMembers != totalMembers ||
+        m_cloudMatchSyncComparisonBoundedMembers != boundedMembers ||
+        m_cloudMatchSyncComparisonTruncated != truncated) {
         InvalidateCloudMatchSyncPreview(true);
         m_cloudMatchSyncError = L"房间数据在刷新过程中发生变化，请重新刷新。";
         return;
@@ -13185,9 +13237,9 @@ void CDNFGameCaptureDlg::HandleCloudMatchComparisonResult(const json& event)
         return;
     }
     ++m_cloudMatchSyncComparisonPageCount;
-    if (m_cloudMatchSyncComparisonPageCount > 64 ||
-        m_cloudMatchSyncPendingMembers.size() + event["members"].size() > 512 ||
-        boundedMembers > 512 || totalMembers < boundedMembers) {
+    if (m_cloudMatchSyncComparisonPageCount > 16 ||
+        m_cloudMatchSyncPendingMembers.size() + event["members"].size() > 128 ||
+        boundedMembers > 128 || totalMembers < boundedMembers) {
         InvalidateCloudMatchSyncPreview(true);
         m_cloudMatchSyncError = L"房间成员数据超过客户端安全上限。";
         return;
@@ -13371,7 +13423,8 @@ void CDNFGameCaptureDlg::HandleCloudMatchComparisonResult(const json& event)
             std::to_string(m_cloudMatchSyncGeneration) + "-" +
             std::to_string(m_cloudMatchSyncRequestSequence);
         if (!m_cloudMatchClient.RequestComparison(m_cloudMatchSyncComparisonRequestId,
-            m_cloudMatchSyncComparisonCursor, 64)) {
+            m_cloudMatchSyncComparisonCursor, 64,
+            m_cloudMatchSyncComparisonToken)) {
             m_cloudMatchSyncComparisonRequestId.clear();
             m_cloudMatchSyncError = L"云端分页请求未发送，请重新刷新。";
         }
@@ -13396,9 +13449,14 @@ void CDNFGameCaptureDlg::HandleCloudMatchComparisonResult(const json& event)
         m_cloudMatchSyncConsensusDeviceId.clear();
     }
     m_cloudMatchSyncError.Empty();
-    m_cloudMatchSyncLastResult = event["truncated"].get<bool>() ?
-        L"房间成员较多，已显示安全上限内（含本机）的数据。" :
-        L"房间数据已刷新。选择主播后仅生成预览，不会自动覆盖本地。";
+    const std::wstring memberSummary = L"共" +
+        std::to_wstring(m_cloudMatchSyncComparisonTotalMembers) +
+        L"人，本次比较最近" +
+        std::to_wstring(m_cloudMatchSyncComparisonBoundedMembers) + L"人。";
+    m_cloudMatchSyncLastResult = CString(memberSummary.c_str()) +
+        (m_cloudMatchSyncComparisonTruncated ?
+            L" 已保留本机并省略较早成员。" :
+            L" 选择主播后仅生成预览，不会自动覆盖本地。");
 }
 
 void CDNFGameCaptureDlg::HandleCloudMatchSnapshotResult(const json& event)

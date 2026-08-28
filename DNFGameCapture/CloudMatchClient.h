@@ -45,7 +45,8 @@ public:
     bool LeaveRoom();
     bool UploadSnapshot(std::string snapshotJson);
     bool RequestComparison(const std::string& requestId,
-        const std::string& cursor = {}, std::uint32_t limit = 64);
+        const std::string& cursor = {}, std::uint32_t limit = 64,
+        const std::string& comparisonToken = {});
     bool RequestComparison(unsigned int requestId);
     bool RequestSnapshot(const std::string& requestId,
         const std::string& targetDeviceId, std::uint64_t clientRevision);

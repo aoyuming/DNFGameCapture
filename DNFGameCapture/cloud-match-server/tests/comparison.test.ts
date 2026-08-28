@@ -139,6 +139,7 @@ describe('room snapshot comparison', () => {
     const result = compareRoomSnapshots(
       [row('device-A', a), row('device-B', b), row('device-C', c)],
       1_000,
+      { includePairwise: true },
     );
     const expectedDifference: SnapshotDifference = {
       kind: 'stat',
@@ -153,7 +154,7 @@ describe('room snapshot comparison', () => {
     expect(result.consensusDeviceId).toBe('device-A');
     expect(member(result, 'device-C').differences).toEqual([expectedDifference]);
     expect(
-      result.pairwise.find(
+      result.pairwise?.find(
         (pair) => pair.leftDeviceId === 'device-A' && pair.rightDeviceId === 'device-C',
       ),
     ).toMatchObject({
@@ -479,5 +480,20 @@ describe('room snapshot comparison', () => {
       1_000,
     );
     expect(expired.groups).toEqual([]);
+  });
+
+  test('uses lightweight output by default and compares 128 simple members quickly', () => {
+    const base = snapshot();
+    const rows = Array.from({ length: 128 }, (_, index) =>
+      row(`performance-${index.toString().padStart(4, '0')}`, base),
+    );
+    const startedAt = performance.now();
+
+    const result = compareRoomSnapshots(rows, 1_000);
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(result.members).toHaveLength(128);
+    expect(result).not.toHaveProperty('pairwise');
+    expect(elapsedMs).toBeLessThan(1_000);
   });
 });

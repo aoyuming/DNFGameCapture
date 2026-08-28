@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import type { Server as SocketIoServer, Socket } from 'socket.io';
 import { z } from 'zod';
 
@@ -32,15 +33,27 @@ type Acknowledge = (response: unknown) => void;
 
 const MAX_SNAPSHOT_BYTES = 65_536;
 const MAX_COMPARISON_PAGE_SIZE = 8;
-const MAX_COMPARISON_MEMBERS = 512;
+const MAX_COMPARISON_MEMBERS = 128;
+const MAX_COMPARISON_ACK_BYTES = 96 * 1_024;
+const MAX_PROTOCOL_ACK_BYTES = 128 * 1_024;
+const MAX_DEVICE_PENDING_OPERATIONS = 64;
+const MAX_SHARED_COMPARISONS = 8;
+const COMPARISON_TOKEN_TTL_SECONDS = 20;
+const COMPARISON_REFRESH_COOLDOWN_SECONDS = 1;
 const FIXED_ROOM_IDS = ['59', 'li-yong', 'wen-rou'] as const;
 const emptyPayloadSchema = z.object({}).strict();
 const comparisonRequestSchema = z
   .object({
     cursor: deviceIdSchema.optional(),
+    comparisonToken: z.string().min(32).max(128).regex(/^[A-Za-z0-9_-]+$/).optional(),
     limit: z.number().int().min(1).max(64).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((request, context) => {
+    if ((request.cursor === undefined) !== (request.comparisonToken === undefined)) {
+      context.addIssue({ code: z.ZodIssueCode.custom });
+    }
+  });
 const snapshotUploadSchema = z.object({ snapshot: z.unknown() }).strict();
 const snapshotGetSchema = z
   .object({
@@ -132,6 +145,33 @@ interface AuthenticatedSocketData {
   deviceId: string;
 }
 
+interface MaterializedComparison {
+  roomId: string;
+  roomRevision: number;
+  generatedAt: number;
+  consensusDeviceId: string | null;
+  members: Array<Record<string, unknown>>;
+  groups: Array<{ id: string; memberDeviceIds: string[] }>;
+  totalMembers: number;
+  boundedMembers: number;
+  truncated: boolean;
+}
+
+interface ComparisonSession extends MaterializedComparison {
+  token: string;
+  expiresAt: number;
+  expectedCursor: string | null;
+}
+
+interface SharedComparison {
+  expiresAt: number;
+  pending: Promise<MaterializedComparison>;
+}
+
+type MaterializeComparisonResult =
+  | { ok: true; comparison: MaterializedComparison }
+  | { ok: false; code: 'comparison_changed' };
+
 function createSocketError(code: string): Error & { data: { code: string } } {
   const message =
     code === 'unsupported_protocol' ? 'Unsupported protocol' : 'Authentication failed';
@@ -209,6 +249,17 @@ function serializedByteLength(value: unknown): number | null {
   }
 }
 
+function boundedResponse(
+  response: unknown,
+  maximumBytes: number,
+): unknown {
+  const bytes = serializedByteLength(response);
+  if (bytes === null || bytes > maximumBytes) {
+    return { ok: false, code: 'response_too_large' };
+  }
+  return response;
+}
+
 export function registerCloudMatchSocketHandlers(
   context: RegisterCloudMatchSocketHandlersContext,
 ): CloudMatchSocketHandlerRegistration {
@@ -223,6 +274,7 @@ export function registerCloudMatchSocketHandlers(
   } = context;
   const activeSockets = new Map<string, Socket>();
   const deviceQueues = new Map<string, Promise<void>>();
+  const comparisonCache = new Map<string, SharedComparison>();
   const lastAnnouncedRevision = new Map<string, number>(
     FIXED_ROOM_IDS.map((roomId) => [roomId, -1]),
   );
@@ -252,6 +304,131 @@ export function registerCloudMatchSocketHandlers(
     deviceQueues.set(deviceId, tail);
     removeSettledDeviceQueue(deviceId, tail);
     return result;
+  };
+
+  const rememberComparison = (
+    key: string,
+    build: () => Promise<MaterializedComparison>,
+  ): Promise<MaterializedComparison> => {
+    const existing = comparisonCache.get(key);
+    if (existing && now() <= existing.expiresAt) {
+      return existing.pending;
+    }
+    if (existing) {
+      comparisonCache.delete(key);
+    }
+    const pending = build();
+    const shared = {
+      expiresAt: now() + COMPARISON_TOKEN_TTL_SECONDS,
+      pending,
+    };
+    comparisonCache.set(key, shared);
+    void pending.catch(() => {
+      if (comparisonCache.get(key) === shared) {
+        comparisonCache.delete(key);
+      }
+    });
+    while (comparisonCache.size > MAX_SHARED_COMPARISONS) {
+      const oldest = comparisonCache.keys().next().value as string | undefined;
+      if (oldest === undefined) {
+        break;
+      }
+      comparisonCache.delete(oldest);
+    }
+    return pending;
+  };
+
+  const materializeComparison = async (
+    roomId: string,
+    requiredDeviceId: string,
+  ): Promise<MaterializeComparisonResult> => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const roomRevision = await roomService.getRoomRevision(db, roomId);
+      const generatedAt = now();
+      const boundedRoom = await roomService.listRoomMembersBounded(
+        db,
+        roomId,
+        requiredDeviceId,
+        MAX_COMPARISON_MEMBERS,
+      );
+      const roomMembers = boundedRoom.members;
+      const memberFingerprint = roomMembers.map((member) => member.deviceId).join(',');
+      const cacheKey = `${roomId}:${roomRevision}:${memberFingerprint}`;
+      const comparison = await rememberComparison(cacheKey, async () => {
+        const boundedMemberIds = new Set(
+          roomMembers.map((member) => member.deviceId),
+        );
+        const snapshots = await snapshotService.getRoomSnapshots(
+          db,
+          roomId,
+          [...boundedMemberIds],
+        );
+        const inputRows = snapshots
+          .filter((row) => boundedMemberIds.has(row.deviceId))
+          .map((row) => ({
+            ...row,
+            online: activeSockets.has(row.deviceId),
+          }));
+        const compared = await comparisonService.compareRoomSnapshots(
+          inputRows,
+          generatedAt,
+        );
+        const comparedByDeviceId = new Map(
+          compared.members.map((member) => [member.deviceId, member]),
+        );
+        const members = roomMembers.map((member): Record<string, unknown> => {
+          const item = comparedByDeviceId.get(member.deviceId);
+          if (!item) {
+            return {
+              ...member,
+              online: activeSockets.has(member.deviceId),
+              state: 'no_data' as const,
+            };
+          }
+          return {
+            deviceId: item.deviceId,
+            broadcasterName: item.broadcasterName,
+            deviceSuffix: item.deviceSuffix,
+            online: activeSockets.has(item.deviceId),
+            state: item.stale ? ('stale' as const) : ('updated' as const),
+            clientRevision: item.clientRevision,
+            receivedAt: item.receivedAt,
+            stale: item.stale,
+            excludedFromConsensus: item.excludedFromConsensus,
+            sourceRoot: item.sourceRoot,
+            swapped: item.swapped,
+            identityMatchPercent: item.identityMatchPercent,
+            similarity: item.similarity,
+          };
+        });
+        const memberIds = new Set(members.map((member) => member.deviceId as string));
+        const groups = compared.groups.flatMap((group) => {
+          const memberDeviceIds = [...new Set(group.memberDeviceIds)].filter((id) =>
+            memberIds.has(id),
+          );
+          return memberDeviceIds.length > 0
+            ? [{ id: group.id, memberDeviceIds }]
+            : [];
+        });
+        return {
+          roomId,
+          roomRevision,
+          generatedAt,
+          consensusDeviceId: compared.consensusDeviceId,
+          members,
+          groups,
+          totalMembers: boundedRoom.totalMembers,
+          boundedMembers: members.length,
+          truncated: boundedRoom.totalMembers > members.length,
+        };
+      });
+      const revisionAfter = await roomService.getRoomRevision(db, roomId);
+      if (revisionAfter === roomRevision) {
+        return { ok: true, comparison };
+      }
+      comparisonCache.delete(cacheKey);
+    }
+    return { ok: false, code: 'comparison_changed' };
   };
 
   const announceRoomNotification = (
@@ -326,6 +503,9 @@ export function registerCloudMatchSocketHandlers(
   io.on('connection', (socket) => {
     const deviceId = (socket.data as AuthenticatedSocketData).deviceId;
     let restoredRoomId: string | null = null;
+    let pendingSerializedOperations = 0;
+    let comparisonSession: ComparisonSession | null = null;
+    let lastComparisonStartedAt = Number.NEGATIVE_INFINITY;
 
     const initialization = enqueueDeviceOperation(deviceId, async () => {
       if (!socket.connected) {
@@ -396,7 +576,17 @@ export function registerCloudMatchSocketHandlers(
         };
 
         if (serializeForDevice) {
-          void enqueueDeviceOperation(deviceId, run);
+          if (pendingSerializedOperations >= MAX_DEVICE_PENDING_OPERATIONS) {
+            safeAcknowledge(acknowledge as Acknowledge, {
+              ok: false,
+              code: 'rate_limited',
+            });
+            return;
+          }
+          pendingSerializedOperations += 1;
+          void enqueueDeviceOperation(deviceId, run).finally(() => {
+            pendingSerializedOperations -= 1;
+          });
         } else {
           void run();
         }
@@ -613,64 +803,77 @@ export function registerCloudMatchSocketHandlers(
         if (!membership) {
           return { ok: false, code: 'not_in_room' };
         }
-
-        const generatedAt = now();
         const roomId = membership.room.id;
-        const boundedRoom = await roomService.listRoomMembersBounded(
-          db,
-          roomId,
-          deviceId,
-          MAX_COMPARISON_MEMBERS,
-        );
-        const roomMembers = boundedRoom.members;
-        const boundedMemberIds = new Set(roomMembers.map((member) => member.deviceId));
-        const snapshots = await snapshotService.getRoomSnapshots(
-          db,
-          roomId,
-          [...boundedMemberIds],
-        );
-        const inputRows = snapshots
-          .filter((row) => boundedMemberIds.has(row.deviceId))
-          .map((row) => ({
-            ...row,
-            online: activeSockets.has(row.deviceId),
-          }));
-        const comparison = await comparisonService.compareRoomSnapshots(
-          inputRows,
-          generatedAt,
-        );
-        const comparedByDeviceId = new Map(
-          comparison.members.map((member) => [member.deviceId, member]),
-        );
-        const members = roomMembers.map((member) => {
-          const compared = comparedByDeviceId.get(member.deviceId);
-          if (!compared) {
-            return {
-              ...member,
-              online: activeSockets.has(member.deviceId),
-              state: 'no_data' as const,
-            };
+        const requestedToken = parsed.data.comparisonToken;
+        const requestedCursor = parsed.data.cursor ?? null;
+        if (requestedToken) {
+          if (!comparisonSession || comparisonSession.token !== requestedToken) {
+            return { ok: false, code: 'invalid_comparison_token' };
           }
-          return {
-            ...compared,
-            online: activeSockets.has(member.deviceId),
-            state: compared.stale ? ('stale' as const) : ('updated' as const),
+          if (comparisonSession.roomId !== roomId) {
+            comparisonSession = null;
+            return { ok: false, code: 'comparison_changed' };
+          }
+          if (now() > comparisonSession.expiresAt) {
+            comparisonSession = null;
+            return { ok: false, code: 'comparison_expired' };
+          }
+          if (
+            (await roomService.getRoomRevision(db, roomId)) !==
+            comparisonSession.roomRevision
+          ) {
+            comparisonSession = null;
+            return { ok: false, code: 'comparison_changed' };
+          }
+          if (requestedCursor !== comparisonSession.expectedCursor) {
+            return { ok: false, code: 'invalid_comparison_cursor' };
+          }
+        } else {
+          const startedAt = now();
+          if (startedAt - lastComparisonStartedAt < COMPARISON_REFRESH_COOLDOWN_SECONDS) {
+            return { ok: false, code: 'rate_limited' };
+          }
+          lastComparisonStartedAt = startedAt;
+          comparisonSession = null;
+          let materialized: MaterializeComparisonResult;
+          try {
+            materialized = await materializeComparison(roomId, deviceId);
+          } catch (error) {
+            lastComparisonStartedAt = Number.NEGATIVE_INFINITY;
+            throw error;
+          }
+          if (!materialized.ok) {
+            lastComparisonStartedAt = Number.NEGATIVE_INFINITY;
+            return materialized;
+          }
+          comparisonSession = {
+            ...materialized.comparison,
+            token: randomBytes(32).toString('base64url'),
+            expiresAt:
+              materialized.comparison.generatedAt + COMPARISON_TOKEN_TTL_SECONDS,
+            expectedCursor: null,
           };
-        });
+        }
 
-        const startIndex = parsed.data.cursor
-          ? members.findIndex((member) => member.deviceId > parsed.data.cursor!)
+        const session = comparisonSession;
+        if (!session) {
+          return { ok: false, code: 'invalid_comparison_token' };
+        }
+        const startIndex = requestedCursor
+          ? session.members.findIndex(
+              (member) => (member.deviceId as string) > requestedCursor,
+            )
           : 0;
-        const pageStart = startIndex < 0 ? members.length : startIndex;
+        const pageStart = startIndex < 0 ? session.members.length : startIndex;
         const requestedLimit = parsed.data.limit ?? MAX_COMPARISON_PAGE_SIZE;
         const pageSize = Math.min(requestedLimit, MAX_COMPARISON_PAGE_SIZE);
-        const pageMembers = members.slice(pageStart, pageStart + pageSize);
-        const hasMore = pageStart + pageMembers.length < members.length;
+        const pageMembers = session.members.slice(pageStart, pageStart + pageSize);
+        const hasMore = pageStart + pageMembers.length < session.members.length;
         const nextCursor = hasMore && pageMembers.length > 0
-          ? pageMembers.at(-1)!.deviceId
+          ? pageMembers.at(-1)!.deviceId as string
           : null;
         const pageMemberIds = new Set(pageMembers.map((member) => member.deviceId));
-        const groups = comparison.groups
+        const groups = session.groups
           .map((group) => ({
             id: group.id,
             memberDeviceIds: [...new Set(group.memberDeviceIds)].filter((id) =>
@@ -679,19 +882,26 @@ export function registerCloudMatchSocketHandlers(
           }))
           .filter((group) => group.memberDeviceIds.length > 0);
 
-        return {
+        const response = {
           ok: true,
-          generatedAt,
-          roomRevision: await roomService.getRoomRevision(db, roomId),
-          consensusDeviceId: comparison.consensusDeviceId,
+          comparisonToken: session.token,
+          cursor: requestedCursor,
+          generatedAt: session.generatedAt,
+          roomRevision: session.roomRevision,
+          consensusDeviceId: session.consensusDeviceId,
           members: pageMembers,
           groups,
-          totalMembers: boundedRoom.totalMembers,
-          boundedMembers: members.length,
-          truncated: boundedRoom.totalMembers > members.length,
+          totalMembers: session.totalMembers,
+          boundedMembers: session.boundedMembers,
+          truncated: session.truncated,
           hasMore,
           nextCursor,
         };
+        const bounded = boundedResponse(response, MAX_COMPARISON_ACK_BYTES);
+        if ((bounded as { ok?: boolean }).ok === true) {
+          session.expectedCursor = nextCursor;
+        }
+        return bounded;
       },
       true,
     );
@@ -727,7 +937,7 @@ export function registerCloudMatchSocketHandlers(
         if (stored.snapshot.clientRevision !== parsed.data.clientRevision) {
           return { ok: false, code: 'snapshot_revision_changed' };
         }
-        return {
+        return boundedResponse({
           ok: true,
           targetDeviceId: parsed.data.targetDeviceId,
           broadcasterName: targetMembership.broadcasterName,
@@ -735,12 +945,13 @@ export function registerCloudMatchSocketHandlers(
           receivedAt: stored.receivedAt,
           clientRevision: stored.snapshot.clientRevision,
           snapshot: stored.snapshot,
-        };
+        }, MAX_PROTOCOL_ACK_BYTES);
       },
       true,
     );
 
     socket.on('disconnect', () => {
+      comparisonSession = null;
       const wasActive = activeSockets.get(deviceId) === socket;
       if (wasActive) {
         activeSockets.delete(deviceId);
@@ -774,6 +985,7 @@ export function registerCloudMatchSocketHandlers(
     close(): void {
       notificationsClosed = true;
       lastAnnouncedRevision.clear();
+      comparisonCache.clear();
     },
   };
 }

@@ -396,10 +396,19 @@ public:
     }
 
     bool RequestComparison(const std::string& requestId,
-        const std::string& cursor, std::uint32_t limit)
+        const std::string& cursor, std::uint32_t limit,
+        const std::string& comparisonToken)
     {
+        const bool tokenCharactersValid = std::all_of(comparisonToken.begin(),
+            comparisonToken.end(), [](unsigned char value) {
+                return (value >= 'A' && value <= 'Z') ||
+                    (value >= 'a' && value <= 'z') ||
+                    (value >= '0' && value <= '9') || value == '_' || value == '-';
+            });
         if (requestId.empty() || requestId.size() > 128 || cursor.size() > 128 ||
-            limit == 0 || limit > 64) {
+            limit == 0 || limit > 64 || cursor.empty() != comparisonToken.empty() ||
+            (!comparisonToken.empty() && (comparisonToken.size() < 32 ||
+                comparisonToken.size() > 128 || !tokenCharactersValid))) {
             return false;
         }
         bool enqueued = false;
@@ -410,7 +419,8 @@ public:
                 return false;
             }
             enqueued = EnqueueCommandLocked(config.generation,
-                CommandKind::requestComparison, cursor, {}, requestId, 0, limit);
+                CommandKind::requestComparison, cursor, comparisonToken,
+                requestId, 0, limit);
         }
         if (enqueued) condition.notify_all();
         return enqueued;
@@ -574,6 +584,13 @@ public:
             { "code", "test_complete" }
         };
         if (!command.requestId.empty()) result["requestId"] = command.requestId;
+        if (command.kind == CommandKind::requestComparison) {
+            result["cursor"] = command.argument.empty() ? json(nullptr) :
+                json(command.argument);
+            if (!command.secondArgument.empty()) {
+                result["comparisonToken"] = command.secondArgument;
+            }
+        }
         if (command.kind == CommandKind::requestSnapshot) {
             result["targetDeviceId"] = command.argument;
             result["clientRevision"] = command.clientRevision;
@@ -2086,7 +2103,10 @@ private:
             eventName = "room:comparison";
             resultType = "room_comparison_result";
             payload = { { "limit", command.pageLimit == 0 ? 64 : command.pageLimit } };
-            if (!command.argument.empty()) payload["cursor"] = command.argument;
+            if (!command.argument.empty()) {
+                payload["cursor"] = command.argument;
+                payload["comparisonToken"] = command.secondArgument;
+            }
             break;
         case CommandKind::requestSnapshot:
             eventName = "snapshot:get";
@@ -2907,14 +2927,15 @@ bool CloudMatchClient::UploadSnapshot(std::string snapshotJson)
 }
 
 bool CloudMatchClient::RequestComparison(const std::string& requestId,
-    const std::string& cursor, std::uint32_t limit)
+    const std::string& cursor, std::uint32_t limit,
+    const std::string& comparisonToken)
 {
-    return impl_->RequestComparison(requestId, cursor, limit);
+    return impl_->RequestComparison(requestId, cursor, limit, comparisonToken);
 }
 
 bool CloudMatchClient::RequestComparison(unsigned int requestId)
 {
-    return RequestComparison(std::to_string(requestId), {}, 64);
+    return RequestComparison(std::to_string(requestId), {}, 64, {});
 }
 
 bool CloudMatchClient::RequestSnapshot(const std::string& requestId,

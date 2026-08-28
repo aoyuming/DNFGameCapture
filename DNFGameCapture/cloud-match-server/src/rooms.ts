@@ -44,6 +44,7 @@ interface RoomRevisionRow {
 interface RoomMemberRow {
   device_id: string;
   broadcaster_name: string;
+  activity_at?: number;
 }
 
 interface RoomMemberCountRow {
@@ -122,11 +123,18 @@ export function listRoomMembersBounded(
     .get(roomId) as RoomMemberCountRow;
   const rows = db
     .prepare(
-      `SELECT device_id, broadcaster_name
-       FROM memberships
-       WHERE room_id = ?
-       ORDER BY device_id
-       LIMIT ?`,
+      `SELECT device_id, broadcaster_name, activity_at
+       FROM (
+         SELECT m.device_id, m.broadcaster_name,
+                MAX(m.updated_at, d.last_seen_at, COALESCE(s.received_at, 0)) AS activity_at
+         FROM memberships AS m
+         JOIN devices AS d ON d.id = m.device_id
+         LEFT JOIN snapshots AS s ON s.device_id = m.device_id
+         WHERE m.room_id = ?
+         ORDER BY activity_at DESC, m.device_id
+         LIMIT ?
+       )
+       ORDER BY device_id`,
     )
     .all(roomId, limit) as RoomMemberRow[];
 
@@ -142,7 +150,19 @@ export function listRoomMembersBounded(
       )
       .get(roomId, requiredDeviceId) as RoomMemberRow | undefined;
     if (caller) {
-      rows[rows.length - 1] = caller;
+      let replacementIndex = 0;
+      for (let index = 1; index < rows.length; index += 1) {
+        const candidateActivity = rows[index].activity_at ?? 0;
+        const replacementActivity = rows[replacementIndex].activity_at ?? 0;
+        if (
+          candidateActivity < replacementActivity ||
+          (candidateActivity === replacementActivity &&
+            rows[index].device_id > rows[replacementIndex].device_id)
+        ) {
+          replacementIndex = index;
+        }
+      }
+      rows[replacementIndex] = caller;
       rows.sort((left, right) =>
         left.device_id < right.device_id ? -1 : left.device_id > right.device_id ? 1 : 0,
       );

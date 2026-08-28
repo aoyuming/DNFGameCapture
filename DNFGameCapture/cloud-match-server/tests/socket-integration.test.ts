@@ -98,6 +98,29 @@ function snapshot(
   };
 }
 
+function largeUnicodeSnapshot(clientRevision: number, offset: number): MatchSnapshot {
+  const makeTeam = (teamOffset: number): [Player, Player, Player, Player] =>
+    Array.from({ length: 4 }, (_, playerIndex) => {
+      const identityOffset = offset + teamOffset + playerIndex * 40;
+      return {
+        mainName: `${'主'.repeat(63)}${String.fromCharCode(0x4e00 + identityOffset)}`,
+        aliases: Array.from({ length: 32 }, (_, aliasIndex) =>
+          `${'名'.repeat(63)}${String.fromCharCode(
+            0x5200 + identityOffset + aliasIndex,
+          )}`,
+        ),
+        kills: playerIndex,
+        deaths: playerIndex + 1,
+        ak: playerIndex + 2,
+        streak: playerIndex + 3,
+      };
+    }) as [Player, Player, Player, Player];
+  return snapshot(clientRevision, {
+    redPlayers: makeTeam(0),
+    bluePlayers: makeTeam(200),
+  });
+}
+
 async function startApp(options: AppOptions = {}): Promise<RunningApp> {
   const directory = mkdtempSync(join(tmpdir(), 'dnf-cloud-socket-'));
   const app = createCloudMatchApp({
@@ -413,8 +436,60 @@ describe('cloud match Socket.IO integration', () => {
     ).resolves.toEqual({ ok: false, code: 'not_in_room' });
   });
 
-  test('paginates a room with 65 persistent members and keeps the caller reachable', async () => {
-    const { app, url } = await startApp();
+  test('keeps long-Unicode comparison summaries and snapshot ACKs within protocol limits', async () => {
+    const { url } = await startApp();
+    const caller = await createDevice(url, 'unicode-caller-0001');
+    const peer = await createDevice(url, 'unicode-peer-0002');
+    await joinRoom(caller.socket, '59', '主'.repeat(32));
+    await joinRoom(peer.socket, '59', '播'.repeat(32));
+    const callerSnapshot = largeUnicodeSnapshot(1, 0);
+    const peerSnapshot = largeUnicodeSnapshot(1, 500);
+    expect(Buffer.byteLength(JSON.stringify({ snapshot: callerSnapshot }), 'utf8'))
+      .toBeLessThanOrEqual(65_536);
+    expect(Buffer.byteLength(JSON.stringify({ snapshot: peerSnapshot }), 'utf8'))
+      .toBeLessThanOrEqual(65_536);
+    await emitAck(caller.socket, 'snapshot:upload', { snapshot: callerSnapshot });
+    await emitAck(peer.socket, 'snapshot:upload', { snapshot: peerSnapshot });
+
+    const comparison = await emitAck<{
+      ok: boolean;
+      members: Array<Record<string, unknown>>;
+    }>(caller.socket, 'room:comparison', {});
+    expect(comparison.ok).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(comparison), 'utf8')).toBeLessThanOrEqual(
+      96 * 1_024,
+    );
+    for (const member of comparison.members) {
+      expect(member).not.toHaveProperty('differences');
+      expect(member).not.toHaveProperty('snapshot');
+      expect(member).not.toHaveProperty('redPlayers');
+      expect(member).not.toHaveProperty('redScore');
+    }
+
+    const preview = await emitAck<Record<string, unknown>>(
+      caller.socket,
+      'snapshot:get',
+      { targetDeviceId: peer.deviceId, clientRevision: 1 },
+    );
+    expect(preview).toMatchObject({ ok: true, targetDeviceId: peer.deviceId });
+    expect(Buffer.byteLength(JSON.stringify(preview), 'utf8')).toBeLessThanOrEqual(
+      128 * 1_024,
+    );
+    expect(caller.socket.connected).toBe(true);
+  });
+
+  test('paginates one immutable comparison token across 65 persistent members', async () => {
+    let now = 1_700_000_000;
+    let comparisonCalls = 0;
+    const { app, url } = await startApp({
+      now: () => now,
+      comparisonService: {
+        compareRoomSnapshots(rows, nowSec) {
+          comparisonCalls += 1;
+          return comparisonStore.compareRoomSnapshots(rows, nowSec);
+        },
+      },
+    });
     const caller = await createDevice(url, 'paged-member-0065');
     await joinRoom(caller.socket, '59', 'Broadcaster 65');
 
@@ -434,38 +509,302 @@ describe('cloud match Socket.IO integration', () => {
       }
       app.db.prepare("update rooms set revision = revision + 64 where id = '59'").run();
     })();
+    await emitAck(caller.socket, 'snapshot:upload', { snapshot: snapshot(1) });
+    now += 29;
 
     const first = await emitAck<{
       ok: boolean;
+      comparisonToken: string;
+      generatedAt: number;
+      roomRevision: number;
       members: Array<{ deviceId: string }>;
       totalMembers: number;
+      boundedMembers: number;
+      truncated: boolean;
       hasMore: boolean;
       nextCursor: string | null;
     }>(caller.socket, 'room:comparison', { limit: 64 });
-    expect(first).toMatchObject({ ok: true, totalMembers: 65, hasMore: true });
+    expect(first).toMatchObject({
+      ok: true,
+      generatedAt: now,
+      totalMembers: 65,
+      boundedMembers: 65,
+      truncated: false,
+      hasMore: true,
+    });
+    expect(first.comparisonToken).toMatch(/^[A-Za-z0-9_-]{32,128}$/);
     expect(first.members).toHaveLength(8);
     expect(first.members.map((member) => member.deviceId)).not.toContain(caller.deviceId);
     expect(first.nextCursor).toBe('paged-member-0008');
 
+    now += 2;
     let cursor = first.nextCursor;
     const collected = [...first.members];
     let pageCount = 1;
     while (cursor !== null) {
       const page = await emitAck<{
         ok: boolean;
+        comparisonToken: string;
+        generatedAt: number;
+        roomRevision: number;
         members: Array<{ deviceId: string }>;
         totalMembers: number;
+        boundedMembers: number;
+        truncated: boolean;
         hasMore: boolean;
         nextCursor: string | null;
-      }>(caller.socket, 'room:comparison', { cursor, limit: 64 });
+      }>(caller.socket, 'room:comparison', {
+        comparisonToken: first.comparisonToken,
+        cursor,
+        limit: 64,
+      });
       expect(page.ok).toBe(true);
+      expect(page).toMatchObject({
+        comparisonToken: first.comparisonToken,
+        generatedAt: first.generatedAt,
+        roomRevision: first.roomRevision,
+        totalMembers: first.totalMembers,
+        boundedMembers: first.boundedMembers,
+        truncated: first.truncated,
+      });
       collected.push(...page.members);
       cursor = page.nextCursor;
       pageCount += 1;
     }
     expect(pageCount).toBe(9);
     expect(collected).toHaveLength(65);
-    expect(collected.at(-1)).toEqual(expect.objectContaining({ deviceId: caller.deviceId }));
+    expect(collected.at(-1)).toEqual(expect.objectContaining({
+      deviceId: caller.deviceId,
+      stale: false,
+      excludedFromConsensus: false,
+    }));
+    expect(comparisonCalls).toBe(1);
+  });
+
+  test('rejects comparison tokens after expiry, room changes, or use by another socket', async () => {
+    let now = 1_700_000_000;
+    const { url } = await startApp({ now: () => now });
+    const caller = await createDevice(url, 'token-caller-0001');
+    const peer = await createDevice(url, 'token-peer-0002');
+    await joinRoom(caller.socket, '59', 'Caller');
+    await joinRoom(peer.socket, '59', 'Peer');
+
+    const first = await emitAck<{
+      ok: boolean;
+      comparisonToken: string;
+      nextCursor: string | null;
+    }>(caller.socket, 'room:comparison', { limit: 1 });
+    expect(first.ok).toBe(true);
+    expect(first.nextCursor).not.toBeNull();
+    await expect(
+      emitAck(peer.socket, 'room:comparison', {
+        comparisonToken: first.comparisonToken,
+        cursor: first.nextCursor,
+        limit: 1,
+      }),
+    ).resolves.toEqual({ ok: false, code: 'invalid_comparison_token' });
+
+    await emitAck(peer.socket, 'snapshot:upload', { snapshot: snapshot(1) });
+    await expect(
+      emitAck(caller.socket, 'room:comparison', {
+        comparisonToken: first.comparisonToken,
+        cursor: first.nextCursor,
+        limit: 1,
+      }),
+    ).resolves.toEqual({ ok: false, code: 'comparison_changed' });
+
+    now += 2;
+    const refreshed = await emitAck<{
+      ok: boolean;
+      comparisonToken: string;
+      nextCursor: string | null;
+    }>(caller.socket, 'room:comparison', { limit: 1 });
+    expect(refreshed.ok).toBe(true);
+    now += 21;
+    await expect(
+      emitAck(caller.socket, 'room:comparison', {
+        comparisonToken: refreshed.comparisonToken,
+        cursor: refreshed.nextCursor,
+        limit: 1,
+      }),
+    ).resolves.toEqual({ ok: false, code: 'comparison_expired' });
+  });
+
+  test('discloses and paginates a recent 128-member window without losing the caller', async () => {
+    const { app, url } = await startApp();
+    const caller = await createDevice(url, 'window-member-0130');
+    await joinRoom(caller.socket, '59', 'Caller 130');
+    const insertDevice = app.db.prepare(
+      'insert into devices (id, token_hash, created_at, last_seen_at) values (?, ?, ?, ?)',
+    );
+    const insertMembership = app.db.prepare(
+      `insert into memberships (device_id, room_id, broadcaster_name, updated_at)
+       values (?, '59', ?, ?)`,
+    );
+    app.db.transaction(() => {
+      for (let index = 1; index <= 129; index += 1) {
+        const suffix = index.toString().padStart(4, '0');
+        insertDevice.run(`window-member-${suffix}`, `hash-${suffix}`, 1, index);
+        insertMembership.run(`window-member-${suffix}`, `Member ${index}`, index);
+      }
+      app.db.prepare("update rooms set revision = revision + 129 where id = '59'").run();
+    })();
+
+    const first = await emitAck<{
+      comparisonToken: string;
+      members: Array<{ deviceId: string }>;
+      totalMembers: number;
+      boundedMembers: number;
+      truncated: boolean;
+      nextCursor: string | null;
+    }>(caller.socket, 'room:comparison', {});
+    expect(first).toMatchObject({
+      totalMembers: 130,
+      boundedMembers: 128,
+      truncated: true,
+    });
+    const members = [...first.members];
+    let cursor = first.nextCursor;
+    while (cursor) {
+      const page = await emitAck<{
+        members: Array<{ deviceId: string }>;
+        nextCursor: string | null;
+      }>(caller.socket, 'room:comparison', {
+        comparisonToken: first.comparisonToken,
+        cursor,
+      });
+      members.push(...page.members);
+      cursor = page.nextCursor;
+    }
+    expect(members).toHaveLength(128);
+    expect(members.map((member) => member.deviceId)).toContain(caller.deviceId);
+  });
+
+  test('retries a comparison changed during computation without relabeling stale data', async () => {
+    const entered = createDeferred<void>();
+    const release = createDeferred<void>();
+    let comparisonCalls = 0;
+    const { app, url } = await startApp({
+      comparisonService: {
+        async compareRoomSnapshots(rows, nowSec) {
+          comparisonCalls += 1;
+          if (comparisonCalls === 1) {
+            entered.resolve(undefined);
+            await release.promise;
+          }
+          return comparisonStore.compareRoomSnapshots(rows, nowSec);
+        },
+      },
+    });
+    const caller = await createDevice(url, 'changed-caller-0001');
+    const peer = await createDevice(url, 'changed-peer-0002');
+    await joinRoom(caller.socket, '59', 'Caller');
+    await joinRoom(peer.socket, '59', 'Peer');
+    await emitAck(caller.socket, 'snapshot:upload', { snapshot: snapshot(1) });
+
+    const pending = emitAck<{
+      ok: boolean;
+      roomRevision: number;
+      members: Array<{ deviceId: string; clientRevision?: number }>;
+    }>(caller.socket, 'room:comparison', {});
+    await entered.promise;
+    await emitAck(peer.socket, 'snapshot:upload', { snapshot: snapshot(7) });
+    release.resolve(undefined);
+    const response = await pending;
+
+    expect(response).toMatchObject({ ok: true, roomRevision: roomRevision(app, '59') });
+    expect(response.members).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ deviceId: peer.deviceId, clientRevision: 7 }),
+      ]),
+    );
+    expect(comparisonCalls).toBe(2);
+  });
+
+  test('single-flights comparison computation per room revision and rate-limits refreshes', async () => {
+    const entered = createDeferred<void>();
+    const release = createDeferred<void>();
+    let comparisonCalls = 0;
+    const { url } = await startApp({
+      comparisonService: {
+        async compareRoomSnapshots(rows, nowSec) {
+          comparisonCalls += 1;
+          if (comparisonCalls === 1) {
+            entered.resolve(undefined);
+            await release.promise;
+          }
+          return comparisonStore.compareRoomSnapshots(rows, nowSec);
+        },
+      },
+    });
+    const first = await createDevice(url, 'singleflight-first-0001');
+    const second = await createDevice(url, 'singleflight-second-0002');
+    await joinRoom(first.socket, '59', 'First');
+    await joinRoom(second.socket, '59', 'Second');
+
+    const firstRequest = emitAck<{ ok: boolean; comparisonToken: string }>(
+      first.socket,
+      'room:comparison',
+      {},
+    );
+    await entered.promise;
+    const secondRequest = emitAck<{ ok: boolean; comparisonToken: string }>(
+      second.socket,
+      'room:comparison',
+      {},
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    release.resolve(undefined);
+    const [firstResponse, secondResponse] = await Promise.all([
+      firstRequest,
+      secondRequest,
+    ]);
+
+    expect(firstResponse.ok).toBe(true);
+    expect(secondResponse.ok).toBe(true);
+    expect(firstResponse.comparisonToken).not.toBe(secondResponse.comparisonToken);
+    expect(comparisonCalls).toBe(1);
+    await expect(
+      emitAck(first.socket, 'room:comparison', {}),
+    ).resolves.toEqual({ ok: false, code: 'rate_limited' });
+  });
+
+  test('expires the shared comparison cache so stale boundaries are recomputed', async () => {
+    let now = 1_700_000_000;
+    let comparisonCalls = 0;
+    const { url } = await startApp({
+      now: () => now,
+      comparisonService: {
+        compareRoomSnapshots(rows, nowSec) {
+          comparisonCalls += 1;
+          return comparisonStore.compareRoomSnapshots(rows, nowSec);
+        },
+      },
+    });
+    const caller = await createDevice(url, 'cache-expiry-caller-0001');
+    await joinRoom(caller.socket, '59', 'Caller');
+    await emitAck(caller.socket, 'snapshot:upload', { snapshot: snapshot(1) });
+
+    const first = await emitAck<{
+      generatedAt: number;
+      members: Array<{ stale: boolean; excludedFromConsensus: boolean }>;
+    }>(caller.socket, 'room:comparison', {});
+    expect(first.members[0]).toMatchObject({
+      stale: false,
+      excludedFromConsensus: false,
+    });
+
+    now += 31;
+    const refreshed = await emitAck<{
+      generatedAt: number;
+      members: Array<{ stale: boolean; excludedFromConsensus: boolean }>;
+    }>(caller.socket, 'room:comparison', {});
+    expect(refreshed.generatedAt).toBe(now);
+    expect(refreshed.members[0]).toMatchObject({
+      stale: true,
+      excludedFromConsensus: false,
+    });
+    expect(comparisonCalls).toBe(2);
   });
 
   test('fetches only the explicitly requested snapshot revision', async () => {
@@ -764,48 +1103,78 @@ describe('cloud match Socket.IO integration', () => {
     ]);
   });
 
-  test('serializes 400 in-flight revisions without starving the event loop', async () => {
-    const { app, url } = await startApp();
+  test('bounds the serialized device queue and recovers after rejected overflow', async () => {
+    const firstLookupEntered = createDeferred<void>();
+    const releaseFirstLookup = createDeferred<void>();
+    let blockSnapshotLookups = false;
+    let blockedLookups = 0;
+    const { app, url } = await startApp({
+      roomService: {
+        async getMembership(db, deviceId) {
+          if (blockSnapshotLookups && deviceId === 'rapid-device-0001') {
+            blockedLookups += 1;
+            if (blockedLookups === 1) {
+              firstLookupEntered.resolve(undefined);
+            }
+            await releaseFirstLookup.promise;
+          }
+          return roomStore.getMembership(db, deviceId);
+        },
+      },
+    });
     const device = await createDevice(url, 'rapid-device-0001');
     await joinRoom(device.socket, '59', 'Rapid');
+    blockSnapshotLookups = true;
     let timerTicks = 0;
     const timer = setInterval(() => {
       timerTicks += 1;
     }, 1);
 
-    let responses: Array<{ ok: boolean; acceptedRevision: number }>;
-    try {
-      responses = await Promise.all(
-        Array.from({ length: 400 }, (_, index) => {
-          const revision = index + 1;
-          return emitAck<{ ok: boolean; acceptedRevision: number }>(
-            device.socket,
-            'snapshot:upload',
-            { snapshot: snapshot(revision, { redScore: revision }) },
-            15_000,
-          );
-        }),
+    const pending = Array.from({ length: 100 }, (_, index) => {
+      const revision = index + 1;
+      return emitAck<{ ok: boolean; acceptedRevision?: number; code?: string }>(
+        device.socket,
+        'snapshot:upload',
+        { snapshot: snapshot(revision, { redScore: revision }) },
+        15_000,
       );
+    });
+    await firstLookupEntered.promise;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    releaseFirstLookup.resolve(undefined);
+
+    let responses: Array<{ ok: boolean; acceptedRevision?: number; code?: string }>;
+    try {
+      responses = await Promise.all(pending);
     } finally {
       clearInterval(timer);
     }
 
-    expect(responses).toHaveLength(400);
-    expect(responses.every((response) => response.ok)).toBe(true);
-    expect(responses.at(-1)?.acceptedRevision).toBe(400);
+    const accepted = responses.filter((response) => response.ok);
+    const rejected = responses.filter((response) => !response.ok);
+    expect(responses).toHaveLength(100);
+    expect(accepted.length).toBeGreaterThan(0);
+    expect(accepted.length).toBeLessThanOrEqual(64);
+    expect(rejected.length).toBeGreaterThan(0);
+    expect(rejected.every((response) => response.code === 'rate_limited')).toBe(true);
     expect(timerTicks).toBeGreaterThan(0);
     expect(
       app.db
         .prepare('select client_revision from snapshots where device_id = ?')
         .get(device.deviceId),
-    ).toEqual({ client_revision: 400 });
-    expect(roomRevision(app, '59')).toBe(401);
+    ).toEqual({ client_revision: accepted.at(-1)?.acceptedRevision });
+    blockSnapshotLookups = false;
+    await expect(
+      emitAck(device.socket, 'snapshot:upload', {
+        snapshot: snapshot(101, { redScore: 101 }),
+      }),
+    ).resolves.toMatchObject({ ok: true, acceptedRevision: 101 });
     await expect(
       emitAck(device.socket, 'room:comparison', {}),
     ).resolves.toMatchObject({
       ok: true,
-      roomRevision: 401,
-      members: [expect.objectContaining({ clientRevision: 400 })],
+      roomRevision: roomRevision(app, '59'),
+      members: [expect.objectContaining({ clientRevision: 101 })],
     });
   }, 30_000);
 

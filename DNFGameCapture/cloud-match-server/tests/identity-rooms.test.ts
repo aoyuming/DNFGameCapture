@@ -337,6 +337,38 @@ describe('fixed room membership', () => {
     );
   });
 
+  test('selects the most recently active comparison window while retaining the caller', async () => {
+    const { app } = await startApp();
+    const insertDevice = app.db.prepare(
+      'insert into devices (id, token_hash, created_at, last_seen_at) values (?, ?, ?, ?)',
+    );
+    const insertMembership = app.db.prepare(
+      `insert into memberships (device_id, room_id, broadcaster_name, updated_at)
+       values (?, '59', ?, ?)`,
+    );
+    app.db.transaction(() => {
+      insertDevice.run('recent-member-0001', 'hash-1', 1, 1);
+      insertMembership.run('recent-member-0001', 'Required', 1);
+      insertDevice.run('recent-member-0002', 'hash-2', 1, 20);
+      insertMembership.run('recent-member-0002', 'Older', 20);
+      insertDevice.run('recent-member-0003', 'hash-3', 1, 30);
+      insertMembership.run('recent-member-0003', 'Newest', 30);
+    })();
+
+    const result = roomStore.listRoomMembersBounded(
+      app.db,
+      '59',
+      'recent-member-0001',
+      2,
+    );
+
+    expect(result.totalMembers).toBe(3);
+    expect(result.members.map((member) => member.deviceId)).toEqual([
+      'recent-member-0001',
+      'recent-member-0003',
+    ]);
+  });
+
   test('rejects unknown rooms, oversized room IDs, and unsafe broadcaster names', async () => {
     const { url } = await startApp();
     const socket = await connectRegistered(
@@ -387,6 +419,31 @@ describe('fixed room membership', () => {
     await expect(
       emitAck(socket, 'room:rename', { broadcasterName: '主播甲' }),
     ).resolves.toMatchObject({ ok: true, broadcasterName: '主播甲' });
+  });
+
+  test('bounds broadcaster names by normalized UTF-8 bytes', async () => {
+    const { url } = await startApp();
+    const socket = await connectRegistered(
+      url,
+      await register(url, 'capture-device-byte-name-1001'),
+    );
+    const exactly512Bytes = `a${'\u0301'.repeat(256)}`;
+    const over512Bytes = `a${'\u0301'.repeat(257)}`;
+    expect(Buffer.byteLength(exactly512Bytes.normalize('NFC'), 'utf8')).toBe(512);
+    expect(Buffer.byteLength(over512Bytes.normalize('NFC'), 'utf8')).toBe(514);
+
+    await expect(
+      emitAck(socket, 'room:join', {
+        roomId: '59',
+        broadcasterName: exactly512Bytes,
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      broadcasterName: exactly512Bytes.normalize('NFC'),
+    });
+    await expect(
+      emitAck(socket, 'room:rename', { broadcasterName: over512Bytes }),
+    ).resolves.toEqual({ ok: false, code: 'invalid_broadcaster_name' });
   });
 
   test('catches operational Socket errors and remains usable without process errors', async () => {

@@ -59,7 +59,8 @@ export const broadcasterNameSchema = z
       FORBIDDEN_BROADCASTER_CHARACTERS.test(normalized) ||
       !VISIBLE_BROADCASTER_BASE.test(trimmed) ||
       graphemeCount < 1 ||
-      graphemeCount > 32
+      graphemeCount > 32 ||
+      Buffer.byteLength(trimmed, 'utf8') > 512
     ) {
       context.addIssue({ code: z.ZodIssueCode.custom });
     }

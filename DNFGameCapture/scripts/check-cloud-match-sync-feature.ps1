@@ -6,6 +6,7 @@ $sourcePath = Join-Path $root 'CloudMatchSync.cpp'
 $dialogHeaderPath = Join-Path $root 'DNFGameCaptureDlg.h'
 $dialogSourcePath = Join-Path $root 'DNFGameCaptureDlg.cpp'
 $testPath = Join-Path $PSScriptRoot 'cloud_match_sync_test.cpp'
+$themeTestPath = Join-Path $PSScriptRoot 'cloud_match_theme_test.js'
 $webRoot = Get-ChildItem -LiteralPath $root -Directory | Where-Object {
     (Test-Path -LiteralPath (Join-Path $_.FullName 'main.js')) -and
     (Test-Path -LiteralPath (Join-Path $_.FullName 'index.html')) -and
@@ -19,7 +20,7 @@ $webHtmlPath = Join-Path $webRoot.FullName 'index.html'
 $webCssPath = Join-Path $webRoot.FullName 'style.css'
 
 foreach ($path in @($headerPath, $sourcePath, $dialogHeaderPath, $dialogSourcePath,
-    $testPath, $webMainPath, $webHtmlPath, $webCssPath)) {
+    $testPath, $themeTestPath, $webMainPath, $webHtmlPath, $webCssPath)) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Missing cloud match sync feature file: $path"
     }
@@ -51,11 +52,27 @@ foreach ($needle in @(
     'm_cloudMatchSyncUndoRoomId', 'm_cloudMatchSyncUndoConnectionGeneration',
     'DnfResolveCloudMatchRelativeSwap(', 'DnfIsCloudMatchPreviewCurrent(',
     'DnfCanCloudMatchUndo(', 'm_cloudMatchSyncComparisonRoomRevision',
-    'm_cloudMatchSyncPreviewRequestId', 'CancelRequest('
+    'm_cloudMatchSyncPreviewRequestId', 'CancelRequest(',
+    'm_cloudMatchSyncComparisonToken', 'm_cloudMatchSyncComparisonGeneratedAt',
+    'm_cloudMatchSyncComparisonTotalMembers',
+    'm_cloudMatchSyncComparisonBoundedMembers'
 )) {
     if (-not $dialogSource.Contains($needle) -and -not $dialogHeader.Contains($needle)) {
         throw "Cloud match review safety contract is missing: $needle"
     }
+}
+if (-not $dialogSource.Contains('event["comparisonToken"].get<std::string>()')) {
+    throw 'Cloud comparison pagination must validate and retain the server token.'
+}
+if (-not $dialogSource.Contains('m_cloudMatchSyncComparisonCursor, 64,') -or
+    -not $dialogSource.Contains('m_cloudMatchSyncComparisonToken')) {
+    throw 'Cloud comparison continuation requests must carry cursor and token.'
+}
+if (-not $dialogSource.Contains(
+        'std::to_wstring(m_cloudMatchSyncComparisonTotalMembers)') -or
+    -not $dialogSource.Contains(
+        'std::to_wstring(m_cloudMatchSyncComparisonBoundedMembers)')) {
+    throw 'Cloud comparison UI must disclose total and bounded member counts.'
 }
 if (-not $dialogHeader.Contains('bool RefreshAfterTeamSyncApply()')) {
     throw 'Cloud apply persistence aggregation must return a result.'
@@ -185,6 +202,10 @@ foreach ($theme in @('dark-esports', 'frost-broadcast', 'black-gold')) {
 }
 if (-not $webMain.Contains("event.target?.id === 'cloud-sync-overlay'")) {
     throw 'Cloud sync backdrop click must close only when the overlay itself is clicked.'
+}
+& node $themeTestPath
+if ($LASTEXITCODE -ne 0) {
+    throw 'Cloud match theme runtime tests failed.'
 }
 $memberHandlerStart = $webMain.IndexOf("document.getElementById('cloud-sync-member-list')")
 $applyHandlerStart = $webMain.IndexOf("document.getElementById('btn-cloud-sync-apply')", $memberHandlerStart)

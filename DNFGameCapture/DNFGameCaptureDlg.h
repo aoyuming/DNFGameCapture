@@ -578,13 +578,18 @@ private:
     std::uint64_t m_cloudMatchSyncRequestSequence = 0;
     std::uint64_t m_cloudMatchSyncConnectionGeneration = 0;
     std::uint64_t m_cloudMatchSyncComparisonRoomRevision = 0;
+    std::uint64_t m_cloudMatchSyncComparisonGeneratedAt = 0;
+    std::uint64_t m_cloudMatchSyncComparisonTotalMembers = 0;
+    std::uint64_t m_cloudMatchSyncComparisonBoundedMembers = 0;
     std::uint64_t m_cloudMatchSyncRequestConnectionGeneration = 0;
     std::size_t m_cloudMatchSyncComparisonPageCount = 0;
+    bool m_cloudMatchSyncComparisonTruncated = false;
     bool m_cloudMatchSyncWasConnected = false;
     std::string m_cloudMatchSyncComparisonRequestId;
     std::string m_cloudMatchSyncSnapshotRequestId;
     std::string m_cloudMatchSyncPreviewRequestId;
     std::string m_cloudMatchSyncComparisonCursor;
+    std::string m_cloudMatchSyncComparisonToken;
     std::string m_cloudMatchSyncRequestRoomId;
     std::string m_cloudMatchSyncSelectedDeviceId;
     std::uint64_t m_cloudMatchSyncSelectedRevision = 0;
