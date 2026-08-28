@@ -81,7 +81,8 @@ if [[ ! -f "${ENV_FILE}" ]]; then
 fi
 install -m 0644 "${SCRIPT_DIR}/dnf-cloud-match.service" "${UNIT_FILE}"
 systemctl daemon-reload
-systemctl enable --now "${SERVICE_NAME}.service"
+systemctl enable "${SERVICE_NAME}.service"
+systemctl restart "${SERVICE_NAME}.service"
 
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
     ufw allow 18880/tcp

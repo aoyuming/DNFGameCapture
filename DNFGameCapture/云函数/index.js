@@ -18,7 +18,7 @@ const MAX_ALIASES_PER_MAIN = 20;
 const MAX_PUBLIC_ALIAS_MAINS = 5000;
 const MAX_PUBLIC_ALIASES_PER_MAIN = 100;
 const MAX_NAME_LENGTH = 60;
-const CLOUD_MATCH_SERVER_URL = process.env.CLOUD_MATCH_SERVER_URL || 'http://47.109.149.111:18880';
+const CLOUD_MATCH_SERVER_URL = 'http://47.109.149.111:18880';
 
 function createOssClient() {
     const accessKeyId = process.env.ALIBABA_CLOUD_ACCESS_KEY_ID;

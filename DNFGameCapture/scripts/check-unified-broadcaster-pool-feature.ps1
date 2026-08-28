@@ -28,6 +28,7 @@ $webDialog = Read-RequiredFile (Join-Path $root 'WebScoreDlg.cpp')
 $serverSocket = Read-RequiredFile (Join-Path $root 'cloud-match-server\src\socket.ts')
 $relations = Read-RequiredFile (Join-Path $root 'cloud-match-server\src\sync-relations.ts')
 $schemas = Read-RequiredFile (Join-Path $root 'cloud-match-server\src\schemas.ts')
+$installScript = Read-RequiredFile (Join-Path $root 'cloud-match-server\deploy\install.sh')
 $cloudFunction = Read-RequiredFile (Join-Path $root ([string]([char]0x4E91 + [char]0x51FD + [char]0x6570 + '\index.js')))
 
 foreach ($id in @(
@@ -106,8 +107,11 @@ Require-Text $serverSocket 'isTemporaryCloudDeviceId' 'Server does not identify 
 Require-Text $serverSocket 'deleteTemporaryCloudDevice' 'Server does not purge temporary broadcaster data after disconnect.'
 Require-Text $schemas 'recentEvents' 'Cloud snapshots do not expose bounded recent recognition data.'
 Require-Text $dialog "text.find('\0')" 'Recent recognition upload does not reject embedded NUL characters.'
+Require-Text $installScript 'systemctl restart "${SERVICE_NAME}.service"' 'Server update installer does not restart an already-running service.'
 
 Require-Text $cloudFunction 'const CLOUD_MATCH_SERVER_URL' 'The authorization function has no configurable cloud match server URL.'
+Require-Text $cloudFunction "const CLOUD_MATCH_SERVER_URL = 'http://47.109.149.111:18880';" 'The authorization function does not use the fixed production cloud match server URL.'
+Reject-Text $cloudFunction 'process.env.CLOUD_MATCH_SERVER_URL' 'The authorization function still depends on an environment variable for the cloud match server URL.'
 Require-Text $cloudFunction 'cloudServerUrl: CLOUD_MATCH_SERVER_URL' 'Successful authorization does not return cloudServerUrl.'
 Require-Text $dialog 'outCloudServerUrl' 'The C++ authorization bridge does not receive cloudServerUrl.'
 Require-Text $dialog 'authSuccess->cloudServerUrl' 'Authorization success does not apply cloudServerUrl on the UI thread.'
