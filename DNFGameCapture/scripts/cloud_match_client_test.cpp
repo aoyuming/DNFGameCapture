@@ -544,6 +544,49 @@ void TestTransientRequestsFailOfflineCancelAndExpireWithoutReplay()
         "expired requests must not replay after reconnect");
 }
 
+void TestPresenceRevisionDoesNotAdvanceComparisonRevision()
+{
+    CloudMatchClient client;
+    client.ConfigureForTesting();
+    Require(client.HandleServerEventForTesting("room:changed",
+        R"({"roomId":"59","roomRevision":7,"comparisonRevision":7})"),
+        "comparison change fixture should use the production event handler");
+    CloudMatchStatusSnapshot status = client.GetStatusSnapshot();
+    Require(status.roomRevision == 7 && status.comparisonRevision == 7,
+        "room:changed must advance the comparison data revision");
+
+    Require(client.HandleServerEventForTesting("room:presence",
+        R"({"roomId":"59","roomRevision":99,"comparisonRevision":7,"presenceRevision":4,"deviceId":"peer-device","online":true})"),
+        "presence fixture should use the production event handler");
+    status = client.GetStatusSnapshot();
+    Require(status.roomRevision == 7 && status.comparisonRevision == 7,
+        "presence must not advance comparison data revision");
+    Require(status.presenceRevision == 4,
+        "presence events must advance only the presence revision");
+}
+
+void TestRateLimitedSnapshotAckPreservesRetryDelay()
+{
+    CloudMatchClient client;
+    client.ConfigureForTesting();
+    std::string message;
+    client.SetMessageCallback([&](std::string value) {
+        message = std::move(value);
+    });
+
+    Require(client.UploadSnapshot(MakeSnapshot(1001)),
+        "rate-limited snapshot fixture should enter the latest slot");
+    Require(client.CompleteLatestSnapshotAckWithPayloadForTesting(
+        R"({"ok":false,"code":"rate_limited","retryAfterMs":1750})"),
+        "rate-limited snapshot ACK should use the production ACK handler");
+    Require(client.DispatchMessages(4) == 1,
+        "rate-limited snapshot ACK should dispatch exactly once");
+    Require(message.find("\"code\":\"rate_limited\"") != std::string::npos &&
+        message.find("\"retryAfterMs\":1750") != std::string::npos &&
+        HasRevision(message, 1001),
+        "rate-limited upload result must retain retry delay and client revision");
+}
+
 } // namespace
 
 int main()
@@ -560,6 +603,8 @@ int main()
     TestDispatchLifecycleGateWaitsAndRemainsReentrant();
     TestRememberedJoinRetriesAfterDispatchCapacityRelease();
     TestTransientRequestsFailOfflineCancelAndExpireWithoutReplay();
+    TestPresenceRevisionDoesNotAdvanceComparisonRevision();
+    TestRateLimitedSnapshotAckPreservesRetryDelay();
     std::cout << "Cloud match client tests passed.\n";
     return 0;
 }

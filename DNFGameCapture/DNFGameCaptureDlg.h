@@ -561,6 +561,7 @@ private:
     bool m_cloudMatchUploadDirty = false;
     bool m_cloudMatchUploadInFlight = false;
     bool m_cloudMatchUploadRetryBlocked = false;
+    int m_cloudMatchUploadTransientRetryCount = 0;
     bool m_cloudMatchRoomConfirmed = false;
     bool m_cloudMatchRestoring = false;
     bool m_cloudMatchJoining = false;

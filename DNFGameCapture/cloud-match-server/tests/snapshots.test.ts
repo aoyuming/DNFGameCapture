@@ -10,6 +10,7 @@ import {
 import {
   getRoomSnapshots,
   getSnapshot,
+  pruneSnapshotAudit,
   saveSnapshot,
 } from '../src/snapshots.js';
 
@@ -98,6 +99,58 @@ afterEach(() => {
 });
 
 describe('match snapshot schema and persistence', () => {
+  test('bounds audit history per device and keeps the newest rejected records', () => {
+    const db = createDatabase();
+    addDevice(db, 'audit-device-0001', '59');
+    saveSnapshot(db, {
+      deviceId: 'audit-device-0001',
+      roomId: '59',
+      snapshot: snapshot(),
+      receivedAt: 0,
+    });
+
+    for (let receivedAt = 1; receivedAt <= 1_005; receivedAt += 1) {
+      saveSnapshot(db, {
+        deviceId: 'audit-device-0001',
+        roomId: '59',
+        snapshot: snapshot(),
+        receivedAt,
+      });
+    }
+
+    expect(
+      db.prepare(
+        `SELECT count(*) AS count, min(received_at) AS oldest,
+                max(received_at) AS newest
+         FROM snapshot_audit WHERE device_id = ?`,
+      ).get('audit-device-0001'),
+    ).toEqual({ count: 1_000, oldest: 6, newest: 1_005 });
+    expect(getSnapshot(db, 'audit-device-0001')?.snapshot.clientRevision).toBe(1);
+  });
+
+  test('prunes global audit history while retaining newest rows and per-device bounds', () => {
+    const db = createDatabase();
+    const insert = db.prepare(
+      `INSERT INTO snapshot_audit (
+         device_id, room_id, client_revision, accepted, reason, received_at
+       ) VALUES (?, '59', ?, 0, 'stale_revision', ?)`,
+    );
+    db.transaction(() => {
+      for (let index = 1; index <= 4; index += 1) {
+        insert.run('audit-device-a', index, index);
+      }
+      for (let index = 5; index <= 8; index += 1) {
+        insert.run('audit-device-b', index, index);
+      }
+    })();
+
+    pruneSnapshotAudit(db, { perDeviceLimit: 3, globalLimit: 5 });
+
+    expect(
+      db.prepare('SELECT id FROM snapshot_audit ORDER BY id').all(),
+    ).toEqual([{ id: 3 }, { id: 4 }, { id: 6 }, { id: 7 }, { id: 8 }]);
+  });
+
   test('accepts, normalizes, hashes, and persists a legal snapshot', () => {
     const db = createDatabase();
     addDevice(db, 'capture-device-0001', '59', 'Broadcaster A');

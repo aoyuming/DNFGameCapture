@@ -19,6 +19,8 @@ struct CloudMatchStatusSnapshot
     std::uint64_t generation = 0;
     std::uint64_t connectionGeneration = 0;
     std::uint64_t roomRevision = 0;
+    std::uint64_t comparisonRevision = 0;
+    std::uint64_t presenceRevision = 0;
 };
 
 class CloudMatchClient
@@ -80,6 +82,8 @@ public:
     void SetConnectedForTesting(bool connected);
     std::size_t PendingTransientRequestCountForTesting() const;
     bool ExpireNextTransientRequestForTesting();
+    bool HandleServerEventForTesting(const std::string& eventName,
+        const std::string& payloadJson);
 #endif
 
 private:

@@ -204,6 +204,8 @@ Require-Text $uploadHandler 'm_cloudMatchPendingPayload == m_cloudMatchInFlightP
 Require-Text $uploadHandler 'm_cloudMatchUploadDirty = false;' 'Snapshot dirty state is not cleared after a matching success ACK.'
 Require-Text $uploadHandler 'DnfIsTransientCloudSnapshotFailure' 'Transient snapshot failures are not classified for retry.'
 Require-Text $uploadHandler 'm_cloudMatchUploadDueTick' 'Transient snapshot failures are not rescheduled.'
+Require-Text $uploadHandler 'DnfClampCloudMatchRetryAfterMs' 'Snapshot retry delay is not safely bounded.'
+Require-Text $source 'DnfReadCloudMatchUnsigned(event, "retryAfterMs"' 'Snapshot rate limits do not preserve the server retry delay.'
 $invalidAckStart = $uploadHandler.IndexOf('if (acceptedRevision == 0')
 $invalidAckReturn = $uploadHandler.IndexOf('return;', $invalidAckStart)
 if ($invalidAckStart -lt 0 -or $invalidAckReturn -le $invalidAckStart) {
@@ -266,6 +268,14 @@ $nameValidator = $source.Substring($nameValidatorStart,
 Require-Text $nameValidator 'NormalizeString(NormalizationC' 'Cloud snapshot names are not normalized to NFC.'
 Require-Text $nameValidator 'scalarCount > 64' 'Cloud snapshot names are not bounded to 64 Unicode scalars.'
 Require-Text $nameValidator 'DnfIsCloudMatchInvisibleCodePoint' 'Cloud snapshot names do not reject control and invisible characters.'
+
+$transientStart = $source.IndexOf('static bool DnfIsTransientCloudSnapshotFailure(')
+$transientEnd = $source.IndexOf('static bool DnfIsFatalCloudJoinError(', $transientStart)
+if ($transientStart -lt 0 -or $transientEnd -le $transientStart) {
+    throw 'Transient cloud snapshot classifier could not be inspected.'
+}
+$transientBody = $source.Substring($transientStart, $transientEnd - $transientStart)
+Require-Text $transientBody 'code == "rate_limited"' 'Server mutation rate limits must be retried as transient failures.'
 
 $pollBody = Get-CppFunctionBody $source 'void CDNFGameCaptureDlg::PollCloudMatch('
 Require-Text $pollBody 'm_cloudMatchUploadInFlight' 'PollCloudMatch does not enforce one outstanding snapshot ACK.'

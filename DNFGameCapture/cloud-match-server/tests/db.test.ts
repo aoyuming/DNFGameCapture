@@ -67,4 +67,47 @@ describe('openDatabase', () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
+
+  test('enforces audit retention when reopening an existing database', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dnf-cloud-match-db-'));
+    const databasePath = join(directory, 'rooms.sqlite');
+    let db: ReturnType<typeof openDatabase> | undefined;
+
+    try {
+      db = openDatabase(databasePath);
+      const insert = db.prepare(
+        `insert into snapshot_audit (
+           device_id, room_id, client_revision, accepted, reason, received_at
+         ) values (?, '59', ?, 0, 'stale_revision', ?)`,
+      );
+      db.transaction(() => {
+        for (let index = 1; index <= 50_128; index += 1) {
+          insert.run(`restart-device-${index % 64}`, index, index);
+        }
+      })();
+      db.close();
+      db = undefined;
+
+      db = openDatabase(databasePath);
+      expect(
+        db.prepare(
+          `select count(*) as count, min(id) as oldest, max(id) as newest
+           from snapshot_audit`,
+        ).get(),
+      ).toEqual({ count: 50_000, oldest: 129, newest: 50_128 });
+      expect(
+        db.prepare(
+          `select max(device_count) as maximum
+           from (
+             select count(*) as device_count
+             from snapshot_audit
+             group by device_id
+           )`,
+        ).get(),
+      ).toEqual({ maximum: 782 });
+    } finally {
+      db?.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
 });

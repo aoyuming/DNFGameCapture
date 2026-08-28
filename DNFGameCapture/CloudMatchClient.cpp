@@ -152,6 +152,30 @@ std::string SanitizeServerCode(const json& value, const char* key,
     return code;
 }
 
+bool ReadBoundedUnsigned(const json& value, const char* key,
+    std::uint64_t maximum, std::uint64_t& result) noexcept
+{
+    try {
+        const auto found = value.find(key);
+        if (found == value.end()) return false;
+        if (found->is_number_unsigned()) {
+            result = found->get<std::uint64_t>();
+        }
+        else if (found->is_number_integer()) {
+            const std::int64_t signedValue = found->get<std::int64_t>();
+            if (signedValue < 0) return false;
+            result = static_cast<std::uint64_t>(signedValue);
+        }
+        else {
+            return false;
+        }
+        return result <= maximum;
+    }
+    catch (...) {
+        return false;
+    }
+}
+
 std::uint64_t ExtractSnapshotClientRevision(std::string_view snapshotJson) noexcept
 {
     try {
@@ -808,6 +832,23 @@ public:
         }
         if (found) NotifyQueuedCommandFailure(expired, "timeout");
         return found;
+    }
+
+    bool HandleServerEventForTesting(const std::string& eventName,
+        const std::string& payloadJson)
+    {
+        std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
+        const json payload = json::parse(payloadJson, nullptr, false);
+        if (payload.is_discarded()) return false;
+        Config activeConfig;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            activeConfig = config;
+        }
+        HandleServerEvent(activeConfig, cloud_match::SocketIoEvent{
+            eventName, payload
+        });
+        return true;
     }
 #endif
 
@@ -2445,6 +2486,11 @@ private:
             if (validOk) {
                 const std::string message = SanitizeServerText(ack.payload, "message");
                 if (!message.empty()) normalized["message"] = message;
+                std::uint64_t retryAfterMs = 0;
+                if (ReadBoundedUnsigned(ack.payload, "retryAfterMs", 60000,
+                    retryAfterMs) && retryAfterMs > 0) {
+                    normalized["retryAfterMs"] = retryAfterMs;
+                }
             }
         }
         normalized["type"] = pending.resultType;
@@ -2463,6 +2509,17 @@ private:
     void UpdateStatusFromAck(std::uint64_t generation, CommandKind kind, const json& payload)
     {
         UpdateStatus(generation, [&](CloudMatchStatusSnapshot& current) {
+            auto updateComparisonRevision = [&]() {
+                std::uint64_t revision = 0;
+                if (!ReadBoundedUnsigned(payload, "comparisonRevision",
+                    9007199254740991ULL, revision)) {
+                    ReadBoundedUnsigned(payload, "roomRevision",
+                        9007199254740991ULL, revision);
+                }
+                current.comparisonRevision = (std::max)(
+                    current.comparisonRevision, revision);
+                current.roomRevision = current.comparisonRevision;
+            };
             if (kind == CommandKind::joinRoom || kind == CommandKind::renameRoom) {
                 const auto room = payload.find("room");
                 if (room != payload.end() && room->is_object()) {
@@ -2471,7 +2528,7 @@ private:
                 }
                 current.broadcasterName = payload.value("broadcasterName",
                     current.broadcasterName);
-                current.roomRevision = payload.value("roomRevision", current.roomRevision);
+                updateComparisonRevision();
                 current.statusText = "in_room";
             }
             else if (kind == CommandKind::leaveRoom) {
@@ -2479,12 +2536,12 @@ private:
                 current.roomName.clear();
                 current.broadcasterName.clear();
                 current.roomRevision = 0;
+                current.comparisonRevision = 0;
+                current.presenceRevision = 0;
                 current.statusText = "connected";
             }
-            else if (payload.contains("roomRevision") &&
-                payload["roomRevision"].is_number_unsigned()) {
-                current.roomRevision = (std::max)(current.roomRevision,
-                    payload["roomRevision"].get<std::uint64_t>());
+            else {
+                updateComparisonRevision();
             }
         });
     }
@@ -2506,13 +2563,30 @@ private:
                 coalesceKey += '\n';
                 coalesceKey += event.payload.value("deviceId", std::string{});
             }
-            if (event.payload.contains("roomRevision") &&
-                event.payload["roomRevision"].is_number_unsigned()) {
-                const std::uint64_t revision = event.payload["roomRevision"].get<std::uint64_t>();
+            if (event.name == "room:changed") {
+                std::uint64_t revision = 0;
+                if (!ReadBoundedUnsigned(event.payload, "comparisonRevision",
+                    9007199254740991ULL, revision)) {
+                    ReadBoundedUnsigned(event.payload, "roomRevision",
+                        9007199254740991ULL, revision);
+                }
                 UpdateStatus(activeConfig.generation,
                     [revision](CloudMatchStatusSnapshot& current) {
-                        current.roomRevision = (std::max)(current.roomRevision, revision);
+                        current.comparisonRevision = (std::max)(
+                            current.comparisonRevision, revision);
+                        current.roomRevision = current.comparisonRevision;
                     });
+            }
+            else {
+                std::uint64_t revision = 0;
+                if (ReadBoundedUnsigned(event.payload, "presenceRevision",
+                    9007199254740991ULL, revision)) {
+                    UpdateStatus(activeConfig.generation,
+                        [revision](CloudMatchStatusSnapshot& current) {
+                            current.presenceRevision = (std::max)(
+                                current.presenceRevision, revision);
+                        });
+                }
             }
             NotifyJson(activeConfig.generation, normalized, std::move(coalesceKey));
             return;
@@ -3055,5 +3129,11 @@ std::size_t CloudMatchClient::PendingTransientRequestCountForTesting() const
 bool CloudMatchClient::ExpireNextTransientRequestForTesting()
 {
     return impl_->ExpireNextTransientRequestForTesting();
+}
+
+bool CloudMatchClient::HandleServerEventForTesting(const std::string& eventName,
+    const std::string& payloadJson)
+{
+    return impl_->HandleServerEventForTesting(eventName, payloadJson);
 }
 #endif

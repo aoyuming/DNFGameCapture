@@ -41,8 +41,16 @@ const MAX_DEVICE_PENDING_OPERATIONS = 64;
 const MAX_SHARED_COMPARISONS = 8;
 const SHARED_COMPARISON_TTL_SECONDS = 5;
 const COMPARISON_SESSION_TTL_SECONDS = 30;
+const PRESENCE_DEBOUNCE_MS = 300;
 const FIXED_ROOM_IDS = ['59', 'li-yong', 'wen-rou'] as const;
-const emptyPayloadSchema = z.object({}).strict();
+const requestIdSchema = z.string().min(1).max(128);
+const emptyPayloadSchema = z.object({ requestId: requestIdSchema.optional() }).strict();
+const socketRoomJoinSchema = roomJoinSchema.extend({
+  requestId: requestIdSchema.optional(),
+});
+const socketRoomRenameSchema = roomRenameSchema.extend({
+  requestId: requestIdSchema.optional(),
+});
 const comparisonRequestSchema = z
   .object({
     cursor: deviceIdSchema.optional(),
@@ -55,7 +63,12 @@ const comparisonRequestSchema = z
       context.addIssue({ code: z.ZodIssueCode.custom });
     }
   });
-const snapshotUploadSchema = z.object({ snapshot: z.unknown() }).strict();
+const snapshotUploadSchema = z
+  .object({
+    requestId: requestIdSchema.optional(),
+    snapshot: z.unknown(),
+  })
+  .strict();
 const snapshotGetSchema = z
   .object({
     targetDeviceId: deviceIdSchema,
@@ -84,6 +97,11 @@ export interface RoomService {
     roomId: string,
   ): MaybePromise<number>;
   incrementRoomRevision(db: DatabaseConnection, roomId: string): number;
+  getRoomPresenceRevision(
+    db: DatabaseConnection,
+    roomId: string,
+  ): MaybePromise<number>;
+  incrementRoomPresenceRevision(db: DatabaseConnection, roomId: string): number;
   joinRoom(
     db: DatabaseConnection,
     deviceId: string,
@@ -151,6 +169,7 @@ interface AuthenticatedSocketData {
 interface MaterializedComparison {
   roomId: string;
   roomRevision: number;
+  comparisonRevision: number;
   generatedAt: number;
   consensusDeviceId: string | null;
   members: Array<Record<string, unknown>>;
@@ -169,6 +188,14 @@ interface ComparisonSession extends MaterializedComparison {
 interface SharedComparison {
   expiresAt: number;
   pending: Promise<MaterializedComparison>;
+}
+
+interface PendingPresenceState {
+  deviceId: string;
+  roomId: string;
+  desiredOnline: boolean;
+  lastEmittedOnline: boolean | null;
+  timer: ReturnType<typeof setTimeout> | null;
 }
 
 type MaterializeComparisonResult =
@@ -252,6 +279,30 @@ function serializedByteLength(value: unknown): number | null {
   }
 }
 
+function safeRequestId(payload: unknown): string | undefined {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    return undefined;
+  }
+  const requestId = (payload as { requestId?: unknown }).requestId;
+  return typeof requestId === 'string' && requestId.length >= 1 && requestId.length <= 128
+    ? requestId
+    : undefined;
+}
+
+function safeSnapshotClientRevision(payload: unknown): number | undefined {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    return undefined;
+  }
+  const snapshot = (payload as { snapshot?: unknown }).snapshot;
+  if (snapshot === null || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+    return undefined;
+  }
+  const revision = (snapshot as { clientRevision?: unknown }).clientRevision;
+  return typeof revision === 'number' && Number.isSafeInteger(revision)
+    ? revision
+    : undefined;
+}
+
 function boundedResponse(
   response: unknown,
   maximumBytes: number,
@@ -280,7 +331,8 @@ export function registerCloudMatchSocketHandlers(
   const activeSockets = new Map<string, Socket>();
   const deviceQueues = new Map<string, Promise<void>>();
   const comparisonCache = new Map<string, SharedComparison>();
-  const lastAnnouncedRevision = new Map<string, number>(
+  const pendingPresence = new Map<string, PendingPresenceState>();
+  const lastAnnouncedDataRevision = new Map<string, number>(
     FIXED_ROOM_IDS.map((roomId) => [roomId, -1]),
   );
   let notificationsClosed = false;
@@ -449,6 +501,7 @@ export function registerCloudMatchSocketHandlers(
             return {
               roomId,
               roomRevision,
+              comparisonRevision: roomRevision,
               generatedAt,
               consensusDeviceId: compared.consensusDeviceId,
               members,
@@ -470,6 +523,7 @@ export function registerCloudMatchSocketHandlers(
             comparison: {
               ...sharedComparison,
               roomRevision,
+              comparisonRevision: roomRevision,
               members: sharedComparison.members.map((member) => ({
                 ...member,
                 online: activeSockets.has(member.deviceId as string),
@@ -489,7 +543,7 @@ export function registerCloudMatchSocketHandlers(
     roomRevision: number,
     emit: () => void,
   ): void => {
-    const previousRevision = lastAnnouncedRevision.get(roomId);
+    const previousRevision = lastAnnouncedDataRevision.get(roomId);
     if (
       notificationsClosed ||
       previousRevision === undefined ||
@@ -497,7 +551,7 @@ export function registerCloudMatchSocketHandlers(
     ) {
       return;
     }
-    lastAnnouncedRevision.set(roomId, roomRevision);
+    lastAnnouncedDataRevision.set(roomId, roomRevision);
     emit();
   };
 
@@ -508,7 +562,11 @@ export function registerCloudMatchSocketHandlers(
   ): void => {
     announceRoomNotification(roomId, roomRevision, () => {
       const namespace = roomNamespace(roomId);
-      const payload = { roomId, roomRevision };
+      const payload = {
+        roomId,
+        roomRevision,
+        comparisonRevision: roomRevision,
+      };
       io.to(namespace).emit('room:changed', payload);
       if (socket.connected && !socket.rooms.has(namespace)) {
         socket.emit('room:changed', payload);
@@ -516,20 +574,61 @@ export function registerCloudMatchSocketHandlers(
     });
   };
 
-  const emitRoomPresence = (
+  const scheduleRoomPresence = (
     roomId: string,
-    roomRevision: number,
     deviceId: string,
     online: boolean,
   ): void => {
-    announceRoomNotification(roomId, roomRevision, () => {
-      io.to(roomNamespace(roomId)).emit('room:presence', {
-        roomId,
-        roomRevision,
+    if (notificationsClosed) return;
+    const key = `${roomId}\n${deviceId}`;
+    let state = pendingPresence.get(key);
+    if (!state) {
+      state = {
         deviceId,
-        online,
-      });
-    });
+        roomId,
+        desiredOnline: online,
+        lastEmittedOnline: null,
+        timer: null,
+      };
+      pendingPresence.set(key, state);
+    }
+    state.desiredOnline = online;
+    if (state.timer) clearTimeout(state.timer);
+    state.timer = setTimeout(() => {
+      state!.timer = null;
+      void (async () => {
+        if (notificationsClosed || pendingPresence.get(key) !== state) return;
+        if (
+          state!.lastEmittedOnline === state!.desiredOnline ||
+          (state!.lastEmittedOnline === null && !state!.desiredOnline)
+        ) {
+          if (!state!.desiredOnline) pendingPresence.delete(key);
+          return;
+        }
+        try {
+          const presenceRevision = roomService.incrementRoomPresenceRevision(
+            db,
+            state!.roomId,
+          );
+          const comparisonRevision = await roomService.getRoomRevision(
+            db,
+            state!.roomId,
+          );
+          io.to(roomNamespace(state!.roomId)).emit('room:presence', {
+            roomId: state!.roomId,
+            roomRevision: comparisonRevision,
+            comparisonRevision,
+            presenceRevision,
+            deviceId: state!.deviceId,
+            online: state!.desiredOnline,
+          });
+          state!.lastEmittedOnline = state!.desiredOnline;
+          if (!state!.desiredOnline) pendingPresence.delete(key);
+        } catch {
+          pendingPresence.delete(key);
+        }
+      })();
+    }, PRESENCE_DEBOUNCE_MS);
   };
 
   io.use((socket, next) => {
@@ -584,8 +683,7 @@ export function registerCloudMatchSocketHandlers(
         previousSocket.disconnect(true);
       }
       if (restoredRoomId) {
-        const roomRevision = roomService.incrementRoomRevision(db, restoredRoomId);
-        emitRoomPresence(restoredRoomId, roomRevision, deviceId, true);
+        scheduleRoomPresence(restoredRoomId, deviceId, true);
       }
     });
     void initialization.catch(async () => {
@@ -630,9 +728,16 @@ export function registerCloudMatchSocketHandlers(
 
         if (serializeForDevice) {
           if (pendingSerializedOperations >= MAX_DEVICE_PENDING_OPERATIONS) {
+            const requestId = safeRequestId(payload);
+            const clientRevision = event === 'snapshot:upload'
+              ? safeSnapshotClientRevision(payload)
+              : undefined;
             safeAcknowledge(acknowledge as Acknowledge, {
               ok: false,
               code: 'rate_limited',
+              retryAfterMs: 250,
+              ...(requestId ? { requestId } : {}),
+              ...(clientRevision !== undefined ? { clientRevision } : {}),
             });
             return;
           }
@@ -654,19 +759,39 @@ export function registerCloudMatchSocketHandlers(
     bindAckEvent(
       'room:join',
       async (payload) => {
-        const parsed = roomJoinSchema.safeParse(payload);
+        const requestId = safeRequestId(payload);
+        const parsed = socketRoomJoinSchema.safeParse(payload);
         if (!parsed.success) {
           return {
             ok: false,
             code: invalidBroadcasterName(parsed.error)
               ? 'invalid_broadcaster_name'
               : 'invalid_request',
+            ...(requestId ? { requestId } : {}),
+          };
+        }
+
+        const mutation = rateLimitService.allowMembershipMutation(
+          deviceId,
+          socketIpAddress,
+          now(),
+        );
+        if (!mutation.allowed) {
+          return {
+            ok: false,
+            code: 'rate_limited',
+            retryAfterMs: mutation.retryAfterMs,
+            ...(requestId ? { requestId } : {}),
           };
         }
 
         const rooms = await roomService.listRooms(db);
         if (!rooms.some((room) => room.id === parsed.data.roomId)) {
-          return { ok: false, code: 'room_not_found' };
+          return {
+            ok: false,
+            code: 'room_not_found',
+            ...(requestId ? { requestId } : {}),
+          };
         }
         const previousMembership = await roomService.getMembership(db, deviceId);
         const previousRoomId = previousMembership?.room.id ?? null;
@@ -700,6 +825,7 @@ export function registerCloudMatchSocketHandlers(
                 previousRoomId,
                 await roomService.getRoomRevision(db, previousRoomId),
               );
+              scheduleRoomPresence(previousRoomId, deviceId, false);
             }
             emitRoomChanged(
               socket,
@@ -707,7 +833,12 @@ export function registerCloudMatchSocketHandlers(
               await roomService.getRoomRevision(db, membership.room.id),
             );
           }
-          return { ok: true, ...membership };
+          scheduleRoomPresence(membership.room.id, deviceId, true);
+          return {
+            ok: true,
+            ...membership,
+            ...(requestId ? { requestId } : {}),
+          };
         } catch (error) {
           if (!persisted) {
             await restoreAdapterMembership(
@@ -726,13 +857,28 @@ export function registerCloudMatchSocketHandlers(
     bindAckEvent(
       'room:rename',
       async (payload) => {
-        const parsed = roomRenameSchema.safeParse(payload);
+        const requestId = safeRequestId(payload);
+        const parsed = socketRoomRenameSchema.safeParse(payload);
         if (!parsed.success) {
           return {
             ok: false,
             code: invalidBroadcasterName(parsed.error)
               ? 'invalid_broadcaster_name'
               : 'invalid_request',
+            ...(requestId ? { requestId } : {}),
+          };
+        }
+        const mutation = rateLimitService.allowMembershipMutation(
+          deviceId,
+          socketIpAddress,
+          now(),
+        );
+        if (!mutation.allowed) {
+          return {
+            ok: false,
+            code: 'rate_limited',
+            retryAfterMs: mutation.retryAfterMs,
+            ...(requestId ? { requestId } : {}),
           };
         }
         const previousMembership = await roomService.getMembership(db, deviceId);
@@ -743,7 +889,11 @@ export function registerCloudMatchSocketHandlers(
           now(),
         );
         if (!membership) {
-          return { ok: false, code: 'not_in_room' };
+          return {
+            ok: false,
+            code: 'not_in_room',
+            ...(requestId ? { requestId } : {}),
+          };
         }
         if (previousMembership?.broadcasterName !== membership.broadcasterName) {
           emitRoomChanged(
@@ -752,14 +902,40 @@ export function registerCloudMatchSocketHandlers(
             await roomService.getRoomRevision(db, membership.room.id),
           );
         }
-        return { ok: true, ...membership };
+        return {
+          ok: true,
+          ...membership,
+          ...(requestId ? { requestId } : {}),
+        };
       },
       true,
     );
 
     bindAckEvent(
       'room:leave',
-      async () => {
+      async (payload) => {
+        const requestId = safeRequestId(payload);
+        const parsed = emptyPayloadSchema.safeParse(payload ?? {});
+        if (!parsed.success) {
+          return {
+            ok: false,
+            code: 'invalid_request',
+            ...(requestId ? { requestId } : {}),
+          };
+        }
+        const mutation = rateLimitService.allowMembershipMutation(
+          deviceId,
+          socketIpAddress,
+          now(),
+        );
+        if (!mutation.allowed) {
+          return {
+            ok: false,
+            code: 'rate_limited',
+            retryAfterMs: mutation.retryAfterMs,
+            ...(requestId ? { requestId } : {}),
+          };
+        }
         const previousMembership = await roomService.getMembership(db, deviceId);
         const previousRoomId = previousMembership?.room.id ?? null;
         let persisted = false;
@@ -773,8 +949,12 @@ export function registerCloudMatchSocketHandlers(
               previousRoomId,
               await roomService.getRoomRevision(db, previousRoomId),
             );
+            scheduleRoomPresence(previousRoomId, deviceId, false);
           }
-          return { ok: true };
+          return {
+            ok: true,
+            ...(requestId ? { requestId } : {}),
+          };
         } catch (error) {
           if (!persisted) {
             await restoreAdapterMembership(
@@ -803,21 +983,57 @@ export function registerCloudMatchSocketHandlers(
     bindAckEvent(
       'snapshot:upload',
       async (payload) => {
+        const requestId = safeRequestId(payload);
+        const clientRevision = safeSnapshotClientRevision(payload);
+        const mutation = rateLimitService.allowSnapshotMutation(
+          deviceId,
+          socketIpAddress,
+          now(),
+        );
+        if (!mutation.allowed) {
+          return {
+            ok: false,
+            code: 'rate_limited',
+            retryAfterMs: mutation.retryAfterMs,
+            ...(requestId ? { requestId } : {}),
+            ...(clientRevision !== undefined ? { clientRevision } : {}),
+          };
+        }
         const parsed = snapshotUploadSchema.safeParse(payload);
         if (!parsed.success) {
-          return { ok: false, code: 'invalid_request' };
+          return {
+            ok: false,
+            code: 'invalid_request',
+            ...(requestId ? { requestId } : {}),
+            ...(clientRevision !== undefined ? { clientRevision } : {}),
+          };
         }
         const snapshotBytes = serializedByteLength(parsed.data.snapshot);
         if (snapshotBytes === null) {
-          return { ok: false, code: 'invalid_snapshot' };
+          return {
+            ok: false,
+            code: 'invalid_snapshot',
+            ...(requestId ? { requestId } : {}),
+            ...(clientRevision !== undefined ? { clientRevision } : {}),
+          };
         }
         if (snapshotBytes > MAX_SNAPSHOT_BYTES) {
-          return { ok: false, code: 'snapshot_too_large' };
+          return {
+            ok: false,
+            code: 'snapshot_too_large',
+            ...(requestId ? { requestId } : {}),
+            ...(clientRevision !== undefined ? { clientRevision } : {}),
+          };
         }
 
         const membership = await roomService.getMembership(db, deviceId);
         if (!membership) {
-          return { ok: false, code: 'no_membership' };
+          return {
+            ok: false,
+            code: 'no_membership',
+            ...(requestId ? { requestId } : {}),
+            ...(clientRevision !== undefined ? { clientRevision } : {}),
+          };
         }
         const roomId = membership.room.id;
         const accept = db.transaction(() => {
@@ -828,12 +1044,20 @@ export function registerCloudMatchSocketHandlers(
             receivedAt: now(),
           });
           if (!saved.ok) {
-            return saved;
+            return {
+              ...saved,
+              ...(requestId ? { requestId } : {}),
+              ...(clientRevision !== undefined ? { clientRevision } : {}),
+            };
           }
+          const comparisonRevision = roomService.incrementRoomRevision(db, roomId);
           return {
             ok: true as const,
             acceptedRevision: saved.acceptedRevision,
-            roomRevision: roomService.incrementRoomRevision(db, roomId),
+            roomRevision: comparisonRevision,
+            comparisonRevision,
+            ...(requestId ? { requestId } : {}),
+            ...(clientRevision !== undefined ? { clientRevision } : {}),
           };
         });
         const result = accept();
@@ -873,7 +1097,7 @@ export function registerCloudMatchSocketHandlers(
           }
           if (
             (await roomService.getRoomRevision(db, roomId)) !==
-            comparisonSession.roomRevision
+            comparisonSession.comparisonRevision
           ) {
             comparisonSession = null;
             return { ok: false, code: 'comparison_changed' };
@@ -931,6 +1155,7 @@ export function registerCloudMatchSocketHandlers(
           cursor: requestedCursor,
           generatedAt: session.generatedAt,
           roomRevision: session.roomRevision,
+          comparisonRevision: session.comparisonRevision,
           consensusDeviceId: session.consensusDeviceId,
           members: pageMembers,
           groups,
@@ -1005,16 +1230,7 @@ export function registerCloudMatchSocketHandlers(
           if (wasActive) {
             const membership = await roomService.getMembership(db, deviceId);
             if (membership) {
-              const roomRevision = roomService.incrementRoomRevision(
-                db,
-                membership.room.id,
-              );
-              emitRoomPresence(
-                membership.room.id,
-                roomRevision,
-                deviceId,
-                false,
-              );
+              scheduleRoomPresence(membership.room.id, deviceId, false);
             }
           }
         } catch {
@@ -1027,7 +1243,11 @@ export function registerCloudMatchSocketHandlers(
   return {
     close(): void {
       notificationsClosed = true;
-      lastAnnouncedRevision.clear();
+      for (const state of pendingPresence.values()) {
+        if (state.timer) clearTimeout(state.timer);
+      }
+      pendingPresence.clear();
+      lastAnnouncedDataRevision.clear();
       comparisonCache.clear();
     },
   };

@@ -1,5 +1,7 @@
 import Database from 'better-sqlite3';
 
+import { pruneSnapshotAudit } from './snapshots.js';
+
 const ROOM_SEEDS = [
   { id: '59', displayName: '59房' },
   { id: 'li-yong', displayName: '李永房' },
@@ -19,7 +21,8 @@ function initializeSchema(db: Database.Database): void {
       CREATE TABLE IF NOT EXISTS rooms (
         id TEXT PRIMARY KEY,
         display_name TEXT NOT NULL UNIQUE,
-        revision INTEGER NOT NULL DEFAULT 0
+        revision INTEGER NOT NULL DEFAULT 0,
+        presence_revision INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE TABLE IF NOT EXISTS memberships (
@@ -50,11 +53,19 @@ function initializeSchema(db: Database.Database): void {
         reason TEXT NOT NULL,
         received_at INTEGER NOT NULL
       );
+
+      CREATE INDEX IF NOT EXISTS idx_snapshot_audit_device_id_desc
+        ON snapshot_audit (device_id, id DESC);
     `);
 
     const roomColumns = db.pragma('table_info(rooms)') as Array<{ name: string }>;
     if (!roomColumns.some((column) => column.name === 'revision')) {
       db.exec('ALTER TABLE rooms ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!roomColumns.some((column) => column.name === 'presence_revision')) {
+      db.exec(
+        'ALTER TABLE rooms ADD COLUMN presence_revision INTEGER NOT NULL DEFAULT 0',
+      );
     }
 
     const insertRoom = db.prepare(
@@ -63,6 +74,7 @@ function initializeSchema(db: Database.Database): void {
     for (const room of ROOM_SEEDS) {
       insertRoom.run(room.id, room.displayName);
     }
+    pruneSnapshotAudit(db);
   });
 
   initialize();

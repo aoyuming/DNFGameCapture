@@ -80,6 +80,13 @@ if (-not $dialogHeader.Contains('bool RefreshAfterTeamSyncApply()')) {
 if (-not $dialogSource.Contains('if (!RefreshAfterTeamSyncApply())')) {
     throw 'Cloud apply must not report success after persistence failure.'
 }
+if ($dialogSource.Contains('type == "room_changed" || type == "room_presence"')) {
+    throw 'Presence-only changes must not invalidate an immutable comparison preview.'
+}
+if (-not $dialogSource.Contains('type == "room_changed"') -or
+    -not $dialogSource.Contains('"comparisonRevision"')) {
+    throw 'Preview invalidation must follow comparison data revisions.'
+}
 
 function Assert-DialogBlockContains {
     param(

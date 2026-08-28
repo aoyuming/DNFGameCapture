@@ -398,7 +398,7 @@ static bool DnfIsTransientCloudSnapshotFailure(const std::string& code)
     return code == "timeout" || code == "ack_timeout" ||
         code == "connection_lost" || code == "network_error" ||
         code == "canceled" || code == "internal_error" ||
-        code == "server_error";
+        code == "server_error" || code == "rate_limited";
 }
 
 static bool DnfIsFatalCloudJoinError(const std::string& code)
@@ -452,6 +452,17 @@ static bool DnfReadCloudMatchUnsigned(const json& object, const char* key,
         return false;
     }
     return output >= minimum && output <= maximum;
+}
+
+static ULONGLONG DnfClampCloudMatchRetryAfterMs(const json& event,
+    ULONGLONG fallbackMs)
+{
+    std::uint64_t retryAfterMs = 0;
+    if (DnfReadCloudMatchUnsigned(event, "retryAfterMs", 1, 60000,
+        retryAfterMs)) {
+        return (std::max)(250ULL, static_cast<ULONGLONG>(retryAfterMs));
+    }
+    return (std::max)(250ULL, (std::min)(fallbackMs, 30000ULL));
 }
 
 static void DnfSecureClearString(std::string& value)
@@ -11161,7 +11172,8 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 DnfIsCloudMatchRoomId(m_cloudMatchRoomId) && cloudStatus.connected &&
                 cloudStatus.connectionGeneration ==
                     m_cloudMatchSyncRequestConnectionGeneration &&
-                cloudStatus.roomRevision == m_cloudMatchSyncComparisonRoomRevision) {
+                cloudStatus.comparisonRevision ==
+                    m_cloudMatchSyncComparisonRoomRevision) {
                 for (const auto& member : m_cloudMatchSyncMembers) {
                     if (member.value("deviceId", std::string()) == targetDeviceId &&
                         member.value("clientRevision", 0ull) == clientRevision) {
@@ -11254,7 +11266,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 confirmedRevision == m_cloudMatchSyncSelectedRevision &&
                 confirmedRequestId == m_cloudMatchSyncPreviewRequestId &&
                 cloudStatus.connectionGeneration == confirmedConnectionGeneration &&
-                cloudStatus.roomRevision == confirmedRoomRevision &&
+                cloudStatus.comparisonRevision == confirmedRoomRevision &&
                 DnfIsCloudMatchPreviewCurrent(previewBinding, currentBinding);
             if (!correlationValid) {
                 m_cloudMatchSyncError =
@@ -11406,6 +11418,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                         m_cloudMatchPendingChangeSource = "local_restore";
                         m_cloudMatchUploadDirty = true;
                         m_cloudMatchUploadRetryBlocked = false;
+                        m_cloudMatchUploadTransientRetryCount = 0;
                         m_cloudMatchUploadDueTick = ::GetTickCount64();
                         InvalidateCloudMatchSyncUndo();
                         m_cloudMatchSyncBusy = false;
@@ -12327,7 +12340,8 @@ json CDNFGameCaptureDlg::DnfBuildSharedWebStateJson()
         previewBaselineUnchanged && cloudStatus.connected &&
         cloudStatus.connectionGeneration ==
             m_cloudMatchSyncRequestConnectionGeneration &&
-        cloudStatus.roomRevision == m_cloudMatchSyncComparisonRoomRevision;
+        cloudStatus.comparisonRevision ==
+            m_cloudMatchSyncComparisonRoomRevision;
     syncPanel["undoAvailable"] = !m_cloudMatchSyncBusy &&
         !m_cloudMatchSyncUndoBackup.empty() && undoContentUnchanged;
     syncPanel["undoReason"] = m_cloudMatchSyncUndoBackup.empty() ?
@@ -12843,6 +12857,7 @@ void CDNFGameCaptureDlg::BeginCloudDeviceRegistration()
     m_cloudMatchRoomConfirmed = false;
     m_cloudMatchUploadInFlight = false;
     m_cloudMatchUploadRetryBlocked = false;
+    m_cloudMatchUploadTransientRetryCount = 0;
     m_cloudMatchUploadQueueResultDeadlineTick = 0;
     m_cloudMatchInFlightRevision = 0;
     DnfSecureClearString(m_cloudMatchInFlightPayload);
@@ -12962,6 +12977,7 @@ void CDNFGameCaptureDlg::BeginCloudRoomJoin(const std::string& roomId,
     m_cloudMatchRoomConfirmed = false;
     m_cloudMatchUploadInFlight = false;
     m_cloudMatchUploadRetryBlocked = false;
+    m_cloudMatchUploadTransientRetryCount = 0;
     m_cloudMatchUploadQueueResultDeadlineTick = 0;
     m_cloudMatchInFlightRevision = 0;
     DnfSecureClearString(m_cloudMatchInFlightPayload);
@@ -13006,6 +13022,7 @@ void CDNFGameCaptureDlg::CancelCloudRoomJoin(const CString& reason)
     m_cloudMatchJoinDeadlineTick = 0;
     m_cloudMatchUploadInFlight = false;
     m_cloudMatchUploadRetryBlocked = false;
+    m_cloudMatchUploadTransientRetryCount = 0;
     m_cloudMatchUploadQueueResultDeadlineTick = 0;
     m_cloudMatchInFlightRevision = 0;
     DnfSecureClearString(m_cloudMatchInFlightPayload);
@@ -13074,6 +13091,7 @@ void CDNFGameCaptureDlg::HandleCloudMatchSnapshotUploadResult(const json& event)
 
         clearInFlight();
         m_cloudMatchUploadRetryBlocked = false;
+        m_cloudMatchUploadTransientRetryCount = 0;
         m_cloudMatchUploadDirty = false;
         if (m_cloudMatchLastError == DnfCloudMatchErrorText("timeout") ||
             m_cloudMatchLastError == DnfCloudMatchErrorText("connection_lost") ||
@@ -13087,7 +13105,14 @@ void CDNFGameCaptureDlg::HandleCloudMatchSnapshotUploadResult(const json& event)
     if (DnfIsTransientCloudSnapshotFailure(code)) {
         m_cloudMatchUploadDirty = true;
         m_cloudMatchUploadRetryBlocked = false;
-        m_cloudMatchUploadDueTick = ::GetTickCount64() + 250;
+        const int exponent = (std::min)(m_cloudMatchUploadTransientRetryCount, 6);
+        const ULONGLONG fallbackMs = (std::min)(
+            250ULL << exponent, 30000ULL);
+        if (m_cloudMatchUploadTransientRetryCount < 6) {
+            ++m_cloudMatchUploadTransientRetryCount;
+        }
+        m_cloudMatchUploadDueTick = ::GetTickCount64() +
+            DnfClampCloudMatchRetryAfterMs(event, fallbackMs);
         m_cloudMatchLastError = DnfCloudMatchErrorText(code);
         return;
     }
@@ -13207,7 +13232,7 @@ void CDNFGameCaptureDlg::HandleCloudMatchComparisonResult(const json& event)
     std::uint64_t generatedAt = 0;
     std::uint64_t totalMembers = 0;
     std::uint64_t boundedMembers = 0;
-    if (!DnfReadCloudMatchUnsigned(event, "roomRevision", 1,
+    if (!DnfReadCloudMatchUnsigned(event, "comparisonRevision", 1,
             9007199254740991ULL, roomRevision) ||
         !DnfReadCloudMatchUnsigned(event, "generatedAt", 0,
             9007199254740991ULL, generatedAt) ||
@@ -13501,7 +13526,8 @@ void CDNFGameCaptureDlg::HandleCloudMatchSnapshotResult(const json& event)
         m_cloudMatchSyncRequestRoomId != m_cloudMatchRoomId ||
         !cloudStatus.connected || cloudStatus.connectionGeneration !=
             m_cloudMatchSyncRequestConnectionGeneration ||
-        cloudStatus.roomRevision != m_cloudMatchSyncComparisonRoomRevision) {
+        cloudStatus.comparisonRevision !=
+            m_cloudMatchSyncComparisonRoomRevision) {
         return;
     }
     m_cloudMatchSyncSnapshotRequestId.clear();
@@ -13598,6 +13624,7 @@ void CDNFGameCaptureDlg::QueueCloudMatchSyncedUpload(
     m_cloudMatchPendingChangeSource = "cloud_sync";
     m_cloudMatchUploadDirty = true;
     m_cloudMatchUploadRetryBlocked = false;
+    m_cloudMatchUploadTransientRetryCount = 0;
     m_cloudMatchUploadDueTick = ::GetTickCount64();
 }
 
@@ -13708,6 +13735,7 @@ void CDNFGameCaptureDlg::HandleCloudMatchMessage(std::string message)
                     m_cloudMatchUploadDirty = true;
                     m_cloudMatchUploadInFlight = false;
                     m_cloudMatchUploadRetryBlocked = false;
+                    m_cloudMatchUploadTransientRetryCount = 0;
                     m_cloudMatchUploadQueueResultDeadlineTick = 0;
                     m_cloudMatchInFlightRevision = 0;
                     DnfSecureClearString(m_cloudMatchInFlightPayload);
@@ -13761,6 +13789,7 @@ void CDNFGameCaptureDlg::HandleCloudMatchMessage(std::string message)
             m_cloudMatchUploadDirty = false;
             m_cloudMatchUploadInFlight = false;
             m_cloudMatchUploadRetryBlocked = false;
+            m_cloudMatchUploadTransientRetryCount = 0;
             m_cloudMatchRoomConfirmed = false;
             m_cloudMatchRestoring = false;
             m_cloudMatchUploadQueueResultDeadlineTick = 0;
@@ -13796,11 +13825,11 @@ void CDNFGameCaptureDlg::HandleCloudMatchMessage(std::string message)
     else if (type == "snapshot_result") {
         HandleCloudMatchSnapshotResult(event);
     }
-    else if (type == "room_changed" || type == "room_presence") {
+    else if (type == "room_changed") {
         const std::string eventRoomId = event.value("roomId", std::string());
         std::uint64_t eventRoomRevision = 0;
         if (eventRoomId == m_cloudMatchRoomId &&
-            DnfReadCloudMatchUnsigned(event, "roomRevision", 1,
+            DnfReadCloudMatchUnsigned(event, "comparisonRevision", 1,
                 9007199254740991ULL, eventRoomRevision) &&
             m_cloudMatchSyncComparisonRoomRevision != 0 &&
             eventRoomRevision > m_cloudMatchSyncComparisonRoomRevision) {
@@ -13971,6 +14000,7 @@ void CDNFGameCaptureDlg::OnMatchStateChanged(std::string matchPayload,
     m_cloudMatchPendingChangeSource = source && *source ? source : "manual";
     m_cloudMatchUploadDirty = true;
     m_cloudMatchUploadRetryBlocked = false;
+    m_cloudMatchUploadTransientRetryCount = 0;
     m_cloudMatchUploadDueTick = ::GetTickCount64() + 400;
 }
 

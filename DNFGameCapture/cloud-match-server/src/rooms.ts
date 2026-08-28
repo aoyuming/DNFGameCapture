@@ -41,6 +41,10 @@ interface RoomRevisionRow {
   revision: number;
 }
 
+interface RoomPresenceRevisionRow {
+  presence_revision: number;
+}
+
 interface RoomMemberRow {
   device_id: string;
   broadcaster_name: string;
@@ -196,6 +200,34 @@ export function incrementRoomRevision(
     throw new Error('Room not found');
   }
   return getRoomRevision(db, roomId);
+}
+
+export function getRoomPresenceRevision(
+  db: Database.Database,
+  roomId: string,
+): number {
+  const row = db
+    .prepare('SELECT presence_revision FROM rooms WHERE id = ?')
+    .get(roomId) as RoomPresenceRevisionRow | undefined;
+  if (!row) {
+    throw new Error('Room not found');
+  }
+  return row.presence_revision;
+}
+
+export function incrementRoomPresenceRevision(
+  db: Database.Database,
+  roomId: string,
+): number {
+  const result = db
+    .prepare(
+      'UPDATE rooms SET presence_revision = presence_revision + 1 WHERE id = ?',
+    )
+    .run(roomId);
+  if (result.changes !== 1) {
+    throw new Error('Room not found');
+  }
+  return getRoomPresenceRevision(db, roomId);
 }
 
 export function joinRoom(

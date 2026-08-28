@@ -4,6 +4,14 @@ import type Database from 'better-sqlite3';
 import { matchSnapshotSchema, type MatchSnapshot } from './schemas.js';
 
 const MAX_SNAPSHOT_BYTES = 65_536;
+export const SNAPSHOT_AUDIT_PER_DEVICE_LIMIT = 1_000;
+export const SNAPSHOT_AUDIT_GLOBAL_LIMIT = 50_000;
+const SNAPSHOT_AUDIT_GLOBAL_PRUNE_INTERVAL = 128;
+
+export interface SnapshotAuditRetentionOptions {
+  perDeviceLimit: number;
+  globalLimit: number;
+}
 
 export type SaveSnapshotFailureCode =
   | 'invalid_snapshot'
@@ -55,6 +63,68 @@ interface StoredSnapshotRow {
 
 interface RoomSnapshotDatabaseRow extends StoredSnapshotRow {
   broadcaster_name: string;
+}
+
+function requirePositiveSafeInteger(value: number, name: string): void {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new RangeError(`${name} must be a positive safe integer`);
+  }
+}
+
+export function pruneSnapshotAudit(
+  db: Database.Database,
+  options: SnapshotAuditRetentionOptions = {
+    perDeviceLimit: SNAPSHOT_AUDIT_PER_DEVICE_LIMIT,
+    globalLimit: SNAPSHOT_AUDIT_GLOBAL_LIMIT,
+  },
+): void {
+  requirePositiveSafeInteger(options.perDeviceLimit, 'perDeviceLimit');
+  requirePositiveSafeInteger(options.globalLimit, 'globalLimit');
+
+  db.prepare(
+    `DELETE FROM snapshot_audit
+     WHERE id IN (
+       SELECT id
+       FROM (
+         SELECT id,
+                row_number() OVER (
+                  PARTITION BY device_id ORDER BY id DESC
+                ) AS device_rank
+         FROM snapshot_audit
+       ) AS ranked
+       WHERE device_rank > ?
+     )`,
+  ).run(options.perDeviceLimit);
+
+  const globalCutoff = db.prepare(
+    `SELECT id
+     FROM snapshot_audit
+     ORDER BY id DESC
+     LIMIT 1 OFFSET ?`,
+  ).get(options.globalLimit - 1) as { id: number } | undefined;
+  if (globalCutoff) {
+    db.prepare('DELETE FROM snapshot_audit WHERE id < ?').run(globalCutoff.id);
+  }
+}
+
+function pruneDeviceSnapshotAudit(
+  db: Database.Database,
+  deviceId: string,
+): void {
+  const cutoff = db.prepare(
+    `SELECT id
+     FROM snapshot_audit
+     WHERE device_id = ?
+     ORDER BY id DESC
+     LIMIT 1 OFFSET ?`,
+  ).get(deviceId, SNAPSHOT_AUDIT_PER_DEVICE_LIMIT - 1) as
+    | { id: number }
+    | undefined;
+  if (cutoff) {
+    db.prepare(
+      'DELETE FROM snapshot_audit WHERE device_id = ? AND id < ?',
+    ).run(deviceId, cutoff.id);
+  }
 }
 
 function sortJsonValue(value: unknown): unknown {
@@ -145,7 +215,7 @@ export function saveSnapshot(
       if (clientRevision === null) {
         return;
       }
-      db.prepare(
+      const inserted = db.prepare(
         `INSERT INTO snapshot_audit (
            device_id, room_id, client_revision, accepted, reason, received_at
          ) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -157,6 +227,11 @@ export function saveSnapshot(
         reason,
         input.receivedAt,
       );
+      pruneDeviceSnapshotAudit(db, input.deviceId);
+      const auditId = Number(inserted.lastInsertRowid);
+      if (auditId % SNAPSHOT_AUDIT_GLOBAL_PRUNE_INTERVAL === 0) {
+        pruneSnapshotAudit(db);
+      }
     };
 
     if (rejectedBeforePersistence !== null || snapshot === null) {

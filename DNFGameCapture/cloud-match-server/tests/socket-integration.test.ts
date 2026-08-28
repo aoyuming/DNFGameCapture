@@ -34,11 +34,13 @@ interface ConnectedDevice extends Registration {
 interface RoomChanged {
   roomId: string;
   roomRevision: number;
+  comparisonRevision?: number;
 }
 
 interface RoomPresence extends RoomChanged {
   deviceId: string;
   online: boolean;
+  presenceRevision: number;
 }
 
 interface Deferred<T> {
@@ -262,6 +264,14 @@ function roomRevision(app: CloudMatchApp, roomId: string): number {
   ).revision;
 }
 
+function presenceRevision(app: CloudMatchApp, roomId: string): number {
+  return (
+    app.db.prepare('select presence_revision from rooms where id = ?').get(roomId) as {
+      presence_revision: number;
+    }
+  ).presence_revision;
+}
+
 afterEach(async () => {
   for (const socket of sockets.splice(0)) {
     socket.disconnect();
@@ -276,6 +286,202 @@ afterEach(async () => {
 });
 
 describe('cloud match Socket.IO integration', () => {
+  test('keeps comparison tokens stable across presence churn and advances only data revisions', async () => {
+    const { app, url } = await startApp();
+    const viewer = await createDevice(url, 'revision-viewer-0001');
+    const peer = await createDevice(url, 'revision-peer-0002');
+    await joinRoom(viewer.socket, '59', 'Viewer');
+    await joinRoom(peer.socket, '59', 'Peer');
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    const first = await emitAck<{
+      comparisonToken: string;
+      comparisonRevision: number;
+      nextCursor: string;
+    }>(viewer.socket, 'room:comparison', { limit: 1 });
+    const dataBefore = roomRevision(app, '59');
+    const presenceBefore = presenceRevision(app, '59');
+    expect(first.comparisonRevision).toBe(dataBefore);
+
+    const offline = waitForEvent<RoomPresence>(viewer.socket, 'room:presence');
+    peer.socket.disconnect();
+    await expect(offline).resolves.toMatchObject({
+      roomId: '59',
+      comparisonRevision: dataBefore,
+      online: false,
+    });
+    expect(roomRevision(app, '59')).toBe(dataBefore);
+    expect(presenceRevision(app, '59')).toBeGreaterThan(presenceBefore);
+    await expect(
+      emitAck(viewer.socket, 'room:comparison', {
+        comparisonToken: first.comparisonToken,
+        cursor: first.nextCursor,
+        limit: 1,
+      }),
+    ).resolves.toMatchObject({ ok: true, comparisonRevision: dataBefore });
+
+    const online = waitForEvent<RoomPresence>(viewer.socket, 'room:presence');
+    peer.socket = await connectRegistered(url, {
+      deviceId: peer.deviceId,
+      deviceToken: peer.deviceToken,
+    });
+    await expect(online).resolves.toMatchObject({
+      roomId: '59',
+      comparisonRevision: dataBefore,
+      online: true,
+    });
+    expect(roomRevision(app, '59')).toBe(dataBefore);
+
+    const accepted = await emitAck<{
+      ok: boolean;
+      comparisonRevision: number;
+    }>(peer.socket, 'snapshot:upload', {
+      requestId: 'accepted-snapshot',
+      snapshot: snapshot(1),
+    });
+    expect(accepted).toMatchObject({
+      ok: true,
+      comparisonRevision: dataBefore + 1,
+    });
+    const stale = await emitAck(peer.socket, 'snapshot:upload', {
+      requestId: 'stale-snapshot',
+      snapshot: snapshot(1),
+    });
+    expect(stale).toMatchObject({
+      ok: false,
+      code: 'stale_revision',
+      requestId: 'stale-snapshot',
+      clientRevision: 1,
+    });
+    expect(roomRevision(app, '59')).toBe(dataBefore + 1);
+  });
+
+  test('coalesces rapid offline-online presence to the final online state', async () => {
+    const { url } = await startApp();
+    const observer = await createDevice(url, 'presence-observer-0001');
+    const subject = await createDevice(url, 'presence-subject-0002');
+    await joinRoom(observer.socket, '59', 'Observer');
+    await joinRoom(subject.socket, '59', 'Subject');
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    const events: RoomPresence[] = [];
+    observer.socket.on('room:presence', (event: RoomPresence) => events.push(event));
+    subject.socket.disconnect();
+    subject.socket = await connectRegistered(url, {
+      deviceId: subject.deviceId,
+      deviceToken: subject.deviceToken,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    expect(events.filter((event) => event.deviceId === subject.deviceId).length)
+      .toBeLessThanOrEqual(1);
+    if (events.length > 0) {
+      expect(events.at(-1)).toMatchObject({
+        deviceId: subject.deviceId,
+        online: true,
+      });
+    }
+    const comparison = await emitAck<{
+      members: Array<{ deviceId: string; online: boolean }>;
+    }>(observer.socket, 'room:comparison', {});
+    expect(comparison.members).toContainEqual(
+      expect.objectContaining({ deviceId: subject.deviceId, online: true }),
+    );
+  });
+
+  test('rate-limits snapshot and membership mutations across reconnects without auditing limits', async () => {
+    const rateLimitService = createCloudMatchRateLimitService({
+      snapshotDeviceCapacity: 2,
+      snapshotIpCapacity: 20,
+      snapshotGlobalCapacity: 20,
+      snapshotWindowSec: 60,
+      membershipDeviceCapacity: 1,
+      membershipIpCapacity: 20,
+      membershipGlobalCapacity: 20,
+      membershipWindowSec: 60,
+    });
+    const { app, url } = await startApp({
+      rateLimitService,
+      resolveClientIp: () => 'mutation-test-ip',
+    });
+    const device = await createDevice(url, 'mutation-device-0001');
+    await expect(
+      emitAck(device.socket, 'room:join', {
+        requestId: 'join-request',
+        roomId: '59',
+        broadcasterName: 'Mutation',
+      }),
+    ).resolves.toMatchObject({ ok: true, requestId: 'join-request' });
+    await expect(
+      emitAck(device.socket, 'room:rename', {
+        requestId: 'rename-limited',
+        broadcasterName: 'Mutation Renamed',
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'rate_limited',
+      requestId: 'rename-limited',
+      retryAfterMs: expect.any(Number),
+    });
+
+    await expect(
+      emitAck(device.socket, 'snapshot:upload', {
+        requestId: 'snapshot-accepted',
+        snapshot: snapshot(1),
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      requestId: 'snapshot-accepted',
+      clientRevision: 1,
+    });
+    await expect(
+      emitAck(device.socket, 'snapshot:upload', {
+        requestId: 'snapshot-stale',
+        snapshot: snapshot(1),
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'stale_revision',
+      requestId: 'snapshot-stale',
+      clientRevision: 1,
+    });
+    await expect(
+      emitAck(device.socket, 'snapshot:upload', {
+        requestId: 'snapshot-limited',
+        snapshot: snapshot(1),
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'rate_limited',
+      requestId: 'snapshot-limited',
+      clientRevision: 1,
+      retryAfterMs: expect.any(Number),
+    });
+    expect(
+      (app.db.prepare('select count(*) as count from snapshot_audit').get() as {
+        count: number;
+      }).count,
+    ).toBe(2);
+
+    device.socket.disconnect();
+    device.socket = await connectRegistered(url, {
+      deviceId: device.deviceId,
+      deviceToken: device.deviceToken,
+    });
+    await expect(
+      emitAck(device.socket, 'snapshot:upload', {
+        requestId: 'snapshot-reconnect-limited',
+        snapshot: snapshot(2, { redScore: 4 }),
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      code: 'rate_limited',
+      requestId: 'snapshot-reconnect-limited',
+      clientRevision: 2,
+    });
+    await expect(request(url).get('/health')).resolves.toMatchObject({ status: 200 });
+  });
+
   test('rate-limits registration by IP while keeping health checks available', async () => {
     const rateLimitService = createCloudMatchRateLimitService({
       registrationIpCapacity: 2,
@@ -1032,13 +1238,17 @@ describe('cloud match Socket.IO integration', () => {
     await joinRoom(uploader.socket, '59', 'Uploader');
     await joinRoom(viewer.socket, '59', 'Viewer');
     await emitAck(uploader.socket, 'snapshot:upload', { snapshot: snapshot(7) });
+    await new Promise((resolve) => setTimeout(resolve, 400));
     const revisionBeforeDisconnect = roomRevision(app, '59');
+    const presenceBeforeDisconnect = presenceRevision(app, '59');
 
     const firstOffline = waitForEvent<RoomPresence>(viewer.socket, 'room:presence');
     uploader.socket.disconnect();
-    await expect(firstOffline).resolves.toEqual({
+    await expect(firstOffline).resolves.toMatchObject({
       roomId: '59',
-      roomRevision: revisionBeforeDisconnect + 1,
+      roomRevision: revisionBeforeDisconnect,
+      comparisonRevision: revisionBeforeDisconnect,
+      presenceRevision: presenceBeforeDisconnect + 1,
       deviceId: uploader.deviceId,
       online: false,
     });
@@ -1063,18 +1273,20 @@ describe('cloud match Socket.IO integration', () => {
       deviceId: uploader.deviceId,
       deviceToken: uploader.deviceToken,
     });
-    await expect(backOnline).resolves.toEqual({
+    await expect(backOnline).resolves.toMatchObject({
       roomId: '59',
-      roomRevision: revisionBeforeDisconnect + 2,
+      roomRevision: revisionBeforeDisconnect,
+      comparisonRevision: revisionBeforeDisconnect,
       deviceId: uploader.deviceId,
       online: true,
     });
 
     const secondOffline = waitForEvent<RoomPresence>(viewer.socket, 'room:presence');
     reconnected.disconnect();
-    await expect(secondOffline).resolves.toEqual({
+    await expect(secondOffline).resolves.toMatchObject({
       roomId: '59',
-      roomRevision: revisionBeforeDisconnect + 3,
+      roomRevision: revisionBeforeDisconnect,
+      comparisonRevision: revisionBeforeDisconnect,
       deviceId: uploader.deviceId,
       online: false,
     });
@@ -1091,7 +1303,7 @@ describe('cloud match Socket.IO integration', () => {
       clientRevision: 7,
       snapshot: { clientRevision: 7 },
     });
-    expect(roomRevision(app, '59')).toBe(revisionBeforeDisconnect + 3);
+    expect(roomRevision(app, '59')).toBe(revisionBeforeDisconnect);
   });
 
   test('replacement connection emits no transient offline presence', async () => {
@@ -1100,6 +1312,7 @@ describe('cloud match Socket.IO integration', () => {
     const observer = await createDevice(url, 'replacement-observer-0002');
     await joinRoom(device.socket, '59', 'Replaced');
     await joinRoom(observer.socket, '59', 'Observer');
+    await new Promise((resolve) => setTimeout(resolve, 400));
     const presence: RoomPresence[] = [];
     observer.socket.on('room:presence', (event: RoomPresence) => presence.push(event));
     const replaced = waitForEvent(device.socket, 'connection:replaced');
@@ -1110,18 +1323,10 @@ describe('cloud match Socket.IO integration', () => {
     });
 
     await replaced;
-    await waitUntil(() => expect(presence).toHaveLength(1));
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    await new Promise((resolve) => setTimeout(resolve, 500));
     expect(replacement.connected).toBe(true);
-    expect(presence).toEqual([
-      {
-        roomId: '59',
-        roomRevision: 3,
-        deviceId: device.deviceId,
-        online: true,
-      },
-    ]);
-    expect(roomRevision(app, '59')).toBe(3);
+    expect(presence).toEqual([]);
+    expect(roomRevision(app, '59')).toBe(2);
   });
 
   test('switching rooms notifies both rooms and never copies the old snapshot', async () => {
@@ -1131,6 +1336,7 @@ describe('cloud match Socket.IO integration', () => {
     await joinRoom(mover.socket, '59', 'Mover');
     await joinRoom(observer.socket, '59', 'Observer');
     await emitAck(mover.socket, 'snapshot:upload', { snapshot: snapshot(1) });
+    await new Promise((resolve) => setTimeout(resolve, 30));
     const moverChanges: RoomChanged[] = [];
     const observerChanges: RoomChanged[] = [];
     mover.socket.on('room:changed', (event: RoomChanged) => moverChanges.push(event));
@@ -1140,11 +1346,15 @@ describe('cloud match Socket.IO integration', () => {
       joinRoom(mover.socket, 'li-yong', 'Mover'),
     ).resolves.toMatchObject({ ok: true, room: { id: 'li-yong' } });
     await waitUntil(() => {
-      expect(observerChanges).toContainEqual({ roomId: '59', roomRevision: 4 });
+      expect(observerChanges).toContainEqual(expect.objectContaining({
+        roomId: '59',
+        roomRevision: 4,
+        comparisonRevision: 4,
+      }));
       expect(moverChanges).toEqual(
         expect.arrayContaining([
-          { roomId: '59', roomRevision: 4 },
-          { roomId: 'li-yong', roomRevision: 1 },
+          expect.objectContaining({ roomId: '59', roomRevision: 4 }),
+          expect.objectContaining({ roomId: 'li-yong', roomRevision: 1 }),
         ]),
       );
     });
@@ -1195,7 +1405,11 @@ describe('cloud match Socket.IO integration', () => {
 
     await joinRoom(device.socket, '59', 'Original');
     await waitUntil(() => expect(changes).toHaveLength(1));
-    expect(changes[0]).toEqual({ roomId: '59', roomRevision: 1 });
+    expect(changes[0]).toEqual({
+      roomId: '59',
+      roomRevision: 1,
+      comparisonRevision: 1,
+    });
 
     await joinRoom(device.socket, '59', 'Original');
     await emitAck(device.socket, 'room:rename', { broadcasterName: 'Original' });
@@ -1208,20 +1422,20 @@ describe('cloud match Socket.IO integration', () => {
       emitAck<Record<string, unknown>>(device.socket, 'snapshot:upload', {
         snapshot: snapshot(1),
       }),
-    ).resolves.toEqual({ ok: true, acceptedRevision: 1, roomRevision: 3 });
+    ).resolves.toMatchObject({ ok: true, acceptedRevision: 1, roomRevision: 3 });
     await waitUntil(() => expect(changes).toHaveLength(3));
 
     await expect(
       emitAck(device.socket, 'snapshot:upload', { snapshot: snapshot(2) }),
-    ).resolves.toEqual({ ok: false, code: 'duplicate_snapshot' });
+    ).resolves.toMatchObject({ ok: false, code: 'duplicate_snapshot' });
     await expect(
       emitAck(device.socket, 'snapshot:upload', {
         snapshot: snapshot(1, { redScore: 9 }),
       }),
-    ).resolves.toEqual({ ok: false, code: 'stale_revision' });
+    ).resolves.toMatchObject({ ok: false, code: 'stale_revision' });
     await expect(
       emitAck(device.socket, 'snapshot:upload', { snapshot: {} }),
-    ).resolves.toEqual({ ok: false, code: 'invalid_snapshot' });
+    ).resolves.toMatchObject({ ok: false, code: 'invalid_snapshot' });
     expect(roomRevision(app, '59')).toBe(3);
     expect(changes).toHaveLength(3);
 
@@ -1229,10 +1443,10 @@ describe('cloud match Socket.IO integration', () => {
       emitAck(device.socket, 'snapshot:upload', {
         snapshot: snapshot(2, { redScore: 4 }),
       }),
-    ).resolves.toEqual({ ok: true, acceptedRevision: 2, roomRevision: 4 });
+    ).resolves.toMatchObject({ ok: true, acceptedRevision: 2, roomRevision: 4 });
     await emitAck(device.socket, 'room:leave');
     await waitUntil(() => expect(changes).toHaveLength(5));
-    expect(changes).toEqual([
+    expect(changes.map(({ roomId, roomRevision }) => ({ roomId, roomRevision }))).toEqual([
       { roomId: '59', roomRevision: 1 },
       { roomId: '59', roomRevision: 2 },
       { roomId: '59', roomRevision: 3 },
@@ -1290,7 +1504,7 @@ describe('cloud match Socket.IO integration', () => {
       .toBe(true);
     expect(revisions.at(-1)).toBe(4);
     expect(notifications).toEqual([
-      { roomId: '59', roomRevision: 4 },
+      { roomId: '59', roomRevision: 4, comparisonRevision: 4 },
     ]);
   });
 
@@ -1300,6 +1514,12 @@ describe('cloud match Socket.IO integration', () => {
     let blockSnapshotLookups = false;
     let blockedLookups = 0;
     const { app, url } = await startApp({
+      rateLimitService: createCloudMatchRateLimitService({
+        snapshotDeviceCapacity: 256,
+        snapshotIpCapacity: 256,
+        snapshotGlobalCapacity: 256,
+        snapshotWindowSec: 60,
+      }),
       roomService: {
         async getMembership(db, deviceId) {
           if (blockSnapshotLookups && deviceId === 'rapid-device-0001') {
@@ -1323,10 +1543,19 @@ describe('cloud match Socket.IO integration', () => {
 
     const pending = Array.from({ length: 100 }, (_, index) => {
       const revision = index + 1;
-      return emitAck<{ ok: boolean; acceptedRevision?: number; code?: string }>(
+      return emitAck<{
+        ok: boolean;
+        acceptedRevision?: number;
+        code?: string;
+        requestId?: string;
+        clientRevision?: number;
+      }>(
         device.socket,
         'snapshot:upload',
-        { snapshot: snapshot(revision, { redScore: revision }) },
+        {
+          requestId: `rapid-${revision}`,
+          snapshot: snapshot(revision, { redScore: revision }),
+        },
         15_000,
       );
     });
@@ -1334,7 +1563,13 @@ describe('cloud match Socket.IO integration', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     releaseFirstLookup.resolve(undefined);
 
-    let responses: Array<{ ok: boolean; acceptedRevision?: number; code?: string }>;
+    let responses: Array<{
+      ok: boolean;
+      acceptedRevision?: number;
+      code?: string;
+      requestId?: string;
+      clientRevision?: number;
+    }>;
     try {
       responses = await Promise.all(pending);
     } finally {
@@ -1347,7 +1582,10 @@ describe('cloud match Socket.IO integration', () => {
     expect(accepted.length).toBeGreaterThan(0);
     expect(accepted.length).toBeLessThanOrEqual(64);
     expect(rejected.length).toBeGreaterThan(0);
-    expect(rejected.every((response) => response.code === 'rate_limited')).toBe(true);
+    expect(rejected.every((response) =>
+      response.code === 'rate_limited' &&
+      response.requestId === `rapid-${response.clientRevision}`,
+    )).toBe(true);
     expect(timerTicks).toBeGreaterThan(0);
     expect(
       app.db
@@ -1377,16 +1615,16 @@ describe('cloud match Socket.IO integration', () => {
 
     await expect(
       emitAck(joined.socket, 'snapshot:upload', { snapshot: { clientRevision: 1 } }),
-    ).resolves.toEqual({ ok: false, code: 'invalid_snapshot' });
+    ).resolves.toMatchObject({ ok: false, code: 'invalid_snapshot' });
     await expect(
       emitAck(joined.socket, 'snapshot:upload', {
         snapshot: snapshot(1),
         extra: true,
       }),
-    ).resolves.toEqual({ ok: false, code: 'invalid_request' });
+    ).resolves.toMatchObject({ ok: false, code: 'invalid_request' });
     await expect(
       emitAck(unjoined.socket, 'snapshot:upload', { snapshot: snapshot(1) }),
-    ).resolves.toEqual({ ok: false, code: 'no_membership' });
+    ).resolves.toMatchObject({ ok: false, code: 'no_membership' });
     expect(roomRevision(app, '59')).toBe(1);
 
     const disconnected = waitForEvent<string>(joined.socket, 'disconnect', 3_000);
@@ -1412,7 +1650,7 @@ describe('cloud match Socket.IO integration', () => {
         }
       ).count,
     ).toBe(0);
-    expect(roomRevision(app, '59')).toBe(2);
+    expect(roomRevision(app, '59')).toBe(1);
 
     await expect(emitAck(unjoined.socket, 'room:list')).resolves.toMatchObject({
       ok: true,
@@ -1465,7 +1703,7 @@ describe('cloud match Socket.IO integration', () => {
 
     await expect(
       emitAck(device.socket, 'snapshot:upload', { snapshot: snapshot(1) }),
-    ).resolves.toEqual({ ok: true, acceptedRevision: 1, roomRevision: 2 });
+    ).resolves.toMatchObject({ ok: true, acceptedRevision: 1, roomRevision: 2 });
     await expect(
       emitAck(device.socket, 'room:comparison', {}),
     ).resolves.toEqual({ ok: false, code: 'internal_error' });

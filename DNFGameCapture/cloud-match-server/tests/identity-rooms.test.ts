@@ -798,20 +798,12 @@ describe('Socket connection lifecycle', () => {
     await emitAck(first, 'room:join', { roomId: '59', broadcasterName: '重连主播' });
     first.disconnect();
     await waitUntil(() => expect(app.io.sockets.sockets.size).toBe(0));
-    await waitUntil(() => {
-      expect(
-        (
-          app.db.prepare('select revision from rooms where id = ?').get('59') as {
-            revision: number;
-          }
-        ).revision,
-      ).toBe(2);
-    });
     const revisionBeforeFailedReconnect = (
       app.db.prepare('select revision from rooms where id = ?').get('59') as {
         revision: number;
       }
     ).revision;
+    expect(revisionBeforeFailedReconnect).toBe(1);
     failReconnectJoin = true;
 
     const reconnecting = createSocketClient(url, {

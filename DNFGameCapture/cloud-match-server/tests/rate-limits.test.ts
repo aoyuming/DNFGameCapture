@@ -3,6 +3,44 @@ import { describe, expect, test } from 'vitest';
 import { createCloudMatchRateLimitService } from '../src/rate-limits.js';
 
 describe('bounded cloud match rate limits', () => {
+  test('bounds snapshot and membership mutations across reconnect identities', () => {
+    const limits = createCloudMatchRateLimitService({
+      maxEntriesPerScope: 2,
+      entryTtlSec: 10,
+      snapshotDeviceCapacity: 2,
+      snapshotIpCapacity: 3,
+      snapshotGlobalCapacity: 10,
+      snapshotWindowSec: 10,
+      membershipDeviceCapacity: 1,
+      membershipIpCapacity: 2,
+      membershipGlobalCapacity: 10,
+      membershipWindowSec: 60,
+    });
+
+    expect(limits.allowSnapshotMutation('device-a', 'ip-a', 0).allowed).toBe(true);
+    expect(limits.allowSnapshotMutation('device-a', 'ip-a', 0).allowed).toBe(true);
+    const snapshotLimited = limits.allowSnapshotMutation('device-a', 'ip-a', 0);
+    expect(snapshotLimited.allowed).toBe(false);
+    expect(snapshotLimited.retryAfterMs).toBeGreaterThan(0);
+
+    expect(limits.allowMembershipMutation('device-a', 'ip-a', 0).allowed).toBe(true);
+    const membershipLimited = limits.allowMembershipMutation('device-a', 'ip-a', 0);
+    expect(membershipLimited.allowed).toBe(false);
+    expect(membershipLimited.retryAfterMs).toBeGreaterThan(0);
+    expect(limits.entryCounts()).toMatchObject({
+      snapshotDevices: 1,
+      snapshotIps: 1,
+      membershipDevices: 1,
+      membershipIps: 1,
+    });
+
+    expect(limits.allowSnapshotMutation('device-b', 'ip-b', 11).allowed).toBe(true);
+    expect(limits.allowMembershipMutation('device-b', 'ip-b', 11).allowed).toBe(true);
+    expect(limits.allowSnapshotMutation('device-c', 'ip-c', 11).allowed).toBe(true);
+    expect(limits.allowSnapshotMutation('device-d', 'ip-d', 11).allowed).toBe(false);
+    expect(limits.entryCounts().snapshotDevices).toBeLessThanOrEqual(2);
+  });
+
   test('refills quotas continuously instead of resetting a fixed window', () => {
     const limits = createCloudMatchRateLimitService({
       registrationIpCapacity: 2,

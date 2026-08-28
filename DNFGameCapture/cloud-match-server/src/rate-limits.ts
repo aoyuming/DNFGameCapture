@@ -5,6 +5,14 @@ export interface CloudMatchRateLimitOptions {
   comparisonIpCapacity?: number;
   comparisonWindowSec?: number;
   comparisonMinIntervalSec?: number;
+  snapshotDeviceCapacity?: number;
+  snapshotIpCapacity?: number;
+  snapshotGlobalCapacity?: number;
+  snapshotWindowSec?: number;
+  membershipDeviceCapacity?: number;
+  membershipIpCapacity?: number;
+  membershipGlobalCapacity?: number;
+  membershipWindowSec?: number;
   registrationIpCapacity?: number;
   registrationGlobalCapacity?: number;
   registrationWindowSec?: number;
@@ -20,11 +28,30 @@ export interface CloudMatchRateLimitEntryCounts {
   comparisonIps: number;
   registrationIps: number;
   coldRooms: number;
+  snapshotDevices: number;
+  snapshotIps: number;
+  membershipDevices: number;
+  membershipIps: number;
+}
+
+export interface RateLimitDecision {
+  allowed: boolean;
+  retryAfterMs: number;
 }
 
 export interface CloudMatchRateLimitService {
   allowComparison(deviceId: string, ipAddress: string, nowSec: number): boolean;
   allowRegistration(ipAddress: string, nowSec: number): boolean;
+  allowSnapshotMutation(
+    deviceId: string,
+    ipAddress: string,
+    nowSec: number,
+  ): RateLimitDecision;
+  allowMembershipMutation(
+    deviceId: string,
+    ipAddress: string,
+    nowSec: number,
+  ): RateLimitDecision;
   tryAcquireColdComparison(roomId: string, nowSec: number): (() => void) | null;
   activeColdComparisons(): number;
   entryCounts(): CloudMatchRateLimitEntryCounts;
@@ -50,12 +77,15 @@ class BoundedTokenBucketMap {
 
   constructor(private readonly options: QuotaOptions) {}
 
-  consume(key: string, nowSec: number): boolean {
+  consume(key: string, nowSec: number): RateLimitDecision {
     this.prune(nowSec);
     let entry = this.entries.get(key);
     if (!entry) {
       if (this.entries.size >= this.options.maxEntries) {
-        return false;
+        return {
+          allowed: false,
+          retryAfterMs: Math.min(this.options.entryTtlSec * 1_000, 60_000),
+        };
       }
       entry = {
         lastAllowedAt: null,
@@ -80,14 +110,25 @@ class BoundedTokenBucketMap {
       entry.lastAllowedAt !== null &&
       nowSec - entry.lastAllowedAt < this.options.minimumIntervalSec
     ) {
-      return false;
+      return {
+        allowed: false,
+        retryAfterMs: Math.max(100, Math.ceil(
+          (this.options.minimumIntervalSec - (nowSec - entry.lastAllowedAt)) * 1_000,
+        )),
+      };
     }
     if (entry.tokens < 1) {
-      return false;
+      return {
+        allowed: false,
+        retryAfterMs: Math.max(100, Math.ceil(
+          (1 - entry.tokens) * this.options.windowSec /
+            this.options.capacity * 1_000,
+        )),
+      };
     }
     entry.tokens -= 1;
     entry.lastAllowedAt = nowSec;
-    return true;
+    return { allowed: true, retryAfterMs: 0 };
   }
 
   size(): number {
@@ -128,6 +169,8 @@ export function createCloudMatchRateLimitService(
     0,
   );
   const registrationWindowSec = positiveInteger(options.registrationWindowSec, 60);
+  const snapshotWindowSec = positiveInteger(options.snapshotWindowSec, 4);
+  const membershipWindowSec = positiveInteger(options.membershipWindowSec, 60);
   const coldWindowSec = positiveInteger(options.coldWindowSec, 10);
   const quota = (
     capacity: number,
@@ -163,6 +206,34 @@ export function createCloudMatchRateLimitService(
     0,
     1,
   );
+  const snapshotDevices = quota(
+    positiveInteger(options.snapshotDeviceCapacity, 8),
+    snapshotWindowSec,
+  );
+  const snapshotIps = quota(
+    positiveInteger(options.snapshotIpCapacity, 80),
+    snapshotWindowSec,
+  );
+  const snapshotGlobal = quota(
+    positiveInteger(options.snapshotGlobalCapacity, 320),
+    snapshotWindowSec,
+    0,
+    1,
+  );
+  const membershipDevices = quota(
+    positiveInteger(options.membershipDeviceCapacity, 6),
+    membershipWindowSec,
+  );
+  const membershipIps = quota(
+    positiveInteger(options.membershipIpCapacity, 64),
+    membershipWindowSec,
+  );
+  const membershipGlobal = quota(
+    positiveInteger(options.membershipGlobalCapacity, 512),
+    membershipWindowSec,
+    0,
+    1,
+  );
   const coldGlobal = quota(
     positiveInteger(options.coldGlobalCapacity, 6),
     coldWindowSec,
@@ -179,25 +250,39 @@ export function createCloudMatchRateLimitService(
 
   return {
     allowComparison(deviceId, ipAddress, nowSec) {
-      if (!comparisonDevices.consume(deviceId, nowSec)) {
+      if (!comparisonDevices.consume(deviceId, nowSec).allowed) {
         return false;
       }
-      return comparisonIps.consume(ipAddress, nowSec);
+      return comparisonIps.consume(ipAddress, nowSec).allowed;
     },
     allowRegistration(ipAddress, nowSec) {
-      if (!registrationIps.consume(ipAddress, nowSec)) {
+      if (!registrationIps.consume(ipAddress, nowSec).allowed) {
         return false;
       }
-      return registrationGlobal.consume('global', nowSec);
+      return registrationGlobal.consume('global', nowSec).allowed;
+    },
+    allowSnapshotMutation(deviceId, ipAddress, nowSec) {
+      const device = snapshotDevices.consume(deviceId, nowSec);
+      if (!device.allowed) return device;
+      const ip = snapshotIps.consume(ipAddress, nowSec);
+      if (!ip.allowed) return ip;
+      return snapshotGlobal.consume('global', nowSec);
+    },
+    allowMembershipMutation(deviceId, ipAddress, nowSec) {
+      const device = membershipDevices.consume(deviceId, nowSec);
+      if (!device.allowed) return device;
+      const ip = membershipIps.consume(ipAddress, nowSec);
+      if (!ip.allowed) return ip;
+      return membershipGlobal.consume('global', nowSec);
     },
     tryAcquireColdComparison(roomId, nowSec) {
       if (activeCold >= maxColdConcurrent) {
         return null;
       }
-      if (!coldRooms.consume(roomId, nowSec)) {
+      if (!coldRooms.consume(roomId, nowSec).allowed) {
         return null;
       }
-      if (!coldGlobal.consume('global', nowSec)) {
+      if (!coldGlobal.consume('global', nowSec).allowed) {
         return null;
       }
       activeCold += 1;
@@ -218,6 +303,10 @@ export function createCloudMatchRateLimitService(
         comparisonIps: comparisonIps.size(),
         registrationIps: registrationIps.size(),
         coldRooms: coldRooms.size(),
+        snapshotDevices: snapshotDevices.size(),
+        snapshotIps: snapshotIps.size(),
+        membershipDevices: membershipDevices.size(),
+        membershipIps: membershipIps.size(),
       };
     },
   };
