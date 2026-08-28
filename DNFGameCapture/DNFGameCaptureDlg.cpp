@@ -4798,25 +4798,16 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_status.Create(L"就绪", WS_CHILD | WS_VISIBLE | SS_CENTER, CRect(155, row1_Y + 4, 205, row1_Y + 25), this, 1003); m_status.SetFont(&m_font);
     const int cloudStatusRight = (std::max)(210,
         (std::min)(530, static_cast<int>(r.right) - 140));
-    HWND cloudStatusResourceHost = ::CreateDialogParamW(AfxGetInstanceHandle(),
-        MAKEINTRESOURCEW(IDD_DNFGAMECAPTURE_DIALOG), GetSafeHwnd(),
-        [](HWND, UINT, WPARAM, LPARAM) -> INT_PTR { return FALSE; }, 0);
-    if (cloudStatusResourceHost) {
-        HWND cloudStatusHwnd = ::GetDlgItem(cloudStatusResourceHost,
-            IDC_STATIC_CLOUD_ROOM_STATUS);
-        if (cloudStatusHwnd &&
-            ::SetParent(cloudStatusHwnd, GetSafeHwnd()) == cloudStatusResourceHost) {
-            if (m_cloudMatchStatus.SubclassWindow(cloudStatusHwnd)) {
-                m_cloudMatchStatus.MoveWindow(CRect(10, row1_Y + 32,
-                    cloudStatusRight, row1_Y + 54));
-                m_cloudMatchStatus.SetFont(&m_font);
-                m_cloudMatchStatus.ShowWindow(SW_SHOW);
-            }
-            else {
-                ::DestroyWindow(cloudStatusHwnd);
-            }
-        }
-        ::DestroyWindow(cloudStatusResourceHost);
+    if (!m_cloudMatchStatus.Create(
+        L"\u672A\u52A0\u5165\u4E91\u7AEF\u623F\u95F4",
+        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS,
+        CRect(10, row1_Y + 32, cloudStatusRight, row1_Y + 54), this,
+        IDC_STATIC_CLOUD_ROOM_STATUS)) {
+        ::OutputDebugStringW(
+            L"[CloudMatch] Failed to create cloud room status control.\r\n");
+    }
+    else {
+        m_cloudMatchStatus.SetFont(&m_font);
     }
     RefreshCloudMatchStatusDisplay(m_cloudMatchClient.GetStatusSnapshot());
 

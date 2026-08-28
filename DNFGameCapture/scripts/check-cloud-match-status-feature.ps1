@@ -65,7 +65,7 @@ foreach ($needle in @(
     'cloudMatch["displayState"]',
     'cloudMatch["displayText"]',
     'IDC_STATIC_CLOUD_ROOM_STATUS',
-    'm_cloudMatchStatus.SubclassWindow(',
+    'm_cloudMatchStatus.Create(',
     'RGB(35, 143, 85)',
     'RGB(188, 135, 0)',
     'RGB(196, 48, 62)',
@@ -76,9 +76,24 @@ foreach ($needle in @(
         throw "Cloud match native status wiring is missing: $needle"
     }
 }
-if ($dialogSource.Contains('m_cloudMatchStatus.Create(') -or
-    $dialogSource.Contains('ID_STATIC_CLOUD_MATCH_STATUS')) {
-    throw 'Cloud match native status must bind the resource control without a dynamic CStatic ID.'
+foreach ($forbidden in @('CreateDialogParam', 'SetParent(', 'SubclassWindow(',
+    'ID_STATIC_CLOUD_MATCH_STATUS')) {
+    if ($dialogSource.Contains($forbidden)) {
+        throw "Cloud match native status must not use the resource reparenting path: $forbidden"
+    }
+}
+$statusCreateStart = $dialogSource.IndexOf('if (!m_cloudMatchStatus.Create(')
+$statusCreateEnd = $dialogSource.IndexOf(
+    'RefreshCloudMatchStatusDisplay(', $statusCreateStart)
+if ($statusCreateStart -lt 0 -or $statusCreateEnd -le $statusCreateStart) {
+    throw 'Cloud match native status must check the direct CStatic Create result.'
+}
+$statusCreateBlock = $dialogSource.Substring($statusCreateStart,
+    $statusCreateEnd - $statusCreateStart)
+foreach ($needle in @('IDC_STATIC_CLOUD_ROOM_STATUS', 'OutputDebugStringW(')) {
+    if (-not $statusCreateBlock.Contains($needle)) {
+        throw "Cloud match direct CStatic creation contract is missing: $needle"
+    }
 }
 
 $statusIdMatches = [regex]::Matches($resourceHeader,
