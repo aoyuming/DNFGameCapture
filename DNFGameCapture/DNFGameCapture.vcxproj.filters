@@ -48,6 +48,9 @@
     <ClInclude Include="CloudMatchProtocol.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="CloudMatchStatusDisplay.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="CloudMatchSync.h">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -93,6 +96,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="CloudMatchProtocol.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="CloudMatchStatusDisplay.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="CloudMatchSync.cpp">

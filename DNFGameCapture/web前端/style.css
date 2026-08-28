@@ -752,6 +752,62 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     color: #ffd6de;
 }
 
+.cloud-room-status {
+    width: 100%;
+    min-width: 0;
+    height: 30px;
+    padding: 4px 10px;
+    overflow: hidden;
+    border: 1px solid var(--cloud-status-border);
+    border-radius: 6px;
+    outline: none;
+    color: var(--cloud-status-idle);
+    background: var(--cloud-status-bg);
+    font: 800 12px "Microsoft YaHei", sans-serif;
+    white-space: nowrap;
+    text-align: left;
+    text-overflow: ellipsis;
+    cursor: pointer;
+}
+
+.cloud-room-status:hover,
+.cloud-room-status:focus-visible {
+    border-color: currentColor;
+    filter: brightness(1.08);
+}
+
+.cloud-room-status[data-state="online"] { color: var(--cloud-status-online); }
+.cloud-room-status[data-state="working"] { color: var(--cloud-status-working); }
+.cloud-room-status[data-state="offline"] { color: var(--cloud-status-offline); }
+.cloud-room-status[data-state="not-joined"] { color: var(--cloud-status-idle); }
+
+html[data-theme="dark-esports"] .cloud-room-status {
+    --cloud-status-online: #63dfa4;
+    --cloud-status-working: #ffd16d;
+    --cloud-status-offline: #ff879f;
+    --cloud-status-idle: #9dafb8;
+    --cloud-status-bg: #111b24;
+    --cloud-status-border: rgba(255, 255, 255, 0.12);
+}
+
+html[data-theme="frost-broadcast"] .cloud-room-status {
+    --cloud-status-online: #167347;
+    --cloud-status-working: #795814;
+    --cloud-status-offline: #a3263f;
+    --cloud-status-idle: #536d79;
+    --cloud-status-bg: #edf4f7;
+    --cloud-status-border: rgba(33, 70, 84, 0.24);
+}
+
+html[data-theme="black-gold"] .cloud-room-status {
+    --cloud-status-online: #9fc18b;
+    --cloud-status-working: #efd48f;
+    --cloud-status-offline: #ff8a91;
+    --cloud-status-idle: #b9ac8d;
+    --cloud-status-bg: #15140f;
+    --cloud-status-border: rgba(225, 196, 124, 0.24);
+}
+
 /* 🚨 新增：底部输出目录显示条 */
 .dir-bar {
     width: 100%; text-align: center; margin-top: 2px;

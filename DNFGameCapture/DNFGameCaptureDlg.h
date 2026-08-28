@@ -23,6 +23,7 @@
 #include "KeyMappingHook.h"
 #include "KeyMappingLanService.h"
 #include "CloudMatchClient.h"
+#include "CloudMatchStatusDisplay.h"
 #include "json.hpp"
 
 struct ScorePointF {
@@ -300,6 +301,10 @@ private:
     void QueueCloudMatchSyncedUpload(const std::string& sourceDeviceId,
         std::uint64_t sourceRevision);
     void PollCloudMatch();
+    CloudMatchDisplayStatus BuildCloudMatchDisplayStatusSnapshot(
+        const CloudMatchStatusSnapshot& cloudStatus) const;
+    void RefreshCloudMatchStatusDisplay(
+        const CloudMatchStatusSnapshot& cloudStatus);
     void OnMatchStateChanged(std::string matchPayload, const char* source);
     void MarkMatchMutation();
     void MarkCloudMatchOcrStateChanged(std::string matchPayload);
@@ -586,6 +591,10 @@ private:
     std::size_t m_cloudMatchSyncComparisonPageCount = 0;
     bool m_cloudMatchSyncComparisonTruncated = false;
     bool m_cloudMatchSyncWasConnected = false;
+    bool m_cloudMatchDisplayInitialized = false;
+    CloudMatchDisplayState m_cloudMatchDisplayState =
+        CloudMatchDisplayState::notJoined;
+    CString m_cloudMatchDisplayText;
     std::string m_cloudMatchSyncComparisonRequestId;
     std::string m_cloudMatchSyncSnapshotRequestId;
     std::string m_cloudMatchSyncPreviewRequestId;
@@ -627,6 +636,7 @@ private:
     CButton   m_btnQuickAdd;   // 添加按钮
 
     CStatic         m_status;
+    CStatic         m_cloudMatchStatus;
     CRichEditCtrl   m_editOcrResult;
     CRichEditCtrl   m_editVisualLogs;
 

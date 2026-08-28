@@ -2407,12 +2407,15 @@ const CLOUD_ROOM_NAMES = Object.freeze({
     'wen-rou': '温柔房',
     '59': '59房'
 });
+const CLOUD_MATCH_DISPLAY_STATES = new Set(['online', 'working', 'offline', 'not-joined']);
 const cloudRoomNameSegmenter = typeof Intl.Segmenter === 'function'
     ? new Intl.Segmenter('zh-CN', { granularity: 'grapheme' }) : null;
 
 function normalizeCloudMatchState(value = {}) {
     const roomId = Object.prototype.hasOwnProperty.call(CLOUD_ROOM_NAMES, value.roomId)
         ? value.roomId : '';
+    const displayState = CLOUD_MATCH_DISPLAY_STATES.has(value.displayState)
+        ? value.displayState : 'not-joined';
     return {
         joined: value.joined === true && !!roomId,
         roomId,
@@ -2422,6 +2425,8 @@ function normalizeCloudMatchState(value = {}) {
         connected: value.connected === true,
         connecting: value.connecting === true,
         reconnecting: value.reconnecting === true,
+        displayState,
+        displayText: String(value.displayText || '未加入云端房间'),
         joining: value.joining === true,
         registering: value.registering === true,
         restoring: value.restoring === true,
@@ -2460,6 +2465,15 @@ function normalizeCloudSyncPanel(value = {}) {
 function isCloudRoomBusy(state = cloudMatchState) {
     return !!(state?.joining || state?.registering || state?.restoring ||
         state?.renaming || state?.leaving);
+}
+
+function renderCloudRoomStatus() {
+    const status = document.getElementById('cloud-room-status');
+    if (!status) return;
+    const state = cloudMatchState || normalizeCloudMatchState();
+    status.dataset.state = state.displayState;
+    status.textContent = state.displayText;
+    status.title = `${state.displayText}，点击打开云端比赛同步`;
 }
 
 function cloudRoomNameInfo(value) {
@@ -3415,6 +3429,7 @@ function applyStateFromServer(state) {
     killDisplaySettings = normalizeKillDisplaySettings(state.killDisplaySettings);
     keyMappingSettings = normalizeKeyMappingSettings(state.keyMappingSettings || keyMappingSettings || {});
     cloudMatchState = normalizeCloudMatchState(state.cloudMatch || cloudMatchState || {});
+    renderCloudRoomStatus();
     applyScoreboardTextStyles(scoreboardTextStyles);
     applyKillDisplaySettings(killDisplaySettings);
     if (isKeyMappingPanelOpen()) renderKeyMappingPanel();
@@ -4868,6 +4883,7 @@ document.getElementById('btn-random-teams')?.addEventListener('click', openRando
 document.getElementById('btn-key-mapping')?.addEventListener('click', openKeyMappingPanel);
 document.getElementById('btn-key-lan')?.addEventListener('click', openKeyLanPanel);
 document.getElementById('btn-cloud-sync')?.addEventListener('click', openCloudSyncPanel);
+document.getElementById('cloud-room-status')?.addEventListener('click', openCloudSyncPanel);
 document.getElementById('btn-cloud-match')?.addEventListener('click', () => openCloudRoomPanel(false));
 document.getElementById('btn-more-controls')?.addEventListener('click', (e) => {
     e.stopPropagation();

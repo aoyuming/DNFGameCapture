@@ -32,6 +32,7 @@
 
 #include "json.hpp"
 #include "CloudMatchSync.h"
+#include "CloudMatchStatusDisplay.h"
 using json = nlohmann::json;
 static CString s_backupAuthCode = L"";
 static CString s_pendingAuthCode = L"";
@@ -62,6 +63,7 @@ const int ID_BTN_DEATH_X_CALIBRATE = 1036;
 const int ID_BTN_DEATH_X_SAVE = 1037;
 const int ID_BTN_DEATH_X_CANCEL = 1038;
 const int ID_BTN_DEATH_X_DEFAULT = 1039;
+const int ID_STATIC_CLOUD_MATCH_STATUS = 1040;
 const CString PLACEHOLDER_TEXT = L"输入：主号(小号1)(小号2)...";
 
 constexpr int DEATH_X_ALGO_COLOR = 0;      // 当前颜色采样算法
@@ -4795,6 +4797,14 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_chkFlip.Create(L"翻转红蓝", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, CRect(10, row1_Y, 95, row1_Y + 25), this, ID_CHK_FLIP); m_chkFlip.SetFont(&m_font);
     m_btnHelp.Create(L"说明", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(100, row1_Y, 150, row1_Y + 25), this, 1021); m_btnHelp.SetFont(&m_font);
     m_status.Create(L"就绪", WS_CHILD | WS_VISIBLE | SS_CENTER, CRect(155, row1_Y + 4, 205, row1_Y + 25), this, 1003); m_status.SetFont(&m_font);
+    const int cloudStatusRight = (std::max)(210,
+        (std::min)(530, static_cast<int>(r.right) - 140));
+    m_cloudMatchStatus.Create(L"未加入云端房间",
+        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS,
+        CRect(10, row1_Y + 32, cloudStatusRight, row1_Y + 54), this,
+        ID_STATIC_CLOUD_MATCH_STATUS);
+    m_cloudMatchStatus.SetFont(&m_font);
+    RefreshCloudMatchStatusDisplay(m_cloudMatchClient.GetStatusSnapshot());
 
     HWND hDeathAlgoLabel = ::CreateWindowW(
         L"STATIC", L"死亡X算法：",
@@ -12283,6 +12293,8 @@ json CDNFGameCaptureDlg::DnfBuildSharedWebStateJson()
     data["systemFonts"] = DnfBuildInstalledFontListJson();
 
     const CloudMatchStatusSnapshot cloudStatus = m_cloudMatchClient.GetStatusSnapshot();
+    const CloudMatchDisplayStatus displayStatus =
+        BuildCloudMatchDisplayStatusSnapshot(cloudStatus);
     json cloudMatch;
     cloudMatch["joined"] = DnfIsCloudMatchRoomId(m_cloudMatchRoomId);
     cloudMatch["roomId"] = m_cloudMatchRoomId;
@@ -12292,6 +12304,8 @@ json CDNFGameCaptureDlg::DnfBuildSharedWebStateJson()
     cloudMatch["connected"] = cloudStatus.connected;
     cloudMatch["connecting"] = cloudStatus.connecting;
     cloudMatch["reconnecting"] = cloudStatus.reconnecting;
+    cloudMatch["displayState"] = CloudMatchDisplayStateName(displayStatus.state);
+    cloudMatch["displayText"] = DnfJsonUtf8(CString(displayStatus.text.c_str()));
     cloudMatch["joining"] = m_cloudMatchJoining;
     cloudMatch["registering"] = m_cloudMatchRegistering;
     cloudMatch["restoring"] = m_cloudMatchRestoring;
@@ -14020,12 +14034,77 @@ void CDNFGameCaptureDlg::MarkCloudMatchOcrStateChanged(std::string matchPayload)
     m_cloudMatchExplicitOcrPayload = std::move(matchPayload);
 }
 
+CloudMatchDisplayStatus CDNFGameCaptureDlg::BuildCloudMatchDisplayStatusSnapshot(
+    const CloudMatchStatusSnapshot& cloudStatus) const
+{
+    CloudMatchDisplayContext context;
+    context.hasJoinedRoom = DnfIsCloudMatchRoomId(m_cloudMatchRoomId) ||
+        DnfIsCloudMatchRoomId(cloudStatus.roomId);
+    context.joining = m_cloudMatchJoining;
+    context.registering = m_cloudMatchRegistering;
+    context.restoring = m_cloudMatchRestoring;
+    context.hasPendingRoom = (context.joining || context.registering ||
+        context.restoring) && DnfIsCloudMatchRoomId(m_cloudMatchPendingRoomId);
+    context.roomConfirmed = m_cloudMatchRoomConfirmed;
+
+    const std::string displayRoomId = context.hasPendingRoom ?
+        m_cloudMatchPendingRoomId :
+        (DnfIsCloudMatchRoomId(cloudStatus.roomId) ? cloudStatus.roomId :
+            m_cloudMatchRoomId);
+    CString roomName = DnfCloudMatchRoomDisplayName(displayRoomId);
+    if (!context.hasPendingRoom && cloudStatus.roomId == displayRoomId &&
+        !cloudStatus.roomName.empty()) {
+        CString actualRoomName = CA2W(cloudStatus.roomName.c_str(), CP_UTF8);
+        actualRoomName.Trim();
+        if (!actualRoomName.IsEmpty()) roomName = actualRoomName;
+    }
+
+    CString broadcasterName = context.hasPendingRoom ?
+        m_cloudMatchPendingBroadcasterName : m_cloudMatchBroadcasterName;
+    if (!context.hasPendingRoom && cloudStatus.roomId == displayRoomId &&
+        !cloudStatus.broadcasterName.empty()) {
+        CString actualBroadcasterName = CA2W(
+            cloudStatus.broadcasterName.c_str(), CP_UTF8);
+        actualBroadcasterName.Trim();
+        if (!actualBroadcasterName.IsEmpty()) {
+            broadcasterName = actualBroadcasterName;
+        }
+    }
+
+    context.roomName = roomName.GetString();
+    context.broadcasterName = broadcasterName.GetString();
+    return BuildCloudMatchDisplayStatus(cloudStatus, context);
+}
+
+void CDNFGameCaptureDlg::RefreshCloudMatchStatusDisplay(
+    const CloudMatchStatusSnapshot& cloudStatus)
+{
+    const CloudMatchDisplayStatus displayStatus =
+        BuildCloudMatchDisplayStatusSnapshot(cloudStatus);
+    const CString displayText(displayStatus.text.c_str());
+    if (m_cloudMatchDisplayInitialized &&
+        m_cloudMatchDisplayState == displayStatus.state &&
+        m_cloudMatchDisplayText == displayText) {
+        return;
+    }
+
+    m_cloudMatchDisplayInitialized = true;
+    m_cloudMatchDisplayState = displayStatus.state;
+    m_cloudMatchDisplayText = displayText;
+    if (m_cloudMatchStatus.GetSafeHwnd()) {
+        m_cloudMatchStatus.SetWindowText(displayText);
+        m_cloudMatchStatus.Invalidate(FALSE);
+    }
+    BroadcastStateToWeb();
+}
+
 void CDNFGameCaptureDlg::PollCloudMatch()
 {
     m_cloudMatchClient.DispatchMessages(32);
 
     const CloudMatchStatusSnapshot cloudStatus =
         m_cloudMatchClient.GetStatusSnapshot();
+    RefreshCloudMatchStatusDisplay(cloudStatus);
     const bool connectionGenerationChanged =
         cloudStatus.connectionGeneration != m_cloudMatchSyncConnectionGeneration;
     const bool disconnectedNow = m_cloudMatchSyncWasConnected &&
@@ -15597,6 +15676,24 @@ HBRUSH CDNFGameCaptureDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor) {
     else if (pWnd->GetDlgCtrlID() == 1033) {
         pDC->SetTextColor(RGB(150, 150, 150)); // 设定为灰色
         // 注意：这里不需要改变背景色，直接返回默认的 hbr 即可
+    }
+    else if (pWnd->GetSafeHwnd() == m_cloudMatchStatus.GetSafeHwnd()) {
+        switch (m_cloudMatchDisplayState) {
+        case CloudMatchDisplayState::online:
+            pDC->SetTextColor(RGB(35, 143, 85));
+            break;
+        case CloudMatchDisplayState::working:
+            pDC->SetTextColor(RGB(188, 135, 0));
+            break;
+        case CloudMatchDisplayState::offline:
+            pDC->SetTextColor(RGB(196, 48, 62));
+            break;
+        case CloudMatchDisplayState::notJoined:
+        default:
+            pDC->SetTextColor(RGB(112, 119, 128));
+            break;
+        }
+        pDC->SetBkMode(TRANSPARENT);
     }
 
     return hbr;
