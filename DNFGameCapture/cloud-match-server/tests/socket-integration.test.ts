@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 
 import { createCloudMatchApp } from '../src/app.js';
 import * as comparisonStore from '../src/comparison.js';
+import { createCloudMatchRateLimitService } from '../src/rate-limits.js';
 import * as roomStore from '../src/rooms.js';
 import type { MatchSnapshot, Player } from '../src/schemas.js';
 import * as snapshotStore from '../src/snapshots.js';
@@ -275,6 +276,127 @@ afterEach(async () => {
 });
 
 describe('cloud match Socket.IO integration', () => {
+  test('rate-limits registration by IP while keeping health checks available', async () => {
+    const rateLimitService = createCloudMatchRateLimitService({
+      registrationIpCapacity: 2,
+      registrationGlobalCapacity: 10,
+      registrationWindowSec: 60,
+    });
+    const { url } = await startApp({
+      rateLimitService,
+      resolveClientIp: () => 'registration-test-ip',
+    });
+
+    for (const deviceId of ['register-limit-0001', 'register-limit-0002']) {
+      const response = await request(url).post('/api/devices/register').send({ deviceId });
+      expect(response.status).toBe(201);
+    }
+    const limited = await request(url)
+      .post('/api/devices/register')
+      .send({ deviceId: 'register-limit-0003' });
+    expect(limited.status).toBe(429);
+    expect(limited.body).toEqual({ ok: false, code: 'rate_limited' });
+    await expect(request(url).get('/health')).resolves.toMatchObject({
+      status: 200,
+      body: { ok: true },
+    });
+  });
+
+  test('keeps device and IP comparison quotas across sockets and reconnects', async () => {
+    const rateLimitService = createCloudMatchRateLimitService({
+      comparisonDeviceCapacity: 1,
+      comparisonIpCapacity: 2,
+      comparisonMinIntervalSec: 0,
+      comparisonWindowSec: 60,
+      coldGlobalCapacity: 20,
+      coldRoomCapacity: 20,
+      coldRoomMinIntervalSec: 0,
+    });
+    const { app, url } = await startApp({
+      rateLimitService,
+      resolveClientIp: () => 'shared-nat-test-ip',
+    });
+    const first = await createDevice(url, 'quota-first-0001');
+    const second = await createDevice(url, 'quota-second-0002');
+    const third = await createDevice(url, 'quota-third-0003');
+    await joinRoom(first.socket, '59', 'First');
+    await joinRoom(second.socket, '59', 'Second');
+    await joinRoom(third.socket, '59', 'Third');
+
+    await expect(emitAck(first.socket, 'room:comparison', {})).resolves.toMatchObject({
+      ok: true,
+    });
+    await expect(emitAck(second.socket, 'room:comparison', {})).resolves.toMatchObject({
+      ok: true,
+    });
+    first.socket.disconnect();
+    await waitUntil(() => expect(first.socket.connected).toBe(false));
+    const reconnected = await connectRegistered(url, {
+      deviceId: first.deviceId,
+      deviceToken: first.deviceToken,
+    });
+    await expect(
+      emitAck(reconnected, 'room:comparison', {}),
+    ).resolves.toEqual({ ok: false, code: 'rate_limited' });
+    await expect(
+      emitAck(third.socket, 'room:comparison', {}),
+    ).resolves.toEqual({ ok: false, code: 'rate_limited' });
+
+    await expect(
+      emitAck(third.socket, 'snapshot:upload', { snapshot: snapshot(1) }),
+    ).resolves.toMatchObject({ ok: true, acceptedRevision: 1 });
+    expect(
+      app.db.prepare('select client_revision from snapshots where device_id = ?')
+        .get(third.deviceId),
+    ).toEqual({ client_revision: 1 });
+  });
+
+  test('prevents reconnect churn from repeatedly starting cold room comparisons', async () => {
+    let now = 1_700_000_000;
+    let comparisonCalls = 0;
+    const rateLimitService = createCloudMatchRateLimitService({
+      comparisonDeviceCapacity: 20,
+      comparisonIpCapacity: 20,
+      comparisonMinIntervalSec: 0,
+      coldGlobalCapacity: 20,
+      coldRoomCapacity: 1,
+      coldWindowSec: 60,
+      coldRoomMinIntervalSec: 0,
+    });
+    const { url } = await startApp({
+      now: () => now,
+      rateLimitService,
+      comparisonService: {
+        compareRoomSnapshots(rows, nowSec) {
+          comparisonCalls += 1;
+          return comparisonStore.compareRoomSnapshots(rows, nowSec);
+        },
+      },
+    });
+    const registration = await register(url, 'cold-reconnect-0001');
+    let socket = await connectRegistered(url, registration);
+    await joinRoom(socket, '59', 'Reconnect');
+    await expect(emitAck(socket, 'room:comparison', {})).resolves.toMatchObject({
+      ok: true,
+    });
+
+    now += 5;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      socket.disconnect();
+      socket = await connectRegistered(url, registration);
+      await expect(
+        emitAck(socket, 'room:comparison', {}),
+      ).resolves.toMatchObject({ ok: true });
+    }
+    now += 1;
+    socket.disconnect();
+    socket = await connectRegistered(url, registration);
+    await expect(
+      emitAck(socket, 'room:comparison', {}),
+    ).resolves.toEqual({ ok: false, code: 'rate_limited' });
+    expect(comparisonCalls).toBe(1);
+  });
+
   test('compares eight authenticated room members and exposes only safe summaries and previews', async () => {
     const { url } = await startApp();
     const devices: ConnectedDevice[] = [];
@@ -620,7 +742,7 @@ describe('cloud match Socket.IO integration', () => {
       nextCursor: string | null;
     }>(caller.socket, 'room:comparison', { limit: 1 });
     expect(refreshed.ok).toBe(true);
-    now += 21;
+    now += 31;
     await expect(
       emitAck(caller.socket, 'room:comparison', {
         comparisonToken: refreshed.comparisonToken,
@@ -726,6 +848,14 @@ describe('cloud match Socket.IO integration', () => {
     const release = createDeferred<void>();
     let comparisonCalls = 0;
     const { url } = await startApp({
+      rateLimitService: createCloudMatchRateLimitService({
+        comparisonDeviceCapacity: 1,
+        comparisonIpCapacity: 10,
+        comparisonMinIntervalSec: 0,
+        coldGlobalCapacity: 10,
+        coldRoomCapacity: 10,
+        coldRoomMinIntervalSec: 0,
+      }),
       comparisonService: {
         async compareRoomSnapshots(rows, nowSec) {
           comparisonCalls += 1;
@@ -805,6 +935,67 @@ describe('cloud match Socket.IO integration', () => {
       excludedFromConsensus: false,
     });
     expect(comparisonCalls).toBe(2);
+  });
+
+  test('grants a full session TTL when a socket hits the tail of shared cache', async () => {
+    let now = 1_700_000_000;
+    let comparisonCalls = 0;
+    const rateLimitService = createCloudMatchRateLimitService({
+      comparisonDeviceCapacity: 20,
+      comparisonIpCapacity: 20,
+      comparisonMinIntervalSec: 0,
+      coldGlobalCapacity: 20,
+      coldRoomCapacity: 20,
+      coldRoomMinIntervalSec: 0,
+    });
+    const { url } = await startApp({
+      now: () => now,
+      rateLimitService,
+      comparisonService: {
+        compareRoomSnapshots(rows, nowSec) {
+          comparisonCalls += 1;
+          return comparisonStore.compareRoomSnapshots(rows, nowSec);
+        },
+      },
+    });
+    const devices = await Promise.all([
+      createDevice(url, 'ttl-member-0001'),
+      createDevice(url, 'ttl-member-0002'),
+      createDevice(url, 'ttl-member-0003'),
+    ]);
+    for (let index = 0; index < devices.length; index += 1) {
+      await joinRoom(devices[index].socket, '59', `Member ${index + 1}`);
+    }
+    await emitAck(devices[0].socket, 'room:comparison', { limit: 1 });
+
+    now += 4;
+    const cached = await emitAck<{
+      comparisonToken: string;
+      generatedAt: number;
+      nextCursor: string;
+    }>(devices[1].socket, 'room:comparison', { limit: 1 });
+    expect(cached.generatedAt).toBe(1_700_000_000);
+    expect(comparisonCalls).toBe(1);
+
+    now += 29;
+    const secondPage = await emitAck<{
+      ok: boolean;
+      nextCursor: string;
+    }>(devices[1].socket, 'room:comparison', {
+      comparisonToken: cached.comparisonToken,
+      cursor: cached.nextCursor,
+      limit: 1,
+    });
+    expect(secondPage.ok).toBe(true);
+
+    now += 2;
+    await expect(
+      emitAck(devices[1].socket, 'room:comparison', {
+        comparisonToken: cached.comparisonToken,
+        cursor: secondPage.nextCursor,
+        limit: 1,
+      }),
+    ).resolves.toEqual({ ok: false, code: 'comparison_expired' });
   });
 
   test('fetches only the explicitly requested snapshot revision', async () => {
@@ -1232,6 +1423,14 @@ describe('cloud match Socket.IO integration', () => {
     let failSave = true;
     let failComparison = true;
     const { app, url } = await startApp({
+      rateLimitService: createCloudMatchRateLimitService({
+        comparisonDeviceCapacity: 10,
+        comparisonIpCapacity: 10,
+        comparisonMinIntervalSec: 0,
+        coldGlobalCapacity: 10,
+        coldRoomCapacity: 10,
+        coldRoomMinIntervalSec: 0,
+      }),
       snapshotService: {
         saveSnapshot(db, input) {
           const result = snapshotStore.saveSnapshot(db, input);

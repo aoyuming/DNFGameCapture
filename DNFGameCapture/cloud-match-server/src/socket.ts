@@ -1,10 +1,11 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { Server as SocketIoServer, Socket } from 'socket.io';
 import { z } from 'zod';
 
 import { compareRoomSnapshots, type RoomComparison } from './comparison.js';
 import { openDatabase } from './db.js';
 import { authenticateDevice, touchLastSeen } from './identity.js';
+import type { CloudMatchRateLimitService } from './rate-limits.js';
 import type {
   BoundedRoomMembers,
   MembershipDto,
@@ -38,8 +39,8 @@ const MAX_COMPARISON_ACK_BYTES = 96 * 1_024;
 const MAX_PROTOCOL_ACK_BYTES = 128 * 1_024;
 const MAX_DEVICE_PENDING_OPERATIONS = 64;
 const MAX_SHARED_COMPARISONS = 8;
-const COMPARISON_TOKEN_TTL_SECONDS = 20;
-const COMPARISON_REFRESH_COOLDOWN_SECONDS = 1;
+const SHARED_COMPARISON_TTL_SECONDS = 5;
+const COMPARISON_SESSION_TTL_SECONDS = 30;
 const FIXED_ROOM_IDS = ['59', 'li-yong', 'wen-rou'] as const;
 const emptyPayloadSchema = z.object({}).strict();
 const comparisonRequestSchema = z
@@ -134,6 +135,8 @@ export interface RegisterCloudMatchSocketHandlersContext {
   roomService: RoomService;
   snapshotService?: SnapshotService;
   comparisonService?: ComparisonService;
+  rateLimitService: CloudMatchRateLimitService;
+  resolveClientIp(remoteAddress: string): string;
   socketRoomAdapter: SocketRoomAdapter;
 }
 
@@ -170,7 +173,7 @@ interface SharedComparison {
 
 type MaterializeComparisonResult =
   | { ok: true; comparison: MaterializedComparison }
-  | { ok: false; code: 'comparison_changed' };
+  | { ok: false; code: 'comparison_changed' | 'rate_limited' };
 
 function createSocketError(code: string): Error & { data: { code: string } } {
   const message =
@@ -268,6 +271,8 @@ export function registerCloudMatchSocketHandlers(
     db,
     now,
     roomService,
+    rateLimitService,
+    resolveClientIp,
     socketRoomAdapter,
     snapshotService = { saveSnapshot, getSnapshot, getRoomSnapshots },
     comparisonService = { compareRoomSnapshots },
@@ -308,8 +313,9 @@ export function registerCloudMatchSocketHandlers(
 
   const rememberComparison = (
     key: string,
+    acquireColdLease: () => boolean,
     build: () => Promise<MaterializedComparison>,
-  ): Promise<MaterializedComparison> => {
+  ): Promise<MaterializedComparison> | null => {
     const existing = comparisonCache.get(key);
     if (existing && now() <= existing.expiresAt) {
       return existing.pending;
@@ -317,9 +323,12 @@ export function registerCloudMatchSocketHandlers(
     if (existing) {
       comparisonCache.delete(key);
     }
+    if (!acquireColdLease()) {
+      return null;
+    }
     const pending = build();
     const shared = {
-      expiresAt: now() + COMPARISON_TOKEN_TTL_SECONDS,
+      expiresAt: now() + SHARED_COMPARISON_TTL_SECONDS,
       pending,
     };
     comparisonCache.set(key, shared);
@@ -342,19 +351,25 @@ export function registerCloudMatchSocketHandlers(
     roomId: string,
     requiredDeviceId: string,
   ): Promise<MaterializeComparisonResult> => {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const roomRevision = await roomService.getRoomRevision(db, roomId);
-      const generatedAt = now();
-      const boundedRoom = await roomService.listRoomMembersBounded(
-        db,
-        roomId,
-        requiredDeviceId,
-        MAX_COMPARISON_MEMBERS,
-      );
-      const roomMembers = boundedRoom.members;
-      const memberFingerprint = roomMembers.map((member) => member.deviceId).join(',');
-      const cacheKey = `${roomId}:${roomRevision}:${memberFingerprint}`;
-      const comparison = await rememberComparison(cacheKey, async () => {
+    const coldLease: { release: (() => void) | null } = { release: null };
+    const acquireColdLease = (): boolean => {
+      if (coldLease.release) {
+        return true;
+      }
+      coldLease.release = rateLimitService.tryAcquireColdComparison(roomId, now());
+      return coldLease.release !== null;
+    };
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const roomRevision = await roomService.getRoomRevision(db, roomId);
+        const generatedAt = now();
+        const boundedRoom = await roomService.listRoomMembersBounded(
+          db,
+          roomId,
+          requiredDeviceId,
+          MAX_COMPARISON_MEMBERS,
+        );
+        const roomMembers = boundedRoom.members;
         const boundedMemberIds = new Set(
           roomMembers.map((member) => member.deviceId),
         );
@@ -363,72 +378,110 @@ export function registerCloudMatchSocketHandlers(
           roomId,
           [...boundedMemberIds],
         );
-        const inputRows = snapshots
-          .filter((row) => boundedMemberIds.has(row.deviceId))
-          .map((row) => ({
-            ...row,
-            online: activeSockets.has(row.deviceId),
-          }));
-        const compared = await comparisonService.compareRoomSnapshots(
-          inputRows,
-          generatedAt,
-        );
-        const comparedByDeviceId = new Map(
-          compared.members.map((member) => [member.deviceId, member]),
-        );
-        const members = roomMembers.map((member): Record<string, unknown> => {
-          const item = comparedByDeviceId.get(member.deviceId);
-          if (!item) {
+        const dataFingerprint = createHash('sha256')
+          .update(JSON.stringify({
+            totalMembers: boundedRoom.totalMembers,
+            members: roomMembers.map((member) => [
+              member.deviceId,
+              member.broadcasterName,
+            ]),
+            snapshots: snapshots.map((row) => [
+              row.deviceId,
+              row.snapshot.clientRevision,
+              row.receivedAt,
+            ]),
+          }))
+          .digest('base64url');
+        const cacheKey = `${roomId}:${dataFingerprint}`;
+        const cachedComparison = rememberComparison(
+          cacheKey,
+          acquireColdLease,
+          async () => {
+            const inputRows = snapshots
+              .filter((row) => boundedMemberIds.has(row.deviceId))
+              .map((row) => ({
+                ...row,
+                online: activeSockets.has(row.deviceId),
+              }));
+            const compared = await comparisonService.compareRoomSnapshots(
+              inputRows,
+              generatedAt,
+            );
+            const comparedByDeviceId = new Map(
+              compared.members.map((member) => [member.deviceId, member]),
+            );
+            const members = roomMembers.map((member): Record<string, unknown> => {
+              const item = comparedByDeviceId.get(member.deviceId);
+              if (!item) {
+                return {
+                  ...member,
+                  online: activeSockets.has(member.deviceId),
+                  state: 'no_data' as const,
+                };
+              }
+              return {
+                deviceId: item.deviceId,
+                broadcasterName: item.broadcasterName,
+                deviceSuffix: item.deviceSuffix,
+                online: activeSockets.has(item.deviceId),
+                state: item.stale ? ('stale' as const) : ('updated' as const),
+                clientRevision: item.clientRevision,
+                receivedAt: item.receivedAt,
+                stale: item.stale,
+                excludedFromConsensus: item.excludedFromConsensus,
+                sourceRoot: item.sourceRoot,
+                swapped: item.swapped,
+                identityMatchPercent: item.identityMatchPercent,
+                similarity: item.similarity,
+              };
+            });
+            const memberIds = new Set(
+              members.map((member) => member.deviceId as string),
+            );
+            const groups = compared.groups.flatMap((group) => {
+              const memberDeviceIds = [...new Set(group.memberDeviceIds)].filter(
+                (id) => memberIds.has(id),
+              );
+              return memberDeviceIds.length > 0
+                ? [{ id: group.id, memberDeviceIds }]
+                : [];
+            });
             return {
-              ...member,
-              online: activeSockets.has(member.deviceId),
-              state: 'no_data' as const,
+              roomId,
+              roomRevision,
+              generatedAt,
+              consensusDeviceId: compared.consensusDeviceId,
+              members,
+              groups,
+              totalMembers: boundedRoom.totalMembers,
+              boundedMembers: members.length,
+              truncated: boundedRoom.totalMembers > members.length,
             };
-          }
+          },
+        );
+        if (!cachedComparison) {
+          return { ok: false, code: 'rate_limited' };
+        }
+        const sharedComparison = await cachedComparison;
+        const revisionAfter = await roomService.getRoomRevision(db, roomId);
+        if (revisionAfter === roomRevision) {
           return {
-            deviceId: item.deviceId,
-            broadcasterName: item.broadcasterName,
-            deviceSuffix: item.deviceSuffix,
-            online: activeSockets.has(item.deviceId),
-            state: item.stale ? ('stale' as const) : ('updated' as const),
-            clientRevision: item.clientRevision,
-            receivedAt: item.receivedAt,
-            stale: item.stale,
-            excludedFromConsensus: item.excludedFromConsensus,
-            sourceRoot: item.sourceRoot,
-            swapped: item.swapped,
-            identityMatchPercent: item.identityMatchPercent,
-            similarity: item.similarity,
+            ok: true,
+            comparison: {
+              ...sharedComparison,
+              roomRevision,
+              members: sharedComparison.members.map((member) => ({
+                ...member,
+                online: activeSockets.has(member.deviceId as string),
+              })),
+            },
           };
-        });
-        const memberIds = new Set(members.map((member) => member.deviceId as string));
-        const groups = compared.groups.flatMap((group) => {
-          const memberDeviceIds = [...new Set(group.memberDeviceIds)].filter((id) =>
-            memberIds.has(id),
-          );
-          return memberDeviceIds.length > 0
-            ? [{ id: group.id, memberDeviceIds }]
-            : [];
-        });
-        return {
-          roomId,
-          roomRevision,
-          generatedAt,
-          consensusDeviceId: compared.consensusDeviceId,
-          members,
-          groups,
-          totalMembers: boundedRoom.totalMembers,
-          boundedMembers: members.length,
-          truncated: boundedRoom.totalMembers > members.length,
-        };
-      });
-      const revisionAfter = await roomService.getRoomRevision(db, roomId);
-      if (revisionAfter === roomRevision) {
-        return { ok: true, comparison };
+        }
       }
-      comparisonCache.delete(cacheKey);
+      return { ok: false, code: 'comparison_changed' };
+    } finally {
+      coldLease.release?.();
     }
-    return { ok: false, code: 'comparison_changed' };
   };
 
   const announceRoomNotification = (
@@ -502,10 +555,10 @@ export function registerCloudMatchSocketHandlers(
 
   io.on('connection', (socket) => {
     const deviceId = (socket.data as AuthenticatedSocketData).deviceId;
+    const socketIpAddress = resolveClientIp(socket.handshake.address || 'unknown');
     let restoredRoomId: string | null = null;
     let pendingSerializedOperations = 0;
     let comparisonSession: ComparisonSession | null = null;
-    let lastComparisonStartedAt = Number.NEGATIVE_INFINITY;
 
     const initialization = enqueueDeviceOperation(deviceId, async () => {
       if (!socket.connected) {
@@ -829,28 +882,18 @@ export function registerCloudMatchSocketHandlers(
             return { ok: false, code: 'invalid_comparison_cursor' };
           }
         } else {
-          const startedAt = now();
-          if (startedAt - lastComparisonStartedAt < COMPARISON_REFRESH_COOLDOWN_SECONDS) {
+          if (!rateLimitService.allowComparison(deviceId, socketIpAddress, now())) {
             return { ok: false, code: 'rate_limited' };
           }
-          lastComparisonStartedAt = startedAt;
           comparisonSession = null;
-          let materialized: MaterializeComparisonResult;
-          try {
-            materialized = await materializeComparison(roomId, deviceId);
-          } catch (error) {
-            lastComparisonStartedAt = Number.NEGATIVE_INFINITY;
-            throw error;
-          }
+          const materialized = await materializeComparison(roomId, deviceId);
           if (!materialized.ok) {
-            lastComparisonStartedAt = Number.NEGATIVE_INFINITY;
             return materialized;
           }
           comparisonSession = {
             ...materialized.comparison,
             token: randomBytes(32).toString('base64url'),
-            expiresAt:
-              materialized.comparison.generatedAt + COMPARISON_TOKEN_TTL_SECONDS,
+            expiresAt: now() + COMPARISON_SESSION_TTL_SECONDS,
             expectedCursor: null,
           };
         }

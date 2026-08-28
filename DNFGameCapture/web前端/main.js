@@ -75,6 +75,14 @@ let pendingClearAllUntil = 0;
 function applyWebTheme(value) {
     const theme = CLOUD_MATCH_WEB_THEMES.has(value) ? value : 'dark-esports';
     document.documentElement.dataset.theme = theme;
+    const select = document.getElementById('web-theme-select');
+    if (select && select.value !== theme) select.value = theme;
+    return theme;
+}
+
+function requestWebTheme(value) {
+    const theme = applyWebTheme(value);
+    window.chrome?.webview?.postMessage({ action: 'cmd_set_web_theme', theme });
     return theme;
 }
 
@@ -5216,6 +5224,9 @@ document.getElementById('btn-push-alias-db')?.addEventListener('click', () => {
 document.getElementById('btn-pro').addEventListener('click', () => window.chrome.webview.postMessage({ action: "cmd_toggle_mfc", show: !isProMode }));
 document.getElementById('btn-appearance')?.addEventListener('click', openAppearancePanel);
 document.getElementById('btn-appearance-close')?.addEventListener('click', closeAppearancePanel);
+document.getElementById('web-theme-select')?.addEventListener('change', function () {
+    requestWebTheme(this.value);
+});
 document.getElementById('appearance-overlay')?.addEventListener('click', (e) => {
     if (e.target?.id === 'appearance-overlay') closeAppearancePanel();
 });

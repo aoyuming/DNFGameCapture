@@ -11,6 +11,10 @@ import { compareRoomSnapshots } from './comparison.js';
 import { serverConfig } from './config.js';
 import { openDatabase } from './db.js';
 import { registerDevice } from './identity.js';
+import {
+  createCloudMatchRateLimitService,
+  type CloudMatchRateLimitService,
+} from './rate-limits.js';
 import * as defaultRoomService from './rooms.js';
 import { registerBodySchema } from './schemas.js';
 import {
@@ -37,6 +41,11 @@ export interface CreateCloudMatchAppOptions {
   roomService?: Partial<RoomService>;
   snapshotService?: Partial<SnapshotService>;
   comparisonService?: Partial<ComparisonService>;
+  rateLimitService?: CloudMatchRateLimitService;
+  resolveClientIp?: (
+    transport: 'http' | 'socket',
+    remoteAddress: string,
+  ) => string;
   socketRoomAdapter?: SocketRoomAdapter;
 }
 
@@ -87,6 +96,17 @@ export function createCloudMatchApp(
     compareRoomSnapshots,
     ...options.comparisonService,
   };
+  const rateLimitService =
+    options.rateLimitService ?? createCloudMatchRateLimitService();
+  const resolveClientIp = (
+    transport: 'http' | 'socket',
+    remoteAddress: string,
+  ): string => {
+    const resolved = options.resolveClientIp
+      ? options.resolveClientIp(transport, remoteAddress)
+      : remoteAddress;
+    return resolved.trim().slice(0, 128) || 'unknown';
+  };
   const socketRoomAdapter: SocketRoomAdapter =
     options.socketRoomAdapter ?? {
       async join(socket, room): Promise<void> {
@@ -107,6 +127,14 @@ export function createCloudMatchApp(
     response.json({ ok: true });
   });
   expressApp.post('/api/devices/register', (request, response) => {
+    const ipAddress = resolveClientIp(
+      'http',
+      request.socket.remoteAddress ?? 'unknown',
+    );
+    if (!rateLimitService.allowRegistration(ipAddress, now())) {
+      response.status(429).json({ ok: false, code: 'rate_limited' });
+      return;
+    }
     const parsed = registerBodySchema.safeParse(request.body);
     if (!parsed.success) {
       response.status(400).json({ ok: false, code: 'invalid_request' });
@@ -129,6 +157,8 @@ export function createCloudMatchApp(
     roomService,
     snapshotService,
     comparisonService,
+    rateLimitService,
+    resolveClientIp: (remoteAddress) => resolveClientIp('socket', remoteAddress),
     socketRoomAdapter,
   });
 

@@ -668,6 +668,7 @@ private:
     CString m_configPath;
     CString m_iniPath;
     CString m_outputDir;
+    CString m_webTheme = L"dark-esports";
     bool m_bOutputSeatLabelToKillFile = false;
     bool m_bRedPickFirst = false;
 

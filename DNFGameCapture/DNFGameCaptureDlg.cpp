@@ -118,6 +118,18 @@ static CString DnfNormalizeHexColor(CString value)
     return value;
 }
 
+static bool DnfIsWebTheme(const CString& value)
+{
+    return value == L"dark-esports" || value == L"frost-broadcast" ||
+        value == L"black-gold";
+}
+
+static CString DnfNormalizeWebTheme(CString value)
+{
+    value.Trim();
+    return DnfIsWebTheme(value) ? value : CString(L"dark-esports");
+}
+
 struct DnfDefaultKeyMappingSlot {
     UINT vk;
     const wchar_t* label;
@@ -4680,6 +4692,10 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_configPath = appDir + L"players_config.txt";
     m_iniPath = appDir + L"config.ini";
     m_webFrontDir = appDir + L"web前端";
+    wchar_t webThemeBuffer[32] = {};
+    ::GetPrivateProfileString(L"Settings", L"WebTheme", L"dark-esports",
+        webThemeBuffer, static_cast<DWORD>(std::size(webThemeBuffer)), m_iniPath);
+    m_webTheme = DnfNormalizeWebTheme(webThemeBuffer);
     LoadCloudMatchSettings();
     LoadKeyMappingLanSettings();
     LoadKeyMappingSettings();
@@ -11401,6 +11417,21 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             }
             BroadcastStateToWeb();
         }
+        else if (action == "cmd_set_web_theme") {
+            if (j.contains("theme") && j["theme"].is_string()) {
+                CString requestedTheme = CA2W(
+                    j["theme"].get<std::string>().c_str(), CP_UTF8);
+                requestedTheme.Trim();
+                if (DnfIsWebTheme(requestedTheme)) {
+                    const CString previousTheme = m_webTheme;
+                    m_webTheme = requestedTheme;
+                    if (::WritePrivateProfileString(L"Settings", L"WebTheme", m_webTheme, m_iniPath) == FALSE) {
+                        m_webTheme = previousTheme;
+                    }
+                }
+            }
+            BroadcastStateToWeb();
+        }
         else if (action == "cmd_set_appearance_panel_open") {
             if (m_pWebDlg) {
                 m_pWebDlg->SetAppearancePanelExpanded(j.value("open", false));
@@ -12227,6 +12258,7 @@ json CDNFGameCaptureDlg::DnfBuildSharedWebStateJson()
     data["outputSeatLabelToKillFile"] = m_bOutputSeatLabelToKillFile;
     data["redPickMode"] = m_bRedPickFirst ? "first" : "second";
     data["redPickFirst"] = m_bRedPickFirst;
+    data["webTheme"] = DnfJsonUtf8(m_webTheme);
     data["scoreboardTextStyles"] = DnfBuildScoreboardTextStylesJson(m_iniPath);
     data["killDisplaySettings"] = DnfBuildKillDisplaySettingsJson(m_iniPath);
     data["killDisplayObsUrl"] = KILL_DISPLAY_OBS_URL_UTF8;
