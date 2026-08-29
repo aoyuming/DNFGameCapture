@@ -22,6 +22,8 @@ let selectedKeyMappingSlot = 0;
 let keyMappingCaptureSlot = -1;
 let keyMappingSyncTimer = null;
 let keyMappingAdminPromptVisible = false;
+let keyLanAutoDiscoverRequested = false;
+let keyLanConnectionNoticeTimer = null;
 let pendingTeamSyncSnapshot = null;
 let cloudMatchState = null;
 let cloudRoomFirstRun = false;
@@ -632,6 +634,9 @@ if (window.chrome && window.chrome.webview) {
             }
             else if (msg.action === 'key_mapping_admin_required') {
                 showKeyMappingAdminPrompt(msg.message);
+            }
+            else if (msg.action === 'key_lan_connected') {
+                showKeyLanConnectionNotice(msg.message, 'success');
             }
             else if (msg.action === 'team_sync_snapshot') {
                 showTeamSyncSnapshot(msg.data);
@@ -2540,6 +2545,18 @@ function sortBroadcasterDirectory(members, nowSeconds = Date.now() / 1000) {
         });
 }
 
+function visibleBroadcasterDirectory(members, nowSeconds = Date.now() / 1000) {
+    const retentionSeconds = 24 * 60 * 60;
+    const offlineVisibleSeconds = 10 * 60;
+    return sortBroadcasterDirectory(members, nowSeconds).filter(member => {
+        if (member?.online === true) return true;
+        const expiresAt = Number(member?.offlineExpiresAt || 0);
+        if (!Number.isFinite(expiresAt) || expiresAt <= 0) return false;
+        const offlineAt = expiresAt - retentionSeconds;
+        return nowSeconds - offlineAt <= offlineVisibleSeconds;
+    });
+}
+
 function cloudRelationSummary(deviceId) {
     const id = String(deviceId || '');
     const history = cloudMatchState?.syncHistory?.all || [];
@@ -2629,6 +2646,15 @@ function buildBroadcasterCard(member) {
     return button;
 }
 
+function cloudBroadcasterSubmitText(state = {}) {
+    const hasIdentity = String(state.broadcasterName ||
+        state.unifiedPool?.broadcasterName || '').trim().length > 0;
+    if (state.renaming || state.joining || state.registering) {
+        return hasIdentity ? '应用中' : '连接中';
+    }
+    return hasIdentity ? '应用' : '连接';
+}
+
 function renderBroadcasterSidebar() {
     const state = cloudMatchState || normalizeCloudMatchState();
     const status = document.getElementById('broadcaster-cloud-status');
@@ -2646,11 +2672,12 @@ function renderBroadcasterSidebar() {
     const save = document.getElementById('btn-cloud-rename-broadcaster');
     if (save) {
         save.disabled = state.renaming || state.joining || state.registering;
-        save.textContent = state.renaming || state.joining ? '保存中' : '保存';
+        save.textContent = cloudBroadcasterSubmitText(state);
+        save.title = state.broadcasterName ? '应用主播名称' : '连接云端主播大厅';
     }
 
     const selfId = String(state.unifiedPool?.deviceId || '');
-    const members = sortBroadcasterDirectory((state.broadcasters || []).filter(member =>
+    const members = visibleBroadcasterDirectory((state.broadcasters || []).filter(member =>
         String(member?.deviceId || '') !== selfId));
     const onlineCount = members.filter(member => member?.online === true).length;
     const offlineCount = members.length - onlineCount;
@@ -2661,7 +2688,7 @@ function renderBroadcasterSidebar() {
             const empty = document.createElement('div');
             empty.className = 'broadcaster-list-empty';
             empty.textContent = state.connected
-                ? '暂无其他在线或最近离线主播'
+                ? '暂无其他在线或最近 10 分钟离线主播'
                 : '连接云端后显示主播列表';
             list.appendChild(empty);
         } else {
@@ -3439,6 +3466,57 @@ function sendKeyLanCommand(action, payload = {}) {
     window.chrome?.webview?.postMessage({ action, ...payload });
 }
 
+function requestKeyLanDiscovery() {
+    const portInput = document.getElementById('key-lan-client-port');
+    const port = Math.max(1024, Math.min(65535,
+        Number(portInput?.value || keyMappingSettings?.lan?.port || 18778)));
+    sendKeyLanCommand('cmd_discover_key_lan_servers', { port });
+}
+
+function requestAutomaticKeyLanDiscovery() {
+    const lan = keyMappingSettings?.lan;
+    if (!isKeyLanPanelOpen() || lan?.role !== 'client' || lan.running ||
+        lan.discovering || keyLanAutoDiscoverRequested) return;
+    keyLanAutoDiscoverRequested = true;
+    requestKeyLanDiscovery();
+}
+
+function applySelectedKeyLanServer(list = document.getElementById('key-lan-server-list')) {
+    const option = list?.selectedOptions?.[0];
+    const selectedServer = {
+        address: String(option?.dataset?.address || '').trim(),
+        port: Math.max(1024, Math.min(65535, Number(option?.dataset?.port || 18778)))
+    };
+    if (!selectedServer.address) return false;
+
+    const addressInput = document.getElementById('key-lan-server-address');
+    const portInput = document.getElementById('key-lan-client-port');
+    if (document.activeElement !== addressInput) addressInput.value = selectedServer.address;
+    if (document.activeElement !== portInput) portInput.value = String(selectedServer.port);
+    if (keyMappingSettings?.lan) {
+        keyMappingSettings.lan.serverAddress = selectedServer.address;
+        keyMappingSettings.lan.port = selectedServer.port;
+    }
+    return true;
+}
+
+function showKeyLanConnectionNotice(message, state = 'success') {
+    let notice = document.getElementById('key-lan-connection-notice');
+    if (!notice) {
+        notice = document.createElement('div');
+        notice.id = 'key-lan-connection-notice';
+        notice.className = 'key-lan-connection-notice';
+        notice.setAttribute('role', 'status');
+        notice.setAttribute('aria-live', 'polite');
+        document.body.appendChild(notice);
+    }
+    notice.dataset.state = state;
+    notice.textContent = String(message || '已连接到局域网服务器。');
+    notice.classList.add('visible');
+    if (keyLanConnectionNoticeTimer) clearTimeout(keyLanConnectionNoticeTimer);
+    keyLanConnectionNoticeTimer = setTimeout(() => notice.classList.remove('visible'), 3600);
+}
+
 function keyLanStatusText(lan) {
     if (lan.role === 'standalone') return lan.isAdmin ? '单机模式 · 管理员权限' : '单机模式 · 需要管理员权限读取 DNF';
     const labels = {
@@ -3523,17 +3601,19 @@ function renderKeyLanPanel() {
             option.textContent = lan.discovering ? '正在搜索...' : '没有发现服务器，可手动输入 IP';
             list.appendChild(option);
         } else {
+            const preferredAddress = previousAddress || lan.serverAddress || '';
+            let selectedIndex = lan.servers.findIndex(server => server.address === preferredAddress);
+            if (selectedIndex < 0) selectedIndex = 0;
             lan.servers.forEach((server, index) => {
                 const option = document.createElement('option');
                 option.value = String(index);
                 option.dataset.address = String(server.address || '');
                 option.dataset.port = String(server.port || lan.port);
                 option.textContent = `${server.name || '按键服务器'} · ${server.address}`;
-                if (server.address === previousAddress || (!previousAddress && server.address === lan.serverAddress)) {
-                    option.selected = true;
-                }
+                option.selected = index === selectedIndex;
                 list.appendChild(option);
             });
+            applySelectedKeyLanServer(list);
         }
         const discover = document.getElementById('btn-key-lan-discover');
         discover.disabled = lan.discovering;
@@ -3733,10 +3813,12 @@ function openKeyLanPanel() {
     const overlay = document.getElementById('key-lan-overlay');
     if (!overlay) return;
     keyMappingSettings = normalizeKeyMappingSettings(keyMappingSettings || {});
+    keyLanAutoDiscoverRequested = false;
     setMoreControlsOpen(false);
     overlay.classList.add('active');
     overlay.setAttribute('aria-hidden', 'false');
     renderKeyLanPanel();
+    requestAutomaticKeyLanDiscovery();
     window.chrome?.webview?.postMessage({ action: 'cmd_set_appearance_panel_open', open: true });
 }
 
@@ -3745,6 +3827,7 @@ function closeKeyLanPanel() {
     if (!overlay) return;
     overlay.classList.remove('active');
     overlay.setAttribute('aria-hidden', 'true');
+    keyLanAutoDiscoverRequested = false;
     window.chrome?.webview?.postMessage({ action: 'cmd_set_appearance_panel_open', open: false });
 }
 
@@ -5540,6 +5623,10 @@ document.getElementById('key-lan-role')?.addEventListener('change', function () 
     keyMappingSettings.lan.connected = false;
     renderKeyLanPanel();
     sendKeyLanCommand('cmd_set_key_lan_role', { role });
+    if (role === 'client') {
+        keyLanAutoDiscoverRequested = false;
+        requestAutomaticKeyLanDiscovery();
+    }
 });
 document.getElementById('btn-key-lan-server-toggle')?.addEventListener('click', () => {
     const lan = keyMappingSettings.lan;
@@ -5557,15 +5644,10 @@ document.getElementById('btn-key-lan-regenerate')?.addEventListener('click', () 
     });
 });
 document.getElementById('btn-key-lan-discover')?.addEventListener('click', () => {
-    const port = Math.max(1024, Math.min(65535,
-        Number(document.getElementById('key-lan-client-port').value || 18778)));
-    sendKeyLanCommand('cmd_discover_key_lan_servers', { port });
+    requestKeyLanDiscovery();
 });
 document.getElementById('key-lan-server-list')?.addEventListener('change', function () {
-    const option = this.selectedOptions[0];
-    if (!option?.dataset?.address) return;
-    document.getElementById('key-lan-server-address').value = option.dataset.address;
-    document.getElementById('key-lan-client-port').value = option.dataset.port || '18778';
+    applySelectedKeyLanServer(this);
 });
 document.getElementById('key-lan-pair-code')?.addEventListener('input', function () {
     this.value = this.value.replace(/\D/g, '').slice(0, 4);

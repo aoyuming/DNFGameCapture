@@ -172,3 +172,5 @@ Require-Text $dialogSource '127.0.0.1' 'The local display service loopback bindi
 Reject-Text $dialogSource 'INADDR_ANY; // 18777' 'The 18777 display service must remain loopback-only.'
 
 Write-Host 'Key mapping LAN static checks passed.' -ForegroundColor Green
+
+& (Join-Path $PSScriptRoot 'check-key-lan-auto-connect-feature.ps1')

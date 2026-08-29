@@ -11254,6 +11254,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 CString ackText = CA2W(bridgeAck.dump().c_str(), CP_UTF8);
                 m_pWebDlg->SendStateToWeb(ackText);
             }
+            ResumePendingKeyMappingLanClientConnection();
             BroadcastStateToWeb();
             if (m_pWebDlg) m_pWebDlg->WriteWebHostDiagnostics(L"前端page_ready");
         }
@@ -12090,6 +12091,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 }
                 CString hookError;
                 const bool requestedEnabled = settings.value("enabled", m_keyMappingEnabled.load());
+                if (!requestedEnabled) m_keyMappingLanAdminConnectRequested = false;
                 const bool enabledApplied = SetKeyMappingEnabled(requestedEnabled, hookError);
                 SaveKeyMappingSettings();
                 PollKeyMappingState();
@@ -12176,33 +12178,28 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 DnfSendWebToast(m_pWebDlg, L"key_mapping_error", L"请输入服务器 IP 和 4 位配对码。");
                 BroadcastStateToWeb();
             }
-            else if (!IsRunningAsAdmin()) {
-                CString ignored;
-                SetKeyMappingEnabled(false, ignored);
-                SaveKeyMappingSettings();
-                NotifyKeyMappingAdminRequired(L"客户端需要读取 DNF 按键，请先以管理员身份重启软件。\n当前配置会先保存。 ");
-                BroadcastStateToWeb();
-            }
             else {
-                CString hookError;
-                if (!SetKeyMappingEnabled(true, hookError)) {
-                    DnfSendWebToast(m_pWebDlg, L"key_mapping_error", hookError);
+                m_keyMappingLanServerAddress = address;
+                m_keyMappingLanClientPairCode = pairCode;
+                SaveKeyMappingLanSettings();
+
+                if (!IsRunningAsAdmin()) {
+                    m_keyMappingLanAdminConnectRequested = true;
+                    CString ignored;
+                    SetKeyMappingEnabled(false, ignored);
+                    SaveKeyMappingSettings();
+                    NotifyKeyMappingAdminRequired(
+                        L"客户端需要读取 DNF 按键，请先以管理员身份重启软件。\n"
+                        L"服务器 IP、端口和配对码已保存，重启后会自动继续连接。");
                 }
                 else {
-                    m_keyMappingLanServerAddress = address;
-                    m_keyMappingLanClientPairCode = pairCode;
-                    SaveKeyMappingLanSettings();
-                    std::string error;
-                    const bool started = m_keyMappingLanService.StartClient(
-                        std::string(CW2A(address, CP_UTF8)), m_keyMappingLanPort,
-                        std::string(CW2A(pairCode, CP_UTF8)),
-                        std::string(CW2A(m_keyMappingLanDeviceId, CP_UTF8)),
-                        std::string(CW2A(GetKeyMappingLanDeviceName(), CP_UTF8)), error);
-                    SaveKeyMappingSettings();
-                    SaveKeyMappingLanSettings();
-                    if (!started) {
-                        CString message = CA2W(error.c_str(), CP_UTF8);
-                        DnfSendWebToast(m_pWebDlg, L"key_mapping_error", L"连接局域网服务器失败：" + message);
+                    m_keyMappingLanAdminConnectRequested = false;
+                    m_keyMappingLanPendingClientConnect = false;
+                    CString errorMessage;
+                    if (!StartKeyMappingLanClient(address, m_keyMappingLanPort,
+                        pairCode, errorMessage)) {
+                        DnfSendWebToast(m_pWebDlg, L"key_mapping_error",
+                            L"连接局域网服务器失败：" + errorMessage);
                     }
                 }
                 BroadcastStateToWeb();
@@ -12388,10 +12385,14 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             BroadcastStateToWeb();
         }
         else if (action == "cmd_restart_as_admin") {
+            m_keyMappingLanPendingClientConnect = m_keyMappingLanAdminConnectRequested;
+            m_keyMappingLanAdminConnectRequested = false;
             SaveKeyMappingSettings();
             SaveKeyMappingLanSettings();
             SaveConfigToFile();
             if (!RelaunchAsAdmin()) {
+                m_keyMappingLanPendingClientConnect = false;
+                SaveKeyMappingLanSettings();
                 DnfSendWebToast(m_pWebDlg, L"key_mapping_error", L"管理员重启已取消，DNF 内按键仍无法读取。");
                 CString ignored;
                 SetKeyMappingEnabled(false, ignored);
@@ -15528,6 +15529,8 @@ void CDNFGameCaptureDlg::LoadKeyMappingLanSettings()
         L"AllowClientTeamSyncWrite", 0, m_iniPath) != 0;
     m_teamSyncAutoSend = GetPrivateProfileInt(L"KeyMappingLan",
         L"AutoSendTeamSync", 0, m_iniPath) != 0;
+    m_keyMappingLanPendingClientConnect = GetPrivateProfileInt(L"KeyMappingLan",
+        L"PendingClientConnect", 0, m_iniPath) != 0;
 
     m_keyMappingLanService.SetRole(m_keyMappingLanRole);
     m_keyMappingLanService.SetTeamSyncClientWriteAllowed(
@@ -15558,6 +15561,8 @@ void CDNFGameCaptureDlg::SaveKeyMappingLanSettings()
         m_teamSyncAllowClientWrite ? L"1" : L"0", m_iniPath);
     WritePrivateProfileString(L"KeyMappingLan", L"AutoSendTeamSync",
         m_teamSyncAutoSend ? L"1" : L"0", m_iniPath);
+    WritePrivateProfileString(L"KeyMappingLan", L"PendingClientConnect",
+        m_keyMappingLanPendingClientConnect ? L"1" : L"0", m_iniPath);
 }
 
 void CDNFGameCaptureDlg::SetKeyMappingLanRole(KeyMappingLanRole role)
@@ -15576,11 +15581,73 @@ void CDNFGameCaptureDlg::SetKeyMappingLanRole(KeyMappingLanRole role)
     m_keyMappingLanService.SetTeamSyncSubscribed(
         role == KeyMappingLanRole::client && m_teamSyncAutoReceive);
     m_keyMappingLanWasConnected = false;
+    m_keyMappingLanPendingClientConnect = false;
+    m_keyMappingLanAdminConnectRequested = false;
     m_teamSyncLastAutoRevision = 0;
     m_teamSyncLastAutoResult.Empty();
     m_keyMappingAdminRequired = false;
     SaveKeyMappingSettings();
     SaveKeyMappingLanSettings();
+}
+
+bool CDNFGameCaptureDlg::StartKeyMappingLanClient(const CString& address,
+    unsigned short port, const CString& pairCode, CString& errorMessage)
+{
+    errorMessage.Empty();
+    if (!IsRunningAsAdmin()) {
+        errorMessage = L"当前进程没有管理员权限。";
+        return false;
+    }
+
+    CString hookError;
+    if (!SetKeyMappingEnabled(true, hookError)) {
+        errorMessage = hookError;
+        return false;
+    }
+
+    std::string networkError;
+    const bool started = m_keyMappingLanService.StartClient(
+        std::string(CW2A(address, CP_UTF8)), port,
+        std::string(CW2A(pairCode, CP_UTF8)),
+        std::string(CW2A(m_keyMappingLanDeviceId, CP_UTF8)),
+        std::string(CW2A(GetKeyMappingLanDeviceName(), CP_UTF8)), networkError);
+    SaveKeyMappingSettings();
+    SaveKeyMappingLanSettings();
+    if (started) return true;
+
+    CString ignored;
+    SetKeyMappingEnabled(false, ignored);
+    SaveKeyMappingSettings();
+    errorMessage = CA2W(networkError.c_str(), CP_UTF8);
+    if (errorMessage.IsEmpty()) errorMessage = L"无法启动局域网连接线程。";
+    return false;
+}
+
+void CDNFGameCaptureDlg::ResumePendingKeyMappingLanClientConnection()
+{
+    if (!m_keyMappingLanPendingClientConnect) return;
+
+    m_keyMappingLanPendingClientConnect = false;
+    SaveKeyMappingLanSettings();
+
+    if (m_keyMappingLanRole != KeyMappingLanRole::client ||
+        m_keyMappingLanServerAddress.IsEmpty() ||
+        !DnfIsFourDigitPairCode(m_keyMappingLanClientPairCode)) {
+        DnfSendWebToast(m_pWebDlg, L"key_mapping_error",
+            L"管理员重启后的局域网连接参数不完整，请重新打开局域网同步设置。");
+        return;
+    }
+
+    CString errorMessage;
+    if (!StartKeyMappingLanClient(m_keyMappingLanServerAddress, m_keyMappingLanPort,
+        m_keyMappingLanClientPairCode, errorMessage)) {
+        DnfSendWebToast(m_pWebDlg, L"key_mapping_error",
+            L"管理员重启后自动连接失败：" + errorMessage);
+        return;
+    }
+
+    AppLog(L"🌐 [按键映射] 管理员重启完成，正在自动连接局域网服务器。",
+        RGB(0, 220, 255));
 }
 
 void CDNFGameCaptureDlg::NotifyKeyMappingAdminRequired(const CString& reason)
@@ -16715,6 +16782,14 @@ LRESULT CDNFGameCaptureDlg::OnKeyMappingLanChanged(WPARAM wParam, LPARAM lParam)
         }
         SaveKeyMappingLanSettings();
         AppLog(L"🌐 [按键映射] 已连接局域网按键服务器。", RGB(0, 255, 100));
+        if (m_pWebDlg) {
+            CString remoteName = CA2W(status.remoteDeviceName.c_str(), CP_UTF8);
+            if (remoteName.IsEmpty()) remoteName = L"局域网服务器";
+            CString message;
+            message.Format(L"已连接到局域网服务器：%s（%s）",
+                remoteName.GetString(), m_keyMappingLanServerAddress.GetString());
+            DnfSendWebToast(m_pWebDlg, L"key_lan_connected", message);
+        }
     }
 
     CString currentStatus = CA2W(status.status.c_str(), CP_UTF8);
@@ -16725,6 +16800,9 @@ LRESULT CDNFGameCaptureDlg::OnKeyMappingLanChanged(WPARAM wParam, LPARAM lParam)
         else if (currentStatus == L"rejected_pair_code") message = L"连接被拒绝：配对码错误。";
         else if (currentStatus == L"rejected_busy") message = L"连接被拒绝：服务器已有一台客户端。";
         else if (currentStatus == L"rejected_version") message = L"连接被拒绝：双方软件协议版本不一致。";
+        else if (currentStatus == L"reconnecting" && m_keyMappingLanRole == KeyMappingLanRole::client) {
+            message = L"暂时无法连接局域网服务器，软件将在 2 秒后自动重试。请检查 IP、端口和防火墙。";
+        }
         if (!message.IsEmpty() && m_pWebDlg) {
             DnfSendWebToast(m_pWebDlg, L"key_mapping_error", message);
         }

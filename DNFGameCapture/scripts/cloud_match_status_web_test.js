@@ -37,11 +37,15 @@ vm.runInContext(
     `${roomNames}\n${defaultServerUrl}\n${displayStates}\n` +
     `${extractFunction(source, 'normalizeCloudSyncPanel')}\n` +
     `${extractFunction(source, 'normalizeCloudMatchState')}\n` +
+    `${extractFunction(source, 'cloudBroadcasterSubmitText')}\n` +
     `${extractFunction(source, 'cloudOfflineElapsed')}\n` +
     `${extractFunction(source, 'sortBroadcasterDirectory')}\n` +
+    `${extractFunction(source, 'visibleBroadcasterDirectory')}\n` +
     `this.normalizeFixture = normalizeCloudMatchState;\n` +
+    `this.submitText = cloudBroadcasterSubmitText;\n` +
     `this.offlineElapsed = cloudOfflineElapsed;\n` +
-    `this.sortDirectory = sortBroadcasterDirectory;\n`, sandbox);
+    `this.sortDirectory = sortBroadcasterDirectory;\n` +
+    `this.visibleDirectory = visibleBroadcasterDirectory;\n`, sandbox);
 
 const normalized = sandbox.normalizeFixture({
     joined: true,
@@ -64,6 +68,15 @@ requireCondition(normalized.broadcasters.length === 1, 'Broadcaster directory wa
 requireCondition(normalized.syncHistory.all.length === 1, 'Global sync history was lost.');
 requireCondition(normalized.realtimeRelations.length === 1, 'Realtime relations were lost.');
 
+requireCondition(sandbox.submitText({ broadcasterName: '' }) === '连接',
+    'A first-time unnamed broadcaster must see the Connect action.');
+requireCondition(sandbox.submitText({ broadcasterName: '', joining: true }) === '连接中',
+    'A first-time broadcaster must see the connecting progress label.');
+requireCondition(sandbox.submitText({ broadcasterName: 'Broadcaster A' }) === '应用',
+    'An existing broadcaster identity must see the Apply action.');
+requireCondition(sandbox.submitText({ broadcasterName: 'Broadcaster A', renaming: true }) === '应用中',
+    'An existing broadcaster must see the applying progress label.');
+
 const nowSeconds = 2_000_000;
 const elapsed = sandbox.offlineElapsed(nowSeconds + 24 * 60 * 60 - 18 * 60, nowSeconds);
 requireCondition(elapsed === '离线 18分钟',
@@ -79,5 +92,17 @@ const sorted = sandbox.sortDirectory([
 requireCondition(Array.from(sorted, item => item.deviceId).join(',') ===
     'online-new,online-old,offline-new,offline-old',
     'Broadcaster directory must put online entries first, sort by recency, and drop expired entries.');
+
+const visible = sandbox.visibleDirectory([
+    { deviceId: 'offline-eleven-minutes', online: false,
+        offlineExpiresAt: nowSeconds + 24 * 60 * 60 - 11 * 60 },
+    { deviceId: 'offline-nine-minutes', online: false,
+        offlineExpiresAt: nowSeconds + 24 * 60 * 60 - 9 * 60 },
+    { deviceId: 'online-old', online: true, receivedAt: 20 },
+    { deviceId: 'online-new', online: true, receivedAt: 30 }
+], nowSeconds);
+requireCondition(Array.from(visible, item => item.deviceId).join(',') ===
+    'online-new,online-old,offline-nine-minutes',
+    'The client list must keep all online broadcasters and only the last 10 minutes of offline broadcasters.');
 
 console.log('Unified broadcaster Web state tests passed.');

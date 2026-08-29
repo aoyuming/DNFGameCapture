@@ -3287,6 +3287,7 @@ html[data-theme] .modal-btn.btn-confirm {
 
 .key-lan-field input,
 .key-lan-field select {
+    box-sizing: border-box;
     width: 100%;
     height: 34px;
     min-width: 0;
@@ -3333,6 +3334,15 @@ html[data-theme] .modal-btn.btn-confirm {
     margin-top: 10px;
 }
 
+.key-lan-mode-panel.server-panel {
+    grid-template-columns: minmax(190px, 1fr) 72px 96px 108px 126px minmax(128px, 0.8fr);
+}
+
+.server-port-field input {
+    padding-right: 5px;
+    padding-left: 5px;
+}
+
 .key-lan-mode-panel[hidden] {
     display: none;
 }
@@ -3374,6 +3384,32 @@ html[data-theme] .modal-btn.btn-confirm {
     color: #ffe38a;
     font-size: 16px;
     letter-spacing: 0;
+}
+
+.key-lan-connection-notice {
+    position: fixed;
+    top: 18px;
+    left: 50%;
+    z-index: 5000;
+    max-width: min(520px, calc(100vw - 32px));
+    padding: 10px 16px;
+    border: 1px solid rgba(85, 225, 166, 0.72);
+    border-radius: 6px;
+    color: #eafff5;
+    background: rgba(18, 92, 65, 0.96);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.34);
+    font-size: 13px;
+    font-weight: 800;
+    line-height: 1.45;
+    opacity: 0;
+    pointer-events: none;
+    transform: translate(-50%, -12px);
+    transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.key-lan-connection-notice.visible {
+    opacity: 1;
+    transform: translate(-50%, 0);
 }
 
 .key-lan-button {
@@ -3667,10 +3703,10 @@ html[data-theme] .modal-btn.btn-confirm {
     }
 
     .key-lan-status,
-    .key-lan-info:first-child,
+    .server-address-info,
     .server-list-field,
     .address-field,
-    .key-lan-peer {
+    .server-peer {
         grid-column: 1 / -1;
     }
 

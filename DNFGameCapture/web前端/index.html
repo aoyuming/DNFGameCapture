@@ -121,7 +121,7 @@
                 <div class="broadcaster-self-label">本机主播</div>
                 <div class="broadcaster-self-row">
                     <input id="cloud-broadcaster-name-input" type="text" maxlength="32" placeholder="首次联网后填写名称" autocomplete="off">
-                    <button id="btn-cloud-rename-broadcaster" title="修改主播名称">保存</button>
+                    <button id="btn-cloud-rename-broadcaster" title="连接云端主播大厅">连接</button>
                 </div>
                 <div class="broadcaster-self-note">名称用于其他主播识别和同步比赛数据</div>
             </div>
@@ -276,22 +276,22 @@
                         <div class="key-lan-status" id="key-lan-status">单机模式</div>
                     </div>
 
-                    <div class="key-lan-mode-panel" id="key-lan-server-panel" hidden>
-                        <div class="key-lan-info">
+                    <div class="key-lan-mode-panel server-panel" id="key-lan-server-panel" hidden>
+                        <div class="key-lan-info server-address-info">
                             <span>本机地址</span>
                             <strong id="key-lan-local-addresses">正在读取</strong>
                         </div>
-                        <label class="key-lan-field compact-field">
+                        <label class="key-lan-field compact-field server-port-field">
                             <span>端口</span>
                             <input id="key-lan-server-port" type="number" min="1024" max="65535" value="18778">
                         </label>
-                        <div class="key-lan-info pair-code-info">
+                        <div class="key-lan-info pair-code-info server-pair-code-info">
                             <span>配对码</span>
                             <strong id="key-lan-server-pair-code">----</strong>
                         </div>
                         <button class="key-lan-button" id="btn-key-lan-regenerate">重新生成</button>
                         <button class="key-lan-button primary" id="btn-key-lan-server-toggle">启动服务器</button>
-                        <div class="key-lan-peer" id="key-lan-server-client">等待客户端</div>
+                        <div class="key-lan-peer server-peer" id="key-lan-server-client">等待客户端</div>
                     </div>
 
                     <div class="key-lan-mode-panel client-panel" id="key-lan-client-panel" hidden>

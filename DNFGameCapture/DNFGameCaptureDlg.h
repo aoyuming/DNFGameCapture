@@ -282,6 +282,9 @@ private:
     void LoadKeyMappingLanSettings();
     void SaveKeyMappingLanSettings();
     void SetKeyMappingLanRole(KeyMappingLanRole role);
+    bool StartKeyMappingLanClient(const CString& address, unsigned short port,
+        const CString& pairCode, CString& errorMessage);
+    void ResumePendingKeyMappingLanClientConnection();
     void NotifyKeyMappingAdminRequired(const CString& reason);
     CString GetKeyMappingLanDeviceName() const;
     std::string BuildTeamSyncSnapshotPayload();
@@ -537,6 +540,8 @@ private:
     CString m_keyMappingLanLastServerId;
     CString m_keyMappingLanLastStatus;
     bool m_keyMappingLanWasConnected = false;
+    bool m_keyMappingLanPendingClientConnect = false;
+    bool m_keyMappingLanAdminConnectRequested = false;
     bool m_keyMappingAdminRequired = false;
     nlohmann::json m_teamSyncPendingSnapshot;
     nlohmann::json m_teamSyncLocalBaselineSnapshot;
