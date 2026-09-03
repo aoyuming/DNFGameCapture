@@ -15,7 +15,8 @@ const webRoot = fs.readdirSync(root, { withFileTypes: true })
 requireCondition(webRoot, 'Unable to locate Web scoreboard files.');
 
 const source = fs.readFileSync(path.join(webRoot, 'main.js'), 'utf8');
-const css = fs.readFileSync(path.join(webRoot, 'style.css'), 'utf8');
+const css = fs.readFileSync(path.join(webRoot, 'style.css'), 'utf8')
+    .replace(/\r\n/g, '\n');
 const html = fs.readFileSync(path.join(webRoot, 'index.html'), 'utf8');
 const hostSource = fs.readFileSync(path.join(root, 'DNFGameCaptureDlg.cpp'), 'utf8');
 const hostHeader = fs.readFileSync(path.join(root, 'DNFGameCaptureDlg.h'), 'utf8');

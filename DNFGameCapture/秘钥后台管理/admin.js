@@ -454,11 +454,11 @@ function printSubmissionSummary(row, index) {
     const entries = getSubmissionEntries(s);
     const stats = getSubmissionStats(s);
     const sample = entries.length > 0
-        ? `${entries[0].mainName} -> ${entries[0].aliases.length > 0 ? entries[0].aliases.slice(0, 3).join(', ') : '删除主号'}`
+        ? `${entries[0].mainName} -> ${entries[0].aliases.length > 0 ? entries[0].aliases.slice(0, 3).join(', ') : '删除选手'}`
         : '无明细';
 
     console.log(`${index}. ${s.id || row.key}`);
-    console.log(`   时间: ${formatUnixTime(s.updatedAt || s.createdAt)} | 主号: ${stats.mainCount} | 小号: ${stats.pairCount} | 投稿人数: ${s.sourceCount || s.submitterKeyHashes?.length || 1}`);
+    console.log(`   时间: ${formatUnixTime(s.updatedAt || s.createdAt)} | 选手: ${stats.mainCount} | 游戏ID: ${stats.pairCount} | 投稿人数: ${s.sourceCount || s.submitterKeyHashes?.length || 1}`);
     console.log(`   提交者: ${(s.submitterKeyHash || s.submitterKeyHashes?.[0] || '').slice(0, 12)}... | 样例: ${sample}`);
     if (Array.isArray(s.duplicateOwners) && s.duplicateOwners.length > 0) {
         console.log(`   ⚠️ 重复提示: ${s.duplicateOwners.length} 条`);
@@ -473,13 +473,13 @@ function printSubmissionDetail(submission) {
     console.log(`更新时间: ${formatUnixTime(submission.updatedAt || submission.createdAt)}`);
     console.log(`提交者哈希: ${submission.submitterKeyHash || (submission.submitterKeyHashes || []).join(', ')}`);
     console.log(`设备哈希: ${submission.hwidHash || (submission.hwidHashes || []).join(', ')}`);
-    console.log(`数量: ${stats.mainCount} 个主号 / ${stats.pairCount} 个小号`);
+    console.log(`数量: ${stats.mainCount} 个选手 / ${stats.pairCount} 个游戏ID`);
     console.log('------------------------------');
 
     const entries = getSubmissionEntries(submission);
     entries.slice(0, 80).forEach((item, idx) => {
         const aliases = normalizeAliasArray(item.aliases);
-        console.log(`${idx + 1}. ${item.mainName} = ${aliases.length > 0 ? aliases.join(' / ') : '删除主号'}`);
+        console.log(`${idx + 1}. ${item.mainName} = ${aliases.length > 0 ? aliases.join(' / ') : '删除选手'}`);
     });
 
     if (entries.length > 80) {
@@ -497,7 +497,7 @@ function printSubmissionDetail(submission) {
 
     if (Array.isArray(submission.duplicateOwners) && submission.duplicateOwners.length > 0) {
         console.log('------------------------------');
-        console.log('重复小号提示：');
+        console.log('重复游戏ID提示：');
         submission.duplicateOwners.slice(0, 30).forEach(c => {
             console.log(` - ${c.aliasName}: 公共库也属于 ${(c.owners || []).join(', ')}, 本次提交给 ${c.requestedOwner}`);
         });
@@ -633,7 +633,7 @@ async function showPendingAliasSubmissions() {
     console.log('⏳ 正在读取待审核投稿...');
     const { rows, visibleRows, hiddenCount } = await loadReviewablePendingSubmissionList();
     if (rows.length === 0) {
-        console.log('✅ 当前没有待审核小号投稿。');
+        console.log('✅ 当前没有待审核游戏ID投稿。');
         return;
     }
 
@@ -648,7 +648,7 @@ async function showPendingAliasSubmissions() {
 async function reviewAliasSubmission() {
     const { visibleRows: rows } = await loadReviewablePendingSubmissionList();
     if (rows.length === 0) {
-        console.log('✅ 当前没有待审核小号投稿。');
+        console.log('✅ 当前没有待审核游戏ID投稿。');
         return;
     }
 
@@ -667,9 +667,9 @@ async function reviewAliasSubmission() {
     printSubmissionDetail(submission);
 
     console.log('\n操作：');
-    console.log(' a. 通过（按投稿目标状态替换/删除主号）');
-    console.log(' n. 只通过新增小号');
-    console.log(' d. 只通过删除小号');
+    console.log(' a. 通过（按投稿目标状态替换/删除选手）');
+    console.log(' n. 只通过新增游戏ID');
+    console.log(' d. 只通过删除游戏ID');
     console.log(' r. 驳回');
     console.log(' s. 跳过');
 
@@ -693,17 +693,17 @@ async function reviewAliasSubmission() {
     const mergeResult = await mergeSubmissionToPublicDb(submission, reviewMode);
     await archiveSubmission(row, 'approved', { mergeResult, reviewMode });
 
-    console.log('✅ 已审核通过并合并到公共小号库。');
+    console.log('✅ 已审核通过并合并到公共游戏ID库。');
     console.log(` - 模式: ${reviewMode === 'added' ? '只通过新增' : (reviewMode === 'removed' ? '只通过删除' : '完整通过')}`);
-    console.log(` - 替换主号: ${mergeResult.replaced}`);
-    console.log(` - 删除主号: ${mergeResult.deleted}`);
+    console.log(` - 替换选手: ${mergeResult.replaced}`);
+    console.log(` - 删除选手: ${mergeResult.deleted}`);
     console.log(` - 未变化: ${mergeResult.unchanged}`);
 }
 
 async function batchReviewAliasSubmissions() {
     const { visibleRows: rows } = await loadReviewablePendingSubmissionList();
     if (rows.length === 0) {
-        console.log('✅ 当前没有待审核小号投稿。');
+        console.log('✅ 当前没有待审核游戏ID投稿。');
         return;
     }
 
@@ -720,7 +720,7 @@ async function batchReviewAliasSubmissions() {
     console.log(`待审核记录: ${rows.length} 条`);
     console.log(`无重复提示记录: ${noHintRows.length} 条`);
     console.log(`有重复提示记录: ${hintRows.length} 条`);
-    console.log(`合计内容: ${allStats.main} 个主号 / ${allStats.alias} 个小号`);
+    console.log(`合计内容: ${allStats.main} 个选手 / ${allStats.alias} 个游戏ID`);
     console.log('------------------------------');
     console.log(' 1. 一键通过全部无重复提示投稿（推荐）');
     console.log(' 2. 通过前 N 条无重复提示投稿');
@@ -791,21 +791,21 @@ async function batchReviewAliasSubmissions() {
     console.log(`通过: ${totals.approved}`);
     console.log(`驳回: ${totals.rejected}`);
     console.log(`失败: ${totals.failed}`);
-    console.log(`替换主号: ${totals.replaced}`);
-    console.log(`删除主号: ${totals.deleted}`);
+    console.log(`替换选手: ${totals.replaced}`);
+    console.log(`删除选手: ${totals.deleted}`);
     console.log(`未变化: ${totals.unchanged}`);
-    console.log(`目标小号数: ${totals.pairCount}`);
+    console.log(`目标游戏ID数: ${totals.pairCount}`);
 }
 
 async function showPublicAliasDbStats() {
     const publicDb = await loadPublicAliasDb();
     const mainCount = Object.keys(publicDb.players).length;
     const aliasCount = Object.values(publicDb.players).reduce((sum, arr) => sum + arr.length, 0);
-    console.log('\n========== 公共小号库 ==========');
+    console.log('\n========== 公共游戏ID库 ==========');
     console.log(`版本: ${publicDb.version}`);
     console.log(`更新时间: ${formatUnixTime(publicDb.updatedAt)}`);
-    console.log(`主号数: ${mainCount}`);
-    console.log(`小号数: ${aliasCount}`);
+    console.log(`选手数: ${mainCount}`);
+    console.log(`游戏ID数: ${aliasCount}`);
 }
 
 async function previewPublicAliasDb() {
@@ -814,17 +814,17 @@ async function previewPublicAliasDb() {
     const mainCount = entries.length;
     const aliasCount = entries.reduce((sum, [, aliases]) => sum + aliases.length, 0);
 
-    console.log('\n========== 公共小号库格式预览 ==========');
+    console.log('\n========== 公共游戏ID库格式预览 ==========');
     console.log(`OSS Key: ${PUBLIC_ALIAS_DB_KEY}`);
     console.log(`版本: ${publicDb.version}`);
     console.log(`更新时间: ${formatUnixTime(publicDb.updatedAt)}`);
-    console.log(`主号数: ${mainCount} | 小号数: ${aliasCount}`);
+    console.log(`选手数: ${mainCount} | 游戏ID数: ${aliasCount}`);
     console.log('\nJSON 格式：');
     console.log(JSON.stringify({
         version: publicDb.version,
         updatedAt: publicDb.updatedAt,
         players: {
-            '主号示例': ['小号示例1', '小号示例2']
+            '选手示例': ['游戏ID示例1', '游戏ID示例2']
         },
         audit: [
             { action: 'admin_direct_sync 或审核来源', reviewedAt: Math.floor(Date.now() / 1000) }
@@ -840,7 +840,7 @@ async function previewPublicAliasDb() {
     });
 
     if (entries.length > limit) {
-        console.log(`...还有 ${entries.length - limit} 个主号未显示`);
+        console.log(`...还有 ${entries.length - limit} 个选手未显示`);
     }
 }
 
@@ -962,11 +962,11 @@ async function mainMenu() {
     console.log(' 2. 封停卡密 (拉黑)');
     console.log(' 3. 增加/减少时长 (补偿/续费)');
     console.log(' 4. 解除设备绑定 (换绑电脑)');
-    console.log(' 5. 查看待审核小号投稿');
-    console.log(' 6. 审核小号投稿');
-    console.log(' 7. 批量审核小号投稿');
-    console.log(' 8. 查看公共小号库统计');
-    console.log(' 9. 预览公共小号库格式');
+    console.log(' 5. 查看待审核游戏ID投稿');
+    console.log(' 6. 审核游戏ID投稿');
+    console.log(' 7. 批量审核游戏ID投稿');
+    console.log(' 8. 查看公共游戏ID库统计');
+    console.log(' 9. 预览公共游戏ID库格式');
     console.log('10. 管理直写管理员白名单');
     console.log('11. 清理空的待审核记录');
     console.log(' 0. 退出程序');

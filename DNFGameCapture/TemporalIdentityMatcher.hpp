@@ -62,8 +62,8 @@ struct TDnfVote {
 };
 
 struct TDnfCandidateIdentity {
-    CString name;       // 候选原始小号字符串，例如：上海1夏雫#气功师
-    CString ownerName;  // 归属主号。主号候选可等于 name
+    CString name;       // 候选原始游戏ID字符串，例如：上海1夏雫#气功师
+    CString ownerName;  // 归属选手。选手候选可等于 name
     int team = -1;      // 0/1，保持你现有 m_players.team 语义
     bool isAlias = false;
 
@@ -77,7 +77,7 @@ struct TDnfCandidateIdentity {
     bool hasDeclaredArea = false;
     bool hasDeclaredJob = false;
 
-    // 纯符号/弱 ID 小号：例如 ---#次元行者、一~一.#次元行者。
+    // 纯符号/弱 ID 游戏ID：例如 ---#次元行者、一~一.#次元行者。
     // 这类 ID OCR 往往完全读不到，允许后续用“职业/大区唯一性”兜底。
     bool isSymbolicId = false;
 };
@@ -245,7 +245,7 @@ public:
         return p;
     }
 
-    // 对某个固定框对应的候选人做融合评分。候选列表建议只传该框对应队伍的 4 人 + 小号。
+    // 对某个固定框对应的候选人做融合评分。候选列表建议只传该框对应队伍的 4 人 + 游戏ID。
     TDnfPanelMatchResult MatchPanel(TDnfPanelSide side, const std::vector<TDnfCandidateIdentity>& candidates,
         DWORD now = GetTickCount(), DebugSink debug = nullptr) {
 
@@ -355,7 +355,7 @@ public:
                 }
             }
 
-            // 声明式职业上下文：小号里手动写了 #职业 时，首次识别也能加分。
+            // 声明式职业上下文：游戏ID里手动写了 #职业 时，首次识别也能加分。
             if (!jobTop.value.IsEmpty() && cand.hasDeclaredJob) {
                 if (JobFuzzySame(jobTop.value, cand.declaredJob)) {
                     s.jobMatched = true;
@@ -411,7 +411,7 @@ public:
         for (int i = 0; i < topN; ++i) {
             const auto& s = scores[i];
             Log(debug, Format(L"  ├ Top%d 候选=%s(owner=%s%s) id=%d text=\"%s\" scoreId=\"%s\" ocrId=\"%s\" mode=%s note=%s areaCtx=%+d jobCtx=%+d stable=%+d penalty=-%d final=%d\r\n",
-                i + 1, s.candidate.name.GetString(), s.candidate.ownerName.GetString(), s.candidate.isAlias ? L"/小号" : L"",
+                i + 1, s.candidate.name.GetString(), s.candidate.ownerName.GetString(), s.candidate.isAlias ? L"/游戏ID" : L"",
                 s.idScore, s.bestIdText.GetString(),
                 s.scoreCandidateId.GetString(), s.scoreOcrId.GetString(), s.idMatchMode.GetString(), s.idMatchNote.GetString(),
                 s.areaCtxScore, s.jobCtxScore, s.stableBonus, s.penalty, s.finalScore));

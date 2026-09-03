@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "pch.h"
 #include <afxwin.h>
 #include <afxcmn.h>
@@ -10,6 +10,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <future>
+#include <memory>
 #include <winhttp.h>
 #include "NameMatcher.hpp"
 #include "TemporalIdentityMatcher.hpp" // 【新增】：固定红框时间窗身份融合匹配
@@ -24,6 +25,7 @@
 #include "KeyMappingLanService.h"
 #include "CloudMatchClient.h"
 #include "CloudMatchStatusDisplay.h"
+#include "AliasDbAutoSyncPolicy.h"
 #include "json.hpp"
 
 void DnfReleaseSingleInstanceMutex() noexcept;
@@ -37,7 +39,7 @@ struct ScorePointF {
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"5.0.0"    //当前版本号
+#define CURRENT_VERSION L"5.0.2"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -78,6 +80,7 @@ struct ScorePointF {
 #define WM_KEY_MAPPING_TEAM_SYNC (WM_USER + 115)
 #define WM_CAPTURE_SOURCE_SWITCH_DONE (WM_USER + 116)
 #define WM_CAMERA_LIST_READY (WM_USER + 117)
+#define WM_ALIAS_AUTO_SYNC_RESULT (WM_USER + 118)
 
 // =========================================================
 // 【编译环境切换开关】
@@ -233,10 +236,11 @@ protected:
     afx_msg LRESULT OnKeyDisplayVisibilityChanged(WPARAM wParam, LPARAM lParam);
     afx_msg LRESULT OnKeyMappingLanChanged(WPARAM wParam, LPARAM lParam);
     afx_msg LRESULT OnKeyMappingTeamSync(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnAliasDbAutoSyncResult(WPARAM wParam, LPARAM lParam);
 
-    std::vector<CString> m_autoExpandedNodes; // 【新增】：记忆刚才修改过，需要临时展开3秒的主号
+    std::vector<CString> m_autoExpandedNodes; // 【新增】：记忆刚才修改过，需要临时展开3秒的选手
 
-    // 🚨 C++ 战场级查重引擎：检查某个即将上场的主号及其小号，是否与场上现有的选手冲突
+    // 🚨 C++ 战场级查重引擎：检查某个即将上场的选手及其游戏ID，是否与场上现有的选手冲突
     CString CheckFieldConflict(const CString& newMain, const std::vector<CString>& extraAliases, int excludeIdx);
 
 private:
@@ -268,6 +272,8 @@ private:
 
     void FilterLivePlatformPrefixes();
     bool WriteScoreToFile();
+    nlohmann::json BuildSharedWebMatchSnapshotJson();
+    nlohmann::json DnfBuildKillDisplayStateJson();
     nlohmann::json DnfBuildSharedWebStateJson();
     void OpenKillDisplayWindow();
     void HideKillDisplayWindow();
@@ -335,6 +341,14 @@ private:
     CString GetPickSeatLabelForIndex(int index) const;
     void AppendResultText(const CString& t, COLORREF c);
     void RefreshDisplay();
+    void StartOcrSupervisor();
+    void StopOcrSupervisor();
+    void RequestOcrSupervisorWork();
+    void OcrSupervisorLoop();
+    bool WarmupOcrEngine();
+    void RestartOcrProcessForRecovery();
+    bool IsTrackedOcrProcessAlive();
+    void CloseTrackedOcrProcess();
     bool EnsureOcrRunning(bool forceRestart = false);
     bool ProbeOcrServiceReady();
     void StartMonitoringAfterOcrReady();
@@ -342,6 +356,13 @@ private:
     void BeginOcrServiceRecovery(bool probeBeforePending = false);
     void SetOcrStartupPendingUI(bool pending);
     bool RefreshOcrExePathFromRunningProcess(bool persistToIni);
+    void StartOcrMatchingTask(int triggerSide);
+    void EndOcrMatchingTask();
+    void StopOcrMatchingTasks();
+    void WaitForOcrMatchingTasks();
+    bool RegisterOcrSupervisorRequest(HINTERNET hRequest);
+    bool ReleaseOcrSupervisorRequest(HINTERNET hRequest);
+    void CancelOcrSupervisorRequest();
     bool SaveConfigToFile();
 
     // 托盘图标初始化与清理
@@ -494,11 +515,12 @@ private:
     // 🚨【新增】：WGC 线程安全延迟销毁器
     void SafeDeleteWGC();
 
-    std::map<CString, CString> m_aliasDB;        // 本地小号数据库
+    std::map<CString, CString> m_aliasDB;        // 本地游戏ID数据库
     void LoadAliasDB();                          // 加载数据库
     bool SaveAliasDB();                          // 保存数据库
     bool SaveAliasDB(bool mergeActivePlayers);
     std::string BuildAliasDbJsonPayload(int& mainCount, int& pairCount) const;
+    std::string BuildAliasDbAppendPayload(int& mainCount, int& pairCount) const;
     void LoadAliasCloudDeleteBaseline();
     void SaveAliasCloudDeleteBaseline() const;
     void SetAliasCloudDeleteBaselineFromPublicPlayers(const nlohmann::json& players);
@@ -589,6 +611,10 @@ private:
     bool m_cloudMatchPromptSent = false;
     bool m_cloudMatchWebReady = false;
     int m_cloudMatchRegistrationRetryCount = 0;
+    bool m_cloudMatchUsingLicenseLease = false;
+    bool m_cloudMatchLeaseRefreshAttempted = false;
+    bool m_cloudMatchLeaseRefreshInFlight = false;
+    ULONGLONG m_cloudMatchLeaseDisconnectedSinceTick = 0;
 
     bool m_cloudMatchSyncPanelOpen = false;
     bool m_cloudMatchSyncBusy = false;
@@ -733,9 +759,12 @@ private:
 
     // 把下面这两行覆盖原来的声明
     bool VerifyKey(CString inputKey, CString machineID);
-    CString CheckCloudBinding(CString key, CString hwid, long long duration,
+    static CString CheckCloudBinding(CString key, CString hwid, long long duration,
         long long& outExpTime, CString& outCloudServerUrl);
     bool BeginLicenseCloudCheck(const CString& inputKey, bool manualCheck);
+    bool TryActivateFromLicenseLease(const CString& normalizedKey,
+        const CString& machineId, long long cardDuration);
+    bool BeginLicenseLeaseEndpointRefresh();
     CString SubmitAliasDbForReview(const std::string& aliasDbPayload, int mainCount, int pairCount);
     CString DirectSyncAliasDbToCloud(const std::string& aliasDbPayload, int mainCount, int pairCount);
     CString SyncAliasDbFromCloud();
@@ -743,6 +772,12 @@ private:
     void ResetAliasDbCloudBaseline();
     void AutoSubmitAliasDbIfDirty();
     CString SubmitAliasDbSnapshotIfDirty(bool saveBeforeBuild = true);
+    void LoadAliasDbAutoSyncSettings();
+    bool SaveAliasDbAutoSyncSettings() const;
+    void MaybeStartAliasDbAutoSync(bool force = false);
+    void StartAliasDbAutoSyncAttempt();
+    bool MergePublicAliasDbForAutoSync(const nlohmann::json& players,
+        CString& resultMessage);
     afx_msg LRESULT OnUpdateAuthTime(WPARAM wParam, LPARAM lParam); // 【新增消息】
 
     CString GetMachineID();
@@ -752,6 +787,22 @@ private:
     std::vector<CString> m_aliasDbPendingDeleteMains;
     std::vector<CString> m_aliasCloudDeleteBaselineMains;
     std::map<CString, CString> m_aliasCloudBaselinePlayers;
+
+    // Seven-day alias database sync is independent from match snapshot sync.
+    bool m_aliasAutoSyncEnabled = true;
+    bool m_aliasAutoSyncInFlight = false;
+    bool m_aliasAutoSyncAttemptedThisRun = false;
+    std::atomic<std::uint64_t> m_aliasAutoSyncGeneration{ 1 };
+    std::int64_t m_aliasAutoSyncLastSuccessAt = 0;
+    std::string m_aliasAutoSyncLastPushHash;
+    CString m_aliasAutoSyncLastPushStatus = L"pending";
+    CString m_aliasAutoSyncLastPushMessage;
+    CString m_aliasAutoSyncLastPullStatus = L"failed";
+    CString m_aliasAutoSyncLastPullMessage;
+    CString m_aliasAutoSyncLastResult;
+    bool m_aliasAutoSyncAppendSupported = false;
+    bool m_aliasAutoSyncLastKnownAuthorized = false;
+    std::shared_ptr<std::atomic<bool>> m_aliasAutoSyncLifetime;
 
     // 【新增】：仅在 Debug 模式下编译的调试输出函数
     void OutputDebugAuthInfo();
@@ -768,6 +819,29 @@ private:
     std::atomic<bool> m_bOcrHealthCheckPending{ false };
     std::atomic<bool> m_bOcrRecoveryPending{ false };
     std::atomic<DWORD> m_ocrRecoveryRequestId{ 0 };
+    std::thread m_ocrSupervisorThread;
+    std::mutex m_ocrSupervisorMutex;
+    std::condition_variable m_ocrSupervisorCv;
+    bool m_ocrSupervisorWake = false;
+    std::atomic<bool> m_bOcrSupervisorStop{ false };
+    std::atomic<bool> m_bOcrSupervisorStarted{ false };
+    std::atomic<bool> m_bOcrServiceReady{ false };
+    std::atomic<bool> m_bOcrEngineReady{ false };
+    std::atomic<bool> m_bStartAfterOcrReady{ false };
+    std::atomic<DWORD> m_ocrStartPendingSince{ 0 };
+    std::atomic<DWORD> m_ocrRecoveryPendingSince{ 0 };
+    std::atomic<bool> m_bOcrRecoveryResultPosted{ false };
+    std::atomic<HWND> m_ocrSupervisorHwnd{ nullptr };
+    HANDLE m_hOcrTrackedProcess = nullptr;
+    DWORD m_ocrTrackedProcessId = 0;
+    std::atomic<ULONGLONG> m_ocrProcessNotReadySince{ 0 };
+    std::mutex m_ocrSupervisorRequestMutex;
+    HINTERNET m_hOcrSupervisorRequest = nullptr;
+
+    std::mutex m_ocrTaskMutex;
+    std::condition_variable m_ocrTaskCv;
+    std::size_t m_ocrTaskCount = 0;
+    bool m_bOcrTaskStop = false;
 
     CTreeCtrl m_treePlayers;   // 树状展示列表
 

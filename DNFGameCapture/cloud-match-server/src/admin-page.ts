@@ -94,7 +94,7 @@ export const ADMIN_PAGE_JS = `
   function playerRow(player) {
     const row = document.createElement('div'); row.className = 'player'; const identity = document.createElement('div');
     const main = document.createElement('strong'); text(main, player?.mainName || '未设置');
-    const aliases = document.createElement('small'); text(aliases, (player?.aliases || []).join(' / ') || '无小号'); identity.append(main, aliases);
+    const aliases = document.createElement('small'); text(aliases, (player?.aliases || []).join(' / ') || '无游戏ID'); identity.append(main, aliases);
     const stats = document.createElement('span'); stats.className = 'stats'; text(stats, '杀 ' + (player?.kills || 0) + ' · 死 ' + (player?.deaths || 0) + ' · AK ' + (player?.ak || 0) + ' · 连杀 ' + (player?.streak || 0)); row.append(identity, stats); return row;
   }
   function team(title, players, side) { const section = document.createElement('section'); section.className = 'team ' + side; const heading = document.createElement('h2'); text(heading, title); section.append(heading); players.forEach(item => section.append(playerRow(item))); return section; }

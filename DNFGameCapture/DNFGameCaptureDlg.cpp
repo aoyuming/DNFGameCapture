@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "DNFGameCaptureDlg.h"
 #include <shellapi.h>
 #include <Gdiplus.h>
@@ -18,6 +18,7 @@
 #include <climits>
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
 #include <array>
 #include <functional>
 #include <memory>
@@ -33,6 +34,7 @@
 #include "json.hpp"
 #include "CloudMatchSync.h"
 #include "CloudMatchStatusDisplay.h"
+#include "LicenseLease.h"
 using json = nlohmann::json;
 static CString s_backupAuthCode = L"";
 static CString s_pendingAuthCode = L"";
@@ -54,14 +56,37 @@ std::mutex g_visualLogMutex;
 struct DnfCloudAuthSuccess {
     long long expireTime = 0;
     CString cloudServerUrl;
+    CString licenseKey;
+    CString machineId;
+    long long cardDuration = 0;
     bool manualCheck = false;
     std::uint64_t requestGeneration = 0;
+    bool leaseEndpointRefresh = false;
 };
 
 struct DnfCloudAuthFailure {
     CString message;
     bool manualCheck = false;
     std::uint64_t requestGeneration = 0;
+    bool leaseEndpointRefresh = false;
+};
+
+struct DnfAliasAutoSyncResult {
+    std::uint64_t generation = 0;
+    // The HWND alone is not an ownership token: Windows may reuse it after
+    // the dialog is destroyed.  Keep the originating lifetime object in the
+    // message payload so a reused handle can only discard this result.
+    std::shared_ptr<std::atomic<bool>> lifetime;
+    bool pullOk = false;
+    bool appendSupported = false;
+    bool pushAttempted = false;
+    bool pushOk = false;
+    bool localPayloadEmpty = false;
+    std::string localPayloadHash;
+    std::string publicAliasDbJson;
+    std::string pullMessage;
+    std::string pushMessage;
+    std::string errorMessage;
 };
 
 float WINDOW_SCALE = 1.0f;
@@ -76,7 +101,7 @@ const int ID_BTN_DEATH_X_CALIBRATE = 1036;
 const int ID_BTN_DEATH_X_SAVE = 1037;
 const int ID_BTN_DEATH_X_CANCEL = 1038;
 const int ID_BTN_DEATH_X_DEFAULT = 1039;
-const CString PLACEHOLDER_TEXT = L"输入：主号(小号1)(小号2)...";
+const CString PLACEHOLDER_TEXT = L"输入：选手(游戏ID1)(游戏ID2)...";
 
 constexpr int DEATH_X_ALGO_COLOR = 0;      // 当前颜色采样算法
 constexpr int DEATH_X_ALGO_PATCH = 1;      // 打补丁红蓝点算法
@@ -113,6 +138,20 @@ static bool DnfStartKillDisplayHttpServer(CDNFGameCaptureDlg* host, const CStrin
 static void DnfStopKillDisplayHttpServer();
 void WriteMatchLog(const CString& logLine);
 void AppLog(const CString& msg, COLORREF color);
+
+static std::string DnfAliasAutoSyncHash(const std::string& payload)
+{
+    // FNV-1a is sufficient here: the hash only suppresses a repeated upload,
+    // while the server remains the source of truth and validates the payload.
+    std::uint64_t hash = 1469598103934665603ULL;
+    for (unsigned char byte : payload) {
+        hash ^= byte;
+        hash *= 1099511628211ULL;
+    }
+    char text[32] = {};
+    sprintf_s(text, "%016llX", static_cast<unsigned long long>(hash));
+    return text;
+}
 
 static const wchar_t* SCOREBOARD_STYLE_SECTION = L"ScoreboardTextStyles";
 static const wchar_t* KILL_DISPLAY_LAYOUT_SECTION = L"KillDisplay";
@@ -906,29 +945,28 @@ static int CALLBACK DnfEnumFontFamExProc(const LOGFONTW* lpelfe, const TEXTMETRI
 static json DnfBuildInstalledFontListJson()
 {
     static json s_cachedFonts;
-    static bool s_loaded = false;
-    if (s_loaded) return s_cachedFonts;
+    static std::once_flag s_fontCacheOnce;
+    std::call_once(s_fontCacheOnce, [] {
+        DnfFontEnumContext ctx;
+        HDC hdc = ::GetDC(NULL);
+        if (hdc) {
+            LOGFONTW lf = {};
+            lf.lfCharSet = DEFAULT_CHARSET;
+            ::EnumFontFamiliesExW(hdc, &lf, DnfEnumFontFamExProc, reinterpret_cast<LPARAM>(&ctx), 0);
+            ::ReleaseDC(NULL, hdc);
+        }
 
-    DnfFontEnumContext ctx;
-    HDC hdc = ::GetDC(NULL);
-    if (hdc) {
-        LOGFONTW lf = {};
-        lf.lfCharSet = DEFAULT_CHARSET;
-        ::EnumFontFamiliesExW(hdc, &lf, DnfEnumFontFamExProc, reinterpret_cast<LPARAM>(&ctx), 0);
-        ::ReleaseDC(NULL, hdc);
-    }
+        DnfAppendFontName(ctx, L"Microsoft YaHei");
+        DnfAppendFontName(ctx, L"SimHei");
+        DnfAppendFontName(ctx, L"Arial");
+        DnfAppendFontName(ctx, L"Arial Black");
 
-    DnfAppendFontName(ctx, L"Microsoft YaHei");
-    DnfAppendFontName(ctx, L"SimHei");
-    DnfAppendFontName(ctx, L"Arial");
-    DnfAppendFontName(ctx, L"Arial Black");
-
-    s_cachedFonts = json::array();
-    for (const auto& name : ctx.names) {
-        CString fontName(name.c_str());
-        s_cachedFonts.push_back(DnfJsonUtf8(fontName));
-    }
-    s_loaded = true;
+        s_cachedFonts = json::array();
+        for (const auto& name : ctx.names) {
+            CString fontName(name.c_str());
+            s_cachedFonts.push_back(DnfJsonUtf8(fontName));
+        }
+    });
     return s_cachedFonts;
 }
 
@@ -1432,12 +1470,12 @@ static bool DnfIsBlackBarColumn(const std::vector<BYTE>& pixels, int w, int h, i
 }
 
 // ========================================================
-// 小号格式校验：真实 ID 少于 3 个字符时，必须带大区或 #职业。
+// 游戏ID格式校验：真实 ID 少于 3 个字符时，必须带大区或 #职业。
 // 规则说明：
 //   - “上海1夏雫” -> 真实ID=夏雫，大区=上海1，合法
 //   - “夏雫#气功师” -> 真实ID=夏雫，职业=气功师，合法
 //   - “夏雫” -> 真实ID=夏雫，且无大区/职业，不合法
-// 主号不参与 OCR 名称匹配，所以短 ID 必须补充上下文，避免两字/一字误判。
+// 选手不参与 OCR 名称匹配，所以短 ID 必须补充上下文，避免两字/一字误判。
 // ========================================================
 static CString DnfTrimmedCopy(CString s)
 {
@@ -2209,7 +2247,7 @@ static CString DnfLegacyShortAliasDeleteReason(const CString& aliasRaw)
     CString alias = aliasRaw;
     alias.Trim();
     CString msg;
-    msg.Format(L"小号【%s】是2字短ID，真实ID少于3个字符且没有大区/#职业，容易误识别；不会自动删除，但开始监控前需要补充大区或 #职业。", (LPCTSTR)alias);
+    msg.Format(L"游戏ID【%s】是2字短ID，真实ID少于3个字符且没有大区/#职业，容易误识别；不会自动删除，但开始监控前需要补充大区或 #职业。", (LPCTSTR)alias);
     return msg;
 }
 
@@ -2218,7 +2256,7 @@ static bool DnfValidateAliasShortMeta(const CString& aliasRaw, CString& errorMsg
     CString alias = aliasRaw;
     alias.Trim();
     if (alias.IsEmpty()) {
-        errorMsg = L"小号不能为空";
+        errorMsg = L"游戏ID不能为空";
         return false;
     }
 
@@ -2227,11 +2265,11 @@ static bool DnfValidateAliasShortMeta(const CString& aliasRaw, CString& errorMsg
     CString realId = DnfExtractAliasRealId(alias, hasArea, hasJob);
 
     if (realId.IsEmpty()) {
-        errorMsg.Format(L"小号【%s】缺少真实ID，不能只填大区或职业。", (LPCTSTR)alias);
+        errorMsg.Format(L"游戏ID【%s】缺少真实ID，不能只填大区或职业。", (LPCTSTR)alias);
         return false;
     }
 
-    // 允许小号列表保留 2 字短ID；短ID只在“开始监控”时拦截，不在 Web 同步阶段删除/清空。
+    // 允许游戏ID列表保留 2 字短ID；短ID只在“开始监控”时拦截，不在 Web 同步阶段删除/清空。
     return true;
 }
 
@@ -2372,7 +2410,7 @@ static std::map<CString, std::vector<CString>> DnfBuildAliasSnapshotFromBaseline
 static CString DnfFormatMaybeEmptyAliasList(const std::vector<CString>& aliases)
 {
     CString text = DnfJoinAliasNames(aliases);
-    return text.IsEmpty() ? L"无小号" : text;
+    return text.IsEmpty() ? L"无游戏ID" : text;
 }
 
 static void DnfLogAliasPushDiff(const std::map<CString, CString>& baselinePlayers, const std::string& filteredAliasDbPayload, int containedNakedAliasCount)
@@ -2454,7 +2492,7 @@ static void DnfLogAliasPushDiff(const std::map<CString, CString>& baselinePlayer
     }
 
     CString summary;
-    summary.Format(L"☁️ [推送明细] 本次推送：新增主号 %d、删除主号 %d、修改主号 %d、新增小号 %d、删除小号 %d、改名 %d",
+    summary.Format(L"☁️ [推送明细] 本次推送：新增选手 %d、删除选手 %d、修改选手 %d、新增游戏ID %d、删除游戏ID %d、改名 %d",
         visibleAddedMainCount,
         visibleRemovedMainCount,
         changedMainCount,
@@ -2470,28 +2508,28 @@ static void DnfLogAliasPushDiff(const std::map<CString, CString>& baselinePlayer
     }
 
     if (hasMainRename) {
-        AppLog(L"☁️ [推送主号改名] " + renamedMainOld + L" => " + renamedMainNew + L" -> " + DnfFormatMaybeEmptyAliasList(after[renamedMainNew]), RGB(255, 220, 120));
+        AppLog(L"☁️ [推送选手改名] " + renamedMainOld + L" => " + renamedMainNew + L" -> " + DnfFormatMaybeEmptyAliasList(after[renamedMainNew]), RGB(255, 220, 120));
     }
 
     for (const CString& mainName : addedMains) {
         if (hasMainRename && mainName == renamedMainNew) continue;
-        AppLog(L"☁️ [推送新增主号] " + mainName + L" -> " + DnfFormatMaybeEmptyAliasList(after[mainName]), RGB(100, 255, 140));
+        AppLog(L"☁️ [推送新增选手] " + mainName + L" -> " + DnfFormatMaybeEmptyAliasList(after[mainName]), RGB(100, 255, 140));
     }
 
     for (const CString& mainName : removedMains) {
         if (hasMainRename && mainName == renamedMainOld) continue;
-        AppLog(L"☁️ [推送删除主号] " + mainName + L" -> " + DnfFormatMaybeEmptyAliasList(before[mainName]), RGB(255, 120, 100));
+        AppLog(L"☁️ [推送删除选手] " + mainName + L" -> " + DnfFormatMaybeEmptyAliasList(before[mainName]), RGB(255, 120, 100));
     }
 
     for (const auto& log : aliasLogs) {
         if (!log.renameOld.IsEmpty() || !log.renameNew.IsEmpty()) {
-            AppLog(L"☁️ [推送小号改名] " + log.mainName + L" -> " + log.renameOld + L" => " + log.renameNew, RGB(255, 220, 120));
+            AppLog(L"☁️ [推送游戏ID改名] " + log.mainName + L" -> " + log.renameOld + L" => " + log.renameNew, RGB(255, 220, 120));
         }
         if (!log.added.empty()) {
-            AppLog(L"☁️ [推送新增小号] " + log.mainName + L" -> " + DnfJoinAliasNames(log.added), RGB(100, 255, 140));
+            AppLog(L"☁️ [推送新增游戏ID] " + log.mainName + L" -> " + DnfJoinAliasNames(log.added), RGB(100, 255, 140));
         }
         if (!log.removed.empty()) {
-            AppLog(L"☁️ [推送删除小号] " + log.mainName + L" -> " + DnfJoinAliasNames(log.removed), RGB(255, 190, 90));
+            AppLog(L"☁️ [推送删除游戏ID] " + log.mainName + L" -> " + DnfJoinAliasNames(log.removed), RGB(255, 190, 90));
         }
     }
 
@@ -3478,6 +3516,7 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     ON_MESSAGE(WM_KEY_DISPLAY_VISIBILITY_CHANGED, &CDNFGameCaptureDlg::OnKeyDisplayVisibilityChanged)
     ON_MESSAGE(WM_KEY_MAPPING_LAN_CHANGED, &CDNFGameCaptureDlg::OnKeyMappingLanChanged)
     ON_MESSAGE(WM_KEY_MAPPING_TEAM_SYNC, &CDNFGameCaptureDlg::OnKeyMappingTeamSync)
+    ON_MESSAGE(WM_ALIAS_AUTO_SYNC_RESULT, &CDNFGameCaptureDlg::OnAliasDbAutoSyncResult)
     ON_MESSAGE(WM_CAPTURE_SOURCE_SWITCH_DONE, &CDNFGameCaptureDlg::OnCaptureSourceSwitchDone)
     ON_MESSAGE(WM_CAMERA_LIST_READY, &CDNFGameCaptureDlg::OnCameraListReady)
     ON_CBN_DROPDOWN(1031, &CDNFGameCaptureDlg::OnCbnDropdownTargetWindow)
@@ -3697,6 +3736,16 @@ LRESULT CDNFGameCaptureDlg::OnCloudAuthFail(WPARAM wParam, LPARAM lParam) {
             WriteMatchLog(L"[云端验证] 已忽略过期的授权失败回调。");
             return 0;
         }
+        if (authFailure->leaseEndpointRefresh) {
+            m_cloudMatchLeaseRefreshInFlight = false;
+            CString refreshLog = L"五天租约中的服务器地址连接失败，在线刷新地址也未成功；"
+                L"当前授权与租约保持有效，程序将继续重连原地址。原因：" +
+                authFailure->message;
+            WriteMatchLog(L"[云端验证] " + refreshLog);
+            AppLog(L"⚠️ [云端连接] " + refreshLog, RGB(255, 190, 80));
+            BroadcastStateToWeb();
+            return 0;
+        }
         // 请求可能在后台重试期间与后续操作交错，回调使用请求自己的标记，
         // 不再依赖容易被下一次授权操作覆盖的成员变量。
         const bool wasManualAuthCheck = authFailure->manualCheck;
@@ -3712,6 +3761,7 @@ LRESULT CDNFGameCaptureDlg::OnCloudAuthFail(WPARAM wParam, LPARAM lParam) {
         }
         else {
             WriteMatchLog(L"[授权备份] 云端校验失败（非手动授权），保留本地卡密，不覆盖授权存储。");
+            DnfClearProtectedLicenseLease();
         }
 
         if (m_editVisualLogs.m_hWnd) m_editVisualLogs.SetWindowText(L"");
@@ -3745,25 +3795,93 @@ LRESULT CDNFGameCaptureDlg::OnUpdateAuthTime(WPARAM wParam, LPARAM lParam) {
         WriteMatchLog(L"[云端验证] 已忽略过期的授权成功回调。");
         return 0;
     }
+    m_cloudMatchLeaseRefreshInFlight = false;
     long long cloudTime = authSuccess->expireTime;
     const bool wasManualAuthCheck = authSuccess->manualCheck;
-    m_cloudExpireTime = cloudTime;
     const long long currentTime = static_cast<long long>(time(nullptr));
-    m_bIsAuthValid = cloudTime == 0xFFFFFFFF || cloudTime > currentTime;
+    const bool refreshedAuthValid =
+        cloudTime == 0xFFFFFFFF || cloudTime > currentTime;
 
     CString authorizedServerUrl = authSuccess->cloudServerUrl;
     authorizedServerUrl.Trim();
     const std::string authorizedUrlUtf8 = std::string(
         CW2A(authorizedServerUrl, CP_UTF8));
     CloudMatchClient serverUrlValidator;
-    const bool serverUrlValid = m_bIsAuthValid && !authorizedServerUrl.IsEmpty() &&
+    const bool serverUrlValid = refreshedAuthValid && !authorizedServerUrl.IsEmpty() &&
         serverUrlValidator.Configure(authorizedUrlUtf8,
             "cloud-server-url-validator", "cloud-server-url-validator");
 
+    if (authSuccess->leaseEndpointRefresh && !serverUrlValid) {
+        const CString reason = refreshedAuthValid ?
+            L"授权服务没有返回有效的云端比赛服务器地址。" :
+            L"授权服务返回的授权有效期无效。";
+        const CString refreshLog =
+            L"五天租约服务器地址刷新结果无效；当前授权、旧地址和租约保持有效，"
+            L"程序将继续重连原地址。原因：" + reason;
+        WriteMatchLog(L"[云端验证] " + refreshLog);
+        AppLog(L"⚠️ [云端连接] " + refreshLog, RGB(255, 190, 80));
+        BroadcastStateToWeb();
+        return 0;
+    }
+
+    const bool leaseEligible =
+        DnfIsLicenseLeaseEligible(authSuccess->cardDuration);
+    DnfLicenseLeaseRecord refreshedLease;
+    if (leaseEligible) {
+        refreshedLease.licenseKey = authSuccess->licenseKey.GetString();
+        refreshedLease.machineId = authSuccess->machineId.GetString();
+        refreshedLease.cloudServerUrl = authorizedServerUrl.GetString();
+        refreshedLease.cardDuration = authSuccess->cardDuration;
+        refreshedLease.expireTime = cloudTime;
+        refreshedLease.validatedAt = currentTime;
+        refreshedLease.lastUsedAt = currentTime;
+    }
+    if (authSuccess->leaseEndpointRefresh &&
+        (!leaseEligible || !DnfSaveProtectedLicenseLease(refreshedLease))) {
+        const CString reason = leaseEligible ?
+            L"新服务器地址无法写入本机加密租约。" :
+            L"授权服务返回的卡片时长不支持五天租约。";
+        const CString refreshLog =
+            L"五天租约服务器地址刷新未能安全落盘；当前授权、旧地址和租约保持有效，"
+            L"程序将继续重连原地址。原因：" + reason;
+        WriteMatchLog(L"[云端验证] " + refreshLog);
+        AppLog(L"⚠️ [云端连接] " + refreshLog, RGB(255, 190, 80));
+        BroadcastStateToWeb();
+        return 0;
+    }
+
+    m_cloudExpireTime = cloudTime;
+    m_bIsAuthValid = refreshedAuthValid;
+
     DisableCloudMatchForAuthorization(CString());
+    if (!serverUrlValid) {
+        DnfClearProtectedLicenseLease();
+    }
     if (serverUrlValid) {
         m_cloudMatchServerUrl = authorizedServerUrl;
         StartSavedCloudMatchSession();
+
+        if (authSuccess->leaseEndpointRefresh) {
+            AppLog(L"✅ [云端连接] 已从授权服务刷新服务器地址并重新连接。",
+                RGB(80, 225, 150));
+            WriteMatchLog(L"[云端验证] 五天租约服务器地址刷新成功，已更新加密租约。");
+        }
+
+        if (leaseEligible) {
+            if (authSuccess->leaseEndpointRefresh ||
+                DnfSaveProtectedLicenseLease(refreshedLease)) {
+                CString leaseLog;
+                leaseLog.Format(L"[云端验证] 已更新五天加密授权租约；下次最晚验证=%s。",
+                    FormatTimeStamp(DnfGetLicenseLeaseValidUntil(refreshedLease)).GetString());
+                WriteMatchLog(leaseLog);
+            }
+            else {
+                WriteMatchLog(L"[云端验证] 授权成功，但五天加密租约保存失败；下次启动仍将联网验证。");
+            }
+        }
+        else {
+            DnfClearProtectedLicenseLease();
+        }
     }
     else if (m_bIsAuthValid) {
         m_cloudMatchLastError =
@@ -3796,6 +3914,12 @@ LRESULT CDNFGameCaptureDlg::OnUpdateAuthTime(WPARAM wParam, LPARAM lParam) {
     if (wasManualAuthCheck) {
         s_backupAuthCode.Empty();
         s_pendingAuthCode.Empty();
+    }
+    if (m_bIsAuthValid && serverUrlValid) {
+        // A successful authorization is a wake-up point, not a reason to
+        // bypass the persisted seven-day interval.  A first run is still due
+        // because LastSuccessAt is zero.
+        MaybeStartAliasDbAutoSync(false);
     }
     BroadcastStateToWeb();
     return 0;
@@ -4090,10 +4214,134 @@ static CString DnfReadLocalLicenseKey()
     return L"";
 }
 
+bool CDNFGameCaptureDlg::TryActivateFromLicenseLease(const CString& normalizedKey,
+    const CString& machineId, long long cardDuration)
+{
+    if (!DnfIsLicenseLeaseEligible(cardDuration)) return false;
+
+    DnfLicenseLeaseRecord lease;
+    if (!DnfLoadProtectedLicenseLease(lease)) {
+        WriteMatchLog(L"[云端验证] 未找到可用的加密授权租约，本次执行联网验证。");
+        return false;
+    }
+
+    const long long now = static_cast<long long>(time(nullptr));
+    const DnfLicenseLeaseValidation validation = DnfValidateLicenseLease(lease,
+        std::wstring(normalizedKey.GetString()), std::wstring(machineId.GetString()),
+        cardDuration, now);
+    if (validation != DnfLicenseLeaseValidation::valid) {
+        CString leaseLog;
+        leaseLog.Format(L"[云端验证] 加密授权租约不可用：%s；本次执行联网验证。",
+            DnfLicenseLeaseValidationText(validation));
+        WriteMatchLog(leaseLog);
+        if (validation != DnfLicenseLeaseValidation::validationDue) {
+            DnfClearProtectedLicenseLease();
+        }
+        return false;
+    }
+
+    CString authorizedServerUrl(lease.cloudServerUrl.c_str());
+    authorizedServerUrl.Trim();
+    const std::string authorizedUrlUtf8 = std::string(
+        CW2A(authorizedServerUrl, CP_UTF8));
+    CloudMatchClient serverUrlValidator;
+    if (authorizedServerUrl.IsEmpty() ||
+        !serverUrlValidator.Configure(authorizedUrlUtf8,
+            "cached-cloud-server-url-validator",
+            "cached-cloud-server-url-validator")) {
+        DnfClearProtectedLicenseLease();
+        WriteMatchLog(L"[云端验证] 加密授权租约中的服务器地址无效，已丢弃并执行联网验证。");
+        return false;
+    }
+
+    DisableCloudMatchForAuthorization(CString());
+    m_cloudExpireTime = lease.expireTime;
+    m_bIsAuthValid = true;
+    m_cloudMatchServerUrl = authorizedServerUrl;
+    lease.lastUsedAt = now;
+    if (!DnfSaveProtectedLicenseLease(lease)) {
+        WriteMatchLog(L"[云端验证] 加密授权租约使用成功，但最后使用时间保存失败。");
+    }
+    m_cloudMatchUsingLicenseLease = true;
+    m_cloudMatchLeaseRefreshAttempted = false;
+    m_cloudMatchLeaseRefreshInFlight = false;
+    m_cloudMatchLeaseDisconnectedSinceTick = ::GetTickCount64();
+    StartSavedCloudMatchSession();
+
+    CString leaseLog;
+    leaseLog.Format(L"[云端验证] 已使用加密授权租约，跳过本次云函数请求；下次最晚验证=%s。",
+        FormatTimeStamp(DnfGetLicenseLeaseValidUntil(lease)).GetString());
+    WriteMatchLog(leaseLog);
+    AppLog(L"✅ [云端验证] 已使用本机加密授权租约。", RGB(0, 255, 100));
+    // Re-check the persisted schedule on every startup; only a missing or
+    // expired seven-day record should start the background task.
+    MaybeStartAliasDbAutoSync(false);
+    return true;
+}
+
+bool CDNFGameCaptureDlg::BeginLicenseLeaseEndpointRefresh()
+{
+    if (!m_cloudMatchUsingLicenseLease || m_cloudMatchLeaseRefreshAttempted ||
+        m_cloudMatchLeaseRefreshInFlight) {
+        return false;
+    }
+
+    m_cloudMatchLeaseRefreshAttempted = true;
+    DnfLicenseLeaseRecord lease;
+    const CString normalizedKey = DnfReadLocalLicenseKey();
+    const CString machineId = GetMachineID();
+    const long long now = static_cast<long long>(time(nullptr));
+    if (!DnfLoadProtectedLicenseLease(lease) ||
+        DnfValidateLicenseLease(lease, std::wstring(normalizedKey.GetString()),
+            std::wstring(machineId.GetString()), m_keyDuration, now) !=
+            DnfLicenseLeaseValidation::valid) {
+        WriteMatchLog(L"[云端验证] 服务器地址刷新前租约复核失败，本次不再自动刷新。");
+        return false;
+    }
+
+    m_cloudMatchLeaseRefreshInFlight = true;
+    const std::uint64_t requestGeneration = ++m_cloudAuthRequestGeneration;
+    const CString licenseKey(lease.licenseKey.c_str());
+    const long long duration = lease.cardDuration;
+    const HWND hWnd = GetSafeHwnd();
+    AppLog(L"🔄 [云端连接] 租约地址持续连接失败，正在向授权服务刷新服务器地址...",
+        RGB(255, 200, 0));
+    WriteMatchLog(L"[云端验证] 五天租约地址连续30秒未连接，本次运行开始一次在线地址刷新。");
+
+    std::thread([hWnd, licenseKey, machineId, duration,
+        requestGeneration]() {
+        long long cloudExpTime = 0;
+        CString cloudServerUrl;
+        const CString cloudResult = CheckCloudBinding(licenseKey, machineId,
+            duration, cloudExpTime, cloudServerUrl);
+        if (!::IsWindow(hWnd)) return;
+
+        if (cloudResult == L"OK") {
+            auto* success = new DnfCloudAuthSuccess{
+                cloudExpTime, cloudServerUrl, licenseKey, machineId, duration,
+                false, requestGeneration };
+            success->leaseEndpointRefresh = true;
+            if (!::PostMessage(hWnd, WM_UPDATE_AUTH_TIME, 0,
+                reinterpret_cast<LPARAM>(success))) {
+                delete success;
+            }
+            return;
+        }
+
+        auto* failure = new DnfCloudAuthFailure{
+            cloudResult, false, requestGeneration };
+        failure->leaseEndpointRefresh = true;
+        if (!::PostMessage(hWnd, WM_CLOUD_AUTH_FAIL, 0,
+            reinterpret_cast<LPARAM>(failure))) {
+            delete failure;
+        }
+        }).detach();
+    return true;
+}
+
 bool CDNFGameCaptureDlg::BeginLicenseCloudCheck(const CString& inputKey, bool manualCheck)
 {
     const std::uint64_t requestGeneration = ++m_cloudAuthRequestGeneration;
-    DisableCloudMatchForAuthorization(CString());
     CString normalized = DnfNormalizeLicenseKey(inputKey);
     CString hwid = GetMachineID();
     if (normalized.IsEmpty() || !VerifyKey(normalized, hwid)) {
@@ -4103,12 +4351,20 @@ bool CDNFGameCaptureDlg::BeginLicenseCloudCheck(const CString& inputKey, bool ma
         return false;
     }
 
+    if (!manualCheck && TryActivateFromLicenseLease(normalized, hwid,
+        m_keyDuration)) {
+        m_bIsManualAuthCheck = false;
+        return true;
+    }
+
+    DisableCloudMatchForAuthorization(CString());
+
     m_bIsManualAuthCheck = manualCheck;
     m_bIsTrial = false;
     long long duration = m_keyDuration;
     HWND hWnd = GetSafeHwnd();
 
-    std::thread([this, hWnd, normalized, hwid, duration, manualCheck,
+    std::thread([hWnd, normalized, hwid, duration, manualCheck,
         requestGeneration]() {
         constexpr int kAutomaticAttempts = 3;
         const int maxAttempts = manualCheck ? 1 : kAutomaticAttempts;
@@ -4123,7 +4379,8 @@ bool CDNFGameCaptureDlg::BeginLicenseCloudCheck(const CString& inputKey, bool ma
             if (cloudResult == L"OK") {
                 if (::IsWindow(hWnd)) {
                     auto* success = new DnfCloudAuthSuccess{
-                        cloudExpTime, cloudServerUrl, manualCheck,
+                        cloudExpTime, cloudServerUrl, normalized, hwid, duration,
+                        manualCheck,
                         requestGeneration };
                     if (!::PostMessage(hWnd, WM_UPDATE_AUTH_TIME, 0,
                         reinterpret_cast<LPARAM>(success))) {
@@ -4219,12 +4476,12 @@ static bool DnfPostCloudJson(const std::string& jsonUtf8, std::string& responseU
 CString CDNFGameCaptureDlg::SubmitAliasDbForReview(const std::string& aliasDbPayload, int mainCount, int pairCount)
 {
     if (aliasDbPayload.empty()) {
-        return L"当前没有可上传的小号库。";
+        return L"当前没有可上传的游戏ID库。";
     }
 
     CString key = DnfReadLocalLicenseKey();
     if (key.IsEmpty()) {
-        return L"请先输入并验证授权卡密，再上传共享小号库。";
+        return L"请先输入并验证授权卡密，再上传共享游戏ID库。";
     }
 
     CString hwid = GetMachineID();
@@ -4243,11 +4500,11 @@ CString CDNFGameCaptureDlg::SubmitAliasDbForReview(const std::string& aliasDbPay
                 detail.Format(L"☁️ [推送预过滤] 本地预过滤裸ID %d 个，本次无可提交变化。", containedNakedAliasCount);
                 AppLog(detail, RGB(255, 200, 90));
                 CString msg;
-                msg.Format(L"共享库投稿成功：云端已有包含这些裸ID的小号，已本地预过滤 %d 个。", containedNakedAliasCount);
+                msg.Format(L"共享库投稿成功：云端已有包含这些裸ID的游戏ID，已本地预过滤 %d 个。", containedNakedAliasCount);
                 return msg;
             }
             AppLog(L"☁️ [推送明细] 本次无可提交变化。", RGB(160, 170, 180));
-            return L"当前没有可上传的小号库。";
+            return L"当前没有可上传的游戏ID库。";
         }
 
         DnfLogAliasPushDiff(m_aliasCloudBaselinePlayers, filteredAliasDbPayload, containedNakedAliasCount);
@@ -4296,7 +4553,7 @@ CString CDNFGameCaptureDlg::SubmitAliasDbForReview(const std::string& aliasDbPay
 CString CDNFGameCaptureDlg::DirectSyncAliasDbToCloud(const std::string& aliasDbPayload, int mainCount, int pairCount)
 {
     if (mainCount <= 0 || aliasDbPayload.empty()) {
-        return L"当前没有可直写的本地小号库。";
+        return L"当前没有可直写的本地游戏ID库。";
     }
 
     CString key = DnfReadLocalLicenseKey();
@@ -4500,7 +4757,7 @@ CString CDNFGameCaptureDlg::SyncAliasDbFromCloud()
         BroadcastStateToWeb();
 
         CString result;
-        result.Format(L"云端库同步完成：更新 %d 个主号关联、新增 %d 个小号、补全职业信息 %d 个、回填当前选手 %d 个。", touchedMainCount, addedAliasCount, upgradedAliasCount, touchedLiveAliasCount);
+        result.Format(L"云端库同步完成：更新 %d 个选手关联、新增 %d 个游戏ID、补全职业信息 %d 个、回填当前选手 %d 个。", touchedMainCount, addedAliasCount, upgradedAliasCount, touchedLiveAliasCount);
         if (addedAliasCount == 0 && upgradedAliasCount == 0 && touchedLiveAliasCount == 0) result = L"云端库同步完成：本地已经是最新。";
         return result;
     }
@@ -4528,7 +4785,7 @@ void CDNFGameCaptureDlg::AutoSubmitAliasDbIfDirty()
         result = DirectSyncAliasDbToCloud(payload, mainCount, pairCount);
     }
     else {
-        AppLog(L"☁️ [共享库] 检测到本地小号库有变动，退出前自动提交待审核...", RGB(80, 220, 180));
+        AppLog(L"☁️ [共享库] 检测到本地游戏ID库有变动，退出前自动提交待审核...", RGB(80, 220, 180));
         result = SubmitAliasDbForReview(payload, mainCount, pairCount);
     }
     COLORREF logColor = result.Find(L"成功") >= 0 ? RGB(0, 255, 120) : RGB(255, 120, 80);
@@ -4552,10 +4809,10 @@ CString CDNFGameCaptureDlg::SubmitAliasDbSnapshotIfDirty(bool saveBeforeBuild)
     int pairCount = 0;
     std::string payload = BuildAliasDbJsonPayload(mainCount, pairCount);
     if (!m_aliasDbLastSubmittedPayload.empty() && payload == m_aliasDbLastSubmittedPayload) {
-        return L"本地小号库没有变化，无需推送。";
+        return L"本地游戏ID库没有变化，无需推送。";
     }
 
-    AppLog(L"☁️ [共享库] 正在推送本地小号库快照，云端将生成差异等待审核...", RGB(80, 220, 180));
+    AppLog(L"☁️ [共享库] 正在推送本地游戏ID库快照，云端将生成差异等待审核...", RGB(80, 220, 180));
     CString result = SubmitAliasDbForReview(payload, mainCount, pairCount);
     COLORREF logColor = result.Find(L"成功") >= 0 ? RGB(0, 255, 120) : RGB(255, 120, 80);
     AppLog(L"☁️ [共享库] " + result, logColor);
@@ -4707,6 +4964,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_pKillDisplayDlg = nullptr;
     m_pKeyDisplayDlg = nullptr;
     m_bIsManualAuthCheck = false; // 初始设为 false
+    m_aliasAutoSyncLifetime = std::make_shared<std::atomic<bool>>(true);
     StartCaptureSwitchWorker();
 
     // Single-instance ownership is established in CApp before this dialog exists.
@@ -4722,6 +4980,8 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_bOcrRecoveryPending = false;
     m_bOcrHealthCheckPending = false;
     m_ocrRecoveryRequestId = 0;
+    m_hHttpSession = nullptr;
+    m_hHttpConnect = nullptr;
     ApplyDefaultDeathXPoints();
 
     GdiplusStartupInput gpi;
@@ -4747,6 +5007,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
         webThemeBuffer, static_cast<DWORD>(std::size(webThemeBuffer)), m_iniPath);
     m_webTheme = DnfNormalizeWebTheme(webThemeBuffer);
     LoadCloudMatchSettings();
+    LoadAliasDbAutoSyncSettings();
     if (m_cloudMatchTemporaryInstance) {
         m_cloudMatchDeviceId = DnfGenerateCloudMatchDeviceId(true);
         DnfSecureClearString(m_cloudMatchDeviceToken);
@@ -4758,16 +5019,6 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     }
     LoadKeyMappingLanSettings();
     LoadKeyMappingSettings();
-    m_bKillDisplayHttpReady = DnfStartKillDisplayHttpServer(this, m_webFrontDir, m_killDisplayHttpError);
-    if (m_bKillDisplayHttpReady) {
-        OpenKillDisplayWindow();
-        if (GetPrivateProfileInt(L"KeyDisplayWindow", L"Visible", 0, m_iniPath) != 0) {
-            OpenKeyDisplayWindow();
-        }
-    }
-    if (!m_bKillDisplayHttpReady && !m_killDisplayHttpError.IsEmpty()) {
-        WriteMatchLog(L"[击杀展示页] " + m_killDisplayHttpError);
-    }
     m_bOutputSeatLabelToKillFile = GetPrivateProfileInt(L"Settings", L"OutputSeatLabelToKillFile", 0, m_iniPath) != 0;
     m_bRedPickFirst = GetPrivateProfileInt(L"Settings", L"RedPickFirst", 0, m_iniPath) != 0;
     wchar_t lastTargetBuf[512];
@@ -4919,6 +5170,18 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     RefreshDisplay();
     WriteScoreToFile();
 
+    // Start the HTTP worker only after every field used by its snapshots is initialized.
+    m_bKillDisplayHttpReady = DnfStartKillDisplayHttpServer(this, m_webFrontDir, m_killDisplayHttpError);
+    if (m_bKillDisplayHttpReady) {
+        OpenKillDisplayWindow();
+        if (GetPrivateProfileInt(L"KeyDisplayWindow", L"Visible", 0, m_iniPath) != 0) {
+            OpenKeyDisplayWindow();
+        }
+    }
+    if (!m_bKillDisplayHttpReady && !m_killDisplayHttpError.IsEmpty()) {
+        WriteMatchLog(L"[击杀展示页] " + m_killDisplayHttpError);
+    }
+
     CheckTrialAndLicense();
     OutputDebugAuthInfo();
     InitTrayIcon();
@@ -4929,6 +5192,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     SetTimer(5, 100, NULL);
     SetTimer(6, 1000, NULL);
     SetTimer(8, 16, NULL);
+    SetTimer(9, 60000, NULL);
     EnsureBackgroundTimersStarted();
 
     if (m_pWebDlg == nullptr) {
@@ -4940,6 +5204,8 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_pWebDlg->ShowWindow(SW_SHOW);
     ShowWindow(SW_HIDE);
 
+    StartOcrSupervisor();
+
     // ==========================================
     // 🚨 恢复：开机自动在后台检查更新！
     // ==========================================
@@ -4950,6 +5216,13 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
 }
 
 CDNFGameCaptureDlg::~CDNFGameCaptureDlg() {
+    if (m_aliasAutoSyncLifetime) {
+        m_aliasAutoSyncLifetime->store(false, std::memory_order_release);
+    }
+    m_aliasAutoSyncGeneration.fetch_add(1, std::memory_order_acq_rel);
+    m_aliasAutoSyncInFlight = false;
+    StopOcrMatchingTasks();
+    StopOcrSupervisor();
     StopCaptureSwitchWorker();
     m_cloudMatchClient.SetMessageCallback(nullptr);
     m_cloudMatchClient.Stop();
@@ -5030,33 +5303,597 @@ void CDNFGameCaptureDlg::OnClose() {
     BroadcastStateToWeb(); // 👈 新增
 }
 
+void CDNFGameCaptureDlg::StartOcrMatchingTask(int triggerSide)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_ocrTaskMutex);
+        if (m_bOcrTaskStop) {
+            WriteMatchLog(L"[OCR] 已忽略新的识别任务：程序正在退出。");
+            return;
+        }
+        ++m_ocrTaskCount;
+    }
+
+    try {
+        std::thread([this, triggerSide]() {
+            try {
+                DoRetryMatchingTask(triggerSide);
+            }
+            catch (const std::exception& e) {
+                CString message = CA2W(e.what(), CP_UTF8);
+                WriteMatchLog(L"[OCR] 识别任务异常退出：" + message);
+            }
+            catch (...) {
+                WriteMatchLog(L"[OCR] 识别任务异常退出：未知异常。");
+            }
+            EndOcrMatchingTask();
+        }).detach();
+    }
+    catch (const std::exception& e) {
+        EndOcrMatchingTask();
+        CString message = CA2W(e.what(), CP_UTF8);
+        AppLog(L"❌ [OCR] 无法创建识别线程：" + message, RGB(255, 80, 80));
+        WriteMatchLog(L"[OCR] 无法创建识别线程：" + message);
+    }
+    catch (...) {
+        EndOcrMatchingTask();
+        AppLog(L"❌ [OCR] 无法创建识别线程。", RGB(255, 80, 80));
+        WriteMatchLog(L"[OCR] 无法创建识别线程：未知异常。");
+    }
+}
+
+void CDNFGameCaptureDlg::EndOcrMatchingTask()
+{
+    {
+        std::lock_guard<std::mutex> lock(m_ocrTaskMutex);
+        if (m_ocrTaskCount > 0) {
+            --m_ocrTaskCount;
+        }
+    }
+    m_ocrTaskCv.notify_all();
+}
+
+void CDNFGameCaptureDlg::StopOcrMatchingTasks()
+{
+    {
+        std::lock_guard<std::mutex> lock(m_ocrTaskMutex);
+        m_bOcrTaskStop = true;
+    }
+    m_ocrTaskCv.notify_all();
+    WaitForOcrMatchingTasks();
+}
+
+void CDNFGameCaptureDlg::WaitForOcrMatchingTasks()
+{
+    std::unique_lock<std::mutex> lock(m_ocrTaskMutex);
+    m_ocrTaskCv.wait(lock, [this]() {
+        return m_ocrTaskCount == 0;
+    });
+}
+
+bool CDNFGameCaptureDlg::RegisterOcrSupervisorRequest(HINTERNET hRequest)
+{
+    if (!hRequest) return false;
+
+    std::lock_guard<std::mutex> lock(m_ocrSupervisorRequestMutex);
+    if (m_bOcrSupervisorStop.load(std::memory_order_acquire) ||
+        m_hOcrSupervisorRequest != nullptr) {
+        return false;
+    }
+    m_hOcrSupervisorRequest = hRequest;
+    return true;
+}
+
+bool CDNFGameCaptureDlg::ReleaseOcrSupervisorRequest(HINTERNET hRequest)
+{
+    std::lock_guard<std::mutex> lock(m_ocrSupervisorRequestMutex);
+    if (m_hOcrSupervisorRequest != hRequest) {
+        return false;
+    }
+    m_hOcrSupervisorRequest = nullptr;
+    return true;
+}
+
+void CDNFGameCaptureDlg::CancelOcrSupervisorRequest()
+{
+    HINTERNET hRequest = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(m_ocrSupervisorRequestMutex);
+        hRequest = m_hOcrSupervisorRequest;
+        m_hOcrSupervisorRequest = nullptr;
+    }
+
+    // WinHTTP 关闭请求句柄会取消正在进行的同步请求，令监督线程尽快回到停止检查。
+    if (hRequest) {
+        WinHttpCloseHandle(hRequest);
+    }
+}
+
+void CDNFGameCaptureDlg::StartOcrSupervisor()
+{
+    bool expected = false;
+    if (!m_bOcrSupervisorStarted.compare_exchange_strong(expected, true)) {
+        RequestOcrSupervisorWork();
+        return;
+    }
+
+    m_bOcrSupervisorStop.store(false, std::memory_order_release);
+    m_bOcrServiceReady.store(false, std::memory_order_release);
+    m_bOcrEngineReady.store(false, std::memory_order_release);
+    m_ocrProcessNotReadySince.store(0, std::memory_order_release);
+    m_ocrSupervisorHwnd.store(GetSafeHwnd(), std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(m_ocrSupervisorMutex);
+        m_ocrSupervisorWake = true;
+    }
+
+    try {
+        m_ocrSupervisorThread = std::thread(
+            &CDNFGameCaptureDlg::OcrSupervisorLoop, this);
+    }
+    catch (...) {
+        m_bOcrSupervisorStop.store(true, std::memory_order_release);
+        m_bOcrSupervisorStarted.store(false, std::memory_order_release);
+        AppLog(L"❌ [Umi-OCR] 无法创建后台监督线程。", RGB(255, 80, 80));
+        WriteMatchLog(L"[Umi-OCR] 无法创建后台监督线程。");
+        return;
+    }
+
+    m_ocrSupervisorCv.notify_one();
+    WriteMatchLog(L"[Umi-OCR] 后台监督线程已启动，开始预热 OCR。");
+}
+
+void CDNFGameCaptureDlg::StopOcrSupervisor()
+{
+    m_bOcrSupervisorStop.store(true, std::memory_order_release);
+    m_ocrSupervisorHwnd.store(nullptr, std::memory_order_release);
+    CancelOcrSupervisorRequest();
+    {
+        std::lock_guard<std::mutex> lock(m_ocrSupervisorMutex);
+        m_ocrSupervisorWake = true;
+    }
+    m_ocrSupervisorCv.notify_all();
+
+    if (m_ocrSupervisorThread.joinable()) {
+        m_ocrSupervisorThread.join();
+    }
+
+    m_bOcrSupervisorStarted.store(false, std::memory_order_release);
+    m_bOcrServiceReady.store(false, std::memory_order_release);
+    m_bOcrEngineReady.store(false, std::memory_order_release);
+    m_ocrProcessNotReadySince.store(0, std::memory_order_release);
+    CloseTrackedOcrProcess();
+}
+
+void CDNFGameCaptureDlg::RequestOcrSupervisorWork()
+{
+    if (!m_bOcrSupervisorStarted.load(std::memory_order_acquire) ||
+        m_bOcrSupervisorStop.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_ocrSupervisorMutex);
+        m_ocrSupervisorWake = true;
+    }
+    m_ocrSupervisorCv.notify_one();
+}
+
+static bool DnfOcrWaitForSocket(SOCKET socket, bool writeReady,
+    const std::chrono::steady_clock::time_point& deadline,
+    const std::atomic<bool>* stopFlag)
+{
+    while (true) {
+        if (stopFlag && stopFlag->load(std::memory_order_acquire)) {
+            return false;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) return false;
+
+        const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(
+            deadline - now);
+        timeval timeout = {};
+        timeout.tv_sec = static_cast<long>(remaining.count() / 1000000);
+        timeout.tv_usec = static_cast<long>(remaining.count() % 1000000);
+
+        fd_set readySet;
+        FD_ZERO(&readySet);
+        FD_SET(socket, &readySet);
+        const int result = writeReady ?
+            ::select(0, nullptr, &readySet, nullptr, &timeout) :
+            ::select(0, &readySet, nullptr, nullptr, &timeout);
+        if (result == SOCKET_ERROR || result == 0) return false;
+        if (FD_ISSET(socket, &readySet)) return true;
+    }
+}
+
+static bool DnfOcrSendAll(SOCKET socket, const std::string& request,
+    const std::chrono::steady_clock::time_point& deadline,
+    const std::atomic<bool>* stopFlag)
+{
+    size_t offset = 0;
+    while (offset < request.size()) {
+        if (!DnfOcrWaitForSocket(socket, true, deadline, stopFlag)) {
+            return false;
+        }
+
+        const int sent = ::send(socket, request.data() + offset,
+            static_cast<int>(request.size() - offset), 0);
+        if (sent <= 0) return false;
+        offset += static_cast<size_t>(sent);
+    }
+    return true;
+}
+
+static bool DnfOcrHttpRequest(const char* method, const char* path,
+    const std::string& body, int& statusCode,
+    const std::atomic<bool>* stopFlag, DWORD timeoutMs)
+{
+    statusCode = 0;
+
+    WSADATA wsaData = {};
+    if (::WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return false;
+
+    SOCKET socket = INVALID_SOCKET;
+    bool parsedResponse = false;
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(timeoutMs);
+
+    do {
+        if (stopFlag && stopFlag->load(std::memory_order_acquire)) break;
+
+        socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (socket == INVALID_SOCKET) break;
+
+        u_long nonBlocking = 1;
+        if (::ioctlsocket(socket, FIONBIO, &nonBlocking) != 0) break;
+
+        sockaddr_in address = {};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(1224);
+        if (::InetPtonA(AF_INET, "127.0.0.1", &address.sin_addr) != 1) break;
+
+        int connected = ::connect(socket,
+            reinterpret_cast<const sockaddr*>(&address), sizeof(address));
+        if (connected == SOCKET_ERROR) {
+            const int connectError = ::WSAGetLastError();
+            if (connectError != WSAEWOULDBLOCK &&
+                connectError != WSAEINPROGRESS &&
+                connectError != WSAEALREADY) {
+                break;
+            }
+            if (!DnfOcrWaitForSocket(socket, true, deadline, stopFlag)) break;
+
+            int socketError = 0;
+            int socketErrorSize = sizeof(socketError);
+            if (::getsockopt(socket, SOL_SOCKET, SO_ERROR,
+                reinterpret_cast<char*>(&socketError), &socketErrorSize) != 0 ||
+                socketError != 0) {
+                break;
+            }
+        }
+
+        std::string request = std::string(method) + " " + path +
+            " HTTP/1.1\r\nHost: 127.0.0.1:1224\r\nConnection: close\r\n";
+        if (!body.empty()) {
+            request += "Content-Type: application/json\r\nContent-Length: ";
+            request += std::to_string(body.size());
+            request += "\r\n";
+        }
+        request += "\r\n";
+        request += body;
+        if (!DnfOcrSendAll(socket, request, deadline, stopFlag)) break;
+
+        std::string response;
+        char buffer[4096] = {};
+        while (DnfOcrWaitForSocket(socket, false, deadline, stopFlag)) {
+            const int received = ::recv(socket, buffer, sizeof(buffer), 0);
+            if (received <= 0) break;
+            response.append(buffer, static_cast<size_t>(received));
+
+            const size_t lineEnd = response.find("\r\n");
+            if (lineEnd == std::string::npos ||
+                response.compare(0, 5, "HTTP/") != 0) {
+                continue;
+            }
+
+            const size_t statusStart = response.find(' ', 5);
+            if (statusStart == std::string::npos || statusStart + 4 > lineEnd) {
+                break;
+            }
+            statusCode = std::atoi(response.substr(statusStart + 1, 3).c_str());
+            parsedResponse = statusCode > 0;
+            break;
+        }
+    } while (false);
+
+    if (socket != INVALID_SOCKET) ::closesocket(socket);
+    ::WSACleanup();
+    return parsedResponse;
+}
+
+bool CDNFGameCaptureDlg::WarmupOcrEngine()
+{
+    if (m_bOcrSupervisorStop.load(std::memory_order_acquire)) {
+        return false;
+    }
+
+    static constexpr char warmupBody[] =
+        "{\"base64\":\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+        "AAAADUlEQVQIHWP4z8DwHwAFgAI/9bZbWQAAAABJRU5ErkJggg==\"}";
+    const ULONGLONG startedAt = ::GetTickCount64();
+    int statusCode = 0;
+    const bool received = DnfOcrHttpRequest("POST", "/api/ocr",
+        std::string(warmupBody), statusCode, &m_bOcrSupervisorStop, 3000);
+    const bool success = received && statusCode >= 200 && statusCode < 300 &&
+        !m_bOcrSupervisorStop.load(std::memory_order_acquire);
+
+    const ULONGLONG elapsed = ::GetTickCount64() - startedAt;
+    CString message;
+    if (success) {
+        message.Format(L"✅ [Umi-OCR] PaddleOCR 引擎预热完成，用时 %llu ms。",
+            static_cast<unsigned long long>(elapsed));
+        AppLog(message, RGB(0, 255, 100));
+    }
+    else if (!m_bOcrSupervisorStop.load(std::memory_order_acquire)) {
+        message.Format(L"⚠️ [Umi-OCR] OCR 引擎预热尚未完成，用时 %llu ms，后台将重试。",
+            static_cast<unsigned long long>(elapsed));
+        AppLog(message, RGB(255, 180, 0));
+    }
+    if (!message.IsEmpty()) {
+        WriteMatchLog(message);
+    }
+    return success;
+}
+
+bool CDNFGameCaptureDlg::IsTrackedOcrProcessAlive()
+{
+    if (!m_hOcrTrackedProcess) return false;
+
+    DWORD exitCode = 0;
+    const bool stillRunning =
+        ::GetExitCodeProcess(m_hOcrTrackedProcess, &exitCode) &&
+        exitCode == STILL_ACTIVE &&
+        ::WaitForSingleObject(m_hOcrTrackedProcess, 0) == WAIT_TIMEOUT;
+    if (stillRunning) return true;
+
+    CloseTrackedOcrProcess();
+    return false;
+}
+
+void CDNFGameCaptureDlg::CloseTrackedOcrProcess()
+{
+    if (m_hOcrTrackedProcess) {
+        ::CloseHandle(m_hOcrTrackedProcess);
+        m_hOcrTrackedProcess = nullptr;
+    }
+    m_ocrTrackedProcessId = 0;
+}
+
+void CDNFGameCaptureDlg::RestartOcrProcessForRecovery()
+{
+    WriteMatchLog(L"[Umi-OCR] 服务长时间不可用，清理残留进程后重新启动。"
+        L"（避免假活进程阻止自动恢复）");
+
+    if (m_hOcrTrackedProcess) {
+        DWORD exitCode = 0;
+        if (!::GetExitCodeProcess(m_hOcrTrackedProcess, &exitCode) ||
+            exitCode == STILL_ACTIVE) {
+            if (!::TerminateProcess(m_hOcrTrackedProcess, 0xD0F)) {
+                const DWORD error = ::GetLastError();
+                CString message;
+                message.Format(L"[Umi-OCR] 终止受监督进程失败，错误码=%lu。",
+                    static_cast<unsigned long>(error));
+                WriteMatchLog(message);
+            }
+            ::WaitForSingleObject(m_hOcrTrackedProcess, 1500);
+        }
+        CloseTrackedOcrProcess();
+    }
+
+    // Umi-OCR 退出异常时可能只留下 GUI 或 PaddleOCR 子进程；两者都清理，
+    // 否则新实例可能被旧服务占用 1224 端口而立即退出。
+    KillProcessByName(L"Umi-OCR.exe");
+    KillProcessByName(L"PaddleOCR-json.exe");
+
+    const ULONGLONG deadline = ::GetTickCount64() + 2000;
+    while (::GetTickCount64() < deadline &&
+        (DnfIsProcessRunningByName(L"Umi-OCR.exe") ||
+            DnfIsProcessRunningByName(L"PaddleOCR-json.exe"))) {
+        ::Sleep(50);
+    }
+}
+
+void CDNFGameCaptureDlg::OcrSupervisorLoop()
+{
+    using Clock = std::chrono::steady_clock;
+    constexpr DWORD healthIntervalMs = 2000;
+    constexpr DWORD initialRetryMs = 750;
+    constexpr DWORD maximumRetryMs = 8000;
+    constexpr DWORD pendingStartTimeoutMs = 30000;
+    constexpr DWORD pendingRecoveryTimeoutMs = 30000;
+    constexpr ULONGLONG staleProcessTimeoutMs = 15000;
+
+    DWORD recoveryRetryMs = initialRetryMs;
+    DWORD warmupRetryMs = initialRetryMs;
+    auto nextRecoveryAttempt = Clock::now();
+    auto nextWarmupAttempt = Clock::now();
+    bool wasHealthy = false;
+    bool processWasRunning = false;
+
+    while (!m_bOcrSupervisorStop.load(std::memory_order_acquire)) {
+        const auto cycleStartedAt = Clock::now();
+        bool processRunning = IsTrackedOcrProcessAlive() ||
+            DnfIsProcessRunningByName(L"Umi-OCR.exe");
+        bool serviceReady = processRunning && ProbeOcrServiceReady();
+
+        bool forceRestart = false;
+        const ULONGLONG processStateTick = ::GetTickCount64();
+        if (serviceReady || !processRunning) {
+            m_ocrProcessNotReadySince.store(0, std::memory_order_release);
+        }
+        else {
+            ULONGLONG notReadySince =
+                m_ocrProcessNotReadySince.load(std::memory_order_acquire);
+            if (notReadySince == 0) {
+                m_ocrProcessNotReadySince.store(processStateTick,
+                    std::memory_order_release);
+            }
+            else if (processStateTick - notReadySince >= staleProcessTimeoutMs) {
+                forceRestart = true;
+                m_ocrProcessNotReadySince.store(0, std::memory_order_release);
+            }
+        }
+
+        if (!serviceReady && cycleStartedAt >= nextRecoveryAttempt &&
+            !m_bOcrSupervisorStop.load(std::memory_order_acquire)) {
+            if (!processRunning && processWasRunning) {
+                AppLog(L"🔄 [Umi-OCR] 检测到程序已关闭，正在后台重新拉起...",
+                    RGB(255, 200, 0));
+                WriteMatchLog(L"[Umi-OCR] 检测到程序已关闭，开始自动重新拉起。");
+            }
+
+            if (forceRestart) {
+                AppLog(L"🔄 [Umi-OCR] 进程仍在但服务无响应，正在清理残留并重新拉起...",
+                    RGB(255, 160, 0));
+                WriteMatchLog(L"[Umi-OCR] 进程持续存在但服务15秒未就绪，执行残留进程恢复。");
+            }
+            serviceReady = EnsureOcrRunning(forceRestart);
+            processRunning = IsTrackedOcrProcessAlive() ||
+                DnfIsProcessRunningByName(L"Umi-OCR.exe");
+            if (serviceReady) {
+                recoveryRetryMs = initialRetryMs;
+                nextRecoveryAttempt = Clock::now();
+            }
+            else {
+                nextRecoveryAttempt = Clock::now() +
+                    std::chrono::milliseconds(recoveryRetryMs);
+                recoveryRetryMs = (std::min)(maximumRetryMs, recoveryRetryMs * 2);
+            }
+        }
+
+        m_bOcrServiceReady.store(serviceReady, std::memory_order_release);
+        bool engineReady = m_bOcrEngineReady.load(std::memory_order_acquire);
+        if (!serviceReady) {
+            engineReady = false;
+            m_bOcrEngineReady.store(false, std::memory_order_release);
+        }
+        else if (!engineReady && Clock::now() >= nextWarmupAttempt &&
+            !m_bOcrSupervisorStop.load(std::memory_order_acquire)) {
+            engineReady = WarmupOcrEngine();
+            m_bOcrEngineReady.store(engineReady, std::memory_order_release);
+            if (engineReady) {
+                warmupRetryMs = initialRetryMs;
+                nextWarmupAttempt = Clock::now();
+            }
+            else {
+                nextWarmupAttempt = Clock::now() +
+                    std::chrono::milliseconds(warmupRetryMs);
+                warmupRetryMs = (std::min)(maximumRetryMs, warmupRetryMs * 2);
+            }
+        }
+
+        if (!engineReady && wasHealthy) {
+            AppLog(L"⚠️ [Umi-OCR] OCR 服务离线，后台正在自动恢复。",
+                RGB(255, 180, 0));
+            WriteMatchLog(L"[Umi-OCR] OCR 服务从就绪状态转为离线，开始后台恢复。");
+        }
+
+        if (engineReady && m_bOcrStartPending.load(std::memory_order_acquire)) {
+            bool expected = false;
+            if (m_bStartAfterOcrReady.compare_exchange_strong(expected, true)) {
+                HWND hWnd = m_ocrSupervisorHwnd.load(std::memory_order_acquire);
+                DWORD requestId = m_ocrStartRequestId.load(std::memory_order_acquire);
+                if (!::IsWindow(hWnd) || !::PostMessage(hWnd, WM_OCR_START_RESULT,
+                    static_cast<WPARAM>(requestId), 1)) {
+                    m_bStartAfterOcrReady.store(false, std::memory_order_release);
+                }
+            }
+        }
+        else if (!engineReady && m_bOcrStartPending.load(std::memory_order_acquire)) {
+            const DWORD pendingSince = m_ocrStartPendingSince.load(std::memory_order_acquire);
+            if (pendingSince != 0 &&
+                ::GetTickCount() - pendingSince >= pendingStartTimeoutMs) {
+                bool expected = false;
+                if (m_bStartAfterOcrReady.compare_exchange_strong(expected, true)) {
+                    HWND hWnd = m_ocrSupervisorHwnd.load(std::memory_order_acquire);
+                    DWORD requestId = m_ocrStartRequestId.load(std::memory_order_acquire);
+                    if (!::IsWindow(hWnd) || !::PostMessage(hWnd, WM_OCR_START_RESULT,
+                        static_cast<WPARAM>(requestId), 0)) {
+                        m_bStartAfterOcrReady.store(false, std::memory_order_release);
+                    }
+                }
+            }
+        }
+
+        if (engineReady && m_bOcrRecoveryPending.load(std::memory_order_acquire)) {
+            bool expected = false;
+            if (m_bOcrRecoveryResultPosted.compare_exchange_strong(expected, true)) {
+                HWND hWnd = m_ocrSupervisorHwnd.load(std::memory_order_acquire);
+                DWORD requestId = m_ocrRecoveryRequestId.load(std::memory_order_acquire);
+                if (!::IsWindow(hWnd) || !::PostMessage(hWnd, WM_OCR_RECOVER_RESULT,
+                    static_cast<WPARAM>(requestId), 1)) {
+                    m_bOcrRecoveryResultPosted.store(false, std::memory_order_release);
+                }
+            }
+        }
+        else if (!engineReady && m_bOcrRecoveryPending.load(std::memory_order_acquire)) {
+            const DWORD pendingSince = m_ocrRecoveryPendingSince.load(std::memory_order_acquire);
+            if (pendingSince != 0 &&
+                ::GetTickCount() - pendingSince >= pendingRecoveryTimeoutMs) {
+                bool expected = false;
+                if (m_bOcrRecoveryResultPosted.compare_exchange_strong(expected, true)) {
+                    HWND hWnd = m_ocrSupervisorHwnd.load(std::memory_order_acquire);
+                    DWORD requestId = m_ocrRecoveryRequestId.load(std::memory_order_acquire);
+                    if (!::IsWindow(hWnd) || !::PostMessage(hWnd, WM_OCR_RECOVER_RESULT,
+                        static_cast<WPARAM>(requestId), 0)) {
+                        m_bOcrRecoveryResultPosted.store(false, std::memory_order_release);
+                    }
+                }
+            }
+        }
+
+        wasHealthy = engineReady;
+        processWasRunning = processRunning;
+
+        auto waitDuration = std::chrono::milliseconds(healthIntervalMs);
+        const auto now = Clock::now();
+        if (!serviceReady && nextRecoveryAttempt > now) {
+            waitDuration = (std::min)(waitDuration,
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    nextRecoveryAttempt - now));
+        }
+        else if (serviceReady && !engineReady && nextWarmupAttempt > now) {
+            waitDuration = (std::min)(waitDuration,
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    nextWarmupAttempt - now));
+        }
+
+        std::unique_lock<std::mutex> lock(m_ocrSupervisorMutex);
+        m_ocrSupervisorCv.wait_for(lock, waitDuration, [this]() {
+            return m_bOcrSupervisorStop.load(std::memory_order_acquire) ||
+                m_ocrSupervisorWake;
+            });
+        m_ocrSupervisorWake = false;
+    }
+
+    m_bOcrServiceReady.store(false, std::memory_order_release);
+    m_bOcrEngineReady.store(false, std::memory_order_release);
+    WriteMatchLog(L"[Umi-OCR] 后台监督线程已停止。");
+}
+
 bool CDNFGameCaptureDlg::ProbeOcrServiceReady()
 {
-    std::lock_guard<std::mutex> lk(m_launchMutex);
-
-    if (!m_hHttpSession) {
-        m_hHttpSession = WinHttpOpen(L"DNF Capture", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-        if (m_hHttpSession) WinHttpSetTimeouts(m_hHttpSession, 800, 800, 800, 800);
-    }
-    if (!m_hHttpSession) return false;
-
-    if (!m_hHttpConnect) {
-        m_hHttpConnect = WinHttpConnect(m_hHttpSession, L"127.0.0.1", 1224, 0);
-    }
-    if (!m_hHttpConnect) return false;
-
-    HINTERNET hProbe = WinHttpOpenRequest(
-        m_hHttpConnect, L"GET", L"/",
-        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
-    if (!hProbe) return false;
-
-    WinHttpSetTimeouts(hProbe, 800, 800, 800, 800);
-    BOOL ok = WinHttpSendRequest(hProbe, NULL, 0, NULL, 0, 0, 0) && WinHttpReceiveResponse(hProbe, NULL);
-    WinHttpCloseHandle(hProbe);
+    int statusCode = 0;
+    const bool received = DnfOcrHttpRequest("GET", "/", std::string(),
+        statusCode, &m_bOcrSupervisorStop, 350);
+    const bool ok = received && statusCode >= 200 && statusCode < 300 &&
+        !m_bOcrSupervisorStop.load(std::memory_order_acquire);
     if (ok) {
         RefreshOcrExePathFromRunningProcess(true);
     }
-    return ok == TRUE;
+    return ok;
 }
 
 bool CDNFGameCaptureDlg::RefreshOcrExePathFromRunningProcess(bool persistToIni)
@@ -5071,7 +5908,8 @@ bool CDNFGameCaptureDlg::RefreshOcrExePathFromRunningProcess(bool persistToIni)
         return false;
     }
 
-    if (runningPath.CompareNoCase(m_ocrExePath) != 0) {
+    const bool pathChanged = runningPath.CompareNoCase(m_ocrExePath) != 0;
+    if (pathChanged) {
         CString msg;
         msg.Format(L"🔎 [Umi-OCR] 已缓存实际程序路径：%s", (LPCTSTR)runningPath);
         AppLog(msg, RGB(0, 255, 100));
@@ -5079,7 +5917,7 @@ bool CDNFGameCaptureDlg::RefreshOcrExePathFromRunningProcess(bool persistToIni)
     }
 
     m_ocrExePath = runningPath;
-    if (persistToIni) {
+    if (persistToIni && pathChanged) {
         ::WritePrivateProfileString(L"Settings", L"OcrExePath", m_ocrExePath, m_iniPath);
     }
     return true;
@@ -5200,23 +6038,24 @@ void CDNFGameCaptureDlg::EnsureBackgroundTimersStarted()
 void CDNFGameCaptureDlg::BeginOcrServiceBootstrap()
 {
     if (m_bOcrStartPending.exchange(true)) {
+        RequestOcrSupervisorWork();
         return;
     }
 
     DWORD requestId = m_ocrStartRequestId.fetch_add(1) + 1;
+    (void)requestId;
+    m_ocrStartPendingSince.store(::GetTickCount(), std::memory_order_release);
+    m_bStartAfterOcrReady.store(false, std::memory_order_release);
     SetOcrStartupPendingUI(true);
 
     AppLog(L"🔄 [Umi-OCR] 正在启动 OCR 服务，请稍候...", RGB(255, 200, 0));
     WriteMatchLog(L"[Umi-OCR] 正在启动 OCR 服务，请稍候...");
     BroadcastStateToWeb();
 
-    HWND hWnd = GetSafeHwnd();
-    std::thread([this, hWnd, requestId]() {
-        bool ok = EnsureOcrRunning(false);
-        if (!::IsWindow(hWnd)) return;
-        if (!m_bOcrStartPending.load() || requestId != m_ocrStartRequestId.load()) return;
-        ::PostMessage(hWnd, WM_OCR_START_RESULT, (WPARAM)requestId, ok ? 1 : 0);
-        }).detach();
+    if (!m_bOcrSupervisorStarted.load(std::memory_order_acquire)) {
+        StartOcrSupervisor();
+    }
+    RequestOcrSupervisorWork();
 }
 
 LRESULT CDNFGameCaptureDlg::OnOcrStartResult(WPARAM wParam, LPARAM lParam)
@@ -5227,7 +6066,15 @@ LRESULT CDNFGameCaptureDlg::OnOcrStartResult(WPARAM wParam, LPARAM lParam)
         return 0;
     }
 
+    if (success && !m_bOcrEngineReady.load(std::memory_order_acquire)) {
+        m_bStartAfterOcrReady.store(false, std::memory_order_release);
+        RequestOcrSupervisorWork();
+        return 0;
+    }
+
     m_bOcrStartPending = false;
+    m_bStartAfterOcrReady.store(false, std::memory_order_release);
+    m_ocrStartPendingSince.store(0, std::memory_order_release);
     SetOcrStartupPendingUI(false);
 
     if (success) {
@@ -5257,60 +6104,29 @@ LRESULT CDNFGameCaptureDlg::OnOcrStartResult(WPARAM wParam, LPARAM lParam)
 
 void CDNFGameCaptureDlg::BeginOcrServiceRecovery(bool probeBeforePending)
 {
-    if (!m_bIsRunning || m_bOcrStartPending.load()) {
-        return;
-    }
     if (probeBeforePending) {
-        if (m_bOcrRecoveryPending.load() || m_bOcrHealthCheckPending.exchange(true)) {
-            return;
-        }
-
-        HWND hWnd = GetSafeHwnd();
-        std::thread([this, hWnd]() {
-            bool processRunning = DnfIsProcessRunningByName(L"Umi-OCR.exe");
-            bool ready = ProbeOcrServiceReady();
-            if (!::IsWindow(hWnd)) return;
-            m_bOcrHealthCheckPending = false;
-            if (m_bIsRunning && !m_bOcrStartPending.load() && (!ready || !processRunning)) {
-                if (!processRunning) {
-                    AppLog(L"🔄 [Umi-OCR] 检测到主进程已退出，正在后台重新拉起...", RGB(255, 200, 0));
-                    WriteMatchLog(L"[Umi-OCR] 检测到主进程已退出，正在后台重新拉起。");
-                }
-                BeginOcrServiceRecovery(false);
-            }
-        }).detach();
+        RequestOcrSupervisorWork();
         return;
     }
+
+    if (m_bOcrStartPending.load(std::memory_order_acquire)) {
+        RequestOcrSupervisorWork();
+        return;
+    }
+
     if (m_bOcrRecoveryPending.exchange(true)) {
+        RequestOcrSupervisorWork();
         return;
     }
 
-    DWORD requestId = m_ocrRecoveryRequestId.fetch_add(1) + 1;
-    HWND hWnd = GetSafeHwnd();
-
-    std::thread([this, hWnd, requestId]() {
-        bool ok = false;
-        bool processRunning = DnfIsProcessRunningByName(L"Umi-OCR.exe");
-        bool alreadyReady = ProbeOcrServiceReady();
-        if (alreadyReady && processRunning) {
-            ok = true;
-        }
-        else {
-            if (!processRunning) {
-                AppLog(L"🔄 [Umi-OCR] 检测到主进程已退出，正在后台尝试恢复...", RGB(255, 200, 0));
-                WriteMatchLog(L"[Umi-OCR] 检测到主进程已退出，正在后台尝试恢复。");
-            }
-            else {
-                AppLog(L"🔄 [Umi-OCR] 运行中检测到服务离线，正在后台尝试恢复...", RGB(255, 200, 0));
-                WriteMatchLog(L"[Umi-OCR] 运行中检测到服务离线，正在后台尝试恢复。");
-            }
-            ok = EnsureOcrRunning(!processRunning);
-        }
-
-        if (!::IsWindow(hWnd)) return;
-        if (!m_bOcrRecoveryPending.load() || requestId != m_ocrRecoveryRequestId.load()) return;
-        ::PostMessage(hWnd, WM_OCR_RECOVER_RESULT, (WPARAM)requestId, ok ? 1 : 0);
-        }).detach();
+    m_ocrRecoveryRequestId.fetch_add(1);
+    m_ocrRecoveryPendingSince.store(::GetTickCount(), std::memory_order_release);
+    m_bOcrRecoveryResultPosted.store(false, std::memory_order_release);
+    m_bOcrHealthCheckPending.store(false, std::memory_order_release);
+    m_bOcrServiceReady.store(false, std::memory_order_release);
+    m_bOcrEngineReady.store(false, std::memory_order_release);
+    WriteMatchLog(L"[Umi-OCR] OCR 请求失败，已交给后台监督线程恢复。");
+    RequestOcrSupervisorWork();
 }
 
 LRESULT CDNFGameCaptureDlg::OnOcrRecoverResult(WPARAM wParam, LPARAM lParam)
@@ -5321,7 +6137,15 @@ LRESULT CDNFGameCaptureDlg::OnOcrRecoverResult(WPARAM wParam, LPARAM lParam)
         return 0;
     }
 
+    if (success && !m_bOcrEngineReady.load(std::memory_order_acquire)) {
+        m_bOcrRecoveryResultPosted.store(false, std::memory_order_release);
+        RequestOcrSupervisorWork();
+        return 0;
+    }
+
     m_bOcrRecoveryPending = false;
+    m_ocrRecoveryPendingSince.store(0, std::memory_order_release);
+    m_bOcrRecoveryResultPosted.store(false, std::memory_order_release);
 
     if (success) {
         if (m_bIsRunning) {
@@ -5967,11 +6791,11 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             }
 
             // ====================================================
-            // 精确小号命中检测（仅当唯一时才采纳）
+            // 精确游戏ID命中检测（仅当唯一时才采纳）
             // 现在会先解析“大区/真实ID/#职业”，因此：
             //   上海1夏雫 == 夏雫上海1
             //   夏雫#气功师 也能按真实ID命中。
-            // 主号仍然不参与名称匹配。
+            // 选手仍然不参与名称匹配。
             // ====================================================
             int exactMatchCount = 0;
             int exactMatchP = -1, exactMatchA = -1;
@@ -6019,13 +6843,13 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                     CString collectLog;
                     collectLog.Format(L"  └ [首轮收集] 精确别名候选：%s / %s，100分；等待首轮全部帧结束后统一锁定。",
                         isKiller ? L"杀手" : L"死者",
-                        aliasName.IsEmpty() ? L"未知小号" : aliasName.GetString());
+                        aliasName.IsEmpty() ? L"未知游戏ID" : aliasName.GetString());
                     WriteMatchLog(collectLog);
                     return false;
                 }
                 // 唯一别名，直接锁定！安全且精确
                 resolved = true;
-                finalName = m_players[exactMatchP].name; // 🚨 【换成这行】：底层查重统一使用主号！
+                finalName = m_players[exactMatchP].name; // 🚨 【换成这行】：底层查重统一使用选手！
                 outBestP = exactMatchP;
                 outBestA = exactMatchA;
 
@@ -6063,8 +6887,8 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 if (!isKiller && lockedKillerTeam != -1 && m_players[p].team == lockedKillerTeam)
                     teamPenalty = 20;
 
-                // 主号只作为归属 owner，不再参与 OCR 名称匹配。
-                // 这样主号可以是备注名/真实主号，也允许与自己的小号重复；真正用于命中的只有小号列表。
+                // 选手只作为归属 owner，不再参与 OCR 名称匹配。
+                // 这样选手可以是备注名/真实选手，也允许与自己的游戏ID重复；真正用于命中的只有游戏ID列表。
                 int curScore = -2;
                 std::wstring curBestName;
                 int curBestAlias = -1;
@@ -6283,7 +7107,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             resolved = true;
 
             CString ok;
-            ok.Format(L"[首轮统一决策][%s] 采用：主号=%s；命中小号=%s；最高=%d/线%d；第二=%s/%s %d分；分差=%d；来源=第%d帧\"%s\"；说明=首轮全部帧扫完后统一选择。",
+            ok.Format(L"[首轮统一决策][%s] 采用：选手=%s；命中游戏ID=%s；最高=%d/线%d；第二=%s/%s %d分；分差=%d；来源=第%d帧\"%s\"；说明=首轮全部帧扫完后统一选择。",
                 (LPCTSTR)roleText,
                 (LPCTSTR)finalName,
                 bestAlias.IsEmpty() ? L"无" : bestAlias.GetString(),
@@ -6350,7 +7174,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                     return true;
                 }
 
-                // 再用上场小号声明的 #职业 做补充，兼容职业别名/自定义写法。
+                // 再用上场游戏ID声明的 #职业 做补充，兼容职业别名/自定义写法。
                 CString nr = DnfNormalizeLooseText(raw);
                 if (nr.IsEmpty()) return false;
                 for (const CString& j : declaredJobs) {
@@ -6496,7 +7320,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             for (int i = 0; i < (int)list.size(); ++i) {
                 const auto& c = list[i];
                 CString line;
-                line.Format(L"[简化兜底][%s-%s] 候选：主号=%s；小号=%s；匹配ID=%s；职业=%s；真实ID长度=%d；动态线=%d；ID分=%d；最佳ID证据=%s；候选打分ID=%s；OCR打分ID=%s；匹配方式=%s；2字大区辅助=%s；职业一致=%s；阶段=候选收集；是否采用=否；原因=%s。",
+                line.Format(L"[简化兜底][%s-%s] 候选：选手=%s；游戏ID=%s；匹配ID=%s；职业=%s；真实ID长度=%d；动态线=%d；ID分=%d；最佳ID证据=%s；候选打分ID=%s；OCR打分ID=%s；匹配方式=%s；2字大区辅助=%s；职业一致=%s；阶段=候选收集；是否采用=否；原因=%s。",
                     (LPCTSTR)sideText, (LPCTSTR)roleText,
                     (LPCTSTR)c.owner, (LPCTSTR)c.alias,
                     c.matchId.IsEmpty() ? L"无" : c.matchId.GetString(),
@@ -6527,7 +7351,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                     const auto& c = list[idx];
                     if (blockedTeam != -1 && c.team == blockedTeam) {
                         CString skip;
-                        skip.Format(L"[简化兜底][%s-%s] 跳过候选：主号=%s；小号=%s；ID分=%d；队伍=%d；原因=与另一方已锁定队伍%d冲突。",
+                        skip.Format(L"[简化兜底][%s-%s] 跳过候选：选手=%s；游戏ID=%s；ID分=%d；队伍=%d；原因=与另一方已锁定队伍%d冲突。",
                             (LPCTSTR)sideText, (LPCTSTR)roleText,
                             (LPCTSTR)c.owner, (LPCTSTR)c.alias,
                             c.idScore, c.team, blockedTeam);
@@ -6539,7 +7363,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                     if (!allowOneCharStrongId && c.realIdLen <= 1 && !c.allowStrongIdLock) continue;
                     if (!c.allowStrongIdLock) {
                         CString skip;
-                        skip.Format(L"[简化兜底][%s-%s] 跳过候选：主号=%s；小号=%s；ID分=%d；候选打分ID=%s；OCR打分ID=%s；匹配方式=%s；原因=%s。",
+                        skip.Format(L"[简化兜底][%s-%s] 跳过候选：选手=%s；游戏ID=%s；ID分=%d；候选打分ID=%s；OCR打分ID=%s；匹配方式=%s；原因=%s。",
                             (LPCTSTR)sideText, (LPCTSTR)roleText,
                             (LPCTSTR)c.owner, (LPCTSTR)c.alias,
                             c.idScore,
@@ -6616,7 +7440,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 outBestA = c.a;
                 lockedTeam = c.team;
                 CString ok;
-                ok.Format(L"[最终采用结果][%s-%s] 通过简化兜底：主号=%s；命中小号=%s；模式=%s；ID分=%d；队伍=%d；采用原因=%s；说明=两轮兜底；大区未作为独立条件、加分项或放行条件。",
+                ok.Format(L"[最终采用结果][%s-%s] 通过简化兜底：选手=%s；命中游戏ID=%s；模式=%s；ID分=%d；队伍=%d；采用原因=%s；说明=两轮兜底；大区未作为独立条件、加分项或放行条件。",
                     (LPCTSTR)sideText, (LPCTSTR)roleText,
                     (LPCTSTR)c.owner, (LPCTSTR)c.alias,
                     (LPCTSTR)mode, c.idScore, c.team,
@@ -6686,7 +7510,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
                 const auto& c = list[idx];
                 if (blockedTeam != -1 && c.team == blockedTeam) {
                     CString skip;
-                    skip.Format(L"[简化兜底][%s-%s] 跳过候选：主号=%s；小号=%s；ID分=%d；队伍=%d；阶段=第二轮职业匹配；原因=与另一方已锁定队伍%d冲突。",
+                    skip.Format(L"[简化兜底][%s-%s] 跳过候选：选手=%s；游戏ID=%s；ID分=%d；队伍=%d；阶段=第二轮职业匹配；原因=与另一方已锁定队伍%d冲突。",
                         (LPCTSTR)sideText, (LPCTSTR)roleText,
                         (LPCTSTR)c.owner, (LPCTSTR)c.alias,
                         c.idScore, c.team, blockedTeam);
@@ -6837,13 +7661,13 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
 
             if (!resolved) {
                 resolved = true;
-                finalName = owner;       // 底层战绩仍按主号归集
+                finalName = owner;       // 底层战绩仍按选手归集
                 outBestP = pIdx;
                 outBestA = aIdx;
                 lockedTeam = team;
 
                 CString okLog;
-                okLog.Format(L"  └ [🧩身份融合命中-%s] %s => 主号[%s] 命中[%s] final=%d id=%d gap=%d areaCtx=%+d jobCtx=%+d",
+                okLog.Format(L"  └ [🧩身份融合命中-%s] %s => 选手[%s] 命中[%s] final=%d id=%d gap=%d areaCtx=%+d jobCtx=%+d",
                     (LPCTSTR)tag, (LPCTSTR)sideText, (LPCTSTR)owner, (LPCTSTR)hitName,
                     fusion.best.finalScore, fusion.best.idScore, fusion.best.gapToSecond,
                     fusion.best.areaCtxScore, fusion.best.jobCtxScore);
@@ -6997,17 +7821,17 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide)
             }).detach();
 
         if (!killerResolved) {
-            PushVisualLog(L"❌ [彻底失败] 无法识别【杀手】！请检查是否漏绑小号，或右键手动加分！", RGB(255, 80, 80));
+            PushVisualLog(L"❌ [彻底失败] 无法识别【杀手】！请检查是否漏绑游戏ID，或右键手动加分！", RGB(255, 80, 80));
         }
         if (!deadResolved) {
-            PushVisualLog(L"❌ [彻底失败] 无法识别【死者】！请检查是否漏绑小号，或右键手动加分！", RGB(255, 80, 80));
+            PushVisualLog(L"❌ [彻底失败] 无法识别【死者】！请检查是否漏绑游戏ID，或右键手动加分！", RGB(255, 80, 80));
         }
     }
 
     if (killerResolved && deadResolved && lockedKillerTeam != -1 && lockedDeadTeam != -1
         && lockedKillerTeam == lockedDeadTeam) {
         CString sameTeamLog;
-        sameTeamLog.Format(L"[队伍约束] 拒绝落账：杀手=%s(队伍%d)，死者=%s(队伍%d)，两者同队；请检查 OCR/小号绑定或手动加分。",
+        sameTeamLog.Format(L"[队伍约束] 拒绝落账：杀手=%s(队伍%d)，死者=%s(队伍%d)，两者同队；请检查 OCR/游戏ID绑定或手动加分。",
             (LPCTSTR)finalKillerName, lockedKillerTeam,
             (LPCTSTR)finalDeadName, lockedDeadTeam);
         WriteMatchLog(sameTeamLog);
@@ -8025,7 +8849,7 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
             deadSide == 0 ? L"左边" : L"右边", deadSide == 0 ? L"右边" : L"左边");
         WriteMatchLog(line);
         m_bCanTrigger = FALSE;
-        std::thread(&CDNFGameCaptureDlg::DoRetryMatchingTask, this, deadSide).detach();
+        StartOcrMatchingTask(deadSide);
         g_triggerCooldownKind = 1;
         SetTimer(2, COOLDOWN_KILL_TRIGGER, NULL);
     };
@@ -8204,12 +9028,23 @@ LRESULT CDNFGameCaptureDlg::OnTrayMessage(WPARAM wParam, LPARAM lParam) {
 
 void CDNFGameCaptureDlg::DoRealExit() {
     m_bIsRunning = FALSE;
+    if (m_aliasAutoSyncLifetime) {
+        m_aliasAutoSyncLifetime->store(false, std::memory_order_release);
+    }
+    m_aliasAutoSyncGeneration.fetch_add(1, std::memory_order_acq_rel);
+    m_aliasAutoSyncInFlight = false;
+    StopOcrMatchingTasks();
+    StopOcrSupervisor();
     m_bOcrStartPending = false;
     m_ocrStartRequestId.fetch_add(1);
+    m_bStartAfterOcrReady.store(false, std::memory_order_release);
+    m_ocrStartPendingSince.store(0, std::memory_order_release);
     m_bOcrHealthCheckPending = false;
     m_bOcrRecoveryPending = false;
+    m_ocrRecoveryPendingSince.store(0, std::memory_order_release);
+    m_bOcrRecoveryResultPosted.store(false, std::memory_order_release);
     m_ocrRecoveryRequestId.fetch_add(1);
-    KillTimer(1); KillTimer(2); KillTimer(3); KillTimer(4); KillTimer(8);
+    KillTimer(1); KillTimer(2); KillTimer(3); KillTimer(4); KillTimer(8); KillTimer(9);
     ResetDeathXStableState();
     m_keyMappingLanService.SetStateChangedCallback(nullptr);
     m_keyMappingLanService.SetTeamSyncMessageCallback(nullptr);
@@ -8304,7 +9139,9 @@ void CDNFGameCaptureDlg::OnBnClickedStart()
 
         m_bOcrHealthCheckPending = false;
         m_bOcrRecoveryPending = false;
+        m_ocrRecoveryPendingSince.store(0, std::memory_order_release);
         m_ocrRecoveryRequestId.fetch_add(1);
+        m_bOcrRecoveryResultPosted.store(false, std::memory_order_release);
 
         CString missingAliasPlayers;
         CString shortAliasPlayers;
@@ -8327,7 +9164,7 @@ void CDNFGameCaptureDlg::OnBnClickedStart()
         if (!missingAliasPlayers.IsEmpty() || !shortAliasPlayers.IsEmpty()) {
             CString msg = L"检测到上场选手信息不完整，暂时不能开始监控：";
             if (!missingAliasPlayers.IsEmpty()) {
-                msg += L"\r\n\r\n没有小号：" + missingAliasPlayers + L"。主号不参与OCR名称匹配，请至少添加一个小号。";
+                msg += L"\r\n\r\n没有游戏ID：" + missingAliasPlayers + L"。选手不参与OCR名称匹配，请至少添加一个游戏ID。";
             }
             if (!shortAliasPlayers.IsEmpty()) {
                 msg += L"\r\n\r\n未加大区/#职业的2字短ID：" + shortAliasPlayers + L"。允许保留在列表中，但开始监控前请补充大区或 #职业。";
@@ -8365,7 +9202,7 @@ void CDNFGameCaptureDlg::OnBnClickedStart()
             return;
         }
 
-        if (ProbeOcrServiceReady()) {
+        if (m_bOcrEngineReady.load(std::memory_order_acquire)) {
             StartMonitoringAfterOcrReady();
         }
         else {
@@ -8380,7 +9217,9 @@ void CDNFGameCaptureDlg::OnBnClickedStart()
         KillTimer(3);
         ResetDeathXStableState();
         m_bOcrRecoveryPending = false;
+        m_ocrRecoveryPendingSince.store(0, std::memory_order_release);
         m_ocrRecoveryRequestId.fetch_add(1);
+        m_bOcrRecoveryResultPosted.store(false, std::memory_order_release);
 
         // ==========================================
         // 【关键修复】：停止监控时，绝不能销毁 m_pWGC！
@@ -8413,6 +9252,8 @@ LRESULT CDNFGameCaptureDlg::OnOcrServiceFail(WPARAM wParam, LPARAM lParam) {
     }
     m_bOcrHealthCheckPending = false;
     m_bOcrRecoveryPending = false;
+    m_ocrRecoveryPendingSince.store(0, std::memory_order_release);
+    m_bOcrRecoveryResultPosted.store(false, std::memory_order_release);
 
     CString msg = L"❌ Umi-OCR 已关闭或服务无响应。\r\n\r\n软件已经尝试自动恢复，但 OCR 服务仍不可用，所以已自动停止监控。\r\n\r\n请手动打开软件同目录下的 Umi-OCR.exe，确认 OCR 服务启动后，再重新开始监控。";
     AppLog(L"❌ [Umi-OCR] 服务离线且自动恢复失败，已停止监控，避免继续产生 OCR 空结果。", RGB(255, 80, 80));
@@ -8508,7 +9349,7 @@ void CDNFGameCaptureDlg::OnBnClickedApply() {
     // ==========================================
     // 1. 纯粹的数据落地：保存所有战绩和配置
     // ==========================================
-    SaveAliasDB();      // 保存小号自动补全库
+    SaveAliasDB();      // 保存游戏ID自动补全库
     SaveConfigToFile(); // 保存战局人员信息
     WriteScoreToFile(); // 刷新输出给 OBS 用的直播 TXT 文本
 
@@ -8529,10 +9370,14 @@ void CDNFGameCaptureDlg::OnBnClickedApply() {
 
 void CDNFGameCaptureDlg::OnBnClickedFlip() {
     MarkMatchMutation();
-    m_bFlipSides = (m_chkFlip.GetCheck() == BST_CHECKED);
+    const bool flipSides = (m_chkFlip.GetCheck() == BST_CHECKED);
+    {
+        std::lock_guard<std::mutex> dataLock(m_dataMutex);
+        m_bFlipSides = flipSides;
+    }
     CString flipLog;
     flipLog.Format(L"[红蓝翻转] 用户点击翻转红蓝：翻转后状态=%s；说明=只影响软件界面、网页和OBS输出左右显示；不改变游戏物理左/右框、简化兜底候选队伍、身份缓存、OCR区域和X检测位置。",
-        m_bFlipSides ? L"开启" : L"关闭");
+        flipSides ? L"开启" : L"关闭");
     WriteMatchLog(flipLog);
     WriteScoreToFile();
     RefreshDisplay();
@@ -8842,7 +9687,7 @@ void CDNFGameCaptureDlg::ManualTriggerKill(int killSide) {
         std::lock_guard<std::mutex> lk(g_visualLogMutex);
         g_visualLogs.push_back({ tStr, RGB(255, 165, 0) });
     }
-    std::thread(&CDNFGameCaptureDlg::DoRetryMatchingTask, this, killSide).detach();
+    StartOcrMatchingTask(killSide);
     g_triggerCooldownKind = 1;
     SetTimer(2, COOLDOWN_KILL_TRIGGER, NULL);
 }
@@ -9186,37 +10031,17 @@ void CDNFGameCaptureDlg::Capture() {
 
 
 bool CDNFGameCaptureDlg::EnsureOcrRunning(bool forceRestart) {
-    std::lock_guard<std::mutex> lk(m_launchMutex);
-
-    auto ensureHttpHandles = [&]() -> bool {
-        if (!m_hHttpSession) {
-            m_hHttpSession = WinHttpOpen(L"DNF Capture", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-            if (m_hHttpSession) WinHttpSetTimeouts(m_hHttpSession, 800, 800, 800, 800);
-        }
-        if (!m_hHttpSession) return false;
-        if (!m_hHttpConnect) {
-            m_hHttpConnect = WinHttpConnect(m_hHttpSession, L"127.0.0.1", 1224, 0);
-        }
-        return m_hHttpConnect != NULL;
-    };
-
-    auto probeOcr = [&]() -> bool {
-        if (!ensureHttpHandles()) return false;
-        HINTERNET hProbe = WinHttpOpenRequest(
-            m_hHttpConnect, L"GET", L"/",
-            NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
-        if (!hProbe) return false;
-        WinHttpSetTimeouts(hProbe, 800, 800, 800, 800);
-        BOOL ok = WinHttpSendRequest(hProbe, NULL, 0, NULL, 0, 0, 0) && WinHttpReceiveResponse(hProbe, NULL);
-        WinHttpCloseHandle(hProbe);
-        return ok == TRUE;
-    };
-
     // 先探测端口：Umi-OCR 已经在运行时，不重复启动。
-    bool processRunning = DnfIsProcessRunningByName(L"Umi-OCR.exe");
-    if (!forceRestart && processRunning && probeOcr()) {
-        RefreshOcrExePathFromRunningProcess(true);
+    bool processRunning = IsTrackedOcrProcessAlive() ||
+        DnfIsProcessRunningByName(L"Umi-OCR.exe");
+    if (processRunning && !forceRestart && ProbeOcrServiceReady()) {
         return true;
+    }
+
+    if (forceRestart && processRunning) {
+        RestartOcrProcessForRecovery();
+        processRunning = IsTrackedOcrProcessAlive() ||
+            DnfIsProcessRunningByName(L"Umi-OCR.exe");
     }
 
     if (GetFileAttributes(m_ocrExePath) == INVALID_FILE_ATTRIBUTES) {
@@ -9231,13 +10056,19 @@ bool CDNFGameCaptureDlg::EnsureOcrRunning(bool forceRestart) {
         return false;
     }
 
-    DWORD now = GetTickCount();
-    if (forceRestart || !processRunning || now - m_lastLaunchOcrTime >= 10000) {
-        m_lastLaunchOcrTime = now;
+    // 正常情况下只在进程不存在时启动；forceRestart 用于清理确认已假活的实例。
+    if (!processRunning) {
+        m_lastLaunchOcrTime = GetTickCount();
         SHELLEXECUTEINFO sei = { sizeof(sei) };
-        sei.fMask = SEE_MASK_FLAG_NO_UI;
+        sei.fMask = SEE_MASK_FLAG_NO_UI | SEE_MASK_NOCLOSEPROCESS;
         sei.lpVerb = L"open";
         sei.lpFile = m_ocrExePath;
+        CString launchDirectory = m_ocrExePath;
+        const int separator = launchDirectory.ReverseFind(L'\\');
+        if (separator > 0) {
+            launchDirectory = launchDirectory.Left(separator);
+            sei.lpDirectory = launchDirectory;
+        }
         sei.nShow = SW_SHOWMINNOACTIVE;
         if (!ShellExecuteEx(&sei)) {
             CString msg;
@@ -9246,15 +10077,59 @@ bool CDNFGameCaptureDlg::EnsureOcrRunning(bool forceRestart) {
             WriteMatchLog(msg);
             return false;
         }
+        if (sei.hProcess) {
+            m_hOcrTrackedProcess = sei.hProcess;
+            m_ocrTrackedProcessId = ::GetProcessId(sei.hProcess);
+            CString launchLog;
+            launchLog.Format(L"[Umi-OCR] 已创建受监督进程，PID=%lu。",
+                static_cast<unsigned long>(m_ocrTrackedProcessId));
+            WriteMatchLog(launchLog);
+            sei.hProcess = NULL;
+        }
         AppLog(L"🔄 [Umi-OCR] 未检测到 OCR 服务，已尝试自动启动 Umi-OCR...", RGB(255, 200, 0));
     }
+    else {
+        AppLog(L"⏳ [Umi-OCR] 已发现 Umi-OCR 进程，但服务尚未就绪，继续等待现有进程。",
+            RGB(255, 200, 0));
+    }
 
-    // 等待 Umi-OCR 拉起端口。这里最多等 6 秒，避免继续监控时 OCR 永远为空。
-    for (int i = 0; i < 12; ++i) {
-        Sleep(500);
-        if (probeOcr()) {
+    // Keep the whole startup wait bounded; do not multiply a per-probe timeout
+    // by a fixed retry count. Leave early when a seen process disappears.
+    const auto startupWaitDeadline = std::chrono::steady_clock::now() +
+        std::chrono::seconds(6);
+    const auto processGraceDeadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(750);
+    bool processObserved = processRunning;
+    while (std::chrono::steady_clock::now() < startupWaitDeadline) {
+        if (m_bOcrSupervisorStop.load(std::memory_order_acquire)) {
+            return false;
+        }
+
+        const bool currentProcessRunning = IsTrackedOcrProcessAlive() ||
+            DnfIsProcessRunningByName(L"Umi-OCR.exe");
+        if (currentProcessRunning) {
+            processObserved = true;
+        }
+        else if (processObserved) {
+            WriteMatchLog(L"[Umi-OCR] 启动等待期间进程已退出，立即结束本轮恢复。 ");
+            return false;
+        }
+        else if (std::chrono::steady_clock::now() >= processGraceDeadline) {
+            WriteMatchLog(L"[Umi-OCR] 启动后未观察到进程，立即结束本轮恢复。 ");
+            return false;
+        }
+
+        if (ProbeOcrServiceReady()) {
             AppLog(L"✅ [Umi-OCR] OCR 服务已恢复，可以继续监控。", RGB(0, 255, 100));
             return true;
+        }
+
+        std::unique_lock<std::mutex> waitLock(m_ocrSupervisorMutex);
+        if (m_ocrSupervisorCv.wait_for(waitLock, std::chrono::milliseconds(100),
+            [this]() {
+                return m_bOcrSupervisorStop.load(std::memory_order_acquire);
+            })) {
+            return false;
         }
     }
 
@@ -10120,20 +10995,20 @@ void CDNFGameCaptureDlg::Draw(CDC& dc, HBITMAP previewFrame, int previewW, int p
 void CDNFGameCaptureDlg::OnBnClickedHelp() {
     CString msg = L"💡 DNF击杀统计 - 终极使用说明书\r\n\r\n"
         L"【一、 智能录入 (顶部输入框)】\r\n"
-        L"1. 批量添加：支持“主号(小号1)(小号2)”格式，按回车或点击[添加]解析入库。\r\n"
-        L"2. 智能补全：输入主号后打出左括号“(”，系统会自动去“历史数据库”里检索并秒补齐小号。\r\n"
+        L"1. 批量添加：支持“选手(游戏ID1)(游戏ID2)”格式，按回车或点击[添加]解析入库。\r\n"
+        L"2. 智能补全：输入选手后打出左括号“(”，系统会自动去“历史数据库”里检索并秒补齐游戏ID。\r\n"
         L"3. 队伍防呆：如果一侧队伍满员，打字时会自动将人员分配到对面未满队伍。\r\n\r\n"
         L"【二、 树状图左键操作 (双击直接修改)】\r\n"
         L"1. 改比分：左键慢速双击【红队/蓝队】根节点，直接输入数字即可修改大比分。\r\n"
-        L"2. 改人名/战绩：左键慢速双击任意【主号/小号】，像重命名文件一样修改名字或“击杀/死亡/AK”数值。系统防重名，且会自动绑定数据库。\r\n"
-        L"3. 展开折叠：点击 [+] / [-] 可以自由隐藏或显示小号，让界面更清爽。\r\n\r\n"
+        L"2. 改人名/战绩：左键慢速双击任意【选手/游戏ID】，像重命名文件一样修改名字或“击杀/死亡/AK”数值。系统防重名，且会自动绑定数据库。\r\n"
+        L"3. 展开折叠：点击 [+] / [-] 可以自由隐藏或显示游戏ID，让界面更清爽。\r\n\r\n"
         L"【三、 树状图右键菜单 (全能管理)】\r\n"
         L"1. 队伍管理：在【红队/蓝队】右键，可 +1/-1/归零大比分，或一键清空该队。\r\n"
-        L"2. 战绩容错：在【主号】右键，可手动对“击杀、死亡、AK”进行加减(+1/-1)操作。\r\n"
-        L"3. 一键换边：在【主号】右键，可将该玩家及旗下所有小号【移动】到对面阵营（如果对面满员，自动触发位置互换）。\r\n"
-        L"4. 智能删除：在【小号】右键，可以选择仅从本局移除，或者【彻底删除】（连同自动补全记忆一并抹除）。\r\n\r\n"
+        L"2. 战绩容错：在【选手】右键，可手动对“击杀、死亡、AK”进行加减(+1/-1)操作。\r\n"
+        L"3. 一键换边：在【选手】右键，可将该玩家及旗下所有游戏ID【移动】到对面阵营（如果对面满员，自动触发位置互换）。\r\n"
+        L"4. 智能删除：在【游戏ID】右键，可以选择仅从本局移除，或者【彻底删除】（连同自动补全记忆一并抹除）。\r\n\r\n"
         L"【四、 OBS 与直播防卡死同步】\r\n"
-        L"无论你是添加小号、还是修改了人头、或是系统自动识图抓取了击杀，软件都会【在毫秒内】自动更新输出目录下的 TXT 文件！OBS 即可实现零延迟自动跳分！\r\n\r\n"
+        L"无论你是添加游戏ID、还是修改了人头、或是系统自动识图抓取了击杀，软件都会【在毫秒内】自动更新输出目录下的 TXT 文件！OBS 即可实现零延迟自动跳分！\r\n\r\n"
         L"------------------------------------\r\n"
         L"🛠️ 调试快捷键：(用于无比赛时测试画图)\r\n"
         L"Ctrl+F8 : 强制触发【红队】击杀一次\r\n"
@@ -10248,6 +11123,9 @@ void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
         PollKeyMappingState();
         PollCloudMatch();
     }
+    else if (nID == 9) {
+        MaybeStartAliasDbAutoSync(false);
+    }
     // ==========================================
     // 【Timer 7】: 终极系统级轮询 (无视任何消息屏蔽)
     // ==========================================
@@ -10255,6 +11133,9 @@ void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
         static int s_idleSeconds = 0;          // 闲置秒数
         static bool s_hasFolded = true;        // 默认 true，防止刚开软件还没动就乱折叠
         static DWORD s_lastOcrHealthKick = 0;  // OCR 健康检查节流
+
+        // OCR 监督线程始终运行，即使当前没有监控也要及时发现用户手动关闭的 Umi-OCR。
+        RequestOcrSupervisorWork();
 
         // 1. 问系统：现在屏幕最前面的是不是咱们的软件？
         HWND hForeground = ::GetForegroundWindow();
@@ -10944,6 +11825,649 @@ std::string CDNFGameCaptureDlg::BuildAliasDbJsonPayload(int& mainCount, int& pai
     return aliasDb.dump();
 }
 
+std::string CDNFGameCaptureDlg::BuildAliasDbAppendPayload(int& mainCount, int& pairCount) const
+{
+    json aliasDb = json::object();
+    mainCount = 0;
+    pairCount = 0;
+
+    for (const auto& [name, aliases] : m_aliasDB) {
+        CString mainName = name;
+        mainName.Trim();
+        if (mainName.IsEmpty()) continue;
+
+        CString normalizedAliases = DnfNormalizeAliasListString(aliases);
+        std::vector<CString> aliasList = DnfParseAliasListString(normalizedAliases);
+        if (aliasList.empty()) continue;
+
+        aliasDb[std::string(CW2A(mainName, CP_UTF8))] =
+            std::string(CW2A(normalizedAliases, CP_UTF8));
+        ++mainCount;
+        pairCount += static_cast<int>(aliasList.size());
+    }
+
+    return aliasDb.dump();
+}
+
+void CDNFGameCaptureDlg::LoadAliasDbAutoSyncSettings()
+{
+    m_aliasAutoSyncEnabled = GetPrivateProfileInt(
+        L"AliasDbSync", L"Enabled", 1, m_iniPath) != 0;
+
+    wchar_t timeText[64] = {};
+    GetPrivateProfileString(L"AliasDbSync", L"LastSuccessAt", L"0",
+        timeText, static_cast<DWORD>(std::size(timeText)), m_iniPath);
+    m_aliasAutoSyncLastSuccessAt = _wtoi64(timeText);
+    if (m_aliasAutoSyncLastSuccessAt < 0) m_aliasAutoSyncLastSuccessAt = 0;
+
+    wchar_t hashText[128] = {};
+    GetPrivateProfileString(L"AliasDbSync", L"LastPushHash", L"",
+        hashText, static_cast<DWORD>(std::size(hashText)), m_iniPath);
+    m_aliasAutoSyncLastPushHash = std::string(CW2A(hashText, CP_UTF8));
+
+    m_aliasAutoSyncAttemptedThisRun = false;
+    m_aliasAutoSyncInFlight = false;
+    m_aliasAutoSyncAppendSupported = false;
+    m_aliasAutoSyncLastKnownAuthorized = false;
+    m_aliasAutoSyncLastPushStatus = m_aliasAutoSyncEnabled ?
+        L"pending" : L"skipped";
+    m_aliasAutoSyncLastPushMessage = m_aliasAutoSyncEnabled ?
+        L"等待授权完成后执行" : L"自动同步已关闭";
+    m_aliasAutoSyncLastPullStatus = L"failed";
+    m_aliasAutoSyncLastPullMessage = L"尚未执行";
+    m_aliasAutoSyncLastResult.Empty();
+
+    // Persist the default for upgraded installations while retaining the
+    // legacy user's existing alias database untouched.
+    SaveAliasDbAutoSyncSettings();
+}
+
+bool CDNFGameCaptureDlg::SaveAliasDbAutoSyncSettings() const
+{
+    const bool enabledSaved = WritePrivateProfileString(L"AliasDbSync", L"Enabled",
+        m_aliasAutoSyncEnabled ? L"1" : L"0", m_iniPath);
+
+    CString timestamp;
+    timestamp.Format(L"%lld", static_cast<long long>(m_aliasAutoSyncLastSuccessAt));
+    const bool timestampSaved = WritePrivateProfileString(
+        L"AliasDbSync", L"LastSuccessAt", timestamp, m_iniPath);
+
+    CString hash = CA2W(m_aliasAutoSyncLastPushHash.c_str(), CP_UTF8);
+    const bool hashSaved = WritePrivateProfileString(
+        L"AliasDbSync", L"LastPushHash", hash, m_iniPath);
+    return enabledSaved && timestampSaved && hashSaved;
+}
+
+bool CDNFGameCaptureDlg::MergePublicAliasDbForAutoSync(
+    const json& players, CString& resultMessage)
+{
+    resultMessage.Empty();
+    if (!players.is_object() || players.size() > 5000) {
+        resultMessage = L"公共游戏ID库数据格式异常或超出大小限制。";
+        return false;
+    }
+
+    // Validate the complete response before touching the local map.  A bad
+    // entry must not partially overwrite a user's local alias database.
+    for (const auto& item : players.items()) {
+        if (item.key().empty() || item.key().size() > 60) {
+            resultMessage = L"公共游戏ID库包含无效选手名称。";
+            return false;
+        }
+        const json& aliases = item.value();
+        if (aliases.is_array()) {
+            if (aliases.size() > 100) {
+                resultMessage = L"公共游戏ID库单个选手的游戏ID数量超限。";
+                return false;
+            }
+            for (const auto& alias : aliases) {
+                if (!alias.is_string()) {
+                    resultMessage = L"公共游戏ID库包含无效游戏ID数据。";
+                    return false;
+                }
+            }
+        }
+        else if (!aliases.is_string()) {
+            resultMessage = L"公共游戏ID库包含无效游戏ID数据。";
+            return false;
+        }
+    }
+
+    int beforeMainCount = 0;
+    int beforePairCount = 0;
+    const bool wasDirtyBeforeSync =
+        BuildAliasDbJsonPayload(beforeMainCount, beforePairCount) !=
+        m_aliasDbCloudBaselinePayload;
+
+    // Keep a transaction-sized snapshot.  The public response is validated
+    // above, but disk errors can still happen after the merge; in that case
+    // neither the in-memory alias database nor the cloud-delete baseline may
+    // be left half-updated.
+    std::map<CString, CString> aliasDbBefore;
+    std::vector<CString> pendingDeleteMainsBefore;
+    std::vector<CString> cloudDeleteBaselineMainsBefore;
+    std::map<CString, CString> cloudBaselinePlayersBefore;
+    std::string cloudBaselinePayloadBefore;
+    {
+        std::lock_guard<std::mutex> lock(m_dataMutex);
+        aliasDbBefore = m_aliasDB;
+        pendingDeleteMainsBefore = m_aliasDbPendingDeleteMains;
+        cloudDeleteBaselineMainsBefore = m_aliasCloudDeleteBaselineMains;
+        cloudBaselinePlayersBefore = m_aliasCloudBaselinePlayers;
+        cloudBaselinePayloadBefore = m_aliasDbCloudBaselinePayload;
+    }
+
+    int addedAliasCount = 0;
+    int upgradedAliasCount = 0;
+    int touchedMainCount = 0;
+
+    {
+        std::lock_guard<std::mutex> lock(m_dataMutex);
+        SetAliasCloudDeleteBaselineFromPublicPlayers(players);
+
+        for (const auto& item : players.items()) {
+            CString mainName = CA2W(item.key().c_str(), CP_UTF8);
+            mainName.Trim();
+            if (mainName.IsEmpty()) continue;
+
+            std::vector<CString> mergedAliases =
+                DnfParseAliasListString(m_aliasDB[mainName]);
+            const std::vector<CString> beforeAliases = mergedAliases;
+
+            auto addAlias = [&](CString aliasName) {
+                aliasName.Trim();
+                if (aliasName.IsEmpty() || aliasName == mainName) return;
+                const DnfAliasMergeResult mergeResult =
+                    DnfMergeAliasIntoList(mergedAliases, aliasName);
+                if (mergeResult == DnfAliasMergeAdded) ++addedAliasCount;
+                else if (mergeResult == DnfAliasMergeUpgraded) ++upgradedAliasCount;
+            };
+
+            if (item.value().is_array()) {
+                for (const auto& aliasValue : item.value()) {
+                    const CString aliasText =
+                        CA2W(aliasValue.get<std::string>().c_str(), CP_UTF8);
+                    addAlias(aliasText);
+                }
+            }
+            else {
+                const CString aliasList =
+                    CA2W(item.value().get<std::string>().c_str(), CP_UTF8);
+                for (const auto& aliasName : DnfParseAliasListString(aliasList)) {
+                    addAlias(aliasName);
+                }
+            }
+
+            const CString afterAliasesText = DnfFormatAliasListString(mergedAliases);
+            const CString beforeAliasesText = DnfFormatAliasListString(beforeAliases);
+            if (afterAliasesText != beforeAliasesText) {
+                m_aliasDB[mainName] = afterAliasesText;
+                ++touchedMainCount;
+                std::vector<CString> addedAliases;
+                std::vector<CString> removedAliases;
+                for (const auto& alias : mergedAliases) {
+                    if (!DnfAliasListContainsExact(beforeAliases, alias)) {
+                        addedAliases.push_back(alias);
+                    }
+                }
+                for (const auto& alias : beforeAliases) {
+                    if (!DnfAliasListContainsExact(mergedAliases, alias)) {
+                        removedAliases.push_back(alias);
+                    }
+                }
+                if (!addedAliases.empty()) {
+                    AppLog(L"☁️ [自动融合新增] [" + mainName + L"] " +
+                        DnfJoinAliasNames(addedAliases), RGB(100, 255, 140));
+                }
+                if (!removedAliases.empty()) {
+                    AppLog(L"☁️ [自动融合规范化] [" + mainName + L"] " +
+                        DnfJoinAliasNames(removedAliases), RGB(255, 190, 90));
+                }
+            }
+        }
+
+    }
+
+    if (touchedMainCount > 0) {
+        const bool aliasSaved = SaveAliasDB(false);
+        if (!aliasSaved) {
+            {
+                std::lock_guard<std::mutex> lock(m_dataMutex);
+                m_aliasDB = aliasDbBefore;
+                m_aliasDbPendingDeleteMains = pendingDeleteMainsBefore;
+                m_aliasCloudDeleteBaselineMains =
+                    cloudDeleteBaselineMainsBefore;
+                m_aliasCloudBaselinePlayers = cloudBaselinePlayersBefore;
+                m_aliasDbCloudBaselinePayload = cloudBaselinePayloadBefore;
+            }
+
+            // Best effort restoration also repairs a file that was truncated
+            // before the original write reported an error.
+            const bool aliasRestored = SaveAliasDB(false);
+            SaveAliasCloudDeleteBaseline();
+            SyncDataToTree();
+            RefreshDisplay();
+            if (!aliasRestored) {
+                WriteMatchLog(L"[自动游戏ID库] 保存失败后无法完整恢复本地文件，请检查文件权限。\n");
+            }
+            resultMessage = L"公共游戏ID库已解析，但本地库保存失败，未确认本次自动同步。";
+            return false;
+        }
+        SyncDataToTree();
+        RefreshDisplay();
+    }
+
+    if (!wasDirtyBeforeSync) ResetAliasDbCloudBaseline();
+    BroadcastStateToWeb();
+
+    resultMessage.Format(L"自动拉取完成：更新 %d 个选手关联、新增 %d 个游戏ID、补全职业信息 %d 个。",
+        touchedMainCount, addedAliasCount, upgradedAliasCount);
+    if (addedAliasCount == 0 && upgradedAliasCount == 0) {
+        resultMessage = L"自动拉取完成：本地已经是最新。";
+    }
+    return true;
+}
+
+void CDNFGameCaptureDlg::MaybeStartAliasDbAutoSync(bool force)
+{
+    const bool authorized = HasAuthorizedCloudMatchEndpoint();
+    if (authorized != m_aliasAutoSyncLastKnownAuthorized) {
+        m_aliasAutoSyncLastKnownAuthorized = authorized;
+        // The timer also reaches this path after a natural lease expiry.  A
+        // single state-change broadcast keeps Web authorization indicators in
+        // sync without pushing a full WebView state every minute.
+        BroadcastStateToWeb();
+    }
+
+    if (!m_aliasAutoSyncEnabled || m_aliasAutoSyncInFlight ||
+        m_aliasAutoSyncAttemptedThisRun) {
+        return;
+    }
+    if (m_bAliasDirectMode) {
+        m_aliasAutoSyncLastPushStatus = L"skipped";
+        m_aliasAutoSyncLastPushMessage = L"管理员直写模式不参与自动同步";
+        return;
+    }
+    if (!authorized) {
+        m_aliasAutoSyncLastPushStatus = L"pending";
+        m_aliasAutoSyncLastPushMessage = L"授权未就绪，等待授权完成";
+        m_aliasAutoSyncLastResult = m_aliasAutoSyncLastPushMessage;
+        return;
+    }
+
+    const std::int64_t now = static_cast<std::int64_t>(time(nullptr));
+    if (!force && !DnfIsAliasAutoSyncDue(m_aliasAutoSyncEnabled,
+        m_aliasAutoSyncAttemptedThisRun, m_aliasAutoSyncLastSuccessAt, now)) {
+        // Authorization may have just completed after the initial state was
+        // reset to "waiting for authorization".  Once the saved seven-day
+        // checkpoint is still valid, show the real idle state instead.
+        const bool waitingForAuthorization =
+            m_aliasAutoSyncLastPushMessage == L"等待授权完成后执行" ||
+            m_aliasAutoSyncLastPushMessage == L"授权未就绪，等待授权完成" ||
+            m_aliasAutoSyncLastPullMessage == L"等待授权完成后执行" ||
+            m_aliasAutoSyncLastPullMessage == L"授权未就绪，等待授权完成";
+        if (waitingForAuthorization) {
+            m_aliasAutoSyncLastPushStatus = L"pending";
+            m_aliasAutoSyncLastPushMessage = L"等待下次周期执行";
+            m_aliasAutoSyncLastPullStatus = L"failed";
+            m_aliasAutoSyncLastPullMessage = L"等待下次周期执行";
+            m_aliasAutoSyncLastResult = L"已授权，等待下次七天周期执行";
+        }
+        return;
+    }
+    StartAliasDbAutoSyncAttempt();
+}
+
+void CDNFGameCaptureDlg::StartAliasDbAutoSyncAttempt()
+{
+    if (m_aliasAutoSyncInFlight || !m_aliasAutoSyncEnabled ||
+        m_bAliasDirectMode) return;
+
+    // Snapshot all MFC-owned state on the UI thread.  The detached worker
+    // below never captures `this`, so closing the application cannot turn a
+    // slow cloud request into a use-after-free.
+    int mainCount = 0;
+    int pairCount = 0;
+    if (!SaveAliasDB()) {
+        m_aliasAutoSyncAttemptedThisRun = true;
+        m_aliasAutoSyncLastPushStatus = L"failed";
+        m_aliasAutoSyncLastPushMessage = L"本地游戏ID库保存失败，自动同步已跳过";
+        m_aliasAutoSyncLastPullStatus = L"failed";
+        m_aliasAutoSyncLastPullMessage = L"本地游戏ID库保存失败，未拉取公共库";
+        m_aliasAutoSyncLastResult = m_aliasAutoSyncLastPullMessage;
+        AppLog(L"❌ [自动游戏ID库] " + m_aliasAutoSyncLastPullMessage,
+            RGB(255, 120, 80));
+        WriteMatchLog(L"[自动游戏ID库] 本地库保存失败，本次不重试，下次启动再试。");
+        BroadcastStateToWeb();
+        return;
+    }
+    const std::string aliasPayload =
+        BuildAliasDbAppendPayload(mainCount, pairCount);
+    const bool localPayloadEmpty = mainCount <= 0;
+    const std::string payloadHash = DnfAliasAutoSyncHash(
+        localPayloadEmpty ? std::string() : aliasPayload);
+    const std::string previousPushHash = m_aliasAutoSyncLastPushHash;
+    const CString key = DnfReadLocalLicenseKey();
+    const CString hwid = GetMachineID();
+    if (key.IsEmpty() || hwid.IsEmpty()) {
+        m_aliasAutoSyncAttemptedThisRun = true;
+        m_aliasAutoSyncLastPushStatus = L"failed";
+        m_aliasAutoSyncLastPushMessage = key.IsEmpty() ?
+            L"授权未就绪，自动同步已跳过" : L"无法获取本机机器码";
+        m_aliasAutoSyncLastPullStatus = L"failed";
+        m_aliasAutoSyncLastPullMessage = m_aliasAutoSyncLastPushMessage;
+        BroadcastStateToWeb();
+        return;
+    }
+
+    const HWND notifyWindow = GetSafeHwnd();
+    const auto lifetime = m_aliasAutoSyncLifetime;
+    if (!notifyWindow || !lifetime) return;
+
+    m_aliasAutoSyncInFlight = true;
+    m_aliasAutoSyncAttemptedThisRun = true;
+    m_aliasAutoSyncAppendSupported = false;
+    m_aliasAutoSyncLastPushStatus = localPayloadEmpty ?
+        L"skipped" : L"pending";
+    m_aliasAutoSyncLastPushMessage = localPayloadEmpty ?
+        L"本地没有可追加的游戏ID，仍会拉取公共库" : L"等待云函数能力确认";
+    m_aliasAutoSyncLastPullStatus = L"failed";
+    m_aliasAutoSyncLastPullMessage = L"正在拉取公共库";
+    const std::uint64_t generation =
+        m_aliasAutoSyncGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+    BroadcastStateToWeb();
+    AppLog(L"☁️ [自动游戏ID库] 开始七天同步：先拉取公共库，再追加投稿。",
+        RGB(80, 220, 180));
+    WriteMatchLog(L"[自动游戏ID库] 后台任务已启动。");
+
+    const std::string keyUtf8 = std::string(CW2A(key, CP_UTF8));
+    const std::string hwidUtf8 = std::string(CW2A(hwid, CP_UTF8));
+    const std::string clientVersion = std::string(CW2A(CURRENT_VERSION, CP_UTF8));
+
+    try {
+        std::thread([notifyWindow, lifetime, generation, keyUtf8, hwidUtf8,
+            clientVersion, aliasPayload, localPayloadEmpty, payloadHash,
+            previousPushHash]() {
+            auto postResult = [&](DnfAliasAutoSyncResult* result) {
+                if (!lifetime->load(std::memory_order_acquire) ||
+                    !::PostMessage(notifyWindow, WM_ALIAS_AUTO_SYNC_RESULT, 0,
+                        reinterpret_cast<LPARAM>(result))) {
+                    delete result;
+                }
+            };
+
+            auto result = std::make_unique<DnfAliasAutoSyncResult>();
+            result->generation = generation;
+            result->lifetime = lifetime;
+            result->localPayloadEmpty = localPayloadEmpty;
+            result->localPayloadHash = payloadHash;
+
+            try {
+                json getRequest;
+                getRequest["action"] = "get_public_alias_db";
+                getRequest["key"] = keyUtf8;
+                getRequest["hwid"] = hwidUtf8;
+
+                std::string getResponse;
+                CString getError;
+                if (!DnfPostCloudJson(getRequest.dump(), getResponse,
+                    getError, 8000)) {
+                    result->errorMessage = std::string(CW2A(getError, CP_UTF8));
+                    result->pullMessage = result->errorMessage;
+                    postResult(result.release());
+                    return;
+                }
+
+                const json getReply = json::parse(getResponse, nullptr, false);
+                if (getReply.is_discarded() ||
+                    getReply.value("status", "error") != "ok" ||
+                    !getReply.contains("publicAliasDB") ||
+                    !getReply["publicAliasDB"].is_object() ||
+                    !getReply["publicAliasDB"].contains("players") ||
+                    !getReply["publicAliasDB"]["players"].is_object()) {
+                    result->errorMessage = getReply.is_discarded() ?
+                        "公共库响应不是有效 JSON" :
+                        getReply.value("msg", "公共库响应无效");
+                    result->pullMessage = result->errorMessage;
+                    postResult(result.release());
+                    return;
+                }
+
+                result->publicAliasDbJson =
+                    getReply["publicAliasDB"].dump();
+                if (result->publicAliasDbJson.size() > 512 * 1024) {
+                    result->errorMessage = "公共库响应超过本地安全大小限制";
+                    result->pullMessage = result->errorMessage;
+                    postResult(result.release());
+                    return;
+                }
+                result->pullOk = true;
+                result->appendSupported =
+                    getReply.value("aliasAppendSupported", false);
+                result->pullMessage = getReply.value("msg", "公共库拉取成功");
+
+                if (localPayloadEmpty) {
+                    result->pushOk = true;
+                    result->pushMessage = "本地没有可追加的游戏ID，跳过上传";
+                }
+                else if (!result->appendSupported) {
+                    result->pushMessage = "云函数需更新，已禁止自动上传";
+                }
+                else if (payloadHash == previousPushHash) {
+                    result->pushOk = true;
+                    result->pushMessage = "本地库无变化，跳过重复上传";
+                }
+                else {
+                    json pushRequest;
+                    pushRequest["action"] = "submit_alias_db";
+                    pushRequest["appendOnly"] = true;
+                    pushRequest["key"] = keyUtf8;
+                    pushRequest["hwid"] = hwidUtf8;
+                    pushRequest["clientVersion"] = clientVersion;
+                    pushRequest["aliasDB"] = json::parse(aliasPayload);
+                    result->pushAttempted = true;
+
+                    std::string pushResponse;
+                    CString pushError;
+                    if (!DnfPostCloudJson(pushRequest.dump(), pushResponse,
+                        pushError, 8000)) {
+                        result->pushMessage = std::string(CW2A(pushError, CP_UTF8));
+                    }
+                    else {
+                        const json pushReply = json::parse(pushResponse,
+                            nullptr, false);
+                        if (!pushReply.is_discarded() &&
+                            pushReply.value("status", "error") == "ok" &&
+                            pushReply.value("aliasSubmit", false) &&
+                            pushReply.value("aliasAppend", false)) {
+                            result->pushOk = true;
+                            result->pushMessage =
+                                pushReply.value("msg", "已提交待审核");
+                        }
+                        else if (!pushReply.is_discarded() &&
+                            pushReply.value("status", "error") == "ok" &&
+                            !pushReply.value("aliasAppend", false)) {
+                            result->appendSupported = false;
+                            result->pushMessage = "云函数需更新，已禁止自动上传";
+                        }
+                        else {
+                            result->pushMessage = pushReply.is_discarded() ?
+                                "自动投稿响应不是有效 JSON" :
+                                pushReply.value("msg", "自动投稿失败");
+                        }
+                    }
+                }
+            }
+            catch (const std::exception& e) {
+                result->errorMessage = e.what();
+                if (result->pullMessage.empty()) {
+                    result->pullMessage = result->errorMessage;
+                }
+            }
+            catch (...) {
+                result->errorMessage = "自动游戏ID库任务发生未知异常";
+                if (result->pullMessage.empty()) {
+                    result->pullMessage = result->errorMessage;
+                }
+            }
+            postResult(result.release());
+        }).detach();
+    }
+    catch (const std::exception& e) {
+        m_aliasAutoSyncInFlight = false;
+        m_aliasAutoSyncLastPushStatus = L"failed";
+        m_aliasAutoSyncLastPushMessage = CA2W(e.what(), CP_UTF8);
+        WriteMatchLog(L"[自动游戏ID库] 无法创建后台线程。");
+        BroadcastStateToWeb();
+    }
+    catch (...) {
+        m_aliasAutoSyncInFlight = false;
+        m_aliasAutoSyncLastPushStatus = L"failed";
+        m_aliasAutoSyncLastPushMessage = L"无法创建自动同步后台线程";
+        WriteMatchLog(L"[自动游戏ID库] 无法创建后台线程：未知异常。");
+        BroadcastStateToWeb();
+    }
+}
+
+LRESULT CDNFGameCaptureDlg::OnAliasDbAutoSyncResult(WPARAM wParam,
+    LPARAM lParam)
+{
+    (void)wParam;
+    std::unique_ptr<DnfAliasAutoSyncResult> result(
+        reinterpret_cast<DnfAliasAutoSyncResult*>(lParam));
+    if (!result || result->lifetime != m_aliasAutoSyncLifetime ||
+        !result->lifetime ||
+        !result->lifetime->load(std::memory_order_acquire) ||
+        result->generation !=
+        m_aliasAutoSyncGeneration.load(std::memory_order_acquire)) {
+        return 0;
+    }
+
+    m_aliasAutoSyncInFlight = false;
+    m_aliasAutoSyncAppendSupported = result->appendSupported;
+    const std::string previousAutoPushHash = m_aliasAutoSyncLastPushHash;
+    m_aliasAutoSyncLastPullStatus = result->pullOk ? L"success" : L"failed";
+    m_aliasAutoSyncLastPullMessage = result->pullOk ?
+        CA2W(result->pullMessage.c_str(), CP_UTF8) :
+        CA2W((result->errorMessage.empty() ? result->pullMessage :
+            result->errorMessage).c_str(), CP_UTF8);
+
+    auto logAutoPushResult = [&]() {
+        CString logMessage = L"自动推送结果：" + m_aliasAutoSyncLastPushMessage;
+        COLORREF color = RGB(80, 220, 180);
+        if (m_aliasAutoSyncLastPushStatus == L"failed" ||
+            m_aliasAutoSyncLastPushStatus == L"unsupported") {
+            color = RGB(255, 120, 80);
+        }
+        else if (m_aliasAutoSyncLastPushStatus == L"skipped") {
+            color = RGB(255, 200, 90);
+        }
+        AppLog(L"ℹ️ [自动游戏ID库] " + logMessage, color);
+        WriteMatchLog(L"[自动游戏ID库] " + logMessage);
+    };
+
+    if (!result->pullOk) {
+        m_aliasAutoSyncLastPushStatus = L"failed";
+        m_aliasAutoSyncLastPushMessage = L"因公共库拉取失败而未上传";
+        m_aliasAutoSyncLastResult = m_aliasAutoSyncLastPullMessage;
+        logAutoPushResult();
+        AppLog(L"❌ [自动游戏ID库] 拉取失败：" + m_aliasAutoSyncLastPullMessage,
+            RGB(255, 120, 80));
+        WriteMatchLog(L"[自动游戏ID库] 网络失败，本次不重试，下次启动再试。");
+        BroadcastStateToWeb();
+        return 0;
+    }
+
+    json publicDb = json::parse(result->publicAliasDbJson, nullptr, false);
+    CString mergeMessage;
+    const bool mergeOk = !publicDb.is_discarded() &&
+        publicDb.is_object() && publicDb.contains("players") &&
+        MergePublicAliasDbForAutoSync(publicDb["players"], mergeMessage);
+    if (!mergeOk) {
+        m_aliasAutoSyncLastPullStatus = L"failed";
+        m_aliasAutoSyncLastPullMessage = mergeMessage.IsEmpty() ?
+            L"公共库数据无效，本地库未修改" : mergeMessage;
+        m_aliasAutoSyncLastPushStatus = L"failed";
+        m_aliasAutoSyncLastPushMessage = L"因公共库数据无效而未确认上传";
+        m_aliasAutoSyncLastResult = m_aliasAutoSyncLastPullMessage;
+        logAutoPushResult();
+        AppLog(L"❌ [自动游戏ID库] " + m_aliasAutoSyncLastPullMessage,
+            RGB(255, 120, 80));
+        BroadcastStateToWeb();
+        return 0;
+    }
+
+    if (result->localPayloadEmpty) {
+        m_aliasAutoSyncLastPushStatus = L"skipped";
+        m_aliasAutoSyncLastPushMessage = CA2W(
+            result->pushMessage.c_str(), CP_UTF8);
+    }
+    else if (!result->appendSupported) {
+        m_aliasAutoSyncLastPushStatus = L"unsupported";
+        m_aliasAutoSyncLastPushMessage = L"云函数需更新，自动推送未执行";
+    }
+    else if (result->pushOk) {
+        m_aliasAutoSyncLastPushStatus = result->pushAttempted ?
+            L"success" : L"skipped";
+        m_aliasAutoSyncLastPushMessage = CA2W(
+            result->pushMessage.c_str(), CP_UTF8);
+        if (!result->localPayloadHash.empty()) {
+            m_aliasAutoSyncLastPushHash = result->localPayloadHash;
+        }
+    }
+    else {
+        m_aliasAutoSyncLastPushStatus = L"failed";
+        m_aliasAutoSyncLastPushMessage = CA2W(
+            result->pushMessage.c_str(), CP_UTF8);
+    }
+
+    // An old cloud function is a deterministic capability mismatch, not a
+    // transient network failure.  The pull/merge part of this cycle still
+    // completed successfully, so record the seven-day checkpoint while
+    // keeping the push status as "unsupported".  A later manual re-enable or
+    // the next scheduled cycle can retry after the cloud function is updated.
+    const bool cycleReady = result->localPayloadEmpty ||
+        (result->appendSupported && result->pushOk) ||
+        (!result->appendSupported && result->pullOk);
+    if (cycleReady) {
+        const std::int64_t previousSuccessAt = m_aliasAutoSyncLastSuccessAt;
+        m_aliasAutoSyncLastSuccessAt =
+            static_cast<std::int64_t>(time(nullptr));
+        if (SaveAliasDbAutoSyncSettings()) {
+            m_aliasAutoSyncLastResult = mergeMessage;
+            AppLog(L"✅ [自动游戏ID库] " + mergeMessage, RGB(0, 255, 120));
+            CString nextRun;
+            nextRun.Format(L"下次执行：%s", FormatTimeStamp(
+                m_aliasAutoSyncLastSuccessAt +
+                DNF_ALIAS_AUTO_SYNC_PERIOD_SECONDS).GetString());
+            WriteMatchLog(L"[自动游戏ID库] " + nextRun);
+        }
+        else {
+            m_aliasAutoSyncLastSuccessAt = previousSuccessAt;
+            m_aliasAutoSyncLastPushHash = previousAutoPushHash;
+            // Best effort rollback prevents a partially-written timestamp or
+            // hash from making the next launch believe this cycle completed.
+            SaveAliasDbAutoSyncSettings();
+            const CString checkpointError =
+                L"七天检查点保存失败，本次自动同步不会记账，下次启动再试";
+            m_aliasAutoSyncLastResult = mergeMessage + L"；" + checkpointError;
+            AppLog(L"⚠️ [自动游戏ID库] " + m_aliasAutoSyncLastResult,
+                RGB(255, 190, 80));
+            WriteMatchLog(L"[自动游戏ID库] " + checkpointError + L"。");
+        }
+    }
+    else {
+        m_aliasAutoSyncLastResult = mergeMessage +
+            L"；" + m_aliasAutoSyncLastPushMessage;
+        AppLog(L"⚠️ [自动游戏ID库] " + m_aliasAutoSyncLastResult,
+            RGB(255, 190, 80));
+        WriteMatchLog(L"[自动游戏ID库] 自动推送未成功，本次不重试，下次启动再试。");
+    }
+    logAutoPushResult();
+    BroadcastStateToWeb();
+    return 0;
+}
+
 void CDNFGameCaptureDlg::ResetAliasDbCloudBaseline()
 {
     int mainCount = 0;
@@ -11140,7 +12664,7 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd()
 
             CString aliasRuleError;
             if (!DnfValidateAliasListShortMeta(parsedAliases, aliasRuleError)) {
-                strDupAliasAlert += L"【" + mainName + L"】小号格式不合格 -> " + aliasRuleError + L"\n";
+                strDupAliasAlert += L"【" + mainName + L"】游戏ID格式不合格 -> " + aliasRuleError + L"\n";
                 line = text.Tokenize(L"\r\n ", curPos);
                 continue;
             }
@@ -11148,9 +12672,9 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd()
             int targetIdx = -1;
             for (int i = 0; i < 8; i++) { if (m_players[i].name == mainName) { targetIdx = i; break; } }
 
-            // 主号不参与名称匹配，所以新上场选手必须至少绑定 1 个小号。
+            // 选手不参与名称匹配，所以新上场选手必须至少绑定 1 个游戏ID。
             if (targetIdx == -1 && parsedAliases.empty()) {
-                strDupAliasAlert += L"【" + mainName + L"】无法上场 -> 必须至少添加一个小号，格式：主号(小号)\n";
+                strDupAliasAlert += L"【" + mainName + L"】无法上场 -> 必须至少添加一个游戏ID，格式：选手(游戏ID)\n";
                 line = text.Tokenize(L"\r\n ", curPos);
                 continue;
             }
@@ -11172,19 +12696,19 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd()
                         m_players[i].name = mainName;
                         m_players[i].team = currentTeam;
                         addMainCount++;
-                        AppLog(L"👤 [新增主号] [" + mainName + L"]", RGB(80, 180, 255));
+                        AppLog(L"👤 [新增选手] [" + mainName + L"]", RGB(80, 180, 255));
                         break;
                     }
                 }
                 if (targetIdx == -1) strTeamFullAlert += L"[" + mainName + L"]\n";
             }
 
-            // ================== 给场上已有选手追加小号 ==================
+            // ================== 给场上已有选手追加游戏ID ==================
             if (targetIdx != -1) {
-                // 🚨 即使是补小号，也要查重，防止串台
+                // 🚨 即使是补游戏ID，也要查重，防止串台
                 CString conflictInfo = CheckFieldConflict(mainName, parsedAliases, targetIdx);
                 if (!conflictInfo.IsEmpty()) {
-                    strDupAliasAlert += L"【" + mainName + L"】追加小号失败 -> 冲突对象: " + conflictInfo + L"\n";
+                    strDupAliasAlert += L"【" + mainName + L"】追加游戏ID失败 -> 冲突对象: " + conflictInfo + L"\n";
                     line = text.Tokenize(L"\r\n ", curPos);
                     continue;
                 }
@@ -11193,7 +12717,7 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd()
                     DnfAliasMergeResult mergeResult = DnfMergeAliasIntoAliasDataList(m_players[targetIdx].aliases, aN);
                     if (mergeResult != DnfAliasMergeNone) {
                         addAliasCount++;
-                        CString logPrefix = mergeResult == DnfAliasMergeUpgraded ? L" ├ 🧩补全小号: [" : L" ├ ➕追加小号: [";
+                        CString logPrefix = mergeResult == DnfAliasMergeUpgraded ? L" ├ 🧩补全游戏ID: [" : L" ├ ➕追加游戏ID: [";
                         AppLog(logPrefix + aN + L"]", RGB(100, 255, 100));
                     }
                 }
@@ -11349,6 +12873,8 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             else {
                 if (m_bOcrStartPending.exchange(false)) {
                     m_ocrStartRequestId.fetch_add(1);
+                    m_bStartAfterOcrReady.store(false, std::memory_order_release);
+                    m_ocrStartPendingSince.store(0, std::memory_order_release);
                     SetOcrStartupPendingUI(false);
                     WriteMatchLog(L"[云端实时同步] 已取消尚未完成的本地 OCR 启动请求。");
                 }
@@ -11899,8 +13425,8 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 ::WritePrivateProfileString(L"Settings", L"RedPickFirst", m_bRedPickFirst ? L"1" : L"0", m_iniPath);
             }
 
-            // Web 端会把永久小号库 fullAliasDB 一起传回来。
-            // 这里必须同步到 C++ 的 m_aliasDB，否则 Web 里改完小号名后，下一次 C++ 广播会用旧库把它刷回去。
+            // Web 端会把永久游戏ID库 fullAliasDB 一起传回来。
+            // 这里必须同步到 C++ 的 m_aliasDB，否则 Web 里改完游戏ID名后，下一次 C++ 广播会用旧库把它刷回去。
             if (data.contains("fullAliasDB") && data["fullAliasDB"].is_object()) {
                 std::vector<CString> oldMainNames;
                 for (const auto& pair : m_aliasDB) oldMainNames.push_back(pair.first);
@@ -11945,8 +13471,8 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                     m_players[mfcIdx].akCount = p["akCount"].get<int>();
 
                     m_players[mfcIdx].aliases.clear();
-                    // Web 同步阶段只接收并保存小号，不因为 2 字短 ID 清空选手。
-                    // 裸短 ID / 无小号 的拦截统一放到“开始监控”阶段处理。
+                    // Web 同步阶段只接收并保存游戏ID，不因为 2 字短 ID 清空选手。
+                    // 裸短 ID / 无游戏ID 的拦截统一放到“开始监控”阶段处理。
                     for (auto& a : p["aliases"]) {
                         AliasData ad;
                         ad.name = CA2W(a.get<std::string>().c_str(), CP_UTF8);
@@ -11956,7 +13482,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                         }
                     }
                     if (!m_players[mfcIdx].name.IsEmpty() && m_players[mfcIdx].aliases.empty()) {
-                        AppLog(L"⚠️ [Web同步提示] [" + m_players[mfcIdx].name + L"] 只有主号、没有小号：保留在选手列表中，但开始监控会被拦截。", RGB(255, 180, 0));
+                        AppLog(L"⚠️ [Web同步提示] [" + m_players[mfcIdx].name + L"] 只有选手、没有游戏ID：保留在选手列表中，但开始监控会被拦截。", RGB(255, 180, 0));
                     }
                 }
                 // 🚨 Web端后4个是蓝队，写回 MFC 的 4-7
@@ -11970,8 +13496,8 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                     m_players[mfcIdx].akCount = p["akCount"].get<int>();
 
                     m_players[mfcIdx].aliases.clear();
-                    // Web 同步阶段只接收并保存小号，不因为 2 字短 ID 清空选手。
-                    // 裸短 ID / 无小号 的拦截统一放到“开始监控”阶段处理。
+                    // Web 同步阶段只接收并保存游戏ID，不因为 2 字短 ID 清空选手。
+                    // 裸短 ID / 无游戏ID 的拦截统一放到“开始监控”阶段处理。
                     for (auto& a : p["aliases"]) {
                         AliasData ad;
                         ad.name = CA2W(a.get<std::string>().c_str(), CP_UTF8);
@@ -11981,7 +13507,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                         }
                     }
                     if (!m_players[mfcIdx].name.IsEmpty() && m_players[mfcIdx].aliases.empty()) {
-                        AppLog(L"⚠️ [Web同步提示] [" + m_players[mfcIdx].name + L"] 只有主号、没有小号：保留在选手列表中，但开始监控会被拦截。", RGB(255, 180, 0));
+                        AppLog(L"⚠️ [Web同步提示] [" + m_players[mfcIdx].name + L"] 只有选手、没有游戏ID：保留在选手列表中，但开始监控会被拦截。", RGB(255, 180, 0));
                     }
                 }
             }
@@ -12038,10 +13564,14 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
         else if (action == "cmd_set_red_pick_mode") {
             MarkMatchMutation();
             std::string mode = j.value("mode", "first");
-            m_bRedPickFirst = (mode != "second");
-            ::WritePrivateProfileString(L"Settings", L"RedPickFirst", m_bRedPickFirst ? L"1" : L"0", m_iniPath);
+            const bool redPickFirst = (mode != "second");
+            {
+                std::lock_guard<std::mutex> dataLock(m_dataMutex);
+                m_bRedPickFirst = redPickFirst;
+            }
+            ::WritePrivateProfileString(L"Settings", L"RedPickFirst", redPickFirst ? L"1" : L"0", m_iniPath);
             WriteScoreToFile();
-            AppLog(m_bRedPickFirst ? L"🎯 [选人顺序] 红队先选，编号已切换为 x/1/4/6。" : L"🎯 [选人顺序] 红队后选，编号已切换为 h/2/4/5。", RGB(255, 210, 106));
+            AppLog(redPickFirst ? L"🎯 [选人顺序] 红队先选，编号已切换为 x/1/4/6。" : L"🎯 [选人顺序] 红队后选，编号已切换为 h/2/4/5。", RGB(255, 210, 106));
             BroadcastStateToWeb();
         }
         else if (action == "cmd_set_scoreboard_text_styles") {
@@ -12492,7 +14022,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             int mainCount = 0;
             int pairCount = 0;
             std::string payload = BuildAliasDbJsonPayload(mainCount, pairCount);
-            AppLog(L"☁️ [共享库] 管理员直写模式：正在同步本地小号库到公共库...", RGB(80, 220, 180));
+            AppLog(L"☁️ [共享库] 管理员直写模式：正在同步本地游戏ID库到公共库...", RGB(80, 220, 180));
             CString result = DirectSyncAliasDbToCloud(payload, mainCount, pairCount);
             COLORREF logColor = result.Find(L"成功") >= 0 ? RGB(0, 255, 120) : RGB(255, 120, 80);
             AppLog(L"☁️ [共享库] " + result, logColor);
@@ -12502,36 +14032,83 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             m_bAliasDirectMode = j.value("enabled", false);
             AppLog(m_bAliasDirectMode ? L"☁️ [共享库] 管理员直写模式已开启" : L"☁️ [共享库] 管理员直写模式已关闭", RGB(80, 220, 180));
         }
+        else if (action == "cmd_set_alias_auto_sync") {
+            const bool enabled = j.value("enabled", true);
+            if (!enabled) {
+                // Invalidate any detached worker. Its eventual result is
+                // discarded by the generation check in the window handler.
+                m_aliasAutoSyncGeneration.fetch_add(1, std::memory_order_acq_rel);
+                m_aliasAutoSyncEnabled = false;
+                m_aliasAutoSyncInFlight = false;
+                m_aliasAutoSyncAttemptedThisRun = true;
+                m_aliasAutoSyncLastPushStatus = L"skipped";
+                m_aliasAutoSyncLastPushMessage = L"自动同步已关闭";
+                m_aliasAutoSyncLastPullStatus = L"failed";
+                m_aliasAutoSyncLastPullMessage = L"自动同步已关闭";
+                m_aliasAutoSyncLastResult = L"自动同步已关闭";
+                WriteMatchLog(L"[自动游戏ID库] 用户已关闭每七天自动同步。");
+            }
+            else {
+                const bool wasEnabled = m_aliasAutoSyncEnabled;
+                m_aliasAutoSyncEnabled = true;
+                if (!wasEnabled) {
+                    m_aliasAutoSyncAttemptedThisRun = false;
+                    m_aliasAutoSyncLastPushStatus = L"pending";
+                    m_aliasAutoSyncLastPushMessage = L"已重新开启，等待立即执行";
+                    m_aliasAutoSyncLastPullStatus = L"failed";
+                    m_aliasAutoSyncLastPullMessage = L"等待立即执行";
+                    m_aliasAutoSyncLastResult.Empty();
+                    WriteMatchLog(L"[自动游戏ID库] 用户重新开启自动同步，立即执行一次。");
+                    MaybeStartAliasDbAutoSync(true);
+                }
+            }
+            SaveAliasDbAutoSyncSettings();
+            BroadcastStateToWeb();
+        }
         else if (action == "cmd_sync_alias_db") {
-            AppLog(L"☁️ [共享库] 正在从云端公共库同步小号数据...", RGB(80, 220, 180));
-            CString result = SyncAliasDbFromCloud();
-            COLORREF logColor = result.Find(L"失败") >= 0 ? RGB(255, 120, 80) : RGB(0, 255, 120);
-            AppLog(L"☁️ [共享库] " + result, logColor);
-            if (m_pWebDlg) DnfSendWebToast(m_pWebDlg, L"alias_sync_result", result);
+            if (m_aliasAutoSyncInFlight) {
+                const CString result = L"自动游戏ID库同步正在执行，请稍候再进行手动同步。";
+                AppLog(L"⚠️ [共享库] " + result, RGB(255, 190, 80));
+                if (m_pWebDlg) DnfSendWebToast(m_pWebDlg, L"alias_sync_result", result);
+            }
+            else {
+                AppLog(L"☁️ [共享库] 正在从云端公共库同步游戏ID数据...", RGB(80, 220, 180));
+                CString result = SyncAliasDbFromCloud();
+                COLORREF logColor = result.Find(L"失败") >= 0 ? RGB(255, 120, 80) : RGB(0, 255, 120);
+                AppLog(L"☁️ [共享库] " + result, logColor);
+                if (m_pWebDlg) DnfSendWebToast(m_pWebDlg, L"alias_sync_result", result);
+            }
         }
         else if (action == "cmd_push_alias_db") {
-            if (j.contains("data") && j["data"].contains("fullAliasDB") && j["data"]["fullAliasDB"].is_object()) {
-                std::lock_guard<std::mutex> lock(m_dataMutex);
-                m_aliasDB.clear();
-                m_aliasDbPendingDeleteMains.clear();
-                for (auto it = j["data"]["fullAliasDB"].begin(); it != j["data"]["fullAliasDB"].end(); ++it) {
-                    CString mainName = CA2W(it.key().c_str(), CP_UTF8);
-                    CString aliases = CA2W(it.value().get<std::string>().c_str(), CP_UTF8);
-                    mainName.Trim();
-                    aliases.Trim();
-                    CString normalizedAliases = DnfNormalizeAliasListString(aliases);
-                    if (!mainName.IsEmpty()) {
-                        if (!normalizedAliases.IsEmpty()) {
-                            m_aliasDB[mainName] = normalizedAliases;
-                        }
-                        else if (std::find(m_aliasDbPendingDeleteMains.begin(), m_aliasDbPendingDeleteMains.end(), mainName) == m_aliasDbPendingDeleteMains.end()) {
-                            m_aliasDbPendingDeleteMains.push_back(mainName);
+            if (m_aliasAutoSyncInFlight) {
+                const CString result = L"自动游戏ID库同步正在执行，请稍候再进行手动推送。";
+                AppLog(L"⚠️ [共享库] " + result, RGB(255, 190, 80));
+                if (m_pWebDlg) DnfSendWebToast(m_pWebDlg, L"alias_submit_result", result);
+            }
+            else {
+                if (j.contains("data") && j["data"].contains("fullAliasDB") && j["data"]["fullAliasDB"].is_object()) {
+                    std::lock_guard<std::mutex> lock(m_dataMutex);
+                    m_aliasDB.clear();
+                    m_aliasDbPendingDeleteMains.clear();
+                    for (auto it = j["data"]["fullAliasDB"].begin(); it != j["data"]["fullAliasDB"].end(); ++it) {
+                        CString mainName = CA2W(it.key().c_str(), CP_UTF8);
+                        CString aliases = CA2W(it.value().get<std::string>().c_str(), CP_UTF8);
+                        mainName.Trim();
+                        aliases.Trim();
+                        CString normalizedAliases = DnfNormalizeAliasListString(aliases);
+                        if (!mainName.IsEmpty()) {
+                            if (!normalizedAliases.IsEmpty()) {
+                                m_aliasDB[mainName] = normalizedAliases;
+                            }
+                            else if (std::find(m_aliasDbPendingDeleteMains.begin(), m_aliasDbPendingDeleteMains.end(), mainName) == m_aliasDbPendingDeleteMains.end()) {
+                                m_aliasDbPendingDeleteMains.push_back(mainName);
+                            }
                         }
                     }
                 }
+                CString result = SubmitAliasDbSnapshotIfDirty(false);
+                if (m_pWebDlg) DnfSendWebToast(m_pWebDlg, L"alias_submit_result", result);
             }
-            CString result = SubmitAliasDbSnapshotIfDirty(false);
-            if (m_pWebDlg) DnfSendWebToast(m_pWebDlg, L"alias_submit_result", result);
         }
         // 🚨【新增】：处理网页发来的“专业模式”隐藏/显示指令
         else if (action == "cmd_toggle_mfc") {
@@ -12549,7 +14126,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
         else if (action == "cmd_browse_dir") {
             OnBnClickedBrowseDir(); // 直接调用 MFC 原本的浏览目录函数
         }
-        // 🚨【新增】：处理网页发来的“彻底删除小号”指令
+        // 🚨【新增】：处理网页发来的“彻底删除游戏ID”指令
         else if (action == "cmd_delete_alias") {
             MarkMatchMutation();
             std::string mNameStr = j["mainName"].get<std::string>();
@@ -12650,11 +14227,98 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
     return 0;
 }
 
-json CDNFGameCaptureDlg::DnfBuildSharedWebStateJson()
+json CDNFGameCaptureDlg::BuildSharedWebMatchSnapshotJson()
+{
+    json snapshot;
+    std::lock_guard<std::mutex> dataLock(m_dataMutex);
+
+    snapshot["blueScore"] = m_totalScoreBlue;
+    snapshot["redScore"] = m_totalScoreRed;
+    snapshot["currentTeamSnapshot"] = json::parse(
+        BuildTeamSyncSnapshotPayloadUnlocked(), nullptr, false);
+
+    snapshot["players"] = json::array();
+    for (int i = 0; i < 8; ++i) {
+        json player;
+        player["team"] = i < 4 ? 0 : 1;
+        player["name"] = DnfJsonUtf8(m_players[i].name);
+        player["kills"] = m_players[i].kills;
+        player["deaths"] = m_players[i].deaths;
+        player["akCount"] = m_players[i].akCount;
+        player["seatLabel"] = DnfJsonUtf8(GetPickSeatLabelForIndex(i));
+        player["aliases"] = json::array();
+        for (const auto& alias : m_players[i].aliases) {
+            player["aliases"].push_back(DnfJsonUtf8(alias.name));
+        }
+        snapshot["players"].push_back(std::move(player));
+    }
+
+    snapshot["recentEvents"] = json::array();
+    size_t recentCount = 0;
+    for (auto it = m_recentEvents.rbegin();
+        it != m_recentEvents.rend() && recentCount < 100; ++it, ++recentCount) {
+        const RecentEvent& event = *it;
+        snapshot["recentEvents"].push_back({
+            { "id", event.id },
+            { "time", DnfJsonUtf8(event.timeText) },
+            { "triggerSide", DnfJsonUtf8(event.triggerSide == 0 ?
+                CString(L"左侧死亡") : (event.triggerSide == 1 ?
+                    CString(L"右侧死亡") : CString(L"未知"))) },
+            { "killer", DnfJsonUtf8(event.killer) },
+            { "dead", DnfJsonUtf8(event.dead) },
+            { "killerTeam", event.killerTeam },
+            { "deadTeam", event.deadTeam },
+            { "status", DnfJsonUtf8(event.status) },
+            { "statsApplied", event.statsApplied },
+            { "undone", event.undone },
+            { "algorithm", DnfJsonUtf8(event.algorithmName) },
+            { "ocrSummary", DnfJsonUtf8(event.ocrSummary) },
+            { "candidateSummary", DnfJsonUtf8(event.candidateSummary) },
+            { "snapshotPath", DnfJsonUtf8(event.snapshotPath) },
+            { "cloudSynced", event.cloudSynced }
+        });
+    }
+
+    snapshot["fullAliasDB"] = json::object();
+    for (const auto& [name, aliases] : m_aliasDB) {
+        snapshot["fullAliasDB"][DnfJsonUtf8(name)] =
+            DnfJsonUtf8(DnfNormalizeAliasListString(aliases));
+    }
+    return snapshot;
+}
+
+json CDNFGameCaptureDlg::DnfBuildKillDisplayStateJson()
 {
     json data;
-    data["blueScore"] = m_totalScoreBlue;
-    data["redScore"] = m_totalScoreRed;
+    {
+        std::lock_guard<std::mutex> dataLock(m_dataMutex);
+        data["redScore"] = m_totalScoreRed;
+        data["blueScore"] = m_totalScoreBlue;
+        data["isFlipped"] = m_bFlipSides;
+        data["players"] = json::array();
+        for (int i = 0; i < 8; ++i) {
+            data["players"].push_back({
+                { "team", i < 4 ? 0 : 1 },
+                { "name", DnfJsonUtf8(m_players[i].name) },
+                { "seatLabel", DnfJsonUtf8(GetPickSeatLabelForIndex(i)) },
+                { "kills", m_players[i].kills },
+                { "deaths", m_players[i].deaths },
+                { "akCount", m_players[i].akCount }
+            });
+        }
+    }
+
+    data["killDisplaySettings"] = DnfBuildKillDisplaySettingsJson(m_iniPath);
+    data["systemFonts"] = DnfBuildInstalledFontListJson();
+    return data;
+}
+
+json CDNFGameCaptureDlg::DnfBuildSharedWebStateJson()
+{
+    json matchSnapshot = BuildSharedWebMatchSnapshotJson();
+    json data;
+    data["blueScore"] = matchSnapshot.value("blueScore", 0);
+    data["redScore"] = matchSnapshot.value("redScore", 0);
 
     data["isMonitoring"] = (m_bIsRunning == TRUE);
     data["isStartPending"] = (m_bOcrStartPending.load() == true);
@@ -12674,6 +14338,30 @@ json CDNFGameCaptureDlg::DnfBuildSharedWebStateJson()
     data["keyMappingSettings"] = BuildKeyMappingSettingsJson();
     data["keyDisplayWindowVisible"] = IsKeyDisplayWindowVisible();
     data["systemFonts"] = DnfBuildInstalledFontListJson();
+
+    const std::int64_t aliasSyncNow =
+        static_cast<std::int64_t>(time(nullptr));
+    json aliasDbAutoSync;
+    aliasDbAutoSync["enabled"] = m_aliasAutoSyncEnabled;
+    aliasDbAutoSync["inFlight"] = m_aliasAutoSyncInFlight;
+    aliasDbAutoSync["lastSuccessAt"] = m_aliasAutoSyncLastSuccessAt;
+    aliasDbAutoSync["nextDueAt"] = m_aliasAutoSyncEnabled &&
+        m_aliasAutoSyncLastSuccessAt > 0
+        ? m_aliasAutoSyncLastSuccessAt + DNF_ALIAS_AUTO_SYNC_PERIOD_SECONDS
+        : 0;
+    aliasDbAutoSync["appendSupported"] = m_aliasAutoSyncAppendSupported;
+    aliasDbAutoSync["authorized"] = HasAuthorizedCloudMatchEndpoint();
+    aliasDbAutoSync["lastPush"] = {
+        { "status", DnfJsonUtf8(m_aliasAutoSyncLastPushStatus) },
+        { "message", DnfJsonUtf8(m_aliasAutoSyncLastPushMessage) }
+    };
+    aliasDbAutoSync["lastPull"] = {
+        { "status", DnfJsonUtf8(m_aliasAutoSyncLastPullStatus) },
+        { "message", DnfJsonUtf8(m_aliasAutoSyncLastPullMessage) }
+    };
+    aliasDbAutoSync["lastResult"] = DnfJsonUtf8(m_aliasAutoSyncLastResult);
+    aliasDbAutoSync["now"] = aliasSyncNow;
+    data["aliasDbAutoSync"] = std::move(aliasDbAutoSync);
 
     const CloudMatchStatusSnapshot cloudStatus = m_cloudMatchClient.GetStatusSnapshot();
     const CloudMatchDisplayStatus displayStatus =
@@ -12714,8 +14402,7 @@ json CDNFGameCaptureDlg::DnfBuildSharedWebStateJson()
         m_cloudPreviewSnapshot.is_null() ? json(nullptr) : m_cloudPreviewSnapshot;
     cloudMatch["realtimeFollowing"] = m_cloudRealtimeFollowing;
     cloudMatch["realtimeTargetDeviceId"] = m_cloudRealtimeTargetDeviceId;
-    json currentTeamSnapshot = json::parse(BuildTeamSyncSnapshotPayloadUnlocked(),
-        nullptr, false);
+    json currentTeamSnapshot = std::move(matchSnapshot["currentTeamSnapshot"]);
     const bool currentTeamValid = !currentTeamSnapshot.is_discarded();
     const bool previewBaselineUnchanged = currentTeamValid &&
         !m_cloudMatchSyncLocalBaseline.empty() &&
@@ -12792,71 +14479,9 @@ json CDNFGameCaptureDlg::DnfBuildSharedWebStateJson()
     data["authText"] = std::string(CW2A(expStr, CP_UTF8));
     data["outputDir"] = std::string(CW2A(m_outputDir, CP_UTF8));
 
-    json playersArray = json::array();
-    for (int i = 0; i < 4; i++) {
-        json p;
-        p["team"] = 0;
-        p["name"] = std::string(CW2A(m_players[i].name, CP_UTF8));
-        p["kills"] = m_players[i].kills;
-        p["deaths"] = m_players[i].deaths;
-        p["akCount"] = m_players[i].akCount;
-        p["seatLabel"] = std::string(CW2A(GetPickSeatLabelForIndex(i), CP_UTF8));
-        json aliases = json::array();
-        for (auto& a : m_players[i].aliases) {
-            aliases.push_back(std::string(CW2A(a.name, CP_UTF8)));
-        }
-        p["aliases"] = aliases;
-        playersArray.push_back(p);
-    }
-
-    for (int i = 4; i < 8; i++) {
-        json p;
-        p["team"] = 1;
-        p["name"] = std::string(CW2A(m_players[i].name, CP_UTF8));
-        p["kills"] = m_players[i].kills;
-        p["deaths"] = m_players[i].deaths;
-        p["akCount"] = m_players[i].akCount;
-        p["seatLabel"] = std::string(CW2A(GetPickSeatLabelForIndex(i), CP_UTF8));
-        json aliases = json::array();
-        for (auto& a : m_players[i].aliases) {
-            aliases.push_back(std::string(CW2A(a.name, CP_UTF8)));
-        }
-        p["aliases"] = aliases;
-        playersArray.push_back(p);
-    }
-    data["players"] = playersArray;
-
-    json recentJson = json::array();
-    for (auto it = m_recentEvents.rbegin(); it != m_recentEvents.rend(); ++it) {
-        const RecentEvent& ev = *it;
-        json e;
-        e["id"] = ev.id;
-        e["time"] = std::string(CW2A(ev.timeText, CP_UTF8));
-        e["triggerSide"] = std::string(CW2A(ev.triggerSide == 0 ? L"左侧死亡" : (ev.triggerSide == 1 ? L"右侧死亡" : L"未知"), CP_UTF8));
-        e["killer"] = std::string(CW2A(ev.killer, CP_UTF8));
-        e["dead"] = std::string(CW2A(ev.dead, CP_UTF8));
-        e["killerTeam"] = ev.killerTeam;
-        e["deadTeam"] = ev.deadTeam;
-        e["status"] = std::string(CW2A(ev.status, CP_UTF8));
-        e["statsApplied"] = ev.statsApplied;
-        e["undone"] = ev.undone;
-        e["algorithm"] = std::string(CW2A(ev.algorithmName, CP_UTF8));
-        e["ocrSummary"] = std::string(CW2A(ev.ocrSummary, CP_UTF8));
-        e["candidateSummary"] = std::string(CW2A(ev.candidateSummary, CP_UTF8));
-        e["snapshotPath"] = std::string(CW2A(ev.snapshotPath, CP_UTF8));
-        e["cloudSynced"] = ev.cloudSynced;
-        recentJson.push_back(e);
-    }
-    data["recentEvents"] = recentJson;
-
-    json dbJson = json::object();
-    for (auto const& [name, aliases] : m_aliasDB) {
-        std::string utf8Name = std::string(CW2A(name, CP_UTF8));
-        CString normalizedAliases = DnfNormalizeAliasListString(aliases);
-        std::string utf8Aliases = std::string(CW2A(normalizedAliases, CP_UTF8));
-        dbJson[utf8Name] = utf8Aliases;
-    }
-    data["fullAliasDB"] = dbJson;
+    data["players"] = std::move(matchSnapshot["players"]);
+    data["recentEvents"] = std::move(matchSnapshot["recentEvents"]);
+    data["fullAliasDB"] = std::move(matchSnapshot["fullAliasDB"]);
 
     return data;
 }
@@ -12864,10 +14489,9 @@ json CDNFGameCaptureDlg::DnfBuildSharedWebStateJson()
 std::string CDNFGameCaptureDlg::BuildKillDisplayStatePayload()
 {
     try {
-        std::lock_guard<std::mutex> dataLock(m_dataMutex);
         json j;
         j["action"] = "sync_state";
-        j["data"] = DnfBuildSharedWebStateJson();
+        j["data"] = DnfBuildKillDisplayStateJson();
         return j.dump();
     }
     catch (const std::exception& e) {
@@ -13182,6 +14806,19 @@ bool CDNFGameCaptureDlg::HasAuthorizedCloudMatchEndpoint() const
 
 void CDNFGameCaptureDlg::DisableCloudMatchForAuthorization(const CString& reason)
 {
+    // Authorization changes invalidate any in-flight alias request as well.
+    // The detached worker only posts its generation-tagged result; it never
+    // owns or mutates the local database directly.
+    m_aliasAutoSyncGeneration.fetch_add(1, std::memory_order_acq_rel);
+    m_aliasAutoSyncInFlight = false;
+    m_aliasAutoSyncAttemptedThisRun = false;
+    if (m_aliasAutoSyncEnabled) {
+        m_aliasAutoSyncLastPushStatus = L"pending";
+        m_aliasAutoSyncLastPushMessage = L"等待授权完成后执行";
+        m_aliasAutoSyncLastPullStatus = L"failed";
+        m_aliasAutoSyncLastPullMessage = L"等待授权完成后执行";
+        m_aliasAutoSyncLastResult.Empty();
+    }
     InvalidateCloudMatchSyncPreview(true);
     InvalidateCloudMatchSyncUndo();
     m_cloudMatchClient.Stop();
@@ -13217,6 +14854,10 @@ void CDNFGameCaptureDlg::DisableCloudMatchForAuthorization(const CString& reason
     m_cloudMatchSyncConnectionGeneration = 0;
     m_cloudMatchSyncWasConnected = false;
     m_cloudMatchDisplayInitialized = false;
+    m_cloudMatchUsingLicenseLease = false;
+    m_cloudMatchLeaseRefreshAttempted = false;
+    m_cloudMatchLeaseRefreshInFlight = false;
+    m_cloudMatchLeaseDisconnectedSinceTick = 0;
     if (!reason.IsEmpty()) {
         m_cloudMatchLastError = reason;
         m_cloudMatchSyncError = reason;
@@ -14415,6 +16056,10 @@ void CDNFGameCaptureDlg::HandleCloudMatchMessage(std::string message)
             }
         }
     }
+    else if (type == "realtime_heartbeat_result" && ok) {
+        event.clear();
+        return;
+    }
     else if (type == "realtime_heartbeat_result" && !ok &&
         code == "not_following") {
         m_cloudRealtimeFollowing = false;
@@ -14749,7 +16394,7 @@ std::string CDNFGameCaptureDlg::BuildCloudMatchSnapshotPayload(
             !DnfNormalizeCloudSnapshotName(foundName->get<std::string>(), mainUtf8)) {
             if (errorMessage) {
                 *errorMessage = playerPrefix +
-                    L"的主号必须包含可见文字、不能含控制或不可见字符，且不超过 64 个 Unicode 码位。";
+                    L"的选手必须包含可见文字、不能含控制或不可见字符，且不超过 64 个 Unicode 码位。";
             }
             return false;
         }
@@ -14766,7 +16411,7 @@ std::string CDNFGameCaptureDlg::BuildCloudMatchSnapshotPayload(
         const auto foundAliases = input.find("aliases");
         if (foundAliases != input.end()) {
             if (!foundAliases->is_array() || foundAliases->size() > 32) {
-                if (errorMessage) *errorMessage = playerPrefix + L"的小号数量不能超过 32 个。";
+                if (errorMessage) *errorMessage = playerPrefix + L"的游戏ID数量不能超过 32 个。";
                 return false;
             }
             for (const auto& aliasValue : *foundAliases) {
@@ -14776,13 +16421,13 @@ std::string CDNFGameCaptureDlg::BuildCloudMatchSnapshotPayload(
                 if (!validAlias) {
                     if (errorMessage) {
                         *errorMessage = playerPrefix +
-                            L"的小号必须包含可见文字、不能含控制或不可见字符，且不超过 64 个 Unicode 码位。";
+                            L"的游戏ID必须包含可见文字、不能含控制或不可见字符，且不超过 64 个 Unicode 码位。";
                     }
                     return false;
                 }
                 if (aliasUtf8 == mainUtf8) {
                     if (errorMessage) {
-                        *errorMessage = playerPrefix + L"的小号不能与主号相同（按 NFC 规范化后比较）。";
+                        *errorMessage = playerPrefix + L"的游戏ID不能与选手相同（按 NFC 规范化后比较）。";
                     }
                     return false;
                 }
@@ -15016,6 +16661,22 @@ void CDNFGameCaptureDlg::PollCloudMatch()
     m_cloudMatchSyncWasConnected = cloudStatus.connected;
 
     const ULONGLONG now = ::GetTickCount64();
+    if (m_cloudMatchUsingLicenseLease) {
+        if (cloudStatus.connected) {
+            m_cloudMatchLeaseDisconnectedSinceTick = 0;
+        }
+        else {
+            if (m_cloudMatchLeaseDisconnectedSinceTick == 0) {
+                m_cloudMatchLeaseDisconnectedSinceTick = now;
+            }
+            if (DnfShouldRefreshLicenseEndpoint(m_cloudMatchUsingLicenseLease,
+                m_cloudMatchLeaseRefreshAttempted,
+                m_cloudMatchLeaseRefreshInFlight, cloudStatus.connected,
+                m_cloudMatchLeaseDisconnectedSinceTick, now)) {
+                BeginLicenseLeaseEndpointRefresh();
+            }
+        }
+    }
     if (m_cloudRealtimeFollowing && cloudStatus.connected &&
         m_cloudRealtimeHeartbeatDueTick != 0 &&
         now >= m_cloudRealtimeHeartbeatDueTick) {
@@ -15247,28 +16908,28 @@ bool CDNFGameCaptureDlg::ValidateTeamSyncSnapshot(const json& snapshot, CString&
         const std::string name = player["name"].get<std::string>();
         totalTextBytes += name.size();
         if (name.size() > 256 || name.find('\r') != std::string::npos || name.find('\n') != std::string::npos) {
-            errorMessage = L"服务器主号文本过长或包含换行。";
+            errorMessage = L"服务器选手文本过长或包含换行。";
             return false;
         }
         if (player["aliases"].size() > 128) {
-            errorMessage = L"服务器小号数量过多。";
+            errorMessage = L"服务器游戏ID数量过多。";
             return false;
         }
         for (const auto& alias : player["aliases"]) {
             if (!alias.is_string()) {
-                errorMessage = L"服务器小号数据无效。";
+                errorMessage = L"服务器游戏ID数据无效。";
                 return false;
             }
             const std::string text = alias.get<std::string>();
             totalTextBytes += text.size();
             if (text.size() > 256 || text.find('\r') != std::string::npos || text.find('\n') != std::string::npos) {
-                errorMessage = L"服务器小号文本过长或包含换行。";
+                errorMessage = L"服务器游戏ID文本过长或包含换行。";
                 return false;
             }
         }
     }
     if (totalTextBytes > 48 * 1024) {
-        errorMessage = L"服务器选手名称和小号数据过大。";
+        errorMessage = L"服务器选手名称和游戏ID数据过大。";
         return false;
     }
     return true;
@@ -15763,14 +17424,14 @@ void CDNFGameCaptureDlg::PollKeyMappingState()
 // 将数据同步到树状控件（带视觉状态记忆）
 void CDNFGameCaptureDlg::SyncDataToTree() {
 
-    // 1. 【核心新增】：重绘前，先记住当前用户已经展开了哪些主号
+    // 1. 【核心新增】：重绘前，先记住当前用户已经展开了哪些选手
     std::vector<CString> userExpandedNames;
     if (m_treePlayers.m_hWnd) { // 确保控件已创建
         HTREEITEM hRoot = m_treePlayers.GetRootItem();
         while (hRoot) {
             HTREEITEM hChild = m_treePlayers.GetChildItem(hRoot);
             while (hChild) {
-                // 如果这个主号目前是展开状态，记下它的名字
+                // 如果这个选手目前是展开状态，记下它的名字
                 if (m_treePlayers.GetItemState(hChild, TVIS_EXPANDED) & TVIS_EXPANDED) {
                     CString text = m_treePlayers.GetItemText(hChild);
                     int eqPos = text.Find(L'='); if (eqPos == -1) eqPos = text.Find(L'＝');
@@ -15841,9 +17502,9 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
 
         if (hParent == NULL) {
             // ==========================================
-            // 【新增】：根节点添加“添加主号”选项
+            // 【新增】：根节点添加“添加选手”选项
             // ==========================================
-            menu.AppendMenu(MF_STRING, 16, L"➕ 添加主号 (自动切换队伍)");
+            menu.AppendMenu(MF_STRING, 16, L"➕ 添加选手 (自动切换队伍)");
             menu.AppendMenu(MF_SEPARATOR);
 
             menu.AppendMenu(MF_STRING, 7, L"🏆 该队大比分 +1");
@@ -15859,9 +17520,9 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
             menu.AppendMenu(MF_STRING, 14, L"💥 删除（同时从自动补齐库中彻底删除）");
         }
         else if (data >= 0 && data < 8) {
-            // 为主号添加小号快捷选项
-            menu.AppendMenu(MF_STRING, 15, L"➕ 为该主号添加小号...");
-            menu.AppendMenu(MF_STRING, 2, L"🗑️ 删除该主号 (及所有小号)");
+            // 为选手添加游戏ID快捷选项
+            menu.AppendMenu(MF_STRING, 15, L"➕ 为该选手添加游戏ID...");
+            menu.AppendMenu(MF_STRING, 2, L"🗑️ 删除该选手 (及所有游戏ID)");
             menu.AppendMenu(MF_SEPARATOR);
 
             // ==========================================
@@ -15873,7 +17534,7 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
             menu.AppendMenu(MF_STRING, 32, L"💀 战绩：死亡 -1  (撤销)");
             menu.AppendMenu(MF_STRING, 5, L"🌟 战绩：AK +1");
             menu.AppendMenu(MF_STRING, 33, L"🌟 战绩：AK -1  (撤销)");
-            menu.AppendMenu(MF_STRING, 6, L"🔄 该主号战绩清零");
+            menu.AppendMenu(MF_STRING, 6, L"🔄 该选手战绩清零");
             menu.AppendMenu(MF_SEPARATOR);
 
             int curTeam = m_players[data].team;
@@ -15914,7 +17575,7 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
             }
 
             // ==========================================
-            // 【新增】：处理根节点点击“添加主号”的联动逻辑
+            // 【新增】：处理根节点点击“添加选手”的联动逻辑
             // ==========================================
             if (cmd == 16) {
                 // 1. 判断点的是红队还是蓝队，自动切换下拉框
@@ -15931,7 +17592,7 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
                 // 3. (可选) 全选当前输入框的内容，这样用户一打字就会覆盖掉旧内容或提示词
                 m_editQuickAdd.SetSel(0, -1);
 
-                AppLog(L"💡 [操作提示] 已自动切换队伍，请在输入框录入新主号！", RGB(0, 255, 255));
+                AppLog(L"💡 [操作提示] 已自动切换队伍，请在输入框录入新选手！", RGB(0, 255, 255));
                 return; // 直接返回，不用走后面的保存刷新逻辑
             }
 
@@ -15982,7 +17643,7 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
                 int pIdx = (int)data;
 
                 // ==========================================
-                // 【新增】：获取该主号所在的队伍，并自动切换下拉框
+                // 【新增】：获取该选手所在的队伍，并自动切换下拉框
                 // ==========================================
                 int curTeam = m_players[pIdx].team;
                 m_cmbTeamSelect.SetCurSel(curTeam);
@@ -15990,7 +17651,7 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
                 CString mainName = m_players[pIdx].name;
                 CString templateText;
 
-                // 帮你把输入框填充好模板： 主号()
+                // 帮你把输入框填充好模板： 选手()
                 templateText.Format(L"%s()", mainName.GetString());
                 m_editQuickAdd.SetWindowText(templateText);
                 m_editQuickAdd.SetFocus();
@@ -16000,7 +17661,7 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
                 m_editQuickAdd.SetSel(pos, pos);
 
                 CString teamNameStr = (curTeam == 0) ? L"红队" : L"蓝队";
-                AppLog(L"💡 [操作提示] 已自动切换至【" + teamNameStr + L"】，请在括号内填入小号名称！", RGB(0, 255, 255));
+                AppLog(L"💡 [操作提示] 已自动切换至【" + teamNameStr + L"】，请在括号内填入游戏ID名称！", RGB(0, 255, 255));
             }
             else if (cmd == 12 || cmd == 13) {
                 int pIdx = (int)data;
@@ -16052,7 +17713,7 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
                 int aIdx = (data & 0xFFFF);
                 CString subName = m_players[pIdx].aliases[aIdx].name;
                 m_players[pIdx].aliases.erase(m_players[pIdx].aliases.begin() + aIdx);
-                AppLog(L"✂️ [战局移除] 小号 [" + subName + L"] 已从当前战局剥离（保留在库中）", RGB(200, 200, 200));
+                AppLog(L"✂️ [战局移除] 游戏ID [" + subName + L"] 已从当前战局剥离（保留在库中）", RGB(200, 200, 200));
             }
             else if (cmd == 14) {
                 int pIdx = (data & 0x7FFFFFFF) >> 16;
@@ -16077,7 +17738,7 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
                 }
 
                 m_players[pIdx].aliases.erase(m_players[pIdx].aliases.begin() + aIdx);
-                AppLog(L"💥 [双重抹除] 小号 [" + subName + L"] 已从战局及自动补齐数据库中彻底删除！", RGB(255, 80, 80));
+                AppLog(L"💥 [双重抹除] 游戏ID [" + subName + L"] 已从战局及自动补齐数据库中彻底删除！", RGB(255, 80, 80));
             }
             else if (cmd == 2) {
                 int pIdx = (int)data;
@@ -16087,7 +17748,7 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
                 m_players[pIdx].kills = 0;
                 m_players[pIdx].deaths = 0;
                 m_players[pIdx].akCount = 0;
-                AppLog(L"🗑️ [删除主号] 玩家 [" + mainName + L"] 及其旗下小号已被全盘清空", RGB(255, 80, 80));
+                AppLog(L"🗑️ [删除选手] 玩家 [" + mainName + L"] 及其旗下游戏ID已被全盘清空", RGB(255, 80, 80));
             }
             else if (cmd == 3) { m_players[data].kills++; }
             else if (cmd == 31) { if (m_players[data].kills > 0) m_players[data].kills--; }
@@ -16113,11 +17774,11 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
     *pResult = 0;
 }
 
-// 🚨 C++版 战场级查重：严格防止场上 8 个人发生任何主/小号交叉
+// 🚨 C++版 战场级查重：严格防止场上 8 个人发生任何主/游戏ID交叉
 CString CDNFGameCaptureDlg::CheckFieldConflict(const CString& newMain, const std::vector<CString>& extraAliases, int excludeIdx) {
     if (newMain.IsEmpty()) return L"";
 
-    // 汇总即将上场的所有小号（文本框解析带的 + 库里本身带的）
+    // 汇总即将上场的所有游戏ID（文本框解析带的 + 库里本身带的）
     std::vector<CString> allAliases = extraAliases;
     auto it = m_aliasDB.find(newMain);
     if (it != m_aliasDB.end()) {
@@ -16139,15 +17800,15 @@ CString CDNFGameCaptureDlg::CheckFieldConflict(const CString& newMain, const std
 
         CString otherMain = m_players[i].name;
 
-        if (otherMain == newMain) return otherMain + L" (主号冲突)";
+        if (otherMain == newMain) return otherMain + L" (选手冲突)";
         for (const auto& a : allAliases) {
-            if (otherMain == a) return otherMain + L" (小号包含了对方主号)";
+            if (otherMain == a) return otherMain + L" (游戏ID包含了对方选手)";
         }
         for (const auto& oa : m_players[i].aliases) {
-            if (oa.name == newMain) return otherMain + L" (名字是对方的小号)";
+            if (oa.name == newMain) return otherMain + L" (名字是对方的游戏ID)";
             for (const auto& na : allAliases) {
                 if (DnfAliasSameDuplicateId(oa.name, na)) {
-                    return otherMain + L" (小号ID互斥: " + DnfAliasDuplicateKey(na) + L")";
+                    return otherMain + L" (游戏IDID互斥: " + DnfAliasDuplicateKey(na) + L")";
                 }
             }
         }
@@ -16218,7 +17879,7 @@ void CDNFGameCaptureDlg::LoadConfigFromFile() {
         if (line.IsEmpty()) continue;
 
         if (line.Find(L"操作说明") != -1 || line.Find(L"分队：") != -1 ||
-            line.Find(L"绑定小号：") != -1 || line.Find(L"手动改分") != -1 ||
+            line.Find(L"绑定游戏ID：") != -1 || line.Find(L"手动改分") != -1 ||
             line.Find(L"手动改AK") != -1 || line.Find(L"💡") != -1) {
             continue;
         }
@@ -16340,7 +18001,7 @@ void CDNFGameCaptureDlg::LoadConfigFromFile() {
                 m_players[targetIdx].kills = 0; m_players[targetIdx].deaths = 0;
             }
 
-            // 极简加载小号
+            // 极简加载游戏ID
             for (const auto& aN : parsedAliases) {
                 bool aDup = false;
                 for (int k = 0; k < 8; k++) {
@@ -16461,8 +18122,8 @@ void CDNFGameCaptureDlg::OnEndLabelEdit(NMHDR* pNMHDR, LRESULT* pResult) {
             }
         }
         else {
-            // 同一名选手内部允许：主号名称 == 自己的小号名称。
-            // 但仍然禁止同一名选手的小号之间出现同 ID 同职业的重复项。
+            // 同一名选手内部允许：选手名称 == 自己的游戏ID名称。
+            // 但仍然禁止同一名选手的游戏ID之间出现同 ID 同职业的重复项。
             if (curAIdx != -1) {
                 for (int j = 0; j < (int)m_players[i].aliases.size(); j++) {
                     if (j != curAIdx && DnfAliasBlocksSamePlayerAlias(m_players[i].aliases[j].name, newNameOnly)) { isDup = true; break; }
@@ -16473,14 +18134,14 @@ void CDNFGameCaptureDlg::OnEndLabelEdit(NMHDR* pNMHDR, LRESULT* pResult) {
 
     if (isDup) {
         AppLog(L"❌ [重命名失败] 名称 [" + newNameOnly + L"] 已被占用！", RGB(255, 100, 100));
-        MessageBox(L"修改失败！该名称已经被其他主号或小号占用，请使用唯一名称。", L"命名冲突", MB_ICONWARNING);
+        MessageBox(L"修改失败！该名称已经被其他选手或游戏ID占用，请使用唯一名称。", L"命名冲突", MB_ICONWARNING);
         return;
     }
 
     MarkMatchMutation();
 
     if (data & 0x80000000) {
-        // 防止小号名字带脏字符
+        // 防止游戏ID名字带脏字符
         line.Remove(L' '); line.Remove(L'('); line.Remove(L')'); line.Remove(L'（'); line.Remove(L'）');
         CString oldAliasName = m_players[curPIdx].aliases[curAIdx].name;
         CString mainName = m_players[curPIdx].name;
@@ -16573,20 +18234,20 @@ void CDNFGameCaptureDlg::OnCustomDrawTree(NMHDR* pNMHDR, LRESULT* pResult) {
             return;
         }
 
-        // --- 【新增】：判断是小号，直接变灰 ---
+        // --- 【新增】：判断是游戏ID，直接变灰 ---
         if (data & 0x80000000) {
             pCustomDraw->clrText = RGB(150, 150, 150); // 灰色
             *pResult = CDRF_NEWFONT;
             return;
         }
 
-        // --- 下面是主号的颜色 ---
+        // --- 下面是选手的颜色 ---
         int playerIdx = (int)data;
         if (playerIdx >= 0 && playerIdx < 4) {
-            pCustomDraw->clrText = RGB(255, 80, 80); // 红队主号
+            pCustomDraw->clrText = RGB(255, 80, 80); // 红队选手
         }
         else if (playerIdx >= 4 && playerIdx < 8) {
-            pCustomDraw->clrText = RGB(80, 120, 255); // 蓝队主号
+            pCustomDraw->clrText = RGB(80, 120, 255); // 蓝队选手
         }
         *pResult = CDRF_NEWFONT;
     }

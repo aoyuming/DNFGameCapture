@@ -94,8 +94,8 @@ function renderPendingList() {
                 <div class="pending-sub">${escapeHtml(row.id)} · ${formatTime(row.updatedAt)} · 提交人数 ${row.sourceCount}</div>
             </div>
             <div class="pending-badges">
-                <span class="badge ok">${row.mainCount} 主号</span>
-                <span class="badge">${row.pairCount} 小号</span>
+                <span class="badge ok">${row.mainCount} 选手</span>
+                <span class="badge">${row.pairCount} 游戏ID</span>
                 ${(row.duplicateHintCount || 0) > 0 ? `<span class="badge warn">${row.duplicateHintCount} 重复提示</span>` : ''}
             </div>
         `;
@@ -126,7 +126,7 @@ function renderSelection() {
     const aliasCount = rows.reduce((sum, row) => sum + row.pairCount, 0);
     el('selected-count').textContent = String(rows.length);
     el('selected-info').textContent = rows.length > 0
-        ? `包含 ${aliasCount} 个小号，${hintCount} 条重复提示记录`
+        ? `包含 ${aliasCount} 个游戏ID，${hintCount} 条重复提示记录`
         : (state.activeKey ? '未勾选时将处理当前详情记录' : '');
     el('check-all').checked = state.filtered.length > 0 && state.filtered.every(row => state.selected.has(row.key));
 }
@@ -135,20 +135,20 @@ function renderDetail(row) {
     const detail = el('detail-view');
     if (!row) {
         detail.className = 'detail-empty';
-        detail.textContent = '点击左侧记录，查看主号、小号与重复提示。';
+        detail.textContent = '点击左侧记录，查看选手、游戏ID与重复提示。';
         el('detail-meta').textContent = '选择一条记录查看';
         return;
     }
 
     detail.className = 'detail-content';
-    el('detail-meta').textContent = `${row.mainCount} 个主号 / ${row.pairCount} 个小号 / ${row.duplicateHintCount || 0} 条重复提示`;
+    el('detail-meta').textContent = `${row.mainCount} 个选手 / ${row.pairCount} 个游戏ID / ${row.duplicateHintCount || 0} 条重复提示`;
 
     const duplicateHints = row.duplicateHints || row.conflicts || [];
     const conflictHtml = duplicateHints.length > 0
-        ? `<div class="section-title">重复小号提示</div>${duplicateHints.map(c => `
+        ? `<div class="section-title">重复游戏ID提示</div>${duplicateHints.map(c => `
             <div class="conflict-row">${escapeHtml(c.aliasName)}${c.aliasId ? `（ID: ${escapeHtml(c.aliasId)}）` : ''}：公共库里也属于 ${escapeHtml((c.owners || [c.currentOwner]).filter(Boolean).join(' / '))}${Array.isArray(c.matchedAliases) && c.matchedAliases.length ? `，命中 ${escapeHtml(c.matchedAliases.join(' / '))}` : ''}，本次提交给 ${escapeHtml(c.requestedOwner)}</div>
         `).join('')}`
-        : '<div class="section-title">重复小号提示</div><div class="detail-empty">没有跨主号重复提示，可以直接通过。</div>';
+        : '<div class="section-title">重复游戏ID提示</div><div class="detail-empty">没有跨选手重复提示，可以直接通过。</div>';
     const diff = row.diff || {};
     const addedAliases = diff.addedAliases || [];
     const removedAliases = diff.removedAliases || [];
@@ -161,13 +161,13 @@ function renderDetail(row) {
                 <button class="quiet" data-review-action="reject">驳回</button>
             </div>
             <div class="alias-row">
-                <b>新增小号</b>
+                <b>新增游戏ID</b>
                 <div class="alias-tags">
                     ${addedAliases.length > 0 ? addedAliases.map(alias => `<span class="alias-tag">${escapeHtml(alias)}</span>`).join('') : '<span class="alias-tag">无</span>'}
                 </div>
             </div>
             <div class="alias-row">
-                <b>删除小号</b>
+                <b>删除游戏ID</b>
                 <div class="alias-tags">
                     ${removedAliases.length > 0 ? removedAliases.map(alias => `<span class="alias-tag">${escapeHtml(alias)}</span>`).join('') : '<span class="alias-tag">无</span>'}
                 </div>
@@ -182,7 +182,7 @@ function renderDetail(row) {
             <div class="alias-row">
                 <b>${escapeHtml(item.mainName)}</b>
                 <div class="alias-tags">
-                    ${item.aliases.length > 0 ? item.aliases.map(alias => `<span class="alias-tag">${escapeHtml(alias)}</span>`).join('') : '<span class="alias-tag">审核通过后删除该主号</span>'}
+                    ${item.aliases.length > 0 ? item.aliases.map(alias => `<span class="alias-tag">${escapeHtml(alias)}</span>`).join('') : '<span class="alias-tag">审核通过后删除该选手</span>'}
                 </div>
             </div>
         `).join('')}
@@ -194,7 +194,7 @@ function renderDetail(row) {
 }
 
 function renderPublic(data) {
-    el('public-meta').textContent = `版本 ${data.version || 0} · ${data.totalMainCount || 0} 主号 / ${data.totalAliasCount || 0} 小号`;
+    el('public-meta').textContent = `版本 ${data.version || 0} · ${data.totalMainCount || 0} 选手 / ${data.totalAliasCount || 0} 游戏ID`;
     state.publicEntries = data.entries || [];
 
     const mainList = el('public-main-list');
@@ -371,7 +371,7 @@ async function focusPublicMainFromPending(row) {
     await loadPublic();
 
     if (!findPublicEntry(mainName)) {
-        toast(`公共库未找到主号：${mainName}`);
+        toast(`公共库未找到选手：${mainName}`);
     }
 }
 
@@ -392,7 +392,7 @@ async function addPublicEntry() {
 async function savePublicEntry() {
     const oldMainName = state.activePublicMain;
     if (!oldMainName) {
-        toast('请先在主号列表中选择要修改的记录。');
+        toast('请先在选手列表中选择要修改的记录。');
         return;
     }
 
@@ -412,7 +412,7 @@ async function savePublicEntry() {
 async function deletePublicEntry() {
     const selectedNames = Array.from(el('public-main-list').selectedOptions).map(option => option.value).filter(Boolean);
     if (selectedNames.length === 0) {
-        toast('请先在主号列表中选择要删除的记录。');
+        toast('请先在选手列表中选择要删除的记录。');
         return;
     }
 
@@ -428,14 +428,14 @@ async function deletePublicEntry() {
     state.activePublicMain = '';
     state.preferredPublicMain = '';
     el('public-search').value = '';
-    toast(`${data.message}，共 ${data.deletedAliasCount} 个小号`);
+    toast(`${data.message}，共 ${data.deletedAliasCount} 个游戏ID`);
     await loadDashboard();
 }
 
 async function importPublicEntries() {
     const text = el('public-import-text').value.trim();
     if (!text) {
-        toast('请先粘贴要导入的主号小号文本。');
+        toast('请先粘贴要导入的选手游戏ID文本。');
         return;
     }
 

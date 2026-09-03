@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "DNFGameCaptureDlg.h"
 #include <cwctype>
 
@@ -144,8 +144,8 @@ std::vector<TDnfCandidateIdentity> CDNFGameCaptureDlg::BuildIdentityCandidatesFo
         // 纯符号 ID 兜底更需要从 8 人中按“职业/大区唯一性”判断。
         // 最终若两侧候选同队，DoRetryMatchingTask 里仍会按 lockedTeam 做冲突拒绝。
 
-        // 主号只作为归属 owner，不参与身份融合名称匹配。
-        // 真正用于 OCR 命中的候选只有小号。
+        // 选手只作为归属 owner，不参与身份融合名称匹配。
+        // 真正用于 OCR 命中的候选只有游戏ID。
         for (const auto& a : m_players[i].aliases) {
             if (a.name.IsEmpty()) continue;
             TDnfCandidateIdentity alias;

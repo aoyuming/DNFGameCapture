@@ -1,6 +1,11 @@
 const express = require('express');
 const OSS = require('ali-oss');
 const crypto = require('crypto');
+const {
+    mergeAppendAlias,
+    normalizeAppendOnlyAliasDb,
+    withAliasAppendLock
+} = require('./alias_append');
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -599,8 +604,9 @@ async function handleGetPublicAliasDb(client, data, res) {
     const pairCount = Object.values(publicDb.players).reduce((sum, aliases) => sum + aliases.length, 0);
     return res.json({
         status: 'ok',
-        msg: `已获取公共小号库：${Object.keys(publicDb.players).length} 个主号、${pairCount} 个小号`,
-        publicAliasDB: publicDb
+        msg: `已获取公共游戏ID库：${Object.keys(publicDb.players).length} 个选手、${pairCount} 个游戏ID`,
+        publicAliasDB: publicDb,
+        aliasAppendSupported: true
     });
 }
 
@@ -668,10 +674,140 @@ async function handleDirectSyncAliasDb(client, data, res) {
             status: 'ok',
             action: 'direct_sync_alias_db',
             directSync: true,
-            msg: `管理员直写完成：公共库已更新为 ${mainCount} 个主号、${pairCount} 个小号`,
+            msg: `管理员直写完成：公共库已更新为 ${mainCount} 个选手、${pairCount} 个游戏ID`,
             version: publicDb.version,
             mainCount,
         pairCount
+    });
+}
+
+async function handleAppendOnlyAliasDb(client, data, res, publicDb) {
+    const submittedEntries = normalizeAppendOnlyAliasDb(
+        data.aliasDB || data.fullAliasDB,
+        MAX_PUBLIC_ALIAS_MAINS,
+        MAX_PUBLIC_ALIASES_PER_MAIN
+    );
+    if (submittedEntries.length === 0) {
+        return res.json({
+            status: 'ok',
+            action: 'submit_alias_db',
+            aliasSubmit: true,
+            aliasAppend: true,
+            appendOnly: true,
+            msg: '没有可追加的游戏ID数据，已跳过自动投稿。',
+            entryCount: 0,
+            pairCount: 0,
+            deleteMainCount: 0
+        });
+    }
+
+    const createdAt = nowSec();
+    const submitterKeyHash = sha256(data.key);
+    const hwidHash = sha256(data.hwid);
+    const clientVersion = cleanName(data.clientVersion || '');
+    let touchedMainCount = 0;
+    let targetPairCount = 0;
+    let unchangedMainCount = 0;
+    let rejectedDuplicateCount = 0;
+    let duplicateHintCount = 0;
+
+    // Automatic submissions are deliberately monotonic.  The shared helper
+    // also coalesces a naked alias with the same ID's job-qualified alias, so
+    // concurrent submissions cannot leave two representations of one ID in a
+    // pending record.  It never removes an existing entry.
+    const appendPreservingExisting = (out, rawAlias) =>
+        mergeAppendAlias(out, rawAlias);
+
+    for (const entry of submittedEntries) {
+        const mainName = entry.mainName;
+        const publicAliases = normalizeAliasArray(publicDb.players[mainName] || []);
+        const pendingKey = getPendingMainKey(mainName);
+        const existing = await getJsonObject(client, pendingKey, null);
+        const existingPendingAliases = normalizeAliasArray(existing?.aliases || []);
+        const targetAliases = [];
+        for (const alias of publicAliases) appendPreservingExisting(targetAliases, alias);
+        for (const alias of existingPendingAliases) appendPreservingExisting(targetAliases, alias);
+
+        const filterResult = filterContainedNakedAliases(publicAliases, entry.aliases, mainName);
+        for (const alias of filterResult.aliases) {
+            appendPreservingExisting(targetAliases, alias);
+        }
+
+        const submittedAdded = targetAliases.filter(alias =>
+            !publicAliases.some(publicAlias => sameAliasStorageEntry(publicAlias, alias)) &&
+            !existingPendingAliases.some(pendingAlias => sameAliasStorageEntry(pendingAlias, alias))
+        );
+        if (submittedAdded.length === 0) {
+            unchangedMainCount++;
+            continue;
+        }
+
+        const additions = targetAliases.filter(alias =>
+            !publicAliases.some(publicAlias => sameAliasStorageEntry(publicAlias, alias))
+        );
+        const diff = {
+            beforeAliases: publicAliases,
+            afterAliases: targetAliases,
+            addedAliases: additions,
+            removedAliases: []
+        };
+        const fingerprint = getAliasReviewFingerprint(
+            mainName, targetAliases, 'append', diff
+        );
+        const rejectedBlock = await getActiveRejectedBlock(
+            client, mainName, fingerprint, createdAt
+        );
+        if (rejectedBlock) {
+            rejectedDuplicateCount++;
+            continue;
+        }
+
+        const aggregate = normalizePendingAggregate(existing, mainName, createdAt);
+        aggregate.aliases = targetAliases;
+        aggregate.operation = 'append';
+        aggregate.diff = diff;
+        aggregate.conflicts = [];
+        aggregate.duplicateOwners = findDuplicateAliasOwners(
+            publicDb, additions, mainName
+        );
+        duplicateHintCount += aggregate.duplicateOwners.length;
+        if (!aggregate.submitterKeyHashes.includes(submitterKeyHash)) {
+            aggregate.submitterKeyHashes.push(submitterKeyHash);
+        }
+        if (!aggregate.hwidHashes.includes(hwidHash)) {
+            aggregate.hwidHashes.push(hwidHash);
+        }
+        aggregate.sourceCount = aggregate.submitterKeyHashes.length;
+        aggregate.clientVersions = normalizeStringArray(
+            [...(aggregate.clientVersions || []), clientVersion].filter(Boolean)
+        );
+        aggregate.pairCount = targetAliases.length;
+        aggregate.updatedAt = createdAt;
+
+        await client.put(
+            pendingKey,
+            Buffer.from(JSON.stringify(aggregate, null, 2), 'utf8'),
+            { headers: { 'Content-Type': 'application/json; charset=utf-8' } }
+        );
+        touchedMainCount++;
+        targetPairCount += submittedAdded.length;
+    }
+
+    return res.json({
+        status: 'ok',
+        action: 'submit_alias_db',
+        aliasSubmit: true,
+        aliasAppend: true,
+        appendOnly: true,
+        msg: touchedMainCount > 0
+            ? `已追加到待审核区：${touchedMainCount} 个选手、${targetPairCount} 个新增游戏ID`
+            : '本地游戏ID均已存在于公共库或待审核区，没有新的追加内容。',
+        entryCount: touchedMainCount,
+        pairCount: targetPairCount,
+        unchangedMainCount,
+        rejectedDuplicateCount,
+        duplicateHintCount,
+        deleteMainCount: 0
     });
 }
 
@@ -691,8 +827,17 @@ async function handleSubmitAliasDb(client, data, res) {
     const valid = validateBoundLicense(record, hwid);
     if (!valid.ok) return res.json({ status: 'error', msg: valid.msg });
 
-    const submittedEntries = normalizeAliasSubmission(data.aliasDB || data.fullAliasDB, MAX_PUBLIC_ALIAS_MAINS, MAX_PUBLIC_ALIASES_PER_MAIN, { allowEmpty: true });
+    if (data.appendOnly === true) {
+        // Re-read the public and pending records after waiting for the lock;
+        // otherwise two concurrent requests could both merge from stale data.
+        return await withAliasAppendLock(async () => {
+            const publicDb = await loadPublicAliasDb(client);
+            return await handleAppendOnlyAliasDb(client, data, res, publicDb);
+        });
+    }
+
     const publicDb = await loadPublicAliasDb(client);
+    const submittedEntries = normalizeAliasSubmission(data.aliasDB || data.fullAliasDB, MAX_PUBLIC_ALIAS_MAINS, MAX_PUBLIC_ALIASES_PER_MAIN, { allowEmpty: true });
     const submittedMap = new Map(submittedEntries.map(entry => [entry.mainName, entry.aliases]));
     const deleteScopeMainNames = normalizeMainNameArray(data.deleteScopeMainNames, MAX_PUBLIC_ALIAS_MAINS);
     const candidateMainNames = new Set(submittedMap.keys());
@@ -707,7 +852,7 @@ async function handleSubmitAliasDb(client, data, res) {
     }));
 
     if (entries.length === 0) {
-        return res.json({ status: 'error', msg: '没有可上传的小号数据' });
+        return res.json({ status: 'error', msg: '没有可上传的游戏ID数据' });
     }
 
     const createdAt = nowSec();
@@ -782,10 +927,10 @@ async function handleSubmitAliasDb(client, data, res) {
             msgParts.push(`14 天内已驳回过相同投稿 ${rejectedDuplicateCount} 个，已自动过滤`);
         }
         if (containedNakedAliasCount > 0) {
-            msgParts.push(`云端已有包含该裸 ID 的小号 ${containedNakedAliasCount} 个，已自动过滤`);
+            msgParts.push(`云端已有包含该裸 ID 的游戏ID ${containedNakedAliasCount} 个，已自动过滤`);
         }
         if (unchangedMainCount > 0) {
-            msgParts.push(`未变化主号 ${unchangedMainCount} 个`);
+            msgParts.push(`未变化选手 ${unchangedMainCount} 个`);
         }
 
         return res.json({
@@ -808,7 +953,7 @@ async function handleSubmitAliasDb(client, data, res) {
         status: 'ok',
         action: 'submit_alias_db',
         aliasSubmit: true,
-        msg: `已提交到待审核区：${touchedMainCount} 个主号、目标小号 ${targetPairCount} 个、删除主号 ${deleteMainCount} 个${rejectedDuplicateMsg}${containedNakedAliasMsg}`,
+        msg: `已提交到待审核区：${touchedMainCount} 个选手、目标游戏ID ${targetPairCount} 个、删除选手 ${deleteMainCount} 个${rejectedDuplicateMsg}${containedNakedAliasMsg}`,
         entryCount: touchedMainCount,
         pairCount: targetPairCount,
         deleteMainCount,
@@ -819,33 +964,91 @@ async function handleSubmitAliasDb(client, data, res) {
     });
 }
 
-app.post(/.*/, async (req, res) => {
-    try {
-        const data = req.body || {};
-        const client = createOssClient();
+async function dispatchCloudRequest(data, res) {
+    const client = createOssClient();
 
-        if (data.action === 'submit_alias_db') {
-            return await handleSubmitAliasDb(client, data, res);
-        }
-
-        if (data.action === 'get_public_alias_db') {
-            return await handleGetPublicAliasDb(client, data, res);
-        }
-
-        if (data.action === 'direct_sync_alias_db') {
-            return await handleDirectSyncAliasDb(client, data, res);
-        }
-
-        if (data.action) {
-            return res.json({ status: 'error', msg: `未知云端动作: ${data.action}` });
-        }
-
-        return await handleVerifyLicense(client, data, res);
-    } catch (err) {
-        return res.json({ status: 'error', msg: '服务器内部错误: ' + err.message });
+    if (data.action === 'submit_alias_db') {
+        return await handleSubmitAliasDb(client, data, res);
     }
-});
 
-app.listen(9000, '0.0.0.0', () => {
-    console.log('Server is running on port 9000');
-});
+    if (data.action === 'get_public_alias_db') {
+        return await handleGetPublicAliasDb(client, data, res);
+    }
+
+    if (data.action === 'direct_sync_alias_db') {
+        return await handleDirectSyncAliasDb(client, data, res);
+    }
+
+    if (data.action) {
+        return res.json({ status: 'error', msg: `未知云端动作: ${data.action}` });
+    }
+
+    return await handleVerifyLicense(client, data, res);
+}
+
+async function executeCloudRequest(data) {
+    let payload;
+    const response = {
+        json(value) {
+            payload = value;
+            return response;
+        }
+    };
+
+    try {
+        await dispatchCloudRequest(data && typeof data === 'object' ? data : {}, response);
+    } catch (err) {
+        console.error('[cloud-function] request failed:', err && err.stack ? err.stack : err);
+        payload = { status: 'error', msg: '服务器内部错误: ' + err.message };
+    }
+
+    return payload || { status: 'error', msg: '服务器未返回有效响应' };
+}
+
+function parseFunctionEvent(event) {
+    let body = event;
+    if (Buffer.isBuffer(body)) body = body.toString('utf8');
+
+    if (body && typeof body === 'object' &&
+        Object.prototype.hasOwnProperty.call(body, 'body')) {
+        body = body.body;
+        if (event.isBase64Encoded && typeof body === 'string') {
+            body = Buffer.from(body, 'base64').toString('utf8');
+        }
+    }
+
+    if (typeof body === 'string') {
+        try {
+            return JSON.parse(body);
+        } catch (_) {
+            return {};
+        }
+    }
+    return body && typeof body === 'object' ? body : {};
+}
+
+async function handler(event, context, callback) {
+    const payload = await executeCloudRequest(parseFunctionEvent(event));
+    const result = {
+        statusCode: 200,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+        body: JSON.stringify(payload)
+    };
+    if (typeof callback === 'function') return callback(null, result);
+    return result;
+}
+
+app.get('/health', (req, res) => res.json({ ok: true }));
+app.post(/.*/, async (req, res) => res.json(await executeCloudRequest(req.body || {})));
+
+function startServer() {
+    const portValue = Number.parseInt(process.env.PORT || process.env.FC_SERVER_PORT || '9000', 10);
+    const port = Number.isFinite(portValue) && portValue > 0 ? portValue : 9000;
+    return app.listen(port, '0.0.0.0', () => {
+        console.log(`Server is running on port ${port}`);
+    });
+}
+
+module.exports = { app, handler, startServer };
+
+if (require.main === module) startServer();

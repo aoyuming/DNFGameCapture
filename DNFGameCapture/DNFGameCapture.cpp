@@ -1,5 +1,6 @@
 ﻿#include "pch.h"
 #include "DNFGameCaptureDlg.h"
+#include "CrashDump.h"
 
 namespace {
 HANDLE g_singleInstanceMutex = nullptr;
@@ -18,6 +19,7 @@ class CApp : public CWinApp
 public:
     BOOL InitInstance()
     {
+        DnfInstallCrashDumpHandler();
         g_singleInstanceMutex = ::CreateMutexW(
             nullptr, TRUE, L"Global\\DNFGameCapture_SingleInstance");
         if (!g_singleInstanceMutex) return FALSE;

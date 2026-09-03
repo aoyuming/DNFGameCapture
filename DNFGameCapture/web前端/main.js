@@ -1,4 +1,4 @@
-﻿// ==========================================
+// ==========================================
 // 1. 核心：WebView2 同步引擎
 // ==========================================
 let playerDB = {};
@@ -51,12 +51,13 @@ let draggedRow = null;
 let isDbInitialized = false;
 let isCloudDirectMode = false;
 let cloudDirectToggleLock = false;
+let aliasDbAutoSyncState = null;
 let lastDirectAliasPayload = '';
 let directAliasSyncTimer = null;
 const cloudDirectPressedKeys = new Set();
-// Web 端编辑小号后，C++ 可能会立刻推回一次旧状态；这里短时间记录改名映射，避免旧小号被同步回来。
+// Web 端编辑游戏ID后，C++ 可能会立刻推回一次旧状态；这里短时间记录改名映射，避免旧游戏ID被同步回来。
 let pendingAliasRenameRecords = [];
-// 新主号首次绑定小号时，弹窗会让输入框失焦；用这个标记避免 blur 提前同步空小号状态。
+// 新选手首次绑定游戏ID时，弹窗会让输入框失焦；用这个标记避免 blur 提前同步空游戏ID状态。
 let pendingAliasPromptActive = false;
 let pendingAliasPromptName = '';
 let pendingAliasPopoverName = '';
@@ -577,7 +578,7 @@ if (window.chrome && window.chrome.webview) {
                         }
                     }
 
-                    // 如果刚刚在 Web 端改过小号名，而 C++ 推回来的是旧库，先按本地改名记录修正。
+                    // 如果刚刚在 Web 端改过游戏ID名，而 C++ 推回来的是旧库，先按本地改名记录修正。
                     applyPendingAliasRenamesToDb(newSavedDB);
                     for (let key in newSavedDB) {
                         if (!playerDB[key]) playerDB[key] = [];
@@ -600,9 +601,9 @@ if (window.chrome && window.chrome.webview) {
                     msg.data.players.forEach(p => {
                         // 如果这个选手正在场上（红蓝两队 8 个框里）
                         if (p.name && p.name.trim() !== '') {
-                            // 直接用 C++ 传来的最新小号列表，强行覆盖 Web 端的展示库！
+                            // 直接用 C++ 传来的最新游戏ID列表，强行覆盖 Web 端的展示库！
                             // 这样 C++ 无论是加回来、还是在 C++ 里临时删掉，Web 端都能瞬间无缝同步！
-                            // C++ 推回的场上小号也要去重；否则 Web 添加一次后，旧同步/新同步叠加会显示多份。
+                            // C++ 推回的场上游戏ID也要去重；否则 Web 添加一次后，旧同步/新同步叠加会显示多份。
                             playerDB[p.name] = uniqueAliasArray(p.aliases);
                             if (!savedDB[p.name]) savedDB[p.name] = [];
                             savedDB[p.name] = uniqueAliasArray(savedDB[p.name]);
@@ -698,7 +699,7 @@ function toggleCloudDirectMode() {
     const fullAliasDB = buildFormattedAliasDB();
 
     if (isCloudDirectMode) {
-        showAlert('管理员直写模式已开启。<br>当前小号库会同步一次，之后你对小号库的修改会直接写入云端公共库。');
+        showAlert('管理员直写模式已开启。<br>当前游戏ID库会同步一次，之后你对游戏ID库的修改会直接写入云端公共库。');
         queueDirectAliasDbSync(fullAliasDB, true);
     } else {
         showAlert('管理员直写模式已关闭。');
@@ -720,7 +721,7 @@ function pushStateToServer() {
         .map(inp => inp.value.trim())
         .filter(name => name !== '');
 
-    // 2. 遍历永久库，如果选手已经下场了，就自动恢复他的所有小号
+    // 2. 遍历永久库，如果选手已经下场了，就自动恢复他的所有游戏ID
     for (let name in savedDB) {
         if (!activeNames.includes(name)) {
             playerDB[name] = uniqueAliasArray(savedDB[name]);
@@ -940,7 +941,7 @@ const SCOREBOARD_TEXT_STYLE_TYPES = [
     {
         key: 'playerName',
         cssKey: 'player-name',
-        label: '主号名',
+        label: '选手名',
         allowTeamColor: false,
         defaults: { fontFamily: 'Arial Black', fontSize: 22, colorMode: 'custom', color: '#ffffff', strokeColor: '#000000', strokeWidth: 1, glow: 2 }
     },
@@ -1008,8 +1009,8 @@ const KILL_DISPLAY_LAYOUT_FIELDS = [
     { key: 'teamNameOffsetY', label: '队名纵移', min: -120, max: 120, unit: 'px', hidden: true },
     { key: 'pickLabelOffsetX', label: '选人横移', min: -180, max: 180, unit: 'px', hidden: true },
     { key: 'pickLabelOffsetY', label: '选人纵移', min: -120, max: 120, unit: 'px', hidden: true },
-    { key: 'playerNameOffsetX', label: '主号横移', min: -180, max: 180, unit: 'px', hidden: true },
-    { key: 'playerNameOffsetY', label: '主号纵移', min: -120, max: 120, unit: 'px', hidden: true },
+    { key: 'playerNameOffsetX', label: '选手横移', min: -180, max: 180, unit: 'px', hidden: true },
+    { key: 'playerNameOffsetY', label: '选手纵移', min: -120, max: 120, unit: 'px', hidden: true },
     { key: 'killNumberOffsetX', label: '杀横移', min: -180, max: 180, unit: 'px', hidden: true },
     { key: 'killNumberOffsetY', label: '杀纵移', min: -120, max: 120, unit: 'px', hidden: true },
     { key: 'deathNumberOffsetX', label: '死横移', min: -180, max: 180, unit: 'px', hidden: true },
@@ -1059,7 +1060,7 @@ const KILL_DISPLAY_TEXT_STYLE_TYPES = [
     {
         key: 'playerName',
         cssKey: 'player-name',
-        label: '主号名',
+        label: '选手名',
         allowTeamColor: false,
         defaults: { fontFamily: 'Arial', fontSize: 43, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 5, glow: 2, letterSpacing: 0 }
     },
@@ -2526,8 +2527,14 @@ function cloudOfflineElapsed(offlineExpiresAt, nowSeconds = Date.now() / 1000) {
 
 function sortBroadcasterDirectory(members, nowSeconds = Date.now() / 1000) {
     return [...(members || [])]
-        .filter(member => member?.online === true ||
-            Number(member?.offlineExpiresAt || 0) > nowSeconds)
+        .filter(member => {
+            if (member?.online === true) return true;
+            const offlineExpiresAt = Number(member?.offlineExpiresAt || 0);
+            if (!Number.isFinite(offlineExpiresAt) || offlineExpiresAt <= 0) return false;
+            // 服务端保留离线快照 24 小时，但列表只展示最近离线 10 分钟的主播。
+            const offlineAt = offlineExpiresAt - 24 * 60 * 60;
+            return offlineAt <= nowSeconds && offlineAt >= nowSeconds - 10 * 60;
+        })
         .sort((a, b) => {
             const aOnline = a?.online === true;
             const bOnline = b?.online === true;
@@ -2745,7 +2752,7 @@ function buildPreviewTeam(teamName, players, teamClass) {
         main.title = mainName;
         const aliases = document.createElement('span');
         const aliasList = Array.isArray(player?.aliases) ? player.aliases : [];
-        aliases.textContent = aliasList.length ? `小号：${aliasList.join('、')}` : '小号：无';
+        aliases.textContent = aliasList.length ? `游戏ID：${aliasList.join('、')}` : '游戏ID：无';
         aliases.title = aliases.textContent;
         identity.append(main, aliases);
         const stats = document.createElement('div');
@@ -3253,7 +3260,7 @@ const CLOUD_SYNC_GROUP_LABELS = Object.freeze({
     score: '比分', roster: '名单', stats: '战绩', state: '比赛状态'
 });
 const CLOUD_SYNC_FIELD_LABELS = Object.freeze({
-    redScore: '红方比分', blueScore: '蓝方比分', mainName: '主号', aliases: '小号',
+    redScore: '红方比分', blueScore: '蓝方比分', mainName: '选手', aliases: '游戏ID',
     kills: '击杀', deaths: '死亡', ak: 'AK', streak: '连杀',
     redPickFirst: '红方先后手', lastKillTeam: '上一击杀队伍'
 });
@@ -3632,6 +3639,97 @@ function renderKeyLanPanel() {
     }
 }
 
+function normalizeAliasDbAutoSyncState(value = {}) {
+    const input = value && typeof value === 'object' ? value : {};
+    const push = input.lastPush && typeof input.lastPush === 'object'
+        ? input.lastPush : {};
+    const pull = input.lastPull && typeof input.lastPull === 'object'
+        ? input.lastPull : {};
+    return {
+        enabled: input.enabled !== false,
+        inFlight: input.inFlight === true,
+        authorized: input.authorized === true,
+        appendSupported: input.appendSupported === true,
+        lastSuccessAt: Math.max(0, Number(input.lastSuccessAt || 0)),
+        nextDueAt: Math.max(0, Number(input.nextDueAt || 0)),
+        lastPush: {
+            status: String(push.status || 'pending'),
+            message: String(push.message || '尚未执行')
+        },
+        lastPull: {
+            status: String(pull.status || 'failed'),
+            message: String(pull.message || '尚未执行')
+        },
+        lastResult: String(input.lastResult || '')
+    };
+}
+
+function renderAliasDbAutoSync(value = aliasDbAutoSyncState || {}) {
+    const aliasDbAutoSync = normalizeAliasDbAutoSyncState(value);
+    aliasDbAutoSyncState = aliasDbAutoSync;
+
+    const toggle = document.getElementById('alias-auto-sync-enabled');
+    if (toggle) {
+        toggle.checked = aliasDbAutoSync.enabled;
+        // The user may turn the feature off while a request is in flight;
+        // C++ invalidates that request by generation and discards its result.
+        toggle.disabled = false;
+    }
+
+    const state = document.getElementById('alias-auto-sync-state');
+    if (state) {
+        state.textContent = aliasDbAutoSync.inFlight
+            ? '执行中'
+            : (aliasDbAutoSync.enabled ? '已启用' : '已关闭');
+        state.dataset.state = aliasDbAutoSync.inFlight ? 'working'
+            : (aliasDbAutoSync.enabled ? 'enabled' : 'disabled');
+    }
+
+    const lastSuccess = document.getElementById('alias-auto-sync-last-success');
+    if (lastSuccess) {
+        lastSuccess.textContent = aliasDbAutoSync.lastSuccessAt > 0
+            ? `上次成功：${cloudBroadcasterTime(aliasDbAutoSync.lastSuccessAt, true)}`
+            : '上次成功：尚未执行';
+    }
+
+    const next = document.getElementById('alias-auto-sync-next');
+    if (next) {
+        let nextText = '下次执行：已关闭';
+        if (aliasDbAutoSync.enabled) {
+            nextText = aliasDbAutoSync.nextDueAt > 0
+                ? `下次执行：${cloudBroadcasterTime(aliasDbAutoSync.nextDueAt, true)}`
+                : (aliasDbAutoSync.authorized
+                    ? '下次执行：立即执行'
+                    : '下次执行：授权成功后立即执行');
+        }
+        next.textContent = nextText;
+    }
+
+    const push = document.getElementById('alias-auto-sync-push-result');
+    if (push) push.textContent = `推送：${aliasDbAutoSync.lastPush.message}`;
+    const pull = document.getElementById('alias-auto-sync-pull-result');
+    if (pull) pull.textContent = `拉取：${aliasDbAutoSync.lastPull.message}`;
+
+    const warning = document.getElementById('alias-auto-sync-warning');
+    if (warning) {
+        const showUnsupported = aliasDbAutoSync.enabled &&
+            aliasDbAutoSync.authorized &&
+            aliasDbAutoSync.lastPush.status === 'unsupported';
+        warning.hidden = !showUnsupported;
+        warning.textContent = showUnsupported
+            ? '当前云函数不支持追加模式：自动任务只拉取，不会发送自动上传。请先更新云函数。'
+            : '';
+    }
+
+    const busy = aliasDbAutoSync.inFlight;
+    ['btn-sync-alias-db', 'btn-push-alias-db'].forEach(id => {
+        const button = document.getElementById(id);
+        if (!button) return;
+        button.disabled = busy;
+        button.title = busy ? '自动游戏ID库同步执行中，请稍候' : '';
+    });
+}
+
 function getCurrentMatchSnapshotFromWeb() {
     const players = [];
     document.querySelectorAll('#team-red .player-row').forEach(row => players.push(getRowData(row, 0)));
@@ -3668,8 +3766,8 @@ function buildTeamSyncDiffHtml(snapshot, localBaseline) {
     (Array.isArray(snapshot.players) ? snapshot.players : []).forEach((player, index) => {
         const before = local.players[index] || {};
         const seat = `${index < 4 ? '红' : '蓝'}${(index % 4) + 1}`;
-        add(`${seat} 主号`, before.name || '空', player.name || '空');
-        add(`${seat} 小号`, (before.aliases || []).join('、') || '无', (player.aliases || []).join('、') || '无');
+        add(`${seat} 选手`, before.name || '空', player.name || '空');
+        add(`${seat} 游戏ID`, (before.aliases || []).join('、') || '无', (player.aliases || []).join('、') || '无');
         add(`${seat} 战绩`, `${before.kills || 0}/${before.deaths || 0}/A${before.akCount || 0}`,
             `${player.kills || 0}/${player.deaths || 0}/A${player.akCount || 0}`);
         add(`${seat} 连杀进度`, before.currentStreak || 0, player.currentStreak || 0);
@@ -3915,6 +4013,8 @@ function applyStateFromServer(state) {
     scoreboardTextStyles = normalizeScoreboardTextStyles(state.scoreboardTextStyles);
     killDisplaySettings = normalizeKillDisplaySettings(state.killDisplaySettings);
     keyMappingSettings = normalizeKeyMappingSettings(state.keyMappingSettings || keyMappingSettings || {});
+    aliasDbAutoSyncState = normalizeAliasDbAutoSyncState(state.aliasDbAutoSync || aliasDbAutoSyncState || {});
+    renderAliasDbAutoSync(aliasDbAutoSyncState);
     cloudMatchState = normalizeCloudMatchState(state.cloudMatch || cloudMatchState || {});
     if (cloudRenameRequestPending && !cloudMatchState.renaming) {
         if (cloudMatchState.lastError) {
@@ -4267,10 +4367,10 @@ function parseAliasInput(raw) {
 
 function getAliasValidationError(raw) {
     const alias = (raw || '').trim();
-    if (!alias) return '小号不能为空';
+    if (!alias) return '游戏ID不能为空';
     const p = parseAliasInput(alias);
-    if (!p.realId) return `小号【${alias}】缺少真实ID，不能只填大区或职业。`;
-    // 允许小号列表保留 2 字短 ID；短 ID 只做警告，并在开始监控时拦截。
+    if (!p.realId) return `游戏ID【${alias}】缺少真实ID，不能只填大区或职业。`;
+    // 允许游戏ID列表保留 2 字短 ID；短 ID 只做警告，并在开始监控时拦截。
     return '';
 }
 
@@ -4284,7 +4384,7 @@ function isLegacyShortAliasWithoutMeta(raw) {
 
 function getLegacyShortAliasDeleteReason(raw) {
     const id = parseAliasInput(raw).realId || raw;
-    return `小号【${raw}】是旧库短ID，真实ID少于3个字符且没有大区/#职业，容易误识别。不会自动删除；建议后续改成“上海1${id}”或“${id}#职业”。`;
+    return `游戏ID【${raw}】是旧库短ID，真实ID少于3个字符且没有大区/#职业，容易误识别。不会自动删除；建议后续改成“上海1${id}”或“${id}#职业”。`;
 }
 
 function getActiveShortIdViolations() {
@@ -4393,7 +4493,7 @@ function updateStartButtonGuard() {
 
     const noAliasViolations = getActiveNoAliasViolations();
     noAliasViolations.forEach(v => {
-        const msg = `该选手只有主号，没有绑定小号。主号不参与 OCR 名称匹配，请至少绑定一个小号。`;
+        const msg = `该选手只有选手，没有绑定游戏ID。选手不参与 OCR 名称匹配，请至少绑定一个游戏ID。`;
         v.row.classList.add('no-alias-block-row');
         v.row.setAttribute('data-no-alias-warning', msg);
         if (v.input) v.input.title = msg;
@@ -4406,7 +4506,7 @@ function updateStartButtonGuard() {
         return noAliasViolations.concat(shortWarnings);
     }
 
-    // 允许小号列表存在 2 字短 ID，但开始监控必须拦截：短 ID 容易被 OCR 误识别。
+    // 允许游戏ID列表存在 2 字短 ID，但开始监控必须拦截：短 ID 容易被 OCR 误识别。
     const shouldBlockStart = !isMonitoring && (noAliasViolations.length > 0 || shortWarnings.length > 0);
     btnMonitor.disabled = shouldBlockStart;
     btnMonitor.classList.toggle('btn-monitor-disabled', shouldBlockStart);
@@ -4415,7 +4515,7 @@ function updateStartButtonGuard() {
         const titleParts = [];
         if (noAliasViolations.length) {
             const names = noAliasViolations.map(v => v.playerName).join('、');
-            titleParts.push(`以下选手没有绑定小号：${names}`);
+            titleParts.push(`以下选手没有绑定游戏ID：${names}`);
         }
         if (shortWarnings.length) {
             const names = shortWarnings.map(v => `【${v.playerName}】${v.badAliases.join('、')}`).join('；');
@@ -4435,16 +4535,16 @@ function getStartGuardMessage() {
     const noAlias = getActiveNoAliasViolations();
     const shortIds = getActiveShortIdViolations();
     const lines = [];
-    noAlias.forEach(v => lines.push(`【${v.playerName}】没有绑定任何小号`));
+    noAlias.forEach(v => lines.push(`【${v.playerName}】没有绑定任何游戏ID`));
     shortIds.forEach(v => lines.push(`【${v.playerName}】存在未加大区/#职业的2字短ID：${v.badAliases.join('、')}`));
     if (!lines.length) return '';
-    return `检测到上场选手信息不完整，暂不能开始监控：\n\n${lines.join('\n')}\n\n处理方式：没有小号的选手请至少绑定一个小号；2字短ID请补充大区或 #职业。`;
+    return `检测到上场选手信息不完整，暂不能开始监控：\n\n${lines.join('\n')}\n\n处理方式：没有游戏ID的选手请至少绑定一个游戏ID；2字短ID请补充大区或 #职业。`;
 }
 
 function getNoAliasGuardMessage(violations = getActiveNoAliasViolations()) {
     if (!violations.length) return '';
-    const lines = violations.map(v => `【${v.playerName}】没有绑定任何小号`);
-    return `检测到上场选手只有主号、没有小号，暂不能开始监控：\n\n${lines.join('\n')}\n\n主号不参与 OCR 名称匹配，请至少绑定一个小号。`;
+    const lines = violations.map(v => `【${v.playerName}】没有绑定任何游戏ID`);
+    return `检测到上场选手只有选手、没有游戏ID，暂不能开始监控：\n\n${lines.join('\n')}\n\n选手不参与 OCR 名称匹配，请至少绑定一个游戏ID。`;
 }
 
 function isAliasInputValid(raw) {
@@ -4496,7 +4596,7 @@ function showAliasPrompt(playerName, callback, msg = null, initialValue = '') {
     pendingAliasPromptActive = true;
     pendingAliasPromptName = (playerName || '').trim();
 
-    showPrompt(msg || `为【${playerName}】绑定新小号:`, (val) => {
+    showPrompt(msg || `为【${playerName}】绑定新游戏ID:`, (val) => {
         pendingAliasPromptActive = false;
         pendingAliasPromptName = '';
         callback(val);
@@ -4640,13 +4740,13 @@ function getFieldConflict(newMainName, excludeInput) {
         let otherMain = inp.value.trim();
         if (!otherMain) continue;
         let otherAliases = playerDB[otherMain] || [];
-        if (otherMain === newMainName) return { owner: otherMain, reason: '主号已被占用' };
-        if (otherAliases.some(alias => normalizeAliasTextForCompare(alias) === newMainName)) return { owner: otherMain, reason: `名字是[${otherMain}]的小号` };
-        if (newAliases.some(alias => normalizeAliasTextForCompare(alias) === otherMain)) return { owner: otherMain, reason: `携带的小号包含了[${otherMain}]` };
+        if (otherMain === newMainName) return { owner: otherMain, reason: '选手已被占用' };
+        if (otherAliases.some(alias => normalizeAliasTextForCompare(alias) === newMainName)) return { owner: otherMain, reason: `名字是[${otherMain}]的游戏ID` };
+        if (newAliases.some(alias => normalizeAliasTextForCompare(alias) === otherMain)) return { owner: otherMain, reason: `携带的游戏ID包含了[${otherMain}]` };
         for (let a of newAliases) {
             const matchedAlias = findAliasByDuplicateId(otherAliases, a);
             if (matchedAlias) {
-                return { owner: otherMain, reason: `小号ID[${getAliasDuplicateId(a)}]与对方小号[${matchedAlias}]冲突` };
+                return { owner: otherMain, reason: `游戏IDID[${getAliasDuplicateId(a)}]与对方游戏ID[${matchedAlias}]冲突` };
             }
         }
     }
@@ -4814,7 +4914,7 @@ function createPlayerRow(seatNumber = '') {
                 }
                 const conflictOwner = findAliasConflict(inlinePair.mainName, inlinePair.aliasName, this);
                 if (conflictOwner) {
-                    showAlert(`小号【${inlinePair.aliasName}】已被场上选手【${conflictOwner}】占用，无法添加！`);
+                    showAlert(`游戏ID【${inlinePair.aliasName}】已被场上选手【${conflictOwner}】占用，无法添加！`);
                     return;
                 }
                 this.value = inlinePair.mainName;
@@ -4831,14 +4931,14 @@ function createPlayerRow(seatNumber = '') {
                 return;
             }
 
-            // 获取该选手的小号（过滤空字符串）
+            // 获取该选手的游戏ID（过滤空字符串）
             const rawAliases = playerDB[name] || [];
             const aliases = rawAliases.filter(a => a && a.trim());
 
-            // 隐藏补全弹窗，保留小号面板
+            // 隐藏补全弹窗，保留游戏ID面板
             autoPopover.classList.remove('active');
 
-            // 无论是否有小号，按回车都弹出添加对话框
+            // 无论是否有游戏ID，按回车都弹出添加对话框
             const self = this;
             setTimeout(() => {
                 showAliasPrompt(name, (newAlias) => {
@@ -4857,14 +4957,14 @@ function createPlayerRow(seatNumber = '') {
                         if (conflictOwner) {
                             customModal.classList.remove('active');
                             setTimeout(() => {
-                                showAlert(`小号【${aliasClean}】已被场上选手【${conflictOwner}】占用，无法添加！`);
+                                showAlert(`游戏ID【${aliasClean}】已被场上选手【${conflictOwner}】占用，无法添加！`);
                                 self.focus();
                             }, 100);
                             return;
                         }
                         const existingAlias = findSamePlayerAliasBlock(getCleanAliases(name), aliasClean);
                         if (existingAlias) {
-                            showAlert(`小号【${aliasClean}】已存在或被包含于【${existingAlias}】，不会重复添加。`);
+                            showAlert(`游戏ID【${aliasClean}】已存在或被包含于【${existingAlias}】，不会重复添加。`);
                             openAliasPopover(self, name);
                             return;
                         }
@@ -4937,7 +5037,7 @@ function createPlayerRow(seatNumber = '') {
         row.classList.add('active-row');
 
         if (this.value.trim() !== '') {
-            // 【有名字】：弹小号设置
+            // 【有名字】：弹游戏ID设置
             openAliasPopover(this, this.value.trim());
         } else {
             // 【没名字】：弹所有的补全列表！
@@ -4976,7 +5076,7 @@ function createPlayerRow(seatNumber = '') {
             const conflictOwner = findAliasConflict(inlinePair.mainName, inlinePair.aliasName, this);
             if (conflictOwner) {
                 this.value = '';
-                showAlert(`小号【${inlinePair.aliasName}】已被场上选手【${conflictOwner}】占用，无法添加！`);
+                showAlert(`游戏ID【${inlinePair.aliasName}】已被场上选手【${conflictOwner}】占用，无法添加！`);
                 triggerSync();
                 return;
             }
@@ -4987,14 +5087,14 @@ function createPlayerRow(seatNumber = '') {
             return;
         }
 
-        // 如果是“新主号首次绑定小号”弹窗导致的失焦，不能立刻 triggerSync；
-        // 否则 getRowData 会因为小号为空把主号清空，C++ 再同步回来就会把输入框清掉。
+        // 如果是“新选手首次绑定游戏ID”弹窗导致的失焦，不能立刻 triggerSync；
+        // 否则 getRowData 会因为游戏ID为空把选手清空，C++ 再同步回来就会把输入框清掉。
         if (currentName && !hasAtLeastOneAlias(currentName) && pendingAliasPromptActive && pendingAliasPromptName === currentName) {
             return;
         }
 
         if (currentName && !hasAtLeastOneAlias(currentName)) {
-            // 允许只输入主号留在选手框中；用红色高亮和运行按钮拦截提醒，不再清空输入框。
+            // 允许只输入选手留在选手框中；用红色高亮和运行按钮拦截提醒，不再清空输入框。
             openAliasPopover(this, currentName);
             triggerSync();
             return;
@@ -5042,7 +5142,7 @@ function createPlayerRow(seatNumber = '') {
             .filter(name => name !== '');
 
         for (let name in savedDB) {
-            // 只要发现永久库里的人没在场上，无条件瞬间恢复他的所有小号！
+            // 只要发现永久库里的人没在场上，无条件瞬间恢复他的所有游戏ID！
             if (!activeNames.includes(name)) {
                 playerDB[name] = [...savedDB[name]];
             }
@@ -5054,7 +5154,7 @@ function createPlayerRow(seatNumber = '') {
         if (val && conflict) {
             inputElem.classList.add('input-error');
             inputElem.setAttribute('data-error-msg', `❌ 无法上场！已被【${conflict.owner}】占用。\n原因：${conflict.reason}`);
-            closeAliasPopoverForInput(inputElem); // 有冲突时强制关掉小号列表
+            closeAliasPopoverForInput(inputElem); // 有冲突时强制关掉游戏ID列表
         } else {
             inputElem.classList.remove('input-error');
             inputElem.removeAttribute('data-error-msg');
@@ -5090,7 +5190,7 @@ function createPlayerRow(seatNumber = '') {
                     // 赋值后再跑一遍查重逻辑确保万无一失
                     processInputLogic(inputElem, false);
 
-                    // 如果选中的人没冲突，就无缝切出他的小号列表
+                    // 如果选中的人没冲突，就无缝切出他的游戏ID列表
                     if (!inputElem.classList.contains('input-error')) {
                         ignoreNextDocumentClickUntil = Date.now() + 350;
                         autoPopover.classList.remove('active');
@@ -5207,18 +5307,18 @@ function renderAliasMenu(playerName, popElement) {
         <div class="${itemClass}">
             <span class="alias-name" title="${escapeHtml(aliasTitle)}">${legacyShort ? '⚠️' : '🎮'} ${escapeHtml(a)}</span>
             <div class="alias-actions">
-                <span class="btn-edit-alias" data-idx="${i}" title="修改小号名称，并同步修改永久小号库">✎</span>
-                <span class="btn-temp-unbind" data-idx="${i}" title="临时解绑 (本次添加隐藏此ID不参与名称匹配，删除主号后重新添加即可恢复)">X</span>
+                <span class="btn-edit-alias" data-idx="${i}" title="修改游戏ID名称，并同步修改永久游戏ID库">✎</span>
+                <span class="btn-temp-unbind" data-idx="${i}" title="临时解绑 (本次添加隐藏此ID不参与名称匹配，删除选手后重新添加即可恢复)">X</span>
                 <span class="btn-perm-unbind" data-idx="${i}" title="永久解绑 (从库选手信息里面彻底删除)">🗑️</span>
             </div>
         </div>`;
     }).join('');
-    html += `<div class="popover-item add-alias-btn">+ 绑定新小号</div>`;
+    html += `<div class="popover-item add-alias-btn">+ 绑定新游戏ID</div>`;
     popElement.innerHTML = html;
     scheduleAliasPopoverLayout(popElement);
 
     // ==========================================
-    // 1. 绑定新小号逻辑
+    // 1. 绑定新游戏ID逻辑
     // ==========================================
     popElement.querySelector('.add-alias-btn').addEventListener('mousedown', (e) => {
         e.preventDefault(); e.stopPropagation();
@@ -5232,13 +5332,13 @@ function renderAliasMenu(playerName, popElement) {
                 }
                 let conflictOwner = findAliasConflict(playerName, aliasTrimmed);
                 if (conflictOwner) {
-                    showAlert(`❌ 绑定失败！该小号已被场上选手【${conflictOwner}】占用！`);
+                    showAlert(`❌ 绑定失败！该游戏ID已被场上选手【${conflictOwner}】占用！`);
                     return;
                 }
 
                 const existingAlias = findSamePlayerAliasBlock(getCleanAliases(playerName), aliasTrimmed);
                 if (existingAlias) {
-                    showAlert(`小号【${aliasTrimmed}】已存在或被包含于【${existingAlias}】，不会重复添加。`);
+                    showAlert(`游戏ID【${aliasTrimmed}】已存在或被包含于【${existingAlias}】，不会重复添加。`);
                     reopenAliasPopoverFromMenu(popElement, playerName);
                     return;
                 }
@@ -5251,7 +5351,7 @@ function renderAliasMenu(playerName, popElement) {
     });
 
     // ==========================================
-    // 2. 修改小号名称逻辑：当前选手列表 + 永久小号库一起修改
+    // 2. 修改游戏ID名称逻辑：当前选手列表 + 永久游戏ID库一起修改
     // ==========================================
     popElement.querySelectorAll('.btn-edit-alias').forEach(btn => {
         btn.addEventListener('mousedown', (e) => {
@@ -5279,20 +5379,20 @@ function renderAliasMenu(playerName, popElement) {
                 const samePlayerAliases = (playerDB[playerName] || []).filter((_, i) => i !== idx);
                 const samePlayerAlias = findSamePlayerAliasBlock(samePlayerAliases, aliasTrimmed);
                 if (samePlayerAlias) {
-                    showAlert(`❌ 修改失败！该选手已有或包含小号【${samePlayerAlias}】。`);
+                    showAlert(`❌ 修改失败！该选手已有或包含游戏ID【${samePlayerAlias}】。`);
                     return;
                 }
 
                 const conflictOwner = findAliasConflict(playerName, aliasTrimmed);
                 if (conflictOwner) {
-                    showAlert(`❌ 修改失败！该小号已被场上选手【${conflictOwner}】占用！`);
+                    showAlert(`❌ 修改失败！该游戏ID已被场上选手【${conflictOwner}】占用！`);
                     return;
                 }
 
                 updateAliasForPlayer(playerName, oldAlias, aliasTrimmed);
                 reopenAliasPopoverFromMenu(popElement, playerName);
                 triggerSync();
-            }, `修改【${playerName}】的小号名称：`, oldAlias);
+            }, `修改【${playerName}】的游戏ID名称：`, oldAlias);
         });
     });
 
@@ -5305,13 +5405,13 @@ function renderAliasMenu(playerName, popElement) {
             const idx = e.target.getAttribute('data-idx');
             const targetAlias = getCleanAliases(playerName)[idx];
 
-            // 允许临时解绑最后一个小号；选手保留，选手框会变红，运行按钮会被禁用。
+            // 允许临时解绑最后一个游戏ID；选手保留，选手框会变红，运行按钮会被禁用。
             // 从当前活跃库中移除
             playerDB[playerName].splice(idx, 1);
 
             reopenAliasPopoverFromMenu(popElement, playerName);
 
-            // 触发同步（这会告诉 C++ 场上目前没这个小号了，但不会从底层库里抹除它）
+            // 触发同步（这会告诉 C++ 场上目前没这个游戏ID了，但不会从底层库里抹除它）
             triggerSync();
         });
     });
@@ -5325,9 +5425,9 @@ function renderAliasMenu(playerName, popElement) {
             const idx = e.target.getAttribute('data-idx');
             const targetAlias = getCleanAliases(playerName)[idx];
 
-            const confirmText = `⚠️ 确定要【永久删除】小号 [${targetAlias}] 吗？
+            const confirmText = `⚠️ 确定要【永久删除】游戏ID [${targetAlias}] 吗？
 
-如果这是最后一个小号，选手会保留在列表中，但运行按钮会变灰，直到重新绑定小号。`;
+如果这是最后一个游戏ID，选手会保留在列表中，但运行按钮会变灰，直到重新绑定游戏ID。`;
 
             showConfirm(confirmText, (isOk) => {
                 if (isOk) {
@@ -5499,7 +5599,7 @@ document.getElementById('btn-broadcaster-sync-once')?.addEventListener('click', 
     }
     const name = String(preview.sourceName || cloudBroadcasterName(cloudPreviewDeviceId));
     showConfirm(`确认同步【${escapeHtml(name)}】的当前比赛数据？<br><br>` +
-        '比分、战绩、先后手和红蓝方向采用该主播数据；主号和小号会与本地合并。', ok => {
+        '比分、战绩、先后手和红蓝方向采用该主播数据；选手和游戏ID会与本地合并。', ok => {
         if (!ok) return;
         window.chrome?.webview?.postMessage({
             action: 'cmd_cloud_sync_broadcaster',
@@ -5532,6 +5632,17 @@ document.getElementById('key-mapping-enabled')?.addEventListener('change', funct
 });
 document.getElementById('btn-key-display-toggle')?.addEventListener('click', () => {
     window.chrome?.webview?.postMessage({ action: 'cmd_toggle_key_display' });
+});
+document.getElementById('alias-auto-sync-enabled')?.addEventListener('change', function () {
+    const enabled = this.checked;
+    aliasDbAutoSyncState = normalizeAliasDbAutoSyncState({
+        ...(aliasDbAutoSyncState || {}), enabled
+    });
+    renderAliasDbAutoSync(aliasDbAutoSyncState);
+    window.chrome?.webview?.postMessage({
+        action: 'cmd_set_alias_auto_sync',
+        enabled
+    });
 });
 document.getElementById('key-lan-role')?.addEventListener('change', function () {
     const role = ['standalone', 'server', 'client'].includes(this.value) ? this.value : 'standalone';
@@ -5650,13 +5761,21 @@ document.getElementById('kill-show-death-toggle-main')?.addEventListener('change
     setKillDisplayShowDeathNumber(this.checked);
 });
 document.getElementById('btn-sync-alias-db')?.addEventListener('click', () => {
-    showConfirm('确定从云端公共库同步小号数据吗？<br><br>只会合并审核通过的数据，不会删除你本地已有的小号。', (ok) => {
+    if (aliasDbAutoSyncState?.inFlight) {
+        showAlert('自动游戏ID库同步正在执行，请稍候。');
+        return;
+    }
+    showConfirm('确定从云端公共库同步游戏ID数据吗？<br><br>只会合并审核通过的数据，不会删除你本地已有的游戏ID。', (ok) => {
         if (!ok || !window.chrome?.webview) return;
         window.chrome.webview.postMessage({ action: "cmd_sync_alias_db" });
     });
 });
 document.getElementById('btn-push-alias-db')?.addEventListener('click', () => {
-    showConfirm('确定把本地小号库推送到云端待审核吗？<br><br>云端会对比共享库生成新增/删除差异，只有本地库发生变化时才会真正提交。', (ok) => {
+    if (aliasDbAutoSyncState?.inFlight) {
+        showAlert('自动游戏ID库同步正在执行，请稍候。');
+        return;
+    }
+    showConfirm('确定把本地游戏ID库推送到云端待审核吗？<br><br>云端会对比共享库生成新增/删除差异，只有本地库发生变化时才会真正提交。', (ok) => {
         if (!ok || !window.chrome?.webview) return;
         const fullAliasDB = buildFormattedAliasDB();
         window.chrome.webview.postMessage({

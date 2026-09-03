@@ -101,7 +101,7 @@ const KILL_DISPLAY_TEXT_STYLE_TYPES = [
     {
         key: 'playerName',
         cssKey: 'player-name',
-        label: '主号',
+        label: '选手',
         allowTeamColor: false,
         defaults: { fontFamily: 'Arial', fontSize: 43, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 5, glow: 2, letterSpacing: 0 }
     },

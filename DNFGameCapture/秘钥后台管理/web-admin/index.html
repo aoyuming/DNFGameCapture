@@ -28,7 +28,7 @@
             <b id="stat-conflict">0</b>
         </div>
         <div class="stat-card">
-            <span>待审小号</span>
+            <span>待审游戏ID</span>
             <b id="stat-pending-alias">0</b>
         </div>
         <div class="stat-card">
@@ -50,7 +50,7 @@
                 </label>
             </div>
             <div class="filters">
-                <input id="pending-search" placeholder="搜索主号 / 小号 / 提交者">
+                <input id="pending-search" placeholder="搜索选手 / 游戏ID / 提交者">
                 <select id="conflict-filter">
                     <option value="all">全部</option>
                     <option value="clean">无重复提示</option>
@@ -70,7 +70,7 @@
                     <span id="detail-meta">选择一条记录查看</span>
                 </div>
             </div>
-            <div id="detail-view" class="detail-empty">点击左侧记录，查看主号、小号与重复提示。</div>
+            <div id="detail-view" class="detail-empty">点击左侧记录，查看选手、游戏ID与重复提示。</div>
         </section>
 
         <section class="panel public-panel">
@@ -86,22 +86,22 @@
             </div>
             <div class="public-crud">
                 <label class="list-box">
-                    <span>主号列表</span>
+                    <span>选手列表</span>
                     <select id="public-main-list" size="12" multiple></select>
                 </label>
                 <label class="list-box">
-                    <span>小号列表</span>
+                    <span>游戏ID列表</span>
                     <select id="public-alias-list" size="12" multiple></select>
                 </label>
             </div>
             <div class="public-editor">
                 <label>
-                    <span>主号</span>
-                    <input id="public-main-name" placeholder="输入主号名称">
+                    <span>选手</span>
+                    <input id="public-main-name" placeholder="输入选手名称">
                 </label>
                 <label>
-                    <span>小号</span>
-                    <textarea id="public-aliases" rows="5" placeholder="小号列表"></textarea>
+                    <span>游戏ID</span>
+                    <textarea id="public-aliases" rows="5" placeholder="游戏ID列表"></textarea>
                 </label>
                 <div class="public-actions">
                     <button id="btn-public-new" class="quiet">新建</button>

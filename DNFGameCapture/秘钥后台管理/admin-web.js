@@ -342,13 +342,13 @@ function normalizePublicEntryPayload(body) {
     const aliases = normalizeAliasArray(body?.aliases).filter(alias => alias !== mainName);
 
     if (!mainName) {
-        const err = new Error('主号不能为空');
+        const err = new Error('选手不能为空');
         err.statusCode = 400;
         throw err;
     }
 
     if (aliases.length === 0) {
-        const err = new Error('至少填写一个小号');
+        const err = new Error('至少填写一个游戏ID');
         err.statusCode = 400;
         throw err;
     }
@@ -561,7 +561,7 @@ function buildPendingView(row) {
         removedAliases: normalizeAliasArray(row.data.diff.removedAliases)
     } : null;
     const sampleText = firstEntry
-        ? `${firstEntry.mainName} -> ${firstEntry.aliases.length > 0 ? firstEntry.aliases.slice(0, 4).join(' / ') : '删除主号'}`
+        ? `${firstEntry.mainName} -> ${firstEntry.aliases.length > 0 ? firstEntry.aliases.slice(0, 4).join(' / ') : '删除选手'}`
         : '无明细';
 
     return {
@@ -661,7 +661,7 @@ app.post('/api/public', asyncRoute(async (req, res) => {
     const publicDb = await loadPublicAliasDb();
 
     if (publicDb.players[entry.mainName]) {
-        return res.status(409).json({ error: '该主号已存在，请使用保存修改' });
+        return res.status(409).json({ error: '该选手已存在，请使用保存修改' });
     }
 
     publicDb.players[entry.mainName] = entry.aliases;
@@ -685,7 +685,7 @@ app.put('/api/public/:mainName', asyncRoute(async (req, res) => {
     }
 
     if (entry.mainName !== oldMainName && publicDb.players[entry.mainName]) {
-        return res.status(409).json({ error: '新的主号名称已存在' });
+        return res.status(409).json({ error: '新的选手名称已存在' });
     }
 
     delete publicDb.players[oldMainName];
@@ -706,7 +706,7 @@ app.put('/api/public/:mainName', asyncRoute(async (req, res) => {
 app.post('/api/public/batch-delete', asyncRoute(async (req, res) => {
     const requestedNames = Array.isArray(req.body?.mainNames) ? req.body.mainNames : [];
     const mainNames = [...new Set(requestedNames.map(cleanName).filter(Boolean))];
-    if (mainNames.length === 0) return res.status(400).json({ error: '没有选择要删除的主号' });
+    if (mainNames.length === 0) return res.status(400).json({ error: '没有选择要删除的选手' });
 
     const publicDb = await loadPublicAliasDb();
     const deleted = [];
@@ -724,7 +724,7 @@ app.post('/api/public/batch-delete', asyncRoute(async (req, res) => {
         deleted.push(mainName);
     }
 
-    if (deleted.length === 0) return res.status(404).json({ error: '所选主号都不存在或已删除' });
+    if (deleted.length === 0) return res.status(404).json({ error: '所选选手都不存在或已删除' });
 
     const savedDb = await savePublicAliasDb(publicDb, {
         action: 'admin_public_batch_delete',
@@ -734,7 +734,7 @@ app.post('/api/public/batch-delete', asyncRoute(async (req, res) => {
         missing
     });
 
-    res.json(buildPublicCrudResponse(savedDb, '', `已删除 ${deleted.length} 个公共库主号`, {
+    res.json(buildPublicCrudResponse(savedDb, '', `已删除 ${deleted.length} 个公共库选手`, {
         deletedMainNames: deleted,
         deletedAliasCount,
         missing
@@ -762,11 +762,11 @@ function parseImportText(text) {
         const mainName = cleanName(line.slice(0, eqPos));
         const aliases = normalizeAliasArray(line.slice(eqPos + 1)).filter(alias => alias !== mainName);
         if (!mainName) {
-            errors.push({ line: idx + 1, text: line, error: '主号为空' });
+            errors.push({ line: idx + 1, text: line, error: '选手为空' });
             return;
         }
         if (aliases.length === 0) {
-            errors.push({ line: idx + 1, text: line, error: '没有解析到小号' });
+            errors.push({ line: idx + 1, text: line, error: '没有解析到游戏ID' });
             return;
         }
 
@@ -807,7 +807,7 @@ app.post('/api/public/import', asyncRoute(async (req, res) => {
 
     res.json({
         ...getPublicSummary(savedDb),
-        message: `导入完成：新增 ${created} 个主号，更新 ${updated} 个主号，新增小号 ${addedAliasCount} 个`,
+        message: `导入完成：新增 ${created} 个选手，更新 ${updated} 个选手，新增游戏ID ${addedAliasCount} 个`,
         imported: entries.length,
         created,
         updated,

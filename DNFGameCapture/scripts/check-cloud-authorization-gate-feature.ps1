@@ -61,8 +61,8 @@ Require-Text $source 'WritePrivateProfileString(L"CloudMatch", L"ServerUrl", nul
     'Legacy persisted cloud server URLs are not removed during migration.'
 
 $startupCalls = [regex]::Matches($source, 'StartSavedCloudMatchSession\(\);').Count
-if ($startupCalls -ne 1) {
-    throw "Saved cloud sessions must start only from authorization success; found $startupCalls call sites."
+if ($startupCalls -ne 2) {
+    throw "Saved cloud sessions must start only from authorization success or a validated encrypted lease; found $startupCalls call sites."
 }
 
 $authFail = Function-Body $source `
@@ -82,10 +82,31 @@ Require-Text $authSuccess 'authSuccess->requestGeneration != m_cloudAuthRequestG
     'A stale authorization success can still reconnect with an obsolete endpoint.'
 Require-Text $authSuccess 'StartSavedCloudMatchSession();' `
     'Authorization success does not start the saved cloud session.'
+Require-Text $authSuccess 'if (!serverUrlValid) {' `
+    'An unusable online authorization result does not enter the stale-lease cleanup path.'
+Require-Text $authSuccess 'if (!serverUrlValid) {' + "`r`n" + '        DnfClearProtectedLicenseLease();' `
+    'An unusable online authorization result can leave an older encrypted lease active.'
 Reject-Text $authSuccess 'authorizedServerUrl = L"http' `
     'Authorization success still falls back to a local server address.'
 Reject-Text $authSuccess 'SaveCloudMatchSettings();' `
     'Authorization success still persists the returned server address.'
+
+$leaseActivation = Function-Body $source `
+    'bool CDNFGameCaptureDlg::TryActivateFromLicenseLease' `
+    'bool CDNFGameCaptureDlg::BeginLicenseCloudCheck'
+foreach ($needle in @(
+    'DnfLoadProtectedLicenseLease(lease)',
+    'DnfValidateLicenseLease(lease,',
+    'validation != DnfLicenseLeaseValidation::valid',
+    'serverUrlValidator.Configure(',
+    'm_cloudMatchServerUrl = authorizedServerUrl;',
+    'StartSavedCloudMatchSession();'
+)) {
+    Require-Text $leaseActivation $needle `
+        "Encrypted authorization lease activation is missing: $needle"
+}
+Reject-Text $leaseActivation 'authorizedServerUrl = L"http' `
+    'Encrypted lease activation still falls back to a local server address.'
 
 $authStart = Function-Body $source `
     'bool CDNFGameCaptureDlg::BeginLicenseCloudCheck' `
@@ -144,17 +165,17 @@ Require-Text $poll 'DisableCloudMatchForAuthorization(' `
 Require-Text $source 'DnfIsCloudMatchWebAction(action) && !HasAuthorizedCloudMatchEndpoint()' `
     'Cloud Web commands are not blocked before authorization.'
 
-Require-Text $header '#define CURRENT_VERSION L"5.0.0"' `
-    'Application version is not 5.0.0.'
+Require-Text $header '#define CURRENT_VERSION L"5.0.1"' `
+    'Application version is not 5.0.1.'
 foreach ($needle in @(
-    'FILEVERSION 5,0,0,0',
-    'PRODUCTVERSION 5,0,0,0',
-    'VALUE "FileVersion", "5.0.0.0"',
-    'VALUE "ProductVersion", "5.0.0.0"'
+    'FILEVERSION 5,0,1,0',
+    'PRODUCTVERSION 5,0,1,0',
+    'VALUE "FileVersion", "5.0.1.0"',
+    'VALUE "ProductVersion", "5.0.1.0"'
 )) {
     Require-Text $resources $needle "Windows version resource is outdated: $needle"
 }
-Require-Text $resources '5.0.0",IDC_STATIC' `
+Require-Text $resources '5.0.1",IDC_STATIC' `
     'The About dialog still shows an outdated user-visible version.'
 
 Write-Host 'Cloud authorization gate static checks passed.'

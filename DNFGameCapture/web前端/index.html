@@ -84,8 +84,20 @@
                             </div>
                             <div class="more-controls-section">
                                 <div class="more-controls-title">数据</div>
-                        <button class="ctrl-btn btn-sync-db" id="btn-sync-alias-db">☁ 同步云端库</button>
+                                <button class="ctrl-btn btn-sync-db" id="btn-sync-alias-db">☁ 同步云端库</button>
                                 <button class="ctrl-btn btn-push-db" id="btn-push-alias-db">⬆ 推送本地库</button>
+                                <div class="alias-auto-sync-box" id="alias-auto-sync-box">
+                                    <label class="alias-auto-sync-toggle">
+                                        <input type="checkbox" id="alias-auto-sync-enabled">
+                                        <span>每 7 天自动同步游戏ID库</span>
+                                    </label>
+                                    <div class="alias-auto-sync-state" id="alias-auto-sync-state">等待授权</div>
+                                    <div class="alias-auto-sync-meta" id="alias-auto-sync-last-success">上次成功：尚未执行</div>
+                                    <div class="alias-auto-sync-meta" id="alias-auto-sync-next">下次执行：授权成功后立即执行</div>
+                                    <div class="alias-auto-sync-result" id="alias-auto-sync-push-result">推送：尚未执行</div>
+                                    <div class="alias-auto-sync-result" id="alias-auto-sync-pull-result">拉取：尚未执行</div>
+                                    <div class="alias-auto-sync-warning" id="alias-auto-sync-warning" hidden></div>
+                                </div>
                             </div>
                             <div class="more-controls-section">
                                 <div class="more-controls-title">系统</div>
@@ -159,9 +171,9 @@
             <div class="random-tool-body">
                 <div class="random-tool-left">
                     <div class="random-roster-box">
-                        <textarea class="random-roster-input" id="random-roster-input" placeholder="一行一个人，可输入库里主号、临时名字或编号&#10;例如：1号&#10;张三&#10;小王"></textarea>
+                        <textarea class="random-roster-input" id="random-roster-input" placeholder="一行一个人，可输入库里选手、临时名字或编号&#10;例如：1号&#10;张三&#10;小王"></textarea>
                         <div class="random-roster-suggestions" id="random-roster-suggestions"></div>
-                        <div class="random-tool-note">输入库里已有主号时会出现提示；临时名字只用于本次随机，不会写入小号库。</div>
+                        <div class="random-tool-note">输入库里已有选手时会出现提示；临时名字只用于本次随机，不会写入游戏ID库。</div>
                     </div>
 
                     <div class="random-options">

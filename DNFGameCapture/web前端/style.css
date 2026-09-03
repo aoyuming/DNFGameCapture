@@ -668,14 +668,14 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
     width: 100%;
     max-width: 100%;
 }
-/* ================= 小号菜单按钮 ================= */
+/* ================= 游戏ID菜单按钮 ================= */
 .alias-actions {
     display: flex;
     gap: 4px;
     flex-shrink: 0; /* 关键：告诉 Flexbox 这个容器绝对不许缩小！ */
 }
 
-/* 🚨 为小号名字添加超长截断样式 */
+/* 🚨 为游戏ID名字添加超长截断样式 */
 .alias-row .alias-actions {
     position: static;
     display: flex;
@@ -1002,6 +1002,48 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 .more-controls-menu .algo-select {
     flex: 1 1 auto;
     min-width: 0;
+}
+.alias-auto-sync-box {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+    padding: 8px 9px;
+    border: 1px solid rgba(74, 223, 210, 0.24);
+    border-radius: 6px;
+    background: rgba(0, 229, 255, 0.045);
+    color: #d6e9ed;
+    font-size: 11px;
+    line-height: 1.35;
+}
+.alias-auto-sync-toggle {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+    color: #e8fffb;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+}
+.alias-auto-sync-toggle input {
+    flex: 0 0 auto;
+    accent-color: #00e5ff;
+}
+.alias-auto-sync-state {
+    color: #7fffe1;
+    font-weight: 800;
+}
+.alias-auto-sync-state[data-state="working"] { color: #ffcc66; }
+.alias-auto-sync-state[data-state="disabled"] { color: #aab4bd; }
+.alias-auto-sync-meta,
+.alias-auto-sync-result {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: #9eb4bf;
+}
+.alias-auto-sync-warning {
+    color: #ffcc66;
+    font-weight: 700;
 }
 .more-controls-danger {
     grid-column: 1 / -1;
@@ -1977,7 +2019,7 @@ html[data-theme="black-gold"] .cloud-room-status {
     pointer-events: none;
 }
 
-/* 主号没有任何小号：阻止开始运行，但不从列表删除 */
+/* 选手没有任何游戏ID：阻止开始运行，但不从列表删除 */
 .player-row.no-alias-block-row {
     background: rgba(255, 0, 85, 0.26) !important;
     box-shadow: 0 0 0 2px rgba(255, 0, 85, 0.95), 0 0 18px rgba(255, 0, 85, 0.45) !important;
@@ -1987,7 +2029,7 @@ html[data-theme="black-gold"] .cloud-room-status {
     text-shadow: 0 0 8px rgba(255, 0, 85, 0.95) !important;
 }
 .player-row.no-alias-block-row::after {
-    content: "缺少小号";
+    content: "缺少游戏ID";
     position: absolute;
     left: 8px;
     top: -18px;
@@ -2013,7 +2055,7 @@ html[data-theme="black-gold"] .cloud-room-status {
     filter: none !important;
 }
 
-/* 小号菜单恢复为横向常驻按钮布局：名称按剩余空间自动省略 */
+/* 游戏ID菜单恢复为横向常驻按钮布局：名称按剩余空间自动省略 */
 .alias-popover {
     top: -8px;
     left: 0;
@@ -2080,7 +2122,7 @@ html[data-theme="black-gold"] .cloud-room-status {
     font-size: 10px;
 }
 
-/* 小号菜单微调：按钮更靠右，文字再紧一点 */
+/* 游戏ID菜单微调：按钮更靠右，文字再紧一点 */
 .alias-popover .popover-item {
     padding: 7px 4px 7px 9px;
     font-size: 12px;
