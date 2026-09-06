@@ -1,0 +1,7 @@
+{
+  "environment": "test",
+  "cloudServerUrl": "http://47.109.149.111:28880",
+  "adminUrl": "http://47.109.149.111:28881/admin",
+  "protocolVersion": 2,
+  "updatedAt": "2026-09-06T03:06:10Z"
+}

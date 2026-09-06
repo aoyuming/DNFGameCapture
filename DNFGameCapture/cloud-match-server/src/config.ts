@@ -1,5 +1,6 @@
 export interface ServerConfig {
   port: number;
+  publicUrl: string;
   adminHost: string;
   adminPort: number;
   adminPassword: string;
@@ -23,7 +24,8 @@ function readAdminHost(): string {
 }
 
 export const serverConfig: ServerConfig = {
-  port: 18880,
+  port: readPort('PORT', 18880),
+  publicUrl: process.env.PUBLIC_URL?.trim() || `http://127.0.0.1:${readPort('PORT', 18880)}`,
   adminHost: readAdminHost(),
   adminPort: readPort('ADMIN_PORT', 18881),
   adminPassword: process.env.ADMIN_PASSWORD?.trim() ?? '',

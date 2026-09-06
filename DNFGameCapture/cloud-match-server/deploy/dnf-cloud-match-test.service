@@ -1,0 +1,23 @@
+[Unit]
+Description=DNF Cloud Match Test Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dnfcloud-test
+Group=dnfcloud-test
+WorkingDirectory=/opt/dnf-cloud-match-server-test
+EnvironmentFile=/etc/default/dnf-cloud-match-test
+ExecStart=/usr/bin/node /opt/dnf-cloud-match-server-test/dist/server.js
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/dnf-cloud-match-test
+
+[Install]
+WantedBy=multi-user.target

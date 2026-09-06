@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 
 import { createCloudMatchAdminApp } from '../src/admin.js';
 import { createCloudMatchApp } from '../src/app.js';
+import { generateLicenseKey, hashLicenseKey } from '../src/auth.js';
 import { openDatabase } from '../src/db.js';
 import { registerDevice } from '../src/identity.js';
 import type { MatchSnapshot, Player } from '../src/schemas.js';
@@ -356,5 +357,120 @@ describe('localhost admin console', () => {
       .get('expired-device-0001')).toEqual({ count: 0 });
     expect(db.prepare('SELECT COUNT(*) AS count FROM sync_history').get())
       .toEqual({ count: 0 });
+  });
+
+  test('lets the v2 player-library payload use its own larger body limit', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dnf-cloud-v2-limit-'));
+    const cloudApp = createCloudMatchApp({
+      databasePath: join(directory, 'app.sqlite'),
+      now: () => now,
+      adminCsrfToken: csrfToken,
+      adminPassword,
+      v2ServerUrl: 'http://127.0.0.1:28880',
+    });
+    try {
+      cloudApp.db.prepare(
+        `INSERT INTO licenses (key_hash, label, expires_at, disabled_at, bound_device_id, created_at, updated_at)
+         VALUES (?, ?, ?, NULL, NULL, ?, ?)`,
+      ).run(hashLicenseKey('CDK-V2-LIMIT'), 'v2 payload limit', now + 86_400, now, now);
+
+      const activated = await request(cloudApp.expressApp)
+        .post('/api/v2/auth/activate')
+        .send({ key: 'CDK-V2-LIMIT', deviceId: 'device-v2-limit-0001' })
+        .expect(200);
+      const payload = {
+        entities: Array.from({ length: 100 }, (_, index) => ({
+          names: [`测试选手-${index}-${'名称'.repeat(12)}`],
+          gameIds: [`game-id-${index}-${'x'.repeat(16)}`],
+          adventureGroupIds: [`guild-id-${index}`],
+        })),
+      };
+      expect(Buffer.byteLength(JSON.stringify(payload), 'utf8')).toBeGreaterThan(4 * 1024);
+
+      await request(cloudApp.expressApp)
+        .post('/api/v2/player-library/submit')
+        .set('Authorization', `Bearer ${activated.body.sessionToken}`)
+        .set('X-DNF-Device-Id', 'device-v2-limit-0001')
+        .send(payload)
+        .expect(202);
+    } finally {
+      await cloudApp.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('manages licenses, approves player-library submissions, and sets OCR policy', async () => {
+    const { app, db } = createFixture();
+
+    const created = await request(app)
+      .post('/admin/api/licenses')
+      .auth('admin', adminPassword)
+      .set('x-dnf-admin-csrf', csrfToken)
+      .send({ label: '夜间测试卡', expiresAt: now + 3_600 })
+      .expect(201);
+    expect(created.body).toMatchObject({ ok: true, key: expect.stringMatching(/^CDK-/) });
+    expect(created.body.keyHash).toBeUndefined();
+
+    await request(app)
+      .post('/admin/api/licenses')
+      .auth('admin', adminPassword)
+      .set('x-dnf-admin-csrf', csrfToken)
+      .send({ key: 'manual-key-that-native-client-rejects', label: '非法测试卡', expiresAt: null })
+      .expect(400, { ok: false, code: 'invalid_license_format' });
+
+    const suppliedKey = generateLicenseKey();
+    const supplied = await request(app)
+      .post('/admin/api/licenses')
+      .auth('admin', adminPassword)
+      .set('x-dnf-admin-csrf', csrfToken)
+      .send({ key: suppliedKey, label: '手工测试卡', expiresAt: null })
+      .expect(201);
+    expect(supplied.body).toMatchObject({ ok: true, key: suppliedKey });
+
+    const licenses = await request(app)
+      .get('/admin/api/licenses')
+      .auth('admin', adminPassword)
+      .expect(200);
+    expect(licenses.body.licenses).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: '夜间测试卡' }),
+        expect.objectContaining({ label: '手工测试卡' }),
+      ]),
+    );
+    expect(JSON.stringify(licenses.body)).not.toContain(created.body.key);
+    expect(JSON.stringify(licenses.body)).not.toContain(suppliedKey);
+
+    const inserted = db.prepare(
+      `INSERT INTO player_library_submissions (device_id, payload_json, status, created_at)
+       VALUES (?, ?, 'pending', ?)`,
+    ).run('device-test-0001', JSON.stringify({ entities: [{ names: ['测试选手'], gameIds: ['测试ID'], adventureGroupIds: [] }] }), now);
+    await request(app)
+      .post(`/admin/api/player-library/submissions/${inserted.lastInsertRowid}/approve`)
+      .auth('admin', adminPassword)
+      .set('x-dnf-admin-csrf', csrfToken)
+      .send({})
+      .expect(200, { ok: true, revision: 1 });
+
+    const library = await request(app)
+      .get('/admin/api/player-library')
+      .auth('admin', adminPassword)
+      .expect(200);
+    expect(library.body.entities[0]).toMatchObject({ names: ['测试选手'], gameIds: ['测试ID'] });
+
+    await request(app)
+      .put('/admin/api/broadcasters/device-test-0001/ocr-policy')
+      .auth('admin', adminPassword)
+      .set('x-dnf-admin-csrf', csrfToken)
+      .send({ disabledUntil: now + 600 })
+      .expect(200, { ok: true, deviceId: 'device-test-0001', disabledUntil: now + 600 });
+    expect(db.prepare('SELECT ocr_disabled_until FROM broadcaster_policies WHERE device_id = ?')
+      .get('device-test-0001')).toEqual({ ocr_disabled_until: now + 600 });
+
+    await request(app)
+      .post(`/admin/api/licenses/${created.body.id}/disable`)
+      .auth('admin', adminPassword)
+      .set('x-dnf-admin-csrf', csrfToken)
+      .send({ disabled: true })
+      .expect(200, { ok: true, disabled: true });
   });
 });

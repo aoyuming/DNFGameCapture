@@ -5,7 +5,7 @@ const path = require('path');
 
 const root = path.resolve(__dirname, '..');
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
-const cpp = read('DNFGameCaptureDlg.cpp');
+const cpp = read('DNFGameCaptureDlg.cpp').replace(/\r\n/g, '\n');
 const header = read('DNFGameCaptureDlg.h');
 const cloud = read(path.join('云函数', 'index.js'));
 const project = read('DNFGameCapture.vcxproj');
@@ -96,5 +96,21 @@ assertContains(autoResult[0], '自动推送结果：',
     '自动小号库完成后未在 C++ 日志区分推送/跳过结果');
 assertContains(autoResult[0], '云函数需更新，自动推送未执行',
     '旧云函数能力不支持时未在 C++ 日志明确提示');
+
+const autoAttempt = cpp.match(
+    /void CDNFGameCaptureDlg::StartAliasDbAutoSyncAttempt\([\s\S]*?\n}\n\nLRESULT CDNFGameCaptureDlg::OnAliasDbAutoSyncResult/);
+if (!autoAttempt) {
+    throw new Error('未找到自动小号库后台任务实现');
+}
+assertContains(autoAttempt[0], 'const bool useServerAuthV2 = m_cloudServerAuthV2',
+    '自动同步没有读取测试服授权模式');
+assertContains(autoAttempt[0], 'DnfFetchV2PublicAliasDb',
+    '测试服自动同步没有调用 v2 公共库接口');
+assertContains(autoAttempt[0], 'DnfSubmitV2PlayerLibrary',
+    '测试服自动同步没有调用 v2 投稿接口');
+assertContains(autoAttempt[0], 'serverSessionToken',
+    '自动同步没有携带测试服会话令牌');
+assertContains(autoAttempt[0], 'serverDeviceId',
+    '自动同步没有携带测试服设备标识');
 
 console.log('Alias DB auto-sync feature checks passed.');

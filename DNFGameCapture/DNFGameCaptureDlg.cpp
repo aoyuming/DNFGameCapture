@@ -12,6 +12,7 @@
 #include <wininet.h>
 #include <tlhelp32.h> // 【新增】：用于遍历和杀掉后台残留进程
 #include <cwctype>
+#include <cctype>
 #include <set>
 #include <fstream>
 #include <sstream>
@@ -62,6 +63,8 @@ struct DnfCloudAuthSuccess {
     bool manualCheck = false;
     std::uint64_t requestGeneration = 0;
     bool leaseEndpointRefresh = false;
+    bool serverAuthV2 = false;
+    std::string serverSessionToken;
 };
 
 struct DnfCloudAuthFailure {
@@ -162,6 +165,18 @@ static bool DnfFileExists(const CString& path);
 static CString DnfJoinPath(const CString& a, const CString& b);
 static void DnfSendWebToast(CWebScoreDlg* webDlg, const CString& action, const CString& message);
 static bool DnfPostCloudJson(const std::string& jsonUtf8, std::string& responseUtf8, CString& errorMsg, int timeoutMs = 8000);
+static bool DnfCheckServerV2Binding(const CString& endpoint,
+    const CString& manifestUrl, const CString& key, const CString& deviceId,
+    long long duration, long long& outExpTime, CString& outCloudServerUrl,
+    std::string& outSessionToken, CString& errorMsg, bool& networkFailure);
+static bool DnfFetchV2PublicAliasDb(const CString& endpoint,
+    const std::string& sessionToken, const std::string& deviceId,
+    std::string& publicAliasDbJson, CString& errorMsg,
+    std::uint64_t* outRevision = nullptr,
+    bool* outAppendSupported = nullptr);
+static bool DnfSubmitV2PlayerLibrary(const CString& endpoint,
+    const std::string& sessionToken, const std::string& deviceId,
+    const std::string& aliasDbPayload, CString& resultMessage);
 static bool DnfFetchPublicAliasDb(const CString& key, const CString& hwid,
     std::string& publicAliasDbJson, CString& errorMsg);
 static CString DnfSubmitAliasDbRequest(const std::string& requestUtf8,
@@ -1473,6 +1488,8 @@ static bool DnfGetProcessImagePathByName(const CString& processName, CString& pa
 }
 
 static const wchar_t* DNF_CLOUD_API_HOST = L"verifykey-thaovfpoib.cn-hangzhou.fcapp.run";
+static const wchar_t* DNF_CLOUD_ENDPOINT_MANIFEST_URL =
+    L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/cloud-server-test.json";
 static const wchar_t* DNF_LICENSE_REG_PATH = L"Software\\DNFCapture";
 static const wchar_t* DNF_LICENSE_REG_VALUE = L"LicenseKey";
 static CString g_lastLicenseSource = L"未读取";
@@ -3875,6 +3892,10 @@ LRESULT CDNFGameCaptureDlg::OnUpdateAuthTime(WPARAM wParam, LPARAM lParam) {
         refreshedLease.licenseKey = authSuccess->licenseKey.GetString();
         refreshedLease.machineId = authSuccess->machineId.GetString();
         refreshedLease.cloudServerUrl = authorizedServerUrl.GetString();
+        if (!authSuccess->serverSessionToken.empty()) {
+            refreshedLease.serverSessionToken = std::wstring(CA2W(
+                authSuccess->serverSessionToken.c_str(), CP_UTF8));
+        }
         refreshedLease.cardDuration = authSuccess->cardDuration;
         refreshedLease.expireTime = cloudTime;
         refreshedLease.validatedAt = currentTime;
@@ -3903,6 +3924,13 @@ LRESULT CDNFGameCaptureDlg::OnUpdateAuthTime(WPARAM wParam, LPARAM lParam) {
     }
     if (serverUrlValid) {
         m_cloudMatchServerUrl = authorizedServerUrl;
+        m_cloudServerLastKnownUrl = authorizedServerUrl;
+        m_cloudServerSessionToken = authSuccess->serverAuthV2
+            ? authSuccess->serverSessionToken : std::string();
+        if (m_cloudServerAuthV2 && authSuccess->serverAuthV2 &&
+            !SaveCloudMatchSettings()) {
+            WriteMatchLog(L"[云端验证] 测试服地址缓存保存失败；本次连接仍继续。\n");
+        }
         StartSavedCloudMatchSession();
 
         if (authSuccess->leaseEndpointRefresh) {
@@ -4297,11 +4325,20 @@ bool CDNFGameCaptureDlg::TryActivateFromLicenseLease(const CString& normalizedKe
         WriteMatchLog(L"[云端验证] 加密授权租约中的服务器地址无效，已丢弃并执行联网验证。");
         return false;
     }
+    if (m_cloudServerAuthV2 && lease.serverSessionToken.empty()) {
+        WriteMatchLog(L"[云端验证] 旧租约没有测试服会话令牌，本次改为在线授权。");
+        return false;
+    }
 
     DisableCloudMatchForAuthorization(CString());
     m_cloudExpireTime = lease.expireTime;
     m_bIsAuthValid = true;
     m_cloudMatchServerUrl = authorizedServerUrl;
+    m_cloudServerLastKnownUrl = authorizedServerUrl;
+    if (m_cloudServerAuthV2) {
+        m_cloudServerSessionToken = std::string(CW2A(
+            lease.serverSessionToken.c_str(), CP_UTF8));
+    }
     lease.lastUsedAt = now;
     if (!DnfSaveProtectedLicenseLease(lease)) {
         WriteMatchLog(L"[云端验证] 加密授权租约使用成功，但最后使用时间保存失败。");
@@ -4352,18 +4389,38 @@ bool CDNFGameCaptureDlg::BeginLicenseLeaseEndpointRefresh()
         RGB(255, 200, 0));
     WriteMatchLog(L"[云端验证] 五天租约地址连续30秒未连接，本次运行开始一次在线地址刷新。");
 
+    const bool useServerAuthV2 = m_cloudServerAuthV2;
+    const CString endpoint = m_cloudServerLastKnownUrl;
+    const CString manifestUrl = m_cloudEndpointManifestUrl;
     std::thread([hWnd, licenseKey, machineId, duration,
-        requestGeneration]() {
+        requestGeneration, useServerAuthV2, endpoint, manifestUrl]() {
         long long cloudExpTime = 0;
         CString cloudServerUrl;
-        const CString cloudResult = CheckCloudBinding(licenseKey, machineId,
-            duration, cloudExpTime, cloudServerUrl);
+        CString cloudResult;
+        std::string sessionToken;
+        bool networkFailure = false;
+        if (useServerAuthV2) {
+            const bool ok = DnfCheckServerV2Binding(endpoint, manifestUrl,
+                licenseKey, machineId, duration, cloudExpTime, cloudServerUrl,
+                sessionToken, cloudResult, networkFailure);
+            if (ok) cloudResult = L"OK";
+        }
+        else {
+            cloudResult = CheckCloudBinding(licenseKey, machineId,
+                duration, cloudExpTime, cloudServerUrl);
+        }
         if (!::IsWindow(hWnd)) return;
 
         if (cloudResult == L"OK") {
-            auto* success = new DnfCloudAuthSuccess{
-                cloudExpTime, cloudServerUrl, licenseKey, machineId, duration,
-                false, requestGeneration };
+            auto* success = new DnfCloudAuthSuccess;
+            success->expireTime = cloudExpTime;
+            success->cloudServerUrl = cloudServerUrl;
+            success->licenseKey = licenseKey;
+            success->machineId = machineId;
+            success->cardDuration = duration;
+            success->requestGeneration = requestGeneration;
+            success->serverAuthV2 = useServerAuthV2;
+            success->serverSessionToken = std::move(sessionToken);
             success->leaseEndpointRefresh = true;
             if (!::PostMessage(hWnd, WM_UPDATE_AUTH_TIME, 0,
                 reinterpret_cast<LPARAM>(success))) {
@@ -4408,8 +4465,11 @@ bool CDNFGameCaptureDlg::BeginLicenseCloudCheck(const CString& inputKey, bool ma
     long long duration = m_keyDuration;
     HWND hWnd = GetSafeHwnd();
 
+    const bool useServerAuthV2 = m_cloudServerAuthV2;
+    const CString endpoint = m_cloudServerLastKnownUrl;
+    const CString manifestUrl = m_cloudEndpointManifestUrl;
     std::thread([hWnd, normalized, hwid, duration, manualCheck,
-        requestGeneration]() {
+        requestGeneration, useServerAuthV2, endpoint, manifestUrl]() {
         constexpr int kAutomaticAttempts = 3;
         const int maxAttempts = manualCheck ? 1 : kAutomaticAttempts;
         CString cloudResult = L"未知请求异常";
@@ -4417,15 +4477,31 @@ bool CDNFGameCaptureDlg::BeginLicenseCloudCheck(const CString& inputKey, bool ma
         for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
             long long cloudExpTime = 0;
             CString cloudServerUrl;
-            cloudResult = CheckCloudBinding(normalized, hwid, duration,
-                cloudExpTime, cloudServerUrl);
+            std::string sessionToken;
+            bool networkFailure = false;
+            if (useServerAuthV2) {
+                const bool ok = DnfCheckServerV2Binding(endpoint, manifestUrl,
+                    normalized, hwid, duration, cloudExpTime, cloudServerUrl,
+                    sessionToken, cloudResult, networkFailure);
+                if (ok) cloudResult = L"OK";
+            }
+            else {
+                cloudResult = CheckCloudBinding(normalized, hwid, duration,
+                    cloudExpTime, cloudServerUrl);
+            }
 
             if (cloudResult == L"OK") {
                 if (::IsWindow(hWnd)) {
-                    auto* success = new DnfCloudAuthSuccess{
-                        cloudExpTime, cloudServerUrl, normalized, hwid, duration,
-                        manualCheck,
-                        requestGeneration };
+                    auto* success = new DnfCloudAuthSuccess;
+                    success->expireTime = cloudExpTime;
+                    success->cloudServerUrl = cloudServerUrl;
+                    success->licenseKey = normalized;
+                    success->machineId = hwid;
+                    success->cardDuration = duration;
+                    success->manualCheck = manualCheck;
+                    success->requestGeneration = requestGeneration;
+                    success->serverAuthV2 = useServerAuthV2;
+                    success->serverSessionToken = std::move(sessionToken);
                     if (!::PostMessage(hWnd, WM_UPDATE_AUTH_TIME, 0,
                         reinterpret_cast<LPARAM>(success))) {
                         delete success;
@@ -4619,6 +4695,566 @@ static bool DnfPostCloudJson(const std::string& jsonUtf8, std::string& responseU
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
     return ok;
+}
+
+struct DnfHttpEndpointParts {
+    std::wstring host;
+    std::wstring basePath;
+    INTERNET_PORT port = INTERNET_DEFAULT_HTTP_PORT;
+    bool secure = false;
+};
+
+static bool DnfParseHttpEndpoint(const CString& rawEndpoint,
+    DnfHttpEndpointParts& parts)
+{
+    parts = {};
+    CString trimmed(rawEndpoint);
+    trimmed.Trim();
+    if (trimmed.IsEmpty() || trimmed.GetLength() > 2048) return false;
+
+    std::wstring url(trimmed.GetString());
+    URL_COMPONENTS components{};
+    components.dwStructSize = sizeof(components);
+    components.dwSchemeLength = static_cast<DWORD>(-1);
+    components.dwHostNameLength = static_cast<DWORD>(-1);
+    components.dwUserNameLength = static_cast<DWORD>(-1);
+    components.dwPasswordLength = static_cast<DWORD>(-1);
+    components.dwUrlPathLength = static_cast<DWORD>(-1);
+    components.dwExtraInfoLength = static_cast<DWORD>(-1);
+    if (!WinHttpCrackUrl(url.data(), static_cast<DWORD>(url.size()), 0,
+        &components)) {
+        return false;
+    }
+    if ((components.nScheme != INTERNET_SCHEME_HTTP &&
+        components.nScheme != INTERNET_SCHEME_HTTPS) ||
+        components.dwHostNameLength == 0 || components.dwUserNameLength != 0 ||
+        components.dwPasswordLength != 0 || components.dwExtraInfoLength != 0) {
+        return false;
+    }
+
+    parts.secure = components.nScheme == INTERNET_SCHEME_HTTPS;
+    parts.port = components.nPort;
+    parts.host.assign(components.lpszHostName, components.dwHostNameLength);
+    if (components.dwUrlPathLength > 0) {
+        parts.basePath.assign(components.lpszUrlPath, components.dwUrlPathLength);
+    }
+    if (parts.basePath == L"/") parts.basePath.clear();
+    while (!parts.basePath.empty() && parts.basePath.back() == L'/') {
+        parts.basePath.pop_back();
+    }
+    return !parts.host.empty();
+}
+
+static std::wstring DnfJoinHttpPath(const std::wstring& basePath,
+    const wchar_t* route)
+{
+    std::wstring path = basePath;
+    if (route && *route) {
+        if (path.empty()) path = L"/";
+        if (path.back() != L'/') path.push_back(L'/');
+        const wchar_t* cursor = route;
+        while (*cursor == L'/') ++cursor;
+        path.append(cursor);
+    }
+    if (path.empty()) path = L"/";
+    return path;
+}
+
+static bool DnfHttpRequestUtf8(const CString& endpoint,
+    const wchar_t* method, const wchar_t* route, const std::string* body,
+    std::string& responseUtf8, CString& errorMsg, int timeoutMs,
+    DWORD& httpStatus, bool& networkFailure,
+    const std::string* bearerToken = nullptr,
+    const std::string* deviceId = nullptr)
+{
+    responseUtf8.clear();
+    errorMsg.Empty();
+    httpStatus = 0;
+    networkFailure = false;
+
+    DnfHttpEndpointParts parts;
+    if (!DnfParseHttpEndpoint(endpoint, parts)) {
+        errorMsg = L"服务器地址格式无效";
+        return false;
+    }
+
+    HINTERNET session = WinHttpOpen(L"DNF Capture ServerAuth/2",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
+        WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) {
+        networkFailure = true;
+        errorMsg.Format(L"无法创建 HTTP 会话（WinHTTP错误 %lu）", ::GetLastError());
+        return false;
+    }
+    WinHttpSetTimeouts(session, timeoutMs, timeoutMs, timeoutMs, timeoutMs);
+
+    HINTERNET connect = WinHttpConnect(session, parts.host.c_str(), parts.port, 0);
+    if (!connect) {
+        networkFailure = true;
+        const DWORD code = ::GetLastError();
+        errorMsg.Format(L"无法连接服务器（WinHTTP错误 %lu）", code);
+        WinHttpCloseHandle(session);
+        return false;
+    }
+
+    const std::wstring path = DnfJoinHttpPath(parts.basePath, route);
+    const DWORD flags = parts.secure ? WINHTTP_FLAG_SECURE : 0;
+    HINTERNET request = WinHttpOpenRequest(connect, method, path.c_str(),
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+    if (!request) {
+        networkFailure = true;
+        const DWORD code = ::GetLastError();
+        errorMsg.Format(L"无法创建服务器请求（WinHTTP错误 %lu）", code);
+        WinHttpCloseHandle(connect);
+        WinHttpCloseHandle(session);
+        return false;
+    }
+    WinHttpSetTimeouts(request, timeoutMs, timeoutMs, timeoutMs, timeoutMs);
+
+    std::wstring headers = body ?
+        L"Content-Type: application/json\r\nAccept: application/json\r\n" :
+        L"Accept: application/json\r\n";
+    const auto appendHeader = [&](const wchar_t* name,
+        const std::string* value) -> bool {
+        if (!value || value->empty() || value->find('\r') != std::string::npos ||
+            value->find('\n') != std::string::npos) {
+            return value == nullptr || value->empty();
+        }
+        const CString wideValue = CA2W(value->c_str(), CP_UTF8);
+        if (wideValue.IsEmpty()) return false;
+        headers += name;
+        headers += L": ";
+        headers += wideValue.GetString();
+        headers += L"\r\n";
+        return true;
+    };
+    if (bearerToken && !bearerToken->empty()) {
+        const std::string authorization = "Bearer " + *bearerToken;
+        if (!appendHeader(L"Authorization", &authorization)) {
+            errorMsg = L"服务器会话令牌无效";
+            WinHttpCloseHandle(request);
+            WinHttpCloseHandle(connect);
+            WinHttpCloseHandle(session);
+            return false;
+        }
+    }
+    if (deviceId && !appendHeader(L"X-DNF-Device-Id", deviceId)) {
+        errorMsg = L"云端设备标识无效";
+        WinHttpCloseHandle(request);
+        WinHttpCloseHandle(connect);
+        WinHttpCloseHandle(session);
+        return false;
+    }
+    const void* bodyData = body && !body->empty() ? body->data() : nullptr;
+    const DWORD bodyBytes = body ? static_cast<DWORD>(body->size()) : 0;
+    const BOOL sent = WinHttpSendRequest(request, headers.c_str(),
+        static_cast<DWORD>(-1), const_cast<void*>(bodyData), bodyBytes,
+        bodyBytes, 0);
+    if (!sent || !WinHttpReceiveResponse(request, nullptr)) {
+        networkFailure = true;
+        const DWORD code = ::GetLastError();
+        errorMsg.Format(L"服务器请求失败或超时（WinHTTP错误 %lu）", code);
+        WinHttpCloseHandle(request);
+        WinHttpCloseHandle(connect);
+        WinHttpCloseHandle(session);
+        return false;
+    }
+
+    DWORD statusBytes = sizeof(httpStatus);
+    WinHttpQueryHeaders(request,
+        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX, &httpStatus, &statusBytes,
+        WINHTTP_NO_HEADER_INDEX);
+
+    constexpr std::size_t kMaxResponseBytes = 2 * 1024 * 1024;
+    while (true) {
+        DWORD available = 0;
+        if (!WinHttpQueryDataAvailable(request, &available)) {
+            networkFailure = true;
+            errorMsg = L"读取服务器响应失败";
+            break;
+        }
+        if (available == 0) break;
+        if (responseUtf8.size() + available > kMaxResponseBytes) {
+            errorMsg = L"服务器响应超过安全大小限制";
+            break;
+        }
+        const std::size_t offset = responseUtf8.size();
+        responseUtf8.resize(offset + available);
+        DWORD downloaded = 0;
+        if (!WinHttpReadData(request, responseUtf8.data() + offset,
+            available, &downloaded)) {
+            networkFailure = true;
+            errorMsg = L"读取服务器响应内容失败";
+            responseUtf8.clear();
+            break;
+        }
+        responseUtf8.resize(offset + downloaded);
+        if (downloaded == 0) break;
+    }
+
+    WinHttpCloseHandle(request);
+    WinHttpCloseHandle(connect);
+    WinHttpCloseHandle(session);
+    return !networkFailure && !errorMsg.IsEmpty() ? false : !networkFailure;
+}
+
+static bool DnfValidateServerUrlText(const std::string& value,
+    CString& normalized)
+{
+    if (value.empty() || value.size() > 2048 || value.find('\0') != std::string::npos) {
+        return false;
+    }
+    normalized = CA2W(value.c_str(), CP_UTF8);
+    normalized.Trim();
+    DnfHttpEndpointParts parts;
+    const bool valid = !normalized.IsEmpty() &&
+        DnfParseHttpEndpoint(normalized, parts);
+    if (!valid) normalized.Empty();
+    return valid;
+}
+
+static bool DnfFetchServerEndpointManifest(const CString& manifestUrl,
+    CString& endpoint, CString& errorMsg)
+{
+    endpoint.Empty();
+    errorMsg.Empty();
+    std::string response;
+    DWORD status = 0;
+    bool networkFailure = false;
+    if (!DnfHttpRequestUtf8(manifestUrl, L"GET", L"", nullptr, response,
+        errorMsg, 6000, status, networkFailure)) {
+        if (errorMsg.IsEmpty()) errorMsg = L"无法读取服务器地址清单";
+        return false;
+    }
+    if (status < 200 || status >= 300) {
+        errorMsg.Format(L"服务器地址清单返回 HTTP %lu", status);
+        return false;
+    }
+    const json manifest = json::parse(response, nullptr, false);
+    if (manifest.is_discarded() || !manifest.is_object()) {
+        errorMsg = L"服务器地址清单不是有效 JSON";
+        return false;
+    }
+    const auto value = manifest.find("cloudServerUrl");
+    if (value == manifest.end() || !value->is_string() ||
+        !DnfValidateServerUrlText(value->get<std::string>(), endpoint)) {
+        errorMsg = L"服务器地址清单缺少有效 cloudServerUrl";
+        return false;
+    }
+    return true;
+}
+
+static bool DnfCheckServerV2Binding(const CString& endpoint,
+    const CString& manifestUrl, const CString& key, const CString& deviceId,
+    long long duration, long long& outExpTime, CString& outCloudServerUrl,
+    std::string& outSessionToken, CString& errorMsg, bool& networkFailure)
+{
+    outExpTime = 0;
+    outCloudServerUrl.Empty();
+    outSessionToken.clear();
+    errorMsg.Empty();
+    networkFailure = false;
+
+    CString activeEndpoint(endpoint);
+    activeEndpoint.Trim();
+    bool manifestTried = false;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (activeEndpoint.IsEmpty()) {
+            if (manifestTried || !DnfFetchServerEndpointManifest(manifestUrl,
+                activeEndpoint, errorMsg)) {
+                networkFailure = true;
+                return false;
+            }
+            manifestTried = true;
+        }
+
+        json request;
+        request["key"] = std::string(CW2A(key, CP_UTF8));
+        request["deviceId"] = std::string(CW2A(deviceId, CP_UTF8));
+        request["clientVersion"] = std::string(CW2A(CURRENT_VERSION, CP_UTF8));
+        const std::string requestBody = request.dump();
+        std::string response;
+        DWORD status = 0;
+        bool requestNetworkFailure = false;
+        CString requestError;
+        const bool transportOk = DnfHttpRequestUtf8(activeEndpoint, L"POST",
+            L"/api/v2/auth/activate", &requestBody, response, requestError,
+            8000, status, requestNetworkFailure);
+        if (!transportOk) {
+            if (!manifestTried) {
+                CString manifestEndpoint;
+                CString manifestError;
+                if (DnfFetchServerEndpointManifest(manifestUrl,
+                    manifestEndpoint, manifestError)) {
+                    activeEndpoint = manifestEndpoint;
+                    manifestTried = true;
+                    continue;
+                }
+                errorMsg = requestError + L"；地址清单回源失败：" + manifestError;
+            }
+            else {
+                errorMsg = requestError;
+            }
+            networkFailure = requestNetworkFailure;
+            return false;
+        }
+
+        const json reply = json::parse(response, nullptr, false);
+        if (reply.is_discarded() || !reply.is_object() ||
+            !reply.value("ok", false)) {
+            const std::string message = reply.is_object() ?
+                reply.value("code", "授权失败") : "服务器响应不是有效 JSON";
+            const CString messageText = CA2W(message.c_str(), CP_UTF8);
+            errorMsg = L"服务器授权失败：" + messageText;
+            networkFailure = false;
+            return false;
+        }
+        const auto serverUrl = reply.find("cloudServerUrl");
+        const auto token = reply.find("sessionToken");
+        if (serverUrl == reply.end() || !serverUrl->is_string() ||
+            token == reply.end() || !token->is_string() || token->get<std::string>().empty() ||
+            !DnfValidateServerUrlText(serverUrl->get<std::string>(), outCloudServerUrl)) {
+            errorMsg = L"服务器授权响应缺少有效地址或会话令牌";
+            networkFailure = false;
+            return false;
+        }
+        outSessionToken = token->get<std::string>();
+        if (reply.contains("licenseExpiresAt") &&
+            (reply["licenseExpiresAt"].is_number_integer() ||
+                reply["licenseExpiresAt"].is_number_unsigned())) {
+            outExpTime = reply["licenseExpiresAt"].get<long long>();
+        }
+        else if (duration == 0xFFFFFFFF) {
+            outExpTime = 0xFFFFFFFF;
+        }
+        return true;
+    }
+    networkFailure = true;
+    errorMsg = L"服务器地址回源失败";
+    return false;
+}
+
+static bool DnfReadV2Revision(const json& value, std::uint64_t& revision)
+{
+    revision = 0;
+    const auto found = value.find("revision");
+    if (found == value.end()) return true;
+    if (found->is_number_unsigned()) {
+        revision = found->get<std::uint64_t>();
+        return true;
+    }
+    if (found->is_number_integer()) {
+        const auto signedValue = found->get<std::int64_t>();
+        if (signedValue < 0) return false;
+        revision = static_cast<std::uint64_t>(signedValue);
+        return true;
+    }
+    return false;
+}
+
+static bool DnfConvertV2LibraryToLegacyAliasDb(const json& reply,
+    std::string& publicAliasDbJson, std::uint64_t* outRevision,
+    CString& errorMsg)
+{
+    publicAliasDbJson.clear();
+    errorMsg.Empty();
+    if (!reply.is_object() || !reply.value("ok", false) ||
+        !reply.contains("entities") || !reply["entities"].is_array() ||
+        reply["entities"].size() > 10000) {
+        errorMsg = L"测试服公共游戏ID库响应格式异常。";
+        return false;
+    }
+
+    std::uint64_t revision = 0;
+    if (!DnfReadV2Revision(reply, revision)) {
+        errorMsg = L"测试服公共游戏ID库版本号无效。";
+        return false;
+    }
+
+    json players = json::object();
+    std::set<std::string> namesSeen;
+    for (const auto& entity : reply["entities"]) {
+        if (!entity.is_object() || !entity.contains("names") ||
+            !entity["names"].is_array() || entity["names"].empty() ||
+            entity["names"].size() > 32 || !entity.contains("gameIds") ||
+            !entity["gameIds"].is_array() || entity["gameIds"].size() > 256) {
+            errorMsg = L"测试服公共游戏ID库包含无效选手实体。";
+            return false;
+        }
+
+        json gameIds = json::array();
+        std::set<std::string> idsSeen;
+        for (const auto& id : entity["gameIds"]) {
+            if (!id.is_string()) {
+                errorMsg = L"测试服公共游戏ID库包含无效游戏ID。";
+                return false;
+            }
+            std::string value = id.get<std::string>();
+            if (value.empty() || value.size() > 128 ||
+                value.find('\0') != std::string::npos) {
+                errorMsg = L"测试服公共游戏ID长度无效。";
+                return false;
+            }
+            std::string normalized = value;
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (idsSeen.insert(normalized).second) gameIds.push_back(value);
+        }
+
+        for (const auto& nameValue : entity["names"]) {
+            if (!nameValue.is_string()) {
+                errorMsg = L"测试服公共游戏ID库包含无效选手名称。";
+                return false;
+            }
+            const std::string name = nameValue.get<std::string>();
+            if (name.empty() || name.size() > 128 ||
+                name.find('\0') != std::string::npos) {
+                errorMsg = L"测试服公共游戏ID库包含无效选手名称。";
+                return false;
+            }
+            std::string normalizedName = name;
+            std::transform(normalizedName.begin(), normalizedName.end(),
+                normalizedName.begin(), [](unsigned char c) {
+                    return static_cast<char>(std::tolower(c));
+                });
+            if (!namesSeen.insert(normalizedName).second) {
+                errorMsg = L"测试服公共游戏ID库包含重复选手名称。";
+                return false;
+            }
+            players[name] = gameIds;
+        }
+    }
+
+    json legacy;
+    legacy["players"] = std::move(players);
+    publicAliasDbJson = legacy.dump();
+    if (publicAliasDbJson.size() > 512 * 1024) {
+        publicAliasDbJson.clear();
+        errorMsg = L"测试服公共游戏ID库超过本地安全大小限制。";
+        return false;
+    }
+    if (outRevision) *outRevision = revision;
+    return true;
+}
+
+static bool DnfFetchV2PublicAliasDb(const CString& endpoint,
+    const std::string& sessionToken, const std::string& deviceId,
+    std::string& publicAliasDbJson, CString& errorMsg,
+    std::uint64_t* outRevision, bool* outAppendSupported)
+{
+    publicAliasDbJson.clear();
+    errorMsg.Empty();
+    if (outAppendSupported) *outAppendSupported = false;
+    if (endpoint.IsEmpty() || sessionToken.empty() || deviceId.empty()) {
+        errorMsg = L"测试服授权会话未就绪。";
+        return false;
+    }
+
+    std::string response;
+    DWORD status = 0;
+    bool networkFailure = false;
+    if (!DnfHttpRequestUtf8(endpoint, L"GET", L"/api/v2/player-library",
+        nullptr, response, errorMsg, DNF_ALIAS_DB_REQUEST_TIMEOUT_MS,
+        status, networkFailure, &sessionToken, &deviceId)) {
+        if (errorMsg.IsEmpty()) errorMsg = L"测试服公共库请求失败或超时。";
+        return false;
+    }
+    const json reply = json::parse(response, nullptr, false);
+    if (reply.is_discarded() || status < 200 || status >= 300 ||
+        !reply.value("ok", false)) {
+        const std::string code = reply.is_object() ?
+            reply.value("code", "公共库请求失败") : "服务器响应不是有效 JSON";
+        const CString codeText = CA2W(code.c_str(), CP_UTF8);
+        errorMsg = L"测试服公共库请求失败：" + codeText;
+        return false;
+    }
+    if (outAppendSupported) {
+        *outAppendSupported = reply.value("aliasAppendSupported", false);
+    }
+    return DnfConvertV2LibraryToLegacyAliasDb(reply, publicAliasDbJson,
+        outRevision, errorMsg);
+}
+
+static bool DnfSubmitV2PlayerLibrary(const CString& endpoint,
+    const std::string& sessionToken, const std::string& deviceId,
+    const std::string& aliasDbPayload, CString& resultMessage)
+{
+    resultMessage.Empty();
+    if (endpoint.IsEmpty() || sessionToken.empty() || deviceId.empty()) {
+        resultMessage = L"测试服授权会话未就绪。";
+        return false;
+    }
+
+    const json legacy = json::parse(aliasDbPayload, nullptr, false);
+    if (legacy.is_discarded() || !legacy.is_object()) {
+        resultMessage = L"本地游戏ID库格式无效。";
+        return false;
+    }
+    const json players = legacy.contains("players") ?
+        legacy["players"] : legacy;
+    if (!players.is_object()) {
+        resultMessage = L"本地游戏ID库格式无效。";
+        return false;
+    }
+
+    json entities = json::array();
+    for (const auto& item : players.items()) {
+        if (item.key().empty() || item.key().size() > 128) continue;
+        std::vector<std::string> ids;
+        if (item.value().is_array()) {
+            for (const auto& value : item.value()) {
+                if (value.is_string()) ids.push_back(value.get<std::string>());
+            }
+        }
+        else if (item.value().is_string()) {
+            const CString listText = CA2W(item.value().get<std::string>().c_str(), CP_UTF8);
+            for (const auto& id : DnfParseAliasListString(listText)) {
+                ids.emplace_back(CW2A(id, CP_UTF8));
+            }
+        }
+        if (ids.empty()) continue;
+        json entity;
+        entity["names"] = json::array({ item.key() });
+        entity["gameIds"] = std::move(ids);
+        entity["adventureGroupIds"] = json::array();
+        entities.push_back(std::move(entity));
+        if (entities.size() > 10000) {
+            resultMessage = L"本地游戏ID库选手数量超过测试服限制。";
+            return false;
+        }
+    }
+
+    json requestBody;
+    requestBody["entities"] = std::move(entities);
+    const std::string body = requestBody.dump();
+    if (body.size() > 256 * 1024) {
+        resultMessage = L"本地游戏ID库超过测试服安全大小限制。";
+        return false;
+    }
+
+    std::string response;
+    DWORD status = 0;
+    bool networkFailure = false;
+    if (!DnfHttpRequestUtf8(endpoint, L"POST", L"/api/v2/player-library/submit",
+        &body, response, resultMessage, DNF_ALIAS_DB_REQUEST_TIMEOUT_MS,
+        status, networkFailure, &sessionToken, &deviceId)) {
+        if (resultMessage.IsEmpty()) resultMessage = L"测试服投稿请求失败或超时。";
+        return false;
+    }
+    const json reply = json::parse(response, nullptr, false);
+    if (reply.is_discarded() || status < 200 || status >= 300 ||
+        !reply.value("ok", false)) {
+        const std::string code = reply.is_object() ?
+            reply.value("code", "投稿失败") : "服务器响应不是有效 JSON";
+        const CString codeText = CA2W(code.c_str(), CP_UTF8);
+        resultMessage = L"测试服投稿失败：" + codeText;
+        return false;
+    }
+    const std::string state = reply.value("status", "pending_review");
+    resultMessage = state == "pending_review" ?
+        L"已提交测试服审核区，等待管理员审核" : L"测试服投稿已接收";
+    return true;
 }
 
 static bool DnfFetchPublicAliasDb(const CString& key, const CString& hwid,
@@ -5582,10 +6218,17 @@ void CDNFGameCaptureDlg::StartManualAliasDbSync(bool pull,
     const CString hwid = GetMachineID();
     const std::string keyUtf8 = std::string(CW2A(key, CP_UTF8));
     const std::string hwidUtf8 = std::string(CW2A(hwid, CP_UTF8));
+    const bool useServerAuthV2 = m_cloudServerAuthV2;
+    const CString serverEndpoint = m_cloudMatchServerUrl;
+    const std::string serverSessionToken = m_cloudServerSessionToken;
+    const std::string serverDeviceId = m_cloudMatchDeviceId;
     std::string submitRequest;
     int containedNakedAliasCount = 0;
 
-    if (!pull && !keyUtf8.empty() && !hwidUtf8.empty()) {
+    const bool canBuildV2Request = useServerAuthV2 && !serverEndpoint.IsEmpty() &&
+        !serverSessionToken.empty() && !serverDeviceId.empty();
+    if (!pull && ((!useServerAuthV2 && !keyUtf8.empty() && !hwidUtf8.empty()) ||
+        canBuildV2Request)) {
         try {
             int filteredMainCount = mainCount;
             int filteredPairCount = pairCount;
@@ -5606,15 +6249,20 @@ void CDNFGameCaptureDlg::StartManualAliasDbSync(bool pull,
 
             DnfLogAliasPushDiff(m_aliasCloudBaselinePlayers,
                 filteredAliasDbPayload, containedNakedAliasCount);
-            json request;
-            request["action"] = "submit_alias_db";
-            request["key"] = keyUtf8;
-            request["hwid"] = hwidUtf8;
-            request["clientVersion"] = std::string(CW2A(CURRENT_VERSION, CP_UTF8));
-            request["snapshotMode"] = "full";
-            request["deleteScopeMainNames"] = BuildAliasCloudDeleteScopeJson();
-            request["aliasDB"] = json::parse(filteredAliasDbPayload);
-            submitRequest = request.dump();
+            if (useServerAuthV2) {
+                submitRequest = filteredAliasDbPayload;
+            }
+            else {
+                json request;
+                request["action"] = "submit_alias_db";
+                request["key"] = keyUtf8;
+                request["hwid"] = hwidUtf8;
+                request["clientVersion"] = std::string(CW2A(CURRENT_VERSION, CP_UTF8));
+                request["snapshotMode"] = "full";
+                request["deleteScopeMainNames"] = BuildAliasCloudDeleteScopeJson();
+                request["aliasDB"] = json::parse(filteredAliasDbPayload);
+                submitRequest = request.dump();
+            }
         }
         catch (const std::exception& e) {
             m_aliasManualSyncInFlight = false;
@@ -5637,26 +6285,38 @@ void CDNFGameCaptureDlg::StartManualAliasDbSync(bool pull,
 
     try {
         std::thread([notifyWindow, lifetime, generation, pull, keyUtf8,
-            hwidUtf8, submitRequest, containedNakedAliasCount]() {
+            hwidUtf8, submitRequest, containedNakedAliasCount, useServerAuthV2,
+            serverEndpoint, serverSessionToken, serverDeviceId]() {
             auto result = std::make_unique<DnfManualAliasDbSyncResult>();
             result->generation = generation;
             result->lifetime = lifetime;
             result->pull = pull;
 
-            if (keyUtf8.empty()) {
+            if (!useServerAuthV2 && keyUtf8.empty()) {
                 result->message = pull ?
                     L"请先输入并验证授权卡密，再同步云端库。" :
                     L"请先输入并验证授权卡密，再上传共享游戏ID库。";
             }
-            else if (hwidUtf8.empty()) {
+            else if (!useServerAuthV2 && hwidUtf8.empty()) {
                 result->message = L"无法获取本机机器码，云端操作已取消。";
             }
+            else if (useServerAuthV2 && (serverEndpoint.IsEmpty() ||
+                serverSessionToken.empty() || serverDeviceId.empty())) {
+                result->message = L"测试服授权会话未就绪，请重新验证授权。";
+            }
             else if (pull) {
-                const CString key = CA2W(keyUtf8.c_str(), CP_UTF8);
-                const CString hwid = CA2W(hwidUtf8.c_str(), CP_UTF8);
                 CString error;
-                result->ok = DnfFetchPublicAliasDb(key, hwid,
-                    result->publicAliasDbJson, error);
+                if (useServerAuthV2) {
+                    result->ok = DnfFetchV2PublicAliasDb(serverEndpoint,
+                        serverSessionToken, serverDeviceId,
+                        result->publicAliasDbJson, error);
+                }
+                else {
+                    const CString key = CA2W(keyUtf8.c_str(), CP_UTF8);
+                    const CString hwid = CA2W(hwidUtf8.c_str(), CP_UTF8);
+                    result->ok = DnfFetchPublicAliasDb(key, hwid,
+                        result->publicAliasDbJson, error);
+                }
                 result->message = result->ok ?
                     L"公共游戏ID库已拉取，正在合并到本地。" : error;
                 if (result->ok && lifetime->load(std::memory_order_acquire)) {
@@ -5665,9 +6325,16 @@ void CDNFGameCaptureDlg::StartManualAliasDbSync(bool pull,
                 }
             }
             else {
-                result->message = DnfSubmitAliasDbRequest(
-                    submitRequest, containedNakedAliasCount);
-                result->ok = result->message.Find(L"成功") >= 0;
+                if (useServerAuthV2) {
+                    result->ok = DnfSubmitV2PlayerLibrary(serverEndpoint,
+                        serverSessionToken, serverDeviceId, submitRequest,
+                        result->message);
+                }
+                else {
+                    result->message = DnfSubmitAliasDbRequest(
+                        submitRequest, containedNakedAliasCount);
+                    result->ok = result->message.Find(L"成功") >= 0;
+                }
                 if (lifetime->load(std::memory_order_acquire)) {
                     DnfPostCloudProgress(notifyWindow, "alias_manual",
                         result->ok ? "complete" : "failed", 92,
@@ -13680,15 +14347,28 @@ void CDNFGameCaptureDlg::StartAliasDbAutoSyncAttempt()
     const std::string payloadHash = DnfAliasAutoSyncHash(
         localPayloadEmpty ? std::string() : aliasPayload);
     const std::string previousPushHash = m_aliasAutoSyncLastPushHash;
+    const bool useServerAuthV2 = m_cloudServerAuthV2;
+    const CString serverEndpoint = m_cloudMatchServerUrl;
+    const std::string serverSessionToken = m_cloudServerSessionToken;
+    const std::string serverDeviceId = m_cloudMatchDeviceId;
     const CString key = DnfReadLocalLicenseKey();
     const CString hwid = GetMachineID();
-    if (key.IsEmpty() || hwid.IsEmpty()) {
+    const bool v2SessionReady = !serverEndpoint.IsEmpty() &&
+        !serverSessionToken.empty() && !serverDeviceId.empty();
+    const bool legacyIdentityReady = !key.IsEmpty() && !hwid.IsEmpty();
+    if ((useServerAuthV2 && !v2SessionReady) ||
+        (!useServerAuthV2 && !legacyIdentityReady)) {
         m_aliasAutoSyncAttemptedThisRun = true;
         m_aliasAutoSyncLastPushStatus = L"failed";
-        m_aliasAutoSyncLastPushMessage = key.IsEmpty() ?
-            L"授权未就绪，自动同步已跳过" : L"无法获取本机机器码";
+        m_aliasAutoSyncLastPushMessage = useServerAuthV2 ?
+            L"测试服授权会话未就绪，自动同步已跳过" :
+            (key.IsEmpty() ? L"授权未就绪，自动同步已跳过" :
+                L"无法获取本机机器码");
         m_aliasAutoSyncLastPullStatus = L"failed";
         m_aliasAutoSyncLastPullMessage = m_aliasAutoSyncLastPushMessage;
+        AppLog(L"⚠️ [自动游戏ID库] " + m_aliasAutoSyncLastPushMessage,
+            RGB(255, 190, 80));
+        WriteMatchLog(L"[自动游戏ID库] 授权会话未就绪，本次不重试，下次启动再试。");
         BroadcastStateToWeb();
         return;
     }
@@ -13722,7 +14402,8 @@ void CDNFGameCaptureDlg::StartAliasDbAutoSyncAttempt()
     try {
         std::thread([notifyWindow, lifetime, generation, keyUtf8, hwidUtf8,
             clientVersion, aliasPayload, localPayloadEmpty, payloadHash,
-            previousPushHash]() {
+            previousPushHash, useServerAuthV2, serverEndpoint,
+            serverSessionToken, serverDeviceId]() {
             auto postProgress = [&](int progress, const char* phase,
                 const char* message, bool indeterminate = false) {
                 if (!lifetime->load(std::memory_order_acquire)) return;
@@ -13754,48 +14435,67 @@ void CDNFGameCaptureDlg::StartAliasDbAutoSyncAttempt()
 
             try {
                 postProgress(20, "connect", "正在请求公共游戏ID库", true);
-                json getRequest;
-                getRequest["action"] = "get_public_alias_db";
-                getRequest["key"] = keyUtf8;
-                getRequest["hwid"] = hwidUtf8;
-
-                std::string getResponse;
                 CString getError;
-                if (!DnfPostCloudJson(getRequest.dump(), getResponse,
-                    getError, DNF_ALIAS_DB_REQUEST_TIMEOUT_MS)) {
-                    result->errorMessage = std::string(CW2A(getError, CP_UTF8));
-                    result->pullMessage = result->errorMessage;
-                    postResult(result.release());
-                    return;
+                if (useServerAuthV2) {
+                    result->pullOk = DnfFetchV2PublicAliasDb(
+                        serverEndpoint, serverSessionToken, serverDeviceId,
+                        result->publicAliasDbJson, getError, nullptr,
+                        &result->appendSupported);
+                    result->pullMessage = result->pullOk ?
+                        "测试服公共库拉取成功" :
+                        std::string(CW2A(getError, CP_UTF8));
+                    if (!result->pullOk && result->pullMessage.empty()) {
+                        result->pullMessage = "测试服公共库请求失败";
+                    }
                 }
+                else {
+                    json getRequest;
+                    getRequest["action"] = "get_public_alias_db";
+                    getRequest["key"] = keyUtf8;
+                    getRequest["hwid"] = hwidUtf8;
 
-                const json getReply = json::parse(getResponse, nullptr, false);
-                if (getReply.is_discarded() ||
-                    getReply.value("status", "error") != "ok" ||
-                    !getReply.contains("publicAliasDB") ||
-                    !getReply["publicAliasDB"].is_object() ||
-                    !getReply["publicAliasDB"].contains("players") ||
-                    !getReply["publicAliasDB"]["players"].is_object()) {
-                    result->errorMessage = getReply.is_discarded() ?
-                        "公共库响应不是有效 JSON" :
-                        getReply.value("msg", "公共库响应无效");
-                    result->pullMessage = result->errorMessage;
-                    postResult(result.release());
-                    return;
-                }
+                    std::string getResponse;
+                    if (!DnfPostCloudJson(getRequest.dump(), getResponse,
+                        getError, DNF_ALIAS_DB_REQUEST_TIMEOUT_MS)) {
+                        result->errorMessage = std::string(CW2A(getError, CP_UTF8));
+                        result->pullMessage = result->errorMessage;
+                        postResult(result.release());
+                        return;
+                    }
 
-                result->publicAliasDbJson =
-                    getReply["publicAliasDB"].dump();
-                if (result->publicAliasDbJson.size() > 512 * 1024) {
-                    result->errorMessage = "公共库响应超过本地安全大小限制";
-                    result->pullMessage = result->errorMessage;
+                    const json getReply = json::parse(getResponse, nullptr, false);
+                    if (getReply.is_discarded() ||
+                        getReply.value("status", "error") != "ok" ||
+                        !getReply.contains("publicAliasDB") ||
+                        !getReply["publicAliasDB"].is_object() ||
+                        !getReply["publicAliasDB"].contains("players") ||
+                        !getReply["publicAliasDB"]["players"].is_object()) {
+                        result->errorMessage = getReply.is_discarded() ?
+                            "公共库响应不是有效 JSON" :
+                            getReply.value("msg", "公共库响应无效");
+                        result->pullMessage = result->errorMessage;
+                        postResult(result.release());
+                        return;
+                    }
+
+                    result->publicAliasDbJson =
+                        getReply["publicAliasDB"].dump();
+                    if (result->publicAliasDbJson.size() > 512 * 1024) {
+                        result->errorMessage = "公共库响应超过本地安全大小限制";
+                        result->pullMessage = result->errorMessage;
+                        postResult(result.release());
+                        return;
+                    }
+                    result->pullOk = true;
+                    result->appendSupported =
+                        getReply.value("aliasAppendSupported", false);
+                    result->pullMessage = getReply.value("msg", "公共库拉取成功");
+                }
+                if (!result->pullOk) {
+                    result->errorMessage = result->pullMessage;
                     postResult(result.release());
                     return;
                 }
-                result->pullOk = true;
-                result->appendSupported =
-                    getReply.value("aliasAppendSupported", false);
-                result->pullMessage = getReply.value("msg", "公共库拉取成功");
                 postProgress(52, "validate", "公共库已收到，正在校验数据");
 
                 if (localPayloadEmpty) {
@@ -13811,42 +14511,56 @@ void CDNFGameCaptureDlg::StartAliasDbAutoSyncAttempt()
                 }
                 else {
                     postProgress(72, "push", "正在提交本地新增游戏ID（待审核）", true);
-                    json pushRequest;
-                    pushRequest["action"] = "submit_alias_db";
-                    pushRequest["appendOnly"] = true;
-                    pushRequest["key"] = keyUtf8;
-                    pushRequest["hwid"] = hwidUtf8;
-                    pushRequest["clientVersion"] = clientVersion;
-                    pushRequest["aliasDB"] = json::parse(aliasPayload);
                     result->pushAttempted = true;
-
-                    std::string pushResponse;
-                    CString pushError;
-                    if (!DnfPostCloudJson(pushRequest.dump(), pushResponse,
-                        pushError, DNF_ALIAS_DB_REQUEST_TIMEOUT_MS)) {
-                        result->pushMessage = std::string(CW2A(pushError, CP_UTF8));
+                    if (useServerAuthV2) {
+                        CString pushError;
+                        result->pushOk = DnfSubmitV2PlayerLibrary(
+                            serverEndpoint, serverSessionToken, serverDeviceId,
+                            aliasPayload, pushError);
+                        result->pushMessage = std::string(CW2A(
+                            pushError, CP_UTF8));
+                        if (result->pushMessage.empty()) {
+                            result->pushMessage = result->pushOk ?
+                                "已提交测试服审核区" : "测试服投稿失败";
+                        }
                     }
                     else {
-                        const json pushReply = json::parse(pushResponse,
-                            nullptr, false);
-                        if (!pushReply.is_discarded() &&
-                            pushReply.value("status", "error") == "ok" &&
-                            pushReply.value("aliasSubmit", false) &&
-                            pushReply.value("aliasAppend", false)) {
-                            result->pushOk = true;
-                            result->pushMessage =
-                                pushReply.value("msg", "已提交待审核");
-                        }
-                        else if (!pushReply.is_discarded() &&
-                            pushReply.value("status", "error") == "ok" &&
-                            !pushReply.value("aliasAppend", false)) {
-                            result->appendSupported = false;
-                            result->pushMessage = "云函数需更新，已禁止自动上传";
+                        json pushRequest;
+                        pushRequest["action"] = "submit_alias_db";
+                        pushRequest["appendOnly"] = true;
+                        pushRequest["key"] = keyUtf8;
+                        pushRequest["hwid"] = hwidUtf8;
+                        pushRequest["clientVersion"] = clientVersion;
+                        pushRequest["aliasDB"] = json::parse(aliasPayload);
+
+                        std::string pushResponse;
+                        CString pushError;
+                        if (!DnfPostCloudJson(pushRequest.dump(), pushResponse,
+                            pushError, DNF_ALIAS_DB_REQUEST_TIMEOUT_MS)) {
+                            result->pushMessage = std::string(CW2A(pushError, CP_UTF8));
                         }
                         else {
-                            result->pushMessage = pushReply.is_discarded() ?
-                                "自动投稿响应不是有效 JSON" :
-                                pushReply.value("msg", "自动投稿失败");
+                            const json pushReply = json::parse(pushResponse,
+                                nullptr, false);
+                            if (!pushReply.is_discarded() &&
+                                pushReply.value("status", "error") == "ok" &&
+                                pushReply.value("aliasSubmit", false) &&
+                                pushReply.value("aliasAppend", false)) {
+                                result->pushOk = true;
+                                result->pushMessage =
+                                    pushReply.value("msg", "已提交待审核");
+                            }
+                            else if (!pushReply.is_discarded() &&
+                                pushReply.value("status", "error") == "ok" &&
+                                !pushReply.value("aliasAppend", false)) {
+                                result->appendSupported = false;
+                                result->pushMessage = "云函数需更新，已禁止自动上传";
+                            }
+                            else {
+                                result->pushMessage = pushReply.is_discarded() ?
+                                    "自动投稿响应不是有效 JSON" :
+                                    pushReply.value("msg", "自动投稿失败");
+                            }
                         }
                     }
                 }
@@ -16580,6 +17294,7 @@ void CDNFGameCaptureDlg::DisableCloudMatchForAuthorization(const CString& reason
     m_cloudMatchSyncWasConnected = false;
     m_cloudMatchDisplayInitialized = false;
     m_cloudMatchUsingLicenseLease = false;
+    m_cloudServerSessionToken.clear();
     m_cloudMatchLeaseRefreshAttempted = false;
     m_cloudMatchLeaseRefreshInFlight = false;
     m_cloudMatchLeaseDisconnectedSinceTick = 0;
@@ -16594,6 +17309,30 @@ void CDNFGameCaptureDlg::LoadCloudMatchSettings()
 {
     wchar_t text[1024] = {};
     m_cloudMatchServerUrl.Empty();
+    m_cloudServerLastKnownUrl.Empty();
+    m_cloudEndpointManifestUrl = DNF_CLOUD_ENDPOINT_MANIFEST_URL;
+    m_cloudServerAuthV2 = GetPrivateProfileInt(
+        L"CloudMatch", L"ServerAuthV2", 0, m_iniPath) != 0;
+    ::GetPrivateProfileString(L"CloudMatch", L"EndpointManifestUrl",
+        DNF_CLOUD_ENDPOINT_MANIFEST_URL, text,
+        static_cast<DWORD>(std::size(text)), m_iniPath);
+    m_cloudEndpointManifestUrl = text;
+    m_cloudEndpointManifestUrl.Trim();
+    if (m_cloudEndpointManifestUrl.IsEmpty()) {
+        m_cloudEndpointManifestUrl = DNF_CLOUD_ENDPOINT_MANIFEST_URL;
+    }
+    ::SecureZeroMemory(text, sizeof(text));
+    if (m_cloudServerAuthV2) {
+        ::GetPrivateProfileString(L"CloudMatch", L"LastKnownServerUrl", L"", text,
+            static_cast<DWORD>(std::size(text)), m_iniPath);
+        CString candidate = text;
+        candidate.Trim();
+        CString normalized;
+        if (DnfValidateServerUrlText(std::string(CW2A(candidate, CP_UTF8)), normalized)) {
+            m_cloudServerLastKnownUrl = normalized;
+        }
+        ::SecureZeroMemory(text, sizeof(text));
+    }
     if (!::WritePrivateProfileString(L"CloudMatch", L"ServerUrl", nullptr, m_iniPath)) {
         WriteMatchLog(L"[云端连接] 无法删除旧版 ServerUrl 配置；本次运行仍不会读取该地址。");
     }
@@ -16699,6 +17438,11 @@ bool CDNFGameCaptureDlg::SaveCloudMatchSettingsForRoomIdentity(
 
     writeSetting(L"RoomId", roomId);
     writeSetting(L"BroadcasterName", broadcasterNameOverride);
+    writeSetting(L"ServerAuthV2", m_cloudServerAuthV2 ? L"1" : L"0");
+    writeSetting(L"EndpointManifestUrl", m_cloudEndpointManifestUrl);
+    if (m_cloudServerAuthV2) {
+        writeSetting(L"LastKnownServerUrl", m_cloudServerLastKnownUrl);
+    }
     CString revision;
     revision.Format(L"%llu", static_cast<unsigned long long>(m_cloudMatchClientRevision));
     writeSetting(L"ClientRevision", revision);
@@ -16726,8 +17470,16 @@ void CDNFGameCaptureDlg::StartSavedCloudMatchSession()
 {
     if (!HasAuthorizedCloudMatchEndpoint() ||
         !DnfIsCloudMatchRoomId(m_cloudMatchRoomId) ||
-        m_cloudMatchBroadcasterName.IsEmpty() || m_cloudMatchDeviceId.empty() ||
-        m_cloudMatchDeviceToken.empty()) {
+        m_cloudMatchBroadcasterName.IsEmpty() || m_cloudMatchDeviceId.empty()) {
+        return;
+    }
+
+    // v2 authorization and the legacy Socket.IO identity are deliberately
+    // separate credentials.  A first v2-authorized launch may have the
+    // broadcaster name but no legacy device token yet; register it now so the
+    // user does not need to repeat the connection action.
+    if (m_cloudMatchDeviceToken.empty()) {
+        BeginCloudDeviceRegistration();
         return;
     }
 

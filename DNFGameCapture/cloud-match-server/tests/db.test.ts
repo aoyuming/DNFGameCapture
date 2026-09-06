@@ -23,8 +23,16 @@ describe('openDatabase', () => {
           .prepare('select name from sqlite_master where type = ? and name not like ? order by name')
           .all('table', 'sqlite_%'),
       ).toEqual([
+        { name: 'auth_sessions' },
+        { name: 'broadcaster_policies' },
         { name: 'devices' },
+        { name: 'licenses' },
         { name: 'memberships' },
+        { name: 'player_entities' },
+        { name: 'player_entity_identifiers' },
+        { name: 'player_entity_names' },
+        { name: 'player_library_meta' },
+        { name: 'player_library_submissions' },
         { name: 'rooms' },
         { name: 'snapshot_audit' },
         { name: 'snapshots' },

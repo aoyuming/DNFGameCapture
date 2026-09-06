@@ -668,6 +668,12 @@ private:
     bool m_cloudMatchWebReady = false;
     int m_cloudMatchRegistrationRetryCount = 0;
     bool m_cloudMatchUsingLicenseLease = false;
+    // Opt-in test-server authorization. Production/legacy clients keep the
+    // cloud-function path until the test service is verified.
+    bool m_cloudServerAuthV2 = false;
+    CString m_cloudEndpointManifestUrl;
+    CString m_cloudServerLastKnownUrl;
+    std::string m_cloudServerSessionToken;
     bool m_cloudMatchLeaseRefreshAttempted = false;
     bool m_cloudMatchLeaseRefreshInFlight = false;
     ULONGLONG m_cloudMatchLeaseDisconnectedSinceTick = 0;

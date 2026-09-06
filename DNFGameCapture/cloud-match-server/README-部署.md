@@ -162,3 +162,53 @@ ufw status
 ```
 
 如果服务器本机能访问、Windows 不能访问，通常是阿里云安全组没有开放对应端口，或云服务器还有额外防火墙规则。公网后台请仅允许管理电脑的公网 IP 访问 `18881`。
+
+## 十、先部署完全隔离的测试服
+
+测试服不会读取或修改正式服的数据库、环境文件和 systemd 服务。它使用：
+
+| 项目 | 正式服 | 测试服 |
+|---|---|---|
+| 比赛端口 | 18880 | 28880 |
+| 管理端口 | 18881 | 28881 |
+| 服务名 | `dnf-cloud-match` | `dnf-cloud-match-test` |
+| 数据库 | `/var/lib/dnf-cloud-match/cloud-match.sqlite` | `/var/lib/dnf-cloud-match-test/cloud-match-test.sqlite` |
+| 环境文件 | `/etc/default/dnf-cloud-match` | `/etc/default/dnf-cloud-match-test` |
+
+把 `dnf-cloud-match-server-test-20260906.zip` 上传到服务器后执行：
+
+```bash
+mkdir -p /root/dnf-cloud-match-install-test
+unzip -o /root/dnf-cloud-match-server-test-20260906.zip -d /root/dnf-cloud-match-install-test
+cd /root/dnf-cloud-match-install-test/dnf-cloud-match-server
+chmod +x deploy/install-test.sh
+sudo ./deploy/install-test.sh
+```
+
+测试服健康检查：
+
+```bash
+curl http://127.0.0.1:28880/health
+curl http://127.0.0.1:28881/admin/health
+systemctl status dnf-cloud-match-test --no-pager
+```
+
+测试服后台地址是 `http://<服务器IP>:28881/admin`。请只给自己的公网 IP 开放 28881；28880 需要允许测试客户端访问。测试服的授权卡在后台“授权卡管理”生成，普通客户端投稿会进入“公共选手库审核”，审核后才会出现在公共库。
+
+测试服继续使用简单的 HTTP，不具备 HTTPS 的传输加密；`28881` 只应对管理员自己的 IP 开放，勿把后台端口暴露给公网。测试安装脚本会为测试服务创建独立的 `dnfcloud-test` 系统账号，避免测试进程直接读取正式服务的数据目录。
+
+把 `deploy/endpoint-manifest.test.json` 放到测试 OSS 地址时，客户端只在本地缓存地址连接失败后读取它。授权失败不会触发 OSS 回源，也不会绕过授权。生产 OSS、生产端口和旧云函数在测试阶段均不需要修改。
+
+## 十一、v2 API 摘要
+
+测试客户端使用以下接口：
+
+```text
+POST /api/v2/auth/activate
+POST /api/v2/auth/validate
+GET  /api/v2/player-library
+POST /api/v2/player-library/resolve
+POST /api/v2/player-library/submit
+```
+
+授权响应中的 `cloudServerUrl` 是唯一应缓存的比赛服务器地址；客户端不应从卡密、源码或旧固定地址推断新的测试端口。

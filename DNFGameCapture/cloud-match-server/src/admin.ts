@@ -20,6 +20,17 @@ import {
   buildAdminPage,
 } from './admin-page.js';
 import { deviceIdSchema } from './schemas.js';
+import { generateLicenseKey, isNativeLicenseKey } from './auth.js';
+import {
+  approvePlayerLibrarySubmission,
+  createLicense,
+  getBroadcasterOcrDisabledUntil,
+  listLicenses,
+  listPendingPlayerLibrarySubmissions,
+  listPlayerLibrary,
+  setBroadcasterOcrDisabledUntil,
+  setLicenseDisabled,
+} from './v2-api.js';
 
 export interface AdminSocketController {
   getActiveDeviceIds(): ReadonlySet<string>;
@@ -135,6 +146,9 @@ export function createCloudMatchAdminApp(
     response.json({
       ok: true,
       ...buildAdminState(db, socketController.getActiveDeviceIds(), now(), query),
+      licenses: listLicenses(db),
+      playerLibrary: listPlayerLibrary(db),
+      pendingLibrarySubmissions: listPendingPlayerLibrarySubmissions(db),
     });
   });
 
@@ -148,6 +162,98 @@ export function createCloudMatchAdminApp(
       return;
     }
     next();
+  });
+
+  app.post('/admin/api/licenses', (request, response) => {
+    const body = request.body as Record<string, unknown> | null;
+    const label = typeof body?.label === 'string' ? body.label.trim().slice(0, 128) : '';
+    const expiresAt = body?.expiresAt === null
+      ? null
+      : typeof body?.expiresAt === 'number' && Number.isSafeInteger(body.expiresAt)
+        ? body.expiresAt
+        : null;
+    if (body?.expiresAt !== undefined && body.expiresAt !== null && expiresAt === null) {
+      response.status(400).json({ ok: false, code: 'invalid_expiry' });
+      return;
+    }
+    const suppliedKey = typeof body?.key === 'string' ? body.key.trim() : '';
+    const generatedDuration = expiresAt === null
+      ? 0xFFFFFFFF
+      : Math.max(1, Math.min(0xFFFFFFFF, expiresAt - now()));
+    const key = suppliedKey || generateLicenseKey(generatedDuration);
+    if (suppliedKey && !isNativeLicenseKey(key)) {
+      response.status(400).json({ ok: false, code: 'invalid_license_format' });
+      return;
+    }
+    try {
+      const created = createLicense(db, { key, label, expiresAt, nowSec: now() });
+      response.status(201).json({
+        ok: true,
+        id: created.id,
+        key,
+        label,
+        expiresAt: created.expiresAt,
+      });
+    } catch {
+      response.status(409).json({ ok: false, code: 'license_already_exists' });
+    }
+  });
+
+  app.get('/admin/api/licenses', (_request, response) => {
+    response.json({ ok: true, licenses: listLicenses(db) });
+  });
+
+  app.post('/admin/api/licenses/:licenseId/disable', (request, response) => {
+    const licenseId = Number.parseInt(request.params.licenseId, 10);
+    const disabled = (request.body as Record<string, unknown> | null)?.disabled;
+    if (!Number.isSafeInteger(licenseId) || typeof disabled !== 'boolean') {
+      response.status(400).json({ ok: false, code: 'invalid_request' });
+      return;
+    }
+    const changed = setLicenseDisabled(db, licenseId, disabled ? now() : null, now());
+    if (!changed) {
+      response.status(404).json({ ok: false, code: 'license_not_found' });
+      return;
+    }
+    response.json({ ok: true, disabled });
+  });
+
+  app.get('/admin/api/player-library', (_request, response) => {
+    response.json({ ok: true, ...listPlayerLibrary(db) });
+  });
+
+  app.get('/admin/api/player-library/submissions', (_request, response) => {
+    response.json({ ok: true, submissions: listPendingPlayerLibrarySubmissions(db) });
+  });
+
+  app.post('/admin/api/player-library/submissions/:submissionId/approve', (request, response) => {
+    const submissionId = Number.parseInt(request.params.submissionId, 10);
+    if (!Number.isSafeInteger(submissionId)) {
+      response.status(400).json({ ok: false, code: 'invalid_request' });
+      return;
+    }
+    const result = approvePlayerLibrarySubmission(db, submissionId, now());
+    if (!result.ok) {
+      response.status(result.code === 'submission_not_pending' ? 404 : 409).json(result);
+      return;
+    }
+    response.json(result);
+  });
+
+  app.put('/admin/api/broadcasters/:deviceId/ocr-policy', (request, response) => {
+    const deviceId = safeDeviceId(request.params.deviceId);
+    const disabledUntil = (request.body as Record<string, unknown> | null)?.disabledUntil;
+    if (!deviceId || (disabledUntil !== null &&
+      (typeof disabledUntil !== 'number' || !Number.isSafeInteger(disabledUntil) || disabledUntil < 0))) {
+      response.status(400).json({ ok: false, code: 'invalid_request' });
+      return;
+    }
+    setBroadcasterOcrDisabledUntil(db, deviceId, disabledUntil as number | null, now());
+    response.json({
+      ok: true,
+      deviceId,
+      disabledUntil: getBroadcasterOcrDisabledUntil(db, deviceId),
+    });
   });
 
   app.post('/admin/api/broadcasters/:deviceId/disconnect', (request, response) => {

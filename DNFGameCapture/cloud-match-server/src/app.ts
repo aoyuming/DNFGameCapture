@@ -31,6 +31,7 @@ import {
   initializeSyncRelationSchema,
   pruneSyncRelationData,
 } from './sync-relations.js';
+import { createV2Api } from './v2-api.js';
 
 type DatabaseConnection = ReturnType<typeof openDatabase>;
 
@@ -55,6 +56,7 @@ export interface CreateCloudMatchAppOptions {
   socketRoomAdapter?: SocketRoomAdapter;
   adminCsrfToken?: string;
   adminPassword?: string;
+  v2ServerUrl?: string;
 }
 
 export interface CloudMatchApp {
@@ -134,10 +136,17 @@ export function createCloudMatchApp(
   const io = new SocketIoServer(httpServer, { maxHttpBufferSize: 65_536 });
   let closePromise: Promise<void> | undefined;
 
-  expressApp.use(express.json({ limit: '4kb' }));
   expressApp.get('/health', (_request, response) => {
     response.json({ ok: true });
   });
+  expressApp.use('/api/v2', createV2Api({
+    db,
+    now,
+    serverUrl: options.v2ServerUrl ?? serverConfig.publicUrl,
+  }));
+  // Keep the legacy registration endpoint small, while letting the v2
+  // player-library router enforce its own larger payload limit.
+  expressApp.use(express.json({ limit: '4kb' }));
   expressApp.post('/api/devices/register', (request, response) => {
     const ipAddress = resolveClientIp(
       'http',

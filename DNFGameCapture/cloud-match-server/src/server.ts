@@ -6,7 +6,10 @@ if (!serverConfig.adminPassword) {
   console.error('ADMIN_PASSWORD is required before the server can start.');
   process.exit(1);
 }
-const app = createCloudMatchApp({ adminPassword: serverConfig.adminPassword });
+const app = createCloudMatchApp({
+  adminPassword: serverConfig.adminPassword,
+  v2ServerUrl: serverConfig.publicUrl,
+});
 
 app.httpServer.listen(serverConfig.port, host, () => {
   console.log(`Cloud match server listening on ${host}:${serverConfig.port}`);
