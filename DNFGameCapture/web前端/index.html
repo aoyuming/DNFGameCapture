@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DNF 赛事计分板 - WebView2 版</title>
-    <meta name="dnf-web-layout-version" content="20260829-console-on-demand">
-    <link rel="stylesheet" href="style.css?v=20260829-console-on-demand">
+    <meta name="dnf-web-layout-version" content="20260906-5.1.0-web-startup-progress">
+    <link rel="stylesheet" href="style.css?v=20260906-5.1.0-web-startup-progress">
 </head>
 <body>
 
@@ -86,6 +86,7 @@
                                 <div class="more-controls-title">数据</div>
                                 <button class="ctrl-btn btn-sync-db" id="btn-sync-alias-db">☁ 同步云端库</button>
                                 <button class="ctrl-btn btn-push-db" id="btn-push-alias-db">⬆ 推送本地库</button>
+                                <button class="ctrl-btn btn-identity-groups" id="btn-identity-groups">👥 选手身份与游戏ID</button>
                                 <div class="alias-auto-sync-box" id="alias-auto-sync-box">
                                     <label class="alias-auto-sync-toggle">
                                         <input type="checkbox" id="alias-auto-sync-enabled">
@@ -475,6 +476,44 @@
         </div>
     </div>
 
-    <script src="main.js?v=20260829-console-on-demand" defer></script>
+    <div class="identity-overlay" id="identity-overlay" aria-hidden="true">
+        <section class="identity-panel" role="dialog" aria-modal="true" aria-labelledby="identity-title">
+            <header class="identity-header">
+                <div>
+                    <div class="identity-title" id="identity-title">选手身份与游戏ID</div>
+                    <div class="identity-subtitle">别名可以共用一套游戏ID，场上仍显示实际输入的名称</div>
+                </div>
+                <button class="identity-close" id="btn-identity-close" title="关闭">&times;</button>
+            </header>
+            <div class="identity-notice">归并只修改本地游戏ID库，云端仍按现有同步策略提交。</div>
+            <div class="identity-toolbar">
+                <label class="identity-search" for="identity-search-input">
+                    <span>搜索</span>
+                    <input id="identity-search-input" type="search" placeholder="选手名称或游戏ID">
+                </label>
+                <button class="identity-action primary" id="btn-identity-merge">合并为同一选手</button>
+                <button class="identity-action" id="btn-identity-refresh">刷新</button>
+            </div>
+            <div class="identity-workspace">
+                <aside class="identity-members-pane">
+                    <div class="identity-pane-heading">
+                        <span>选手</span>
+                        <span id="identity-selected-count">已选择 0 个名称</span>
+                    </div>
+                    <div class="identity-member-list" id="identity-member-list"></div>
+                </aside>
+                <section class="identity-details-pane">
+                    <div id="identity-detail-pane"></div>
+                </section>
+            </div>
+            <div class="identity-selection-summary" id="identity-selection-summary" aria-live="polite">
+                <span class="identity-selection-label">当前已选择</span>
+                <span class="identity-selection-names" id="identity-selected-names">暂无选手</span>
+            </div>
+            <section class="identity-suggestions" id="identity-suggestions" hidden></section>
+        </section>
+    </div>
+
+    <script src="main.js?v=20260906-5.1.0-async-name-library" defer></script>
 </body>
 </html>

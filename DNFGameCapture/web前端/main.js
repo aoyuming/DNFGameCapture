@@ -52,6 +52,11 @@ let isDbInitialized = false;
 let isCloudDirectMode = false;
 let cloudDirectToggleLock = false;
 let aliasDbAutoSyncState = null;
+let playerIdentityState = null;
+let identitySelectedNames = new Set();
+let identitySearchQuery = '';
+let identityFocusedName = '';
+let identityExpandedIdGroups = new Set();
 let lastDirectAliasPayload = '';
 let directAliasSyncTimer = null;
 const cloudDirectPressedKeys = new Set();
@@ -64,7 +69,8 @@ let pendingAliasPopoverName = '';
 let pendingAliasPopoverInput = null;
 let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
-const WEB_LAYOUT_VERSION = '20260829-console-on-demand';
+const WEB_LAYOUT_VERSION = '20260906-5.1.0-async-name-library';
+const ALIAS_POPOVER_OFFSET_X = 8;
 const CLOUD_MATCH_WEB_THEMES = new Set([
     'dark-esports', 'frost-broadcast', 'black-gold'
 ]);
@@ -81,6 +87,99 @@ const randomToolState = {
     activeSuggestLine: -1
 };
 let pendingClearAllUntil = 0;
+let autocompleteWorker = null;
+let autocompleteWorkerFailed = false;
+let autocompleteRequestSerial = 0;
+let autocompleteWorkerNamesSignature = '';
+const autocompletePendingRequests = new Map();
+let autocompleteMainNamesCache = [];
+let autocompleteMainNamesCacheDirty = true;
+
+function invalidateAutocompleteNamesCache() {
+    autocompleteMainNamesCacheDirty = true;
+}
+
+function filterAutocompleteNames(names, query, showAll, activeNames) {
+    const cleanQuery = String(query || '').trim();
+    if (!showAll && !cleanQuery) return [];
+    const active = new Set(activeNames || []);
+    return (names || []).filter(name =>
+        !active.has(name) && (!cleanQuery || name.includes(cleanQuery)));
+}
+
+function ensureAutocompleteWorker() {
+    if (autocompleteWorker || autocompleteWorkerFailed || typeof Worker === 'undefined') return autocompleteWorker;
+    try {
+        autocompleteWorker = new Worker('autocomplete-worker.js');
+        autocompleteWorker.onmessage = event => {
+            const message = event?.data || {};
+            if (message.type !== 'matches') return;
+            const requestId = Number(message.requestId || 0);
+            const pending = autocompletePendingRequests.get(requestId);
+            if (!pending) return;
+            autocompletePendingRequests.delete(requestId);
+            pending.callback(Array.isArray(message.matches) ? message.matches : []);
+        };
+        autocompleteWorker.onerror = () => {
+            autocompleteWorkerFailed = true;
+            autocompleteWorker?.terminate?.();
+            autocompleteWorker = null;
+            for (const [requestId, pending] of autocompletePendingRequests) {
+                autocompletePendingRequests.delete(requestId);
+                pending.callback(filterAutocompleteNames(
+                    pending.names, pending.query, pending.showAll, pending.activeNames));
+            }
+        };
+    } catch (error) {
+        autocompleteWorkerFailed = true;
+        console.warn('[选手补全] Worker不可用，使用异步回退', error);
+    }
+    return autocompleteWorker;
+}
+
+function getLibraryMainNamesForAutocomplete() {
+    if (autocompleteMainNamesCacheDirty) {
+        const names = new Set([...Object.keys(savedDB || {}), ...Object.keys(playerDB || {})]);
+        autocompleteMainNamesCache = Array.from(names)
+            .map(name => String(name || '').trim())
+            .filter(Boolean)
+            .sort((a, b) => a.localeCompare(b, 'zh-Hans-CN', { sensitivity: 'accent' }));
+        autocompleteMainNamesCacheDirty = false;
+    }
+    return autocompleteMainNamesCache;
+}
+
+function requestAutocompleteSuggestions(query, showAll, activeNames, callback) {
+    const names = getLibraryMainNamesForAutocomplete();
+    const requestId = ++autocompleteRequestSerial;
+    const worker = ensureAutocompleteWorker();
+    const signature = names.join('\u0001');
+    if (worker && signature !== autocompleteWorkerNamesSignature) {
+        autocompleteWorkerNamesSignature = signature;
+        worker.postMessage({ type: 'set-names', names });
+    }
+
+    if (worker) {
+        autocompletePendingRequests.set(requestId, {
+            callback,
+            names,
+            query,
+            showAll,
+            activeNames
+        });
+        worker.postMessage({
+            type: 'query',
+            requestId,
+            query,
+            showAll,
+            activeNames
+        });
+        return requestId;
+    }
+
+    setTimeout(() => callback(filterAutocompleteNames(names, query, showAll, activeNames)), 0);
+    return requestId;
+}
 
 function applyWebTheme(value) {
     const theme = CLOUD_MATCH_WEB_THEMES.has(value) ? value : 'dark-esports';
@@ -285,6 +384,7 @@ function normalizeAllAliasStores() {
     for (const key in savedDB) {
         savedDB[key] = uniqueAliasArray(savedDB[key]);
     }
+    invalidateAutocompleteNamesCache();
 }
 
 function removeAliasFromArray(arr, aliasName) {
@@ -370,12 +470,16 @@ function openAliasPopover(inputElem, playerName, options = {}) {
     return aliasPopover;
 }
 
-function alignAliasPopoverToDragHandle(popElement) {
+function alignAliasPopoverToAnchor(popElement) {
     const row = popElement?.closest('.player-row');
+    const identityLink = row?.querySelector('.identity-link-button');
     const dragHandle = row?.querySelector('.drag-handle');
-    if (!popElement || !dragHandle) return;
+    if (!popElement || (!identityLink && !dragHandle)) return;
 
-    popElement.style.left = `${Math.round(dragHandle.offsetLeft)}px`;
+    const anchorLeft = identityLink
+        ? identityLink.offsetLeft
+        : dragHandle.offsetLeft + ALIAS_POPOVER_OFFSET_X;
+    popElement.style.left = `${Math.round(anchorLeft)}px`;
 }
 
 function clampAliasPopoverToViewport(popElement) {
@@ -389,7 +493,7 @@ function clampAliasPopoverToViewport(popElement) {
     popElement.style.left = '';
     popElement.style.width = '';
     popElement.style.maxHeight = '';
-    alignAliasPopoverToDragHandle(popElement);
+    alignAliasPopoverToAnchor(popElement);
 
     let rect = popElement.getBoundingClientRect();
     if (!rect.width || !rect.height) return;
@@ -646,7 +750,7 @@ if (window.chrome && window.chrome.webview) {
                 else cloudMatchState.shouldPrompt = true;
                 setTimeout(() => promptForBroadcasterName(), 0);
             }
-            else if (msg.action === 'auth_result' || msg.action === 'start_guard' || msg.action === 'patch_result' || msg.action === 'alias_submit_result' || msg.action === 'alias_sync_result' || msg.action === 'copy_window_clipboard_result' || msg.action === 'kill_obs_url_result' || msg.action === 'key_mapping_error') { showAlert(msg.message); }
+            else if (msg.action === 'auth_result' || msg.action === 'start_guard' || msg.action === 'patch_result' || msg.action === 'alias_submit_result' || msg.action === 'alias_sync_result' || msg.action === 'copy_window_clipboard_result' || msg.action === 'kill_obs_url_result' || msg.action === 'key_mapping_error' || msg.action === 'identity_error' || msg.action === 'identity_result') { showAlert(msg.message); }
             else if (msg.action === 'alias_direct_sync_result') {
                 if (String(msg.message || '').includes('失败')) showAlert(msg.message);
                 else console.info('[alias direct sync]', msg.message);
@@ -3648,6 +3752,7 @@ function normalizeAliasDbAutoSyncState(value = {}) {
     return {
         enabled: input.enabled !== false,
         inFlight: input.inFlight === true,
+        manualInFlight: input.manualInFlight === true,
         authorized: input.authorized === true,
         appendSupported: input.appendSupported === true,
         lastSuccessAt: Math.max(0, Number(input.lastSuccessAt || 0)),
@@ -3678,10 +3783,13 @@ function renderAliasDbAutoSync(value = aliasDbAutoSyncState || {}) {
 
     const state = document.getElementById('alias-auto-sync-state');
     if (state) {
-        state.textContent = aliasDbAutoSync.inFlight
-            ? '执行中'
-            : (aliasDbAutoSync.enabled ? '已启用' : '已关闭');
-        state.dataset.state = aliasDbAutoSync.inFlight ? 'working'
+        const working = aliasDbAutoSync.inFlight || aliasDbAutoSync.manualInFlight;
+        state.textContent = aliasDbAutoSync.manualInFlight
+            ? '手动同步中'
+            : (aliasDbAutoSync.inFlight
+                ? '执行中'
+                : (aliasDbAutoSync.enabled ? '已启用' : '已关闭'));
+        state.dataset.state = working ? 'working'
             : (aliasDbAutoSync.enabled ? 'enabled' : 'disabled');
     }
 
@@ -3721,7 +3829,7 @@ function renderAliasDbAutoSync(value = aliasDbAutoSyncState || {}) {
             : '';
     }
 
-    const busy = aliasDbAutoSync.inFlight;
+    const busy = aliasDbAutoSync.inFlight || aliasDbAutoSync.manualInFlight;
     ['btn-sync-alias-db', 'btn-push-alias-db'].forEach(id => {
         const button = document.getElementById(id);
         if (!button) return;
@@ -4014,6 +4122,7 @@ function applyStateFromServer(state) {
     killDisplaySettings = normalizeKillDisplaySettings(state.killDisplaySettings);
     keyMappingSettings = normalizeKeyMappingSettings(state.keyMappingSettings || keyMappingSettings || {});
     aliasDbAutoSyncState = normalizeAliasDbAutoSyncState(state.aliasDbAutoSync || aliasDbAutoSyncState || {});
+    playerIdentityState = normalizePlayerIdentityState(state.playerIdentity || playerIdentityState || {});
     renderAliasDbAutoSync(aliasDbAutoSyncState);
     cloudMatchState = normalizeCloudMatchState(state.cloudMatch || cloudMatchState || {});
     if (cloudRenameRequestPending && !cloudMatchState.renaming) {
@@ -4032,6 +4141,7 @@ function applyStateFromServer(state) {
     applyKillDisplaySettings(killDisplaySettings);
     if (isKeyMappingPanelOpen()) renderKeyMappingPanel();
     if (isKeyLanPanelOpen()) renderKeyLanPanel();
+    if (document.getElementById('identity-overlay')?.classList.contains('active')) renderPlayerIdentityPanel();
     if (cloudMatchState.shouldPrompt && !cloudNamePromptHandled) {
         cloudNamePromptHandled = true;
         setTimeout(() => promptForBroadcasterName(), 0);
@@ -4578,6 +4688,7 @@ function renderAliasInputHelp() {
 }
 
 function resetModalInputUi() {
+    customModal.classList.remove('identity-merge-modal');
     modalInput.placeholder = '';
     currentModalOptions = {};
     modalOk.textContent = '确定';
@@ -4616,12 +4727,19 @@ function showConfirm(msg, callback, options = {}) {
     modalCancel.style.display = 'inline-block';
     modalOk.textContent = options.okText || '确定';
     modalCancel.textContent = options.cancelText || '取消';
+    if (options.variant === 'identity-merge') {
+        customModal.classList.add('identity-merge-modal');
+    }
     customModal.classList.add('active');
     currentModalCallback = callback;
 }
 function showPrompt(msg, callback, options = {}) {
+    customModal.classList.remove('identity-merge-modal');
     currentModalOptions = options || {};
     modalMsg.innerHTML = msg;
+    modalOk.textContent = '确定';
+    modalCancel.textContent = '取消';
+    modalCancel.style.display = 'inline-block';
     modalInput.style.display = 'inline-block';
     modalInput.value = options.value || '';
     modalInput.placeholder = options.placeholder || '';
@@ -4645,6 +4763,453 @@ function showAlert(msg, onOk = null) {
         if (res === true && typeof onOk === 'function') onOk();
     };
 }
+
+function normalizePlayerIdentityState(value) {
+    const state = value && typeof value === 'object' ? value : {};
+    const normalizeNames = list => Array.isArray(list) ? list.map(v => String(v || '').trim()).filter(Boolean) : [];
+    const normalizeIds = list => uniqueAliasArray(normalizeNames(list));
+    return {
+        revision: Number(state.revision || 1),
+        entries: Array.isArray(state.entries) ? state.entries.map(entry => ({
+            name: String(entry?.name || '').trim(),
+            ids: normalizeIds(entry?.ids)
+        })).filter(entry => entry.name) : [],
+        groups: Array.isArray(state.groups) ? state.groups.map(group => ({
+            groupId: String(group?.groupId || ''),
+            source: group?.source === 'manual' ? 'manual' : 'automatic',
+            names: normalizeNames(group?.names),
+            ids: normalizeIds(group?.ids)
+        })).filter(group => group.groupId && group.names.length >= 2) : [],
+        exactMatches: Array.isArray(state.exactMatches) ? state.exactMatches : [],
+        overlapSuggestions: Array.isArray(state.overlapSuggestions) ? state.overlapSuggestions : []
+    };
+}
+
+function getIdentityGroupForName(name) {
+    const target = String(name || '').trim();
+    if (!target || !playerIdentityState) return null;
+    return playerIdentityState.groups.find(group => group.names.includes(target)) || null;
+}
+
+function sendPlayerIdentityCommand(action, payload = {}) {
+    window.chrome?.webview?.postMessage({ action, ...payload });
+}
+
+function identityIdsFromText(text) {
+    return uniqueAliasArray(String(text || '').split(/[()（）,，\n\r\t ]+/).map(value => value.trim()).filter(Boolean));
+}
+
+function renderIdentityIdEditor(group, standaloneName = '') {
+    const groupId = escapeHtml(group?.groupId || '');
+    const name = String(standaloneName || '').trim();
+    const escapedName = escapeHtml(name);
+    const editorKey = group ? 'group:' + group.groupId : 'name:' + name;
+    const ids = group ? (Array.isArray(group.ids) ? group.ids : []) : identityIdsForName(name);
+    const rows = ids.map(id => `
+        <div class="identity-id-editor-row">
+            <input type="text" class="identity-id-input" value="${escapeHtml(id)}" title="游戏ID">
+            <button type="button" class="identity-card-action identity-id-remove" title="删除这条游戏ID">删除</button>
+        </div>`).join('');
+    return `
+        <div class="identity-id-editor" data-group-id="${groupId}" data-name="${escapedName}" data-editor-key="${escapeHtml(editorKey)}">
+            <div class="identity-id-editor-title">${group ? '共用游戏ID' : '独立选手游戏ID'}</div>
+            <div class="identity-id-editor-rows">${rows || '<div class="identity-empty">暂无游戏ID</div>'}</div>
+            <div class="identity-id-editor-actions">
+                <button type="button" class="identity-card-action identity-id-add" data-group-id="${groupId}" data-name="${escapedName}">+ 添加游戏ID</button>
+                <button type="button" class="identity-card-action primary identity-id-save" data-group-id="${groupId}" data-name="${escapedName}">${group ? '保存整组' : '保存游戏ID'}</button>
+            </div>
+        </div>`;
+}
+
+function identityValueMatches(value, query) {
+    return !query || String(value || '').toLocaleLowerCase().includes(query);
+}
+
+function identityIdsForName(name) {
+    const entry = playerIdentityState?.entries.find(item => item.name === name);
+    if (entry) return entry.ids;
+    const group = getIdentityGroupForName(name);
+    return group ? group.ids : [];
+}
+
+function findIdentityEntryByName(name) {
+    const target = String(name || '').trim();
+    if (!target || !playerIdentityState) return null;
+    return playerIdentityState.entries.find(entry => entry.name === target) || null;
+}
+
+function renderIdentitySelectionSummary() {
+    const names = [...identitySelectedNames].map(name => String(name || '').trim()).filter(Boolean);
+    const count = document.getElementById('identity-selected-count');
+    const selectedNames = document.getElementById('identity-selected-names');
+    if (count) count.textContent = '已选择 ' + names.length + ' 个名称';
+    if (selectedNames) {
+        selectedNames.textContent = names.length ? names.join('、') : '暂无选手';
+        selectedNames.title = names.length ? names.join('、') : '暂无选手';
+    }
+}
+
+function buildIdentityMergePreview(names) {
+    const query = identitySearchQuery.trim().toLocaleLowerCase();
+    const ids = [];
+    const rows = names.map(name => {
+        const sourceIds = identityIdsForName(name);
+        ids.push(...sourceIds);
+        return `<div class="identity-merge-source"><b>${escapeHtml(name)}</b><span>${sourceIds.length ? sourceIds.map(escapeHtml).join('、') : '暂无游戏ID'}</span></div>`;
+    }).join('');
+    const merged = uniqueAliasArray(ids);
+    return {
+        query,
+        rows,
+        merged: merged.length ? merged.map(escapeHtml).join('、') : '暂无游戏ID'
+    };
+}
+
+function renderIdentityNameBadge(name, group) {
+    if (!group) return '<span class="identity-name-meta">独立选手</span>';
+    return `<span class="identity-name-meta">同一选手 · ${group.names.length} 个名称</span>`;
+}
+
+function renderIdentityDetailPane() {
+    const detail = document.getElementById('identity-detail-pane');
+    if (!detail || !playerIdentityState) return;
+
+    const name = identityFocusedName || '';
+    const group = getIdentityGroupForName(name);
+    const names = group ? group.names : (name ? [name] : []);
+    const ids = group ? group.ids : identityIdsForName(name);
+    if (!name) {
+        detail.innerHTML = '<div class="identity-empty-state">从左侧选择一个选手查看游戏ID。</div>';
+        return;
+    }
+
+    const groupActionText = group?.source === 'manual' ? '删除别名' : '解除关联';
+    const namesHtml = names.map(item => `
+        <div class="identity-related-name-row">
+            <button type="button" class="identity-related-name${item === name ? ' is-current' : ''}" data-name="${escapeHtml(item)}">${escapeHtml(item)}</button>
+            ${group ? `<button type="button" class="identity-card-action identity-delete-alias" data-group-id="${escapeHtml(group.groupId)}" data-name="${escapeHtml(item)}">${groupActionText}</button>` : ''}
+        </div>`).join('');
+    const summaryIds = ids.length
+        ? ids.map(id => `<span class="identity-id-chip" title="${escapeHtml(id)}">${escapeHtml(id)}</span>`).join('')
+        : '<span class="identity-empty">暂无游戏ID</span>';
+    const editorKey = group ? 'group:' + group.groupId : 'name:' + name;
+    const isIdsExpanded = identityExpandedIdGroups.has(editorKey);
+    const editor = isIdsExpanded ? renderIdentityIdEditor(group, group ? '' : name) : '';
+    const editIdsButton = `<button type="button" class="identity-card-action identity-edit-ids" data-group-id="${escapeHtml(group?.groupId || '')}" data-name="${escapeHtml(group ? '' : name)}" data-editor-key="${escapeHtml(editorKey)}">${isIdsExpanded ? '收起编辑' : '编辑游戏ID'}</button>`;
+    const actions = group ?
+        `<button type="button" class="identity-card-action identity-add-alias" data-group-id="${escapeHtml(group.groupId)}">添加别名</button>
+         ${editIdsButton}
+         <button type="button" class="identity-card-action identity-unmerge" data-group-id="${escapeHtml(group.groupId)}">拆散身份组</button>` :
+        `<button type="button" class="identity-card-action identity-add-alias" data-source-name="${escapeHtml(name)}">添加别名</button>
+         ${editIdsButton}`;
+
+    detail.innerHTML = `
+        <div class="identity-detail-header">
+            <div>
+                <div class="identity-detail-kicker">当前选手</div>
+                <h3>${escapeHtml(name)}</h3>
+            </div>
+            <span class="identity-detail-count">${group ? `同一选手 · 共 ${group.names.length} 个名称` : '独立选手'}</span>
+        </div>
+        <div class="identity-detail-section">
+            <div class="identity-detail-label">关联名称</div>
+            <div class="identity-related-names">${namesHtml}</div>
+        </div>
+        <div class="identity-detail-section">
+            <div class="identity-detail-label">游戏ID <span>${ids.length} 个</span></div>
+            <div class="identity-id-list">${summaryIds}</div>
+            <div class="identity-detail-actions">${actions}</div>
+            ${editor}
+        </div>`;
+}
+
+function renderPlayerIdentityPanel() {
+    const list = document.getElementById('identity-member-list');
+    const suggestions = document.getElementById('identity-suggestions');
+    if (!list || !playerIdentityState) return;
+
+    const groupedNames = new Set();
+    const query = identitySearchQuery.trim().toLocaleLowerCase();
+    const focusedName = identityFocusedName;
+    const members = [];
+    playerIdentityState.groups.forEach((group, groupOrder) => {
+        group.names.forEach((name, memberOrder) => {
+            groupedNames.add(name);
+            members.push({ name, group, ids: group.ids, groupOrder, memberOrder });
+        });
+    });
+    playerIdentityState.entries.forEach(entry => {
+        if (!groupedNames.has(entry.name)) {
+            members.push({
+                name: entry.name,
+                group: null,
+                ids: entry.ids,
+                groupOrder: Number.MAX_SAFE_INTEGER,
+                memberOrder: 0
+            });
+        }
+    });
+
+    const visibleMembers = members.filter(member => !query ||
+        identityValueMatches(member.name, query) || member.ids.some(id => identityValueMatches(id, query)));
+    visibleMembers.sort((left, right) =>
+        Number(Boolean(right.group)) - Number(Boolean(left.group)) ||
+        left.groupOrder - right.groupOrder ||
+        (left.group && right.group ? left.memberOrder - right.memberOrder : 0) ||
+        left.name.localeCompare(right.name, 'zh-CN'));
+
+    const html = visibleMembers.map(member => `
+        <div class="identity-member-row${member.name === focusedName ? ' identity-focused-member' : ''}" data-name="${escapeHtml(member.name)}">
+            <label class="identity-name-check">
+                <input type="checkbox" class="identity-name-input" data-name="${escapeHtml(member.name)}" ${identitySelectedNames.has(member.name) ? 'checked' : ''}>
+                <span class="identity-member-name">${escapeHtml(member.name)}</span>
+            </label>
+            ${renderIdentityNameBadge(member.name, member.group)}
+            <button type="button" class="identity-member-open" data-name="${escapeHtml(member.name)}" title="查看选手详情">查看</button>
+        </div>`).join('');
+
+    list.innerHTML = html || (query ?
+        '<div class="identity-empty-state">没有匹配的选手名称或游戏ID。</div>' :
+        '<div class="identity-empty-state">暂无可管理的选手游戏ID。</div>');
+    renderIdentityDetailPane();
+    renderIdentitySelectionSummary();
+
+    const overlapItems = playerIdentityState.overlapSuggestions.filter(item =>
+        Number(item.commonIdCount || 0) >= 1 && item.leftName && item.rightName &&
+        (!query || identityValueMatches(item.leftName, query) || identityValueMatches(item.rightName, query)));
+    overlapItems.sort((left, right) =>
+        Number(right.leftName === focusedName || right.rightName === focusedName) -
+        Number(left.leftName === focusedName || left.rightName === focusedName));
+    if (suggestions) {
+        suggestions.hidden = overlapItems.length === 0;
+        suggestions.innerHTML = overlapItems.length ?
+            `<div class="identity-suggestion-title">可能是同一选手（游戏ID有重叠，请确认）</div>` +
+            `<div class="identity-suggestion-list">` +
+            overlapItems.map(item => `<div class="identity-suggestion-row${item.leftName === focusedName || item.rightName === focusedName ? ' identity-focused-suggestion' : ''}"><span>${escapeHtml(item.leftName)} + ${escapeHtml(item.rightName)} · 共 ${Number(item.commonIdCount || 0)} 个相同游戏ID</span><div class="identity-suggestion-actions"><button class="identity-card-action identity-suggestion-merge" data-left-name="${escapeHtml(item.leftName)}" data-right-name="${escapeHtml(item.rightName)}">查看并归并</button><button class="identity-card-action identity-suggestion-ignore" data-left-name="${escapeHtml(item.leftName)}" data-right-name="${escapeHtml(item.rightName)}">忽略</button></div></div>`).join('') +
+            `</div>` : '';
+    }
+    if (focusedName) {
+        requestAnimationFrame(() => list.querySelector('.identity-focused-member')?.scrollIntoView({ block: 'nearest' }));
+    }
+}
+
+function openPlayerIdentityPanel(preselectedName = '') {
+    const overlay = document.getElementById('identity-overlay');
+    if (!overlay) return;
+    identityFocusedName = String(preselectedName || '').trim();
+    identitySelectedNames = new Set();
+    identitySearchQuery = '';
+    identityExpandedIdGroups = new Set();
+    const searchInput = document.getElementById('identity-search-input');
+    if (searchInput) searchInput.value = '';
+    const group = getIdentityGroupForName(preselectedName);
+    if (group) group.names.forEach(name => identitySelectedNames.add(name));
+    else if (preselectedName) identitySelectedNames.add(preselectedName);
+    overlay.classList.add('active');
+    overlay.setAttribute('aria-hidden', 'false');
+    // 兼容尚未替换的新旧宿主：旧版已支持外观面板扩高，新版再使用身份面板专用高度。
+    window.chrome?.webview?.postMessage({ action: 'cmd_set_appearance_panel_open', open: true });
+    window.chrome?.webview?.postMessage({ action: 'cmd_set_identity_panel_open', open: true });
+    renderPlayerIdentityPanel();
+}
+
+function closePlayerIdentityPanel() {
+    const overlay = document.getElementById('identity-overlay');
+    if (!overlay) return;
+    overlay.classList.remove('active');
+    overlay.setAttribute('aria-hidden', 'true');
+    window.chrome?.webview?.postMessage({ action: 'cmd_set_appearance_panel_open', open: false });
+    window.chrome?.webview?.postMessage({ action: 'cmd_set_identity_panel_open', open: false });
+}
+
+function confirmIdentityMerge(names) {
+    const cleanNames = [...new Set((names || []).map(name => String(name || '').trim()).filter(Boolean))];
+    if (cleanNames.length < 2) {
+        showAlert('请至少选择两个选手名称。');
+        return;
+    }
+    const preview = buildIdentityMergePreview(cleanNames);
+    showConfirm(`确定把以下名称归并为同一选手吗？<div class="identity-merge-preview"><div class="identity-merge-label">原始游戏ID集合</div>${preview.rows}<div class="identity-merge-label">合并后的并集</div><div class="identity-merge-union">${preview.merged}</div></div><div class="identity-merge-note">只修改本地游戏ID库，之后按现有同步策略上传。</div>`, ok => {
+        if (ok) sendPlayerIdentityCommand('cmd_identity_merge', { names: cleanNames });
+    }, { okText: '确认归并', variant: 'identity-merge' });
+}
+
+function confirmExistingIdentityAlias(groupId, sourceName, existingName) {
+    const cleanExistingName = String(existingName || '').trim();
+    const sourceGroup = groupId
+        ? playerIdentityState?.groups.find(group => group.groupId === groupId)
+        : getIdentityGroupForName(sourceName);
+    const existingGroup = getIdentityGroupForName(cleanExistingName);
+    const names = [];
+    const appendNames = list => (list || []).forEach(name => {
+        const cleanName = String(name || '').trim();
+        if (cleanName && !names.includes(cleanName)) names.push(cleanName);
+    });
+
+    appendNames(sourceGroup?.names || [sourceName]);
+    appendNames(existingGroup?.names || [cleanExistingName]);
+
+    if (existingGroup && sourceGroup && existingGroup.groupId === sourceGroup.groupId) {
+        showAlert(`“${escapeHtml(cleanExistingName)}”已经是当前身份组成员，无需重复添加。`);
+        return;
+    }
+    if (names.length < 2) {
+        showAlert('当前身份组信息已过期，请刷新后重试。');
+        return;
+    }
+
+    const preview = buildIdentityMergePreview(names);
+    showConfirm(
+        `<div class="identity-existing-alias-preview">` +
+        `<div class="identity-existing-alias-title">名称“${escapeHtml(cleanExistingName)}”已经存在</div>` +
+        `<div class="identity-existing-alias-note">是否将它加入当前身份组？已有名称和游戏ID不会被直接覆盖。</div>` +
+        `<div class="identity-merge-label">参与合并的名称和原有游戏ID</div>` +
+        `${preview.rows}` +
+        `<div class="identity-merge-label">合并后的游戏ID列表</div>` +
+        `<div class="identity-merge-union">${preview.merged}</div>` +
+        `</div>` +
+        `<div class="identity-merge-note">确认后只修改本地身份组和游戏ID库，之后按现有同步策略上传。</div>`,
+        ok => {
+            if (ok) sendPlayerIdentityCommand('cmd_identity_merge', { names });
+        },
+        { okText: '确认加入', variant: 'identity-merge' }
+    );
+}
+
+function confirmIdentityAliasDeletion(groupId, name) {
+    const cleanName = String(name || '').trim();
+    if (!cleanName || !groupId) return;
+    const group = playerIdentityState?.groups.find(item => item.groupId === groupId);
+    const isManualGroup = group?.source === 'manual';
+    const actionText = isManualGroup ?
+        '新增别名会从本地游戏ID库删除；原有选手名称会解除归并并恢复归并前的游戏ID。' :
+        '自动识别组没有归并前快照，本次只解除自动关联，不会删除本地游戏ID资料。';
+    showConfirm(`确定处理名称“${escapeHtml(cleanName)}”吗？<br><br>${actionText}<br><br>只修改本地身份组和游戏ID库，不会修改比赛快照、战绩或云端数据。`, ok => {
+        if (ok) sendPlayerIdentityCommand('cmd_identity_delete_alias', {
+            groupId,
+            name: cleanName
+        });
+    }, { okText: isManualGroup ? '删除别名' : '解除关联' });
+}
+
+function ignoreIdentityOverlap(leftName, rightName) {
+    const left = String(leftName || '').trim();
+    const right = String(rightName || '').trim();
+    if (!left || !right || left === right) return;
+    showConfirm(`忽略“${escapeHtml(left)} + ${escapeHtml(right)}”这条可能是同一选手的建议吗？<br><br>之后不再提示这两个名称，游戏ID库不会被修改。`, ok => {
+        if (ok) sendPlayerIdentityCommand('cmd_identity_ignore_overlap', {
+            leftName: left,
+            rightName: right
+        });
+    }, { okText: '确认忽略' });
+}
+
+function promptIdentityAlias(groupId = '', sourceName = '') {
+    showPrompt('输入新的别名：', value => {
+        const newName = String(value || '').trim();
+        if (!newName) return;
+
+        if (findIdentityEntryByName(newName)) {
+            confirmExistingIdentityAlias(groupId, sourceName, newName);
+            return;
+        }
+        sendPlayerIdentityCommand('cmd_identity_add_alias', { groupId, sourceName, newName });
+    }, { placeholder: '例如：老王、旋律' });
+}
+
+document.getElementById('identity-member-list')?.addEventListener('change', event => {
+    const input = event.target.closest('.identity-name-input');
+    if (!input) return;
+    const name = input.dataset.name || '';
+    if (input.checked) identitySelectedNames.add(name);
+    else identitySelectedNames.delete(name);
+    renderIdentitySelectionSummary();
+});
+
+document.getElementById('identity-member-list')?.addEventListener('click', event => {
+    if (event.target.closest('.identity-name-input')) return;
+    const button = event.target.closest('button');
+    const row = event.target.closest('.identity-member-row');
+    const name = button?.dataset.name || row?.dataset.name || '';
+    if (!name) return;
+    identityFocusedName = name;
+    renderPlayerIdentityPanel();
+});
+
+document.getElementById('identity-search-input')?.addEventListener('input', event => {
+    identitySearchQuery = String(event.target.value || '');
+    renderPlayerIdentityPanel();
+});
+
+document.getElementById('identity-detail-pane')?.addEventListener('click', event => {
+    const button = event.target.closest('button');
+    if (!button) return;
+    if (button.classList.contains('identity-related-name')) {
+        identityFocusedName = button.dataset.name || '';
+        renderPlayerIdentityPanel();
+        return;
+    }
+    const groupId = button.dataset.groupId || '';
+    const name = button.dataset.name || '';
+    const editor = button.closest('.identity-id-editor');
+    if (button.classList.contains('identity-id-add')) {
+        const rows = editor?.querySelector('.identity-id-editor-rows');
+        if (!rows) return;
+        if (rows.querySelector('.identity-empty')) rows.innerHTML = '';
+        const row = document.createElement('div');
+        row.className = 'identity-id-editor-row';
+        row.innerHTML = '<input type="text" class="identity-id-input" title="游戏ID" placeholder="输入游戏ID"><button type="button" class="identity-card-action identity-id-remove" title="删除这条游戏ID">删除</button>';
+        rows.appendChild(row);
+        row.querySelector('.identity-id-input')?.focus();
+        return;
+    }
+    if (button.classList.contains('identity-id-remove')) {
+        button.closest('.identity-id-editor-row')?.remove();
+        return;
+    }
+    if (button.classList.contains('identity-id-save')) {
+        const ids = identityIdsFromText(Array.from(editor?.querySelectorAll('.identity-id-input') || [])
+            .map(input => input.value).join('\n'));
+        if (!ids.length) {
+            showAlert('至少保留一个有效游戏ID。');
+            return;
+        }
+        sendPlayerIdentityCommand('cmd_identity_update_ids', { groupId, name, ids });
+        return;
+    }
+    if (button.classList.contains('identity-edit-ids')) {
+        const editorKey = button.dataset.editorKey ||
+            (groupId ? 'group:' + groupId : 'name:' + name);
+        if (identityExpandedIdGroups.has(editorKey)) identityExpandedIdGroups.delete(editorKey);
+        else identityExpandedIdGroups.add(editorKey);
+        renderPlayerIdentityPanel();
+        return;
+    }
+    if (button.classList.contains('identity-delete-alias')) {
+        event.preventDefault();
+        event.stopPropagation();
+        confirmIdentityAliasDeletion(groupId, button.dataset.name || '');
+        return;
+    }
+    if (button.classList.contains('identity-add-alias')) {
+        promptIdentityAlias(groupId, button.dataset.sourceName || '');
+    }
+    else if (button.classList.contains('identity-unmerge')) {
+        showConfirm('确定解除这个同一选手组吗？归并前的游戏ID库会恢复。', ok => {
+            if (ok) sendPlayerIdentityCommand('cmd_identity_unmerge', { groupId, splitAll: true });
+        }, { okText: '解除归并' });
+    }
+});
+
+document.getElementById('identity-suggestions')?.addEventListener('click', event => {
+    const button = event.target.closest('button');
+    if (!button) return;
+    if (button.classList.contains('identity-suggestion-merge')) {
+        confirmIdentityMerge([button.dataset.leftName, button.dataset.rightName]);
+    } else if (button.classList.contains('identity-suggestion-ignore')) {
+        ignoreIdentityOverlap(button.dataset.leftName, button.dataset.rightName);
+    }
+});
 modalCancel.onclick = () => { customModal.classList.remove('active'); if (currentModalCallback) currentModalCallback(null); };
 // 对话框的键盘事件（原位置，只需增加 stopImmediatePropagation）
 document.addEventListener('keydown', function (e) {
@@ -4675,14 +5240,18 @@ function hasAtLeastOneAlias(playerName) {
 function bindAliasToPlayer(playerName, aliasName) {
     const aliasClean = normalizeAliasTextForCompare(aliasName);
     if (!playerName || !aliasClean) return false;
-    if (!playerDB[playerName]) playerDB[playerName] = [];
-    if (!savedDB[playerName]) savedDB[playerName] = [];
-    playerDB[playerName] = uniqueAliasArray(playerDB[playerName]);
-    savedDB[playerName] = uniqueAliasArray(savedDB[playerName]);
-    mergeAliasIntoArray(playerDB[playerName], aliasClean);
-    mergeAliasIntoArray(savedDB[playerName], aliasClean);
-    playerDB[playerName] = uniqueAliasArray(playerDB[playerName]);
-    savedDB[playerName] = uniqueAliasArray(savedDB[playerName]);
+    const group = getIdentityGroupForName(playerName);
+    const ownerNames = group ? group.names : [playerName];
+    ownerNames.forEach(name => {
+        if (!playerDB[name]) playerDB[name] = [];
+        if (!savedDB[name]) savedDB[name] = [];
+        playerDB[name] = uniqueAliasArray(playerDB[name]);
+        savedDB[name] = uniqueAliasArray(savedDB[name]);
+        mergeAliasIntoArray(playerDB[name], aliasClean);
+        mergeAliasIntoArray(savedDB[name], aliasClean);
+        playerDB[name] = uniqueAliasArray(playerDB[name]);
+        savedDB[name] = uniqueAliasArray(savedDB[name]);
+    });
     return true;
 }
 
@@ -4691,19 +5260,23 @@ function updateAliasForPlayer(playerName, oldAlias, newAlias) {
     const newClean = (newAlias || '').trim();
     if (!playerName || !oldClean || !newClean) return false;
 
-    if (!playerDB[playerName]) playerDB[playerName] = [];
-    if (!savedDB[playerName]) savedDB[playerName] = [];
+    const group = getIdentityGroupForName(playerName);
+    const ownerNames = group ? group.names : [playerName];
+    ownerNames.forEach(name => {
+        if (!playerDB[name]) playerDB[name] = [];
+        if (!savedDB[name]) savedDB[name] = [];
 
-    // 关键：先从“当前列表”和“永久库”里彻底删掉旧名称，再写入新名称。
-    // 这样不会出现库里同时存在“修改前名称”和“修改后名称”。
-    playerDB[playerName] = removeAliasFromArray(playerDB[playerName], oldClean);
-    savedDB[playerName] = removeAliasFromArray(savedDB[playerName], oldClean);
+        // 关键：先从整组的“当前列表”和“永久库”里彻底删掉旧名称，再写入新名称。
+        // 这样归并后的别名不会因为编辑了其中一个名称而重新分裂。
+        playerDB[name] = removeAliasFromArray(playerDB[name], oldClean);
+        savedDB[name] = removeAliasFromArray(savedDB[name], oldClean);
 
-    mergeAliasIntoArray(playerDB[playerName], newClean);
-    mergeAliasIntoArray(savedDB[playerName], newClean);
+        mergeAliasIntoArray(playerDB[name], newClean);
+        mergeAliasIntoArray(savedDB[name], newClean);
 
-    playerDB[playerName] = uniqueAliasArray(playerDB[playerName]);
-    savedDB[playerName] = uniqueAliasArray(savedDB[playerName]);
+        playerDB[name] = uniqueAliasArray(playerDB[name]);
+        savedDB[name] = uniqueAliasArray(savedDB[name]);
+    });
 
     // 短时间内屏蔽 C++ 旧状态回推，把旧名称再次刷回 Web 库。
     pendingAliasRenameRecords.push({
@@ -4715,6 +5288,15 @@ function updateAliasForPlayer(playerName, oldAlias, newAlias) {
     return true;
 }
 
+function getAliasesForPlayerName(playerName) {
+    const name = String(playerName || '').trim();
+    if (!name) return [];
+    if (Object.prototype.hasOwnProperty.call(playerDB, name)) {
+        return Array.isArray(playerDB[name]) ? playerDB[name] : [];
+    }
+    return Array.isArray(savedDB[name]) ? savedDB[name] : [];
+}
+
 function findAliasConflict(playerName, aliasName, selfInput = null) {
     const aliasClean = (aliasName || '').trim();
     if (!aliasClean) return null;
@@ -4723,7 +5305,7 @@ function findAliasConflict(playerName, aliasName, selfInput = null) {
         let otherMain = inp.value.trim();
         if (!otherMain || otherMain === playerName) continue;
         if (otherMain === aliasClean) return otherMain;
-        if (playerDB[otherMain] && aliasArrayHasDuplicateId(playerDB[otherMain], aliasClean)) return otherMain;
+        if (aliasArrayHasDuplicateId(getAliasesForPlayerName(otherMain), aliasClean)) return otherMain;
     }
     return null;
 }
@@ -4733,13 +5315,13 @@ function findAliasConflict(playerName, aliasName, selfInput = null) {
 // ==========================================
 function getFieldConflict(newMainName, excludeInput) {
     if (!newMainName) return null;
-    let newAliases = playerDB[newMainName] || [];
+    let newAliases = getAliasesForPlayerName(newMainName);
     let fieldInputs = document.querySelectorAll('.name-input');
     for (let inp of fieldInputs) {
         if (inp === excludeInput) continue;
         let otherMain = inp.value.trim();
         if (!otherMain) continue;
-        let otherAliases = playerDB[otherMain] || [];
+        let otherAliases = getAliasesForPlayerName(otherMain);
         if (otherMain === newMainName) return { owner: otherMain, reason: '选手已被占用' };
         if (otherAliases.some(alias => normalizeAliasTextForCompare(alias) === newMainName)) return { owner: otherMain, reason: `名字是[${otherMain}]的游戏ID` };
         if (newAliases.some(alias => normalizeAliasTextForCompare(alias) === otherMain)) return { owner: otherMain, reason: `携带的游戏ID包含了[${otherMain}]` };
@@ -4768,6 +5350,7 @@ function createPlayerRow(seatNumber = '') {
             <input type="text" class="seat-number seat-label-input" value="" autocomplete="off" title="按先后手自动生成" readonly>
             <button type="button" class="seat-number seat-label-toggle" title="点击切换先选 / 后选" hidden></button>
             <input type="text" class="name-input" placeholder="" autocomplete="off">
+            <button type="button" class="identity-link-button" title="管理同一选手名称"><span aria-hidden="true">👥</span><span>关联</span></button>
             <div class="drag-handle" title="按住拖动以交换位置">⋮⋮</div>
             <div class="popover autocomplete-popover"></div>
             <div class="popover alias-popover"></div>
@@ -4782,6 +5365,12 @@ function createPlayerRow(seatNumber = '') {
     const autoPopover = row.querySelector('.autocomplete-popover');
     const aliasPopover = row.querySelector('.alias-popover');
     const dragHandle = row.querySelector('.drag-handle'); // 获取拖拽柄
+    const identityLink = row.querySelector('.identity-link-button');
+    identityLink.addEventListener('click', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        openPlayerIdentityPanel(nameInput.value.trim());
+    });
 
     bindProNumberControls(row.querySelector('.stat-kill'));
     bindProNumberControls(row.querySelector('.stat-death'));
@@ -4844,6 +5433,7 @@ function createPlayerRow(seatNumber = '') {
     // 🚨 3. 智能焦点与补全逻辑融合
     // ==========================================
     let currentFocusIndex = -1;
+    let autocompleteRenderVersion = 0;
     function clearActiveItems() { autoPopover.querySelectorAll('.suggestion-item').forEach(item => item.classList.remove('keyboard-focus')); }
 
     nameInput.addEventListener('keydown', function (e) {
@@ -5133,64 +5723,39 @@ function createPlayerRow(seatNumber = '') {
         }
     }
 
-    function processInputLogic(inputElem, forceShowAll) {
-        // ========================================================
-        // 🚨 终极强行同步：键盘每敲一下，就扫描全场，立刻恢复被“临时解绑”的下场选手！
-        // ========================================================
-        let activeNames = Array.from(document.querySelectorAll('.name-input'))
-            .map(inp => inp.value.trim())
-            .filter(name => name !== '');
+    function renderAutocompleteMatches(inputElem, value, renderVersion, matches) {
+        if (renderVersion !== autocompleteRenderVersion || !inputElem.isConnected || inputElem.value.trim() !== value) return;
+        autoPopover.innerHTML = '';
+        autoPopover.classList.toggle('active', matches.length > 0);
+        if (!matches.length) return;
 
-        for (let name in savedDB) {
-            // 只要发现永久库里的人没在场上，无条件瞬间恢复他的所有游戏ID！
-            if (!activeNames.includes(name)) {
-                playerDB[name] = [...savedDB[name]];
-            }
-        }
-
-        let val = inputElem.value.trim();
-        let conflict = getFieldConflict(val, inputElem);
-
-        if (val && conflict) {
-            inputElem.classList.add('input-error');
-            inputElem.setAttribute('data-error-msg', `❌ 无法上场！已被【${conflict.owner}】占用。\n原因：${conflict.reason}`);
-            closeAliasPopoverForInput(inputElem); // 有冲突时强制关掉游戏ID列表
-        } else {
-            inputElem.classList.remove('input-error');
-            inputElem.removeAttribute('data-error-msg');
-        }
-
-        let activeMainSet = new Set(activeNames);
-        let availableMains = Object.keys(playerDB).filter(name => !activeMainSet.has(name));
-        let matches = !val ? (forceShowAll ? availableMains : []) : availableMains.filter(n => n.includes(val));
-
-        currentFocusIndex = -1;
-
-        if (matches.length > 0) {
-            matches.sort((a, b) => a.localeCompare(b, 'zh-Hans-CN', { sensitivity: 'accent' }));
-            autoPopover.innerHTML = matches.map(n => {
+        let offset = 0;
+        const appendBatch = () => {
+            if (renderVersion !== autocompleteRenderVersion || !inputElem.isConnected || inputElem.value.trim() !== value) return;
+            const batch = matches.slice(offset, offset + 64);
+            autoPopover.insertAdjacentHTML('beforeend', batch.map(n => {
                 const itemConflict = getFieldConflict(n, inputElem);
                 const conflictText = itemConflict ? `已被【${itemConflict.owner}】占用：${itemConflict.reason}` : '';
                 const itemClass = `popover-item suggestion-item${itemConflict ? ' suggestion-conflict' : ''}`;
                 const conflictAttrs = itemConflict ? ` title="${escapeHtml(conflictText)}" data-conflict-reason="${escapeHtml(conflictText)}"` : '';
                 const conflictBadge = itemConflict ? '<span class="suggestion-conflict-badge">冲突</span>' : '';
                 return `<div class="${itemClass}" data-name="${escapeHtml(n)}"${conflictAttrs}><span class="suggestion-name">${escapeHtml(n)}</span>${conflictBadge}</div>`;
-            }).join('');
-            autoPopover.classList.add('active');
+            }).join(''));
 
-            autoPopover.querySelectorAll('.suggestion-item').forEach(item => {
-                // 🚨 修复：将 click 改为 mousedown
+            autoPopover.querySelectorAll('.suggestion-item:not([data-autocomplete-bound])').forEach(item => {
+                item.dataset.autocompleteBound = '1';
                 item.addEventListener('mousedown', (e) => {
-                    // 🚨 核心：阻止默认事件！防止输入框失去焦点触发 blur 里的隐藏代码
                     e.preventDefault();
                     e.stopPropagation();
 
-                    inputElem.value = item.dataset.name || item.innerText;
+                    const selectedName = item.dataset.name || item.innerText;
+                    if (!Object.prototype.hasOwnProperty.call(playerDB, selectedName) && savedDB[selectedName]) {
+                        playerDB[selectedName] = uniqueAliasArray(savedDB[selectedName]);
+                    }
+                    inputElem.value = selectedName;
 
-                    // 赋值后再跑一遍查重逻辑确保万无一失
                     processInputLogic(inputElem, false);
 
-                    // 如果选中的人没冲突，就无缝切出他的游戏ID列表
                     if (!inputElem.classList.contains('input-error')) {
                         ignoreNextDocumentClickUntil = Date.now() + 350;
                         autoPopover.classList.remove('active');
@@ -5203,9 +5768,36 @@ function createPlayerRow(seatNumber = '') {
                     }
                 });
             });
+
+            offset += batch.length;
+            if (offset < matches.length) requestAnimationFrame(appendBatch);
+        };
+        appendBatch();
+    }
+
+    function processInputLogic(inputElem, forceShowAll) {
+        const activeNames = Array.from(document.querySelectorAll('.name-input'))
+            .map(inp => inp.value.trim())
+            .filter(name => name !== '');
+        const val = inputElem.value.trim();
+        const conflict = getFieldConflict(val, inputElem);
+
+        if (val && conflict) {
+            inputElem.classList.add('input-error');
+            inputElem.setAttribute('data-error-msg', `❌ 无法上场！已被【${conflict.owner}】占用。\n原因：${conflict.reason}`);
+            closeAliasPopoverForInput(inputElem);
         } else {
-            autoPopover.classList.remove('active');
+            inputElem.classList.remove('input-error');
+            inputElem.removeAttribute('data-error-msg');
         }
+
+        currentFocusIndex = -1;
+        const renderVersion = ++autocompleteRenderVersion;
+        autoPopover.innerHTML = '';
+        autoPopover.classList.remove('active');
+        requestAutocompleteSuggestions(val, forceShowAll, activeNames, matches => {
+            renderAutocompleteMatches(inputElem, val, renderVersion, matches);
+        });
     }
 
     return row;
@@ -5296,6 +5888,9 @@ function reopenAliasPopoverFromMenu(popElement, playerName) {
 }
 
 function renderAliasMenu(playerName, popElement) {
+    if (!Object.prototype.hasOwnProperty.call(playerDB, playerName) && savedDB[playerName]) {
+        playerDB[playerName] = uniqueAliasArray(savedDB[playerName]);
+    }
     playerDB[playerName] = uniqueAliasArray(playerDB[playerName]);
     savedDB[playerName] = uniqueAliasArray(savedDB[playerName]);
     let html = getCleanAliases(playerName).map((a, i) => {
@@ -5440,12 +6035,14 @@ function renderAliasMenu(playerName, popElement) {
                         });
                     }
 
-                    // 前端同步清理内存，保证 UI 瞬间反应
-                    playerDB[playerName].splice(idx, 1);
-                    if (savedDB[playerName]) {
-                        let sIdx = savedDB[playerName].indexOf(targetAlias);
-                        if (sIdx > -1) savedDB[playerName].splice(sIdx, 1);
-                    }
+                    // 已归并的名称共享同一套游戏ID；永久删除也同步清理整组。
+                    const identityGroup = getIdentityGroupForName(playerName);
+                    const ownerNames = identityGroup ? identityGroup.names : [playerName];
+                    ownerNames.forEach(name => {
+                        if (!playerDB[name]) playerDB[name] = [];
+                        playerDB[name] = removeAliasFromArray(playerDB[name], targetAlias);
+                        if (savedDB[name]) savedDB[name] = removeAliasFromArray(savedDB[name], targetAlias);
+                    });
 
                     reopenAliasPopoverFromMenu(popElement, playerName);
                     pushStateToServer();
@@ -5983,6 +6580,28 @@ document.getElementById('btn-reset').addEventListener('click', () => {
         }
     });
 });
+
+document.getElementById('btn-identity-groups')?.addEventListener('click', () => {
+    openPlayerIdentityPanel();
+});
+document.getElementById('btn-identity-close')?.addEventListener('click', closePlayerIdentityPanel);
+document.getElementById('btn-identity-refresh')?.addEventListener('click', () => {
+    sendPlayerIdentityCommand('cmd_identity_refresh');
+});
+document.getElementById('btn-identity-merge')?.addEventListener('click', () => {
+    confirmIdentityMerge([...identitySelectedNames]);
+});
+document.getElementById('identity-overlay')?.addEventListener('click', event => {
+    if (event.target.id === 'identity-overlay') closePlayerIdentityPanel();
+});
+document.addEventListener('keydown', event => {
+    const overlay = document.getElementById('identity-overlay');
+    if (overlay?.classList.contains('active') && event.key === 'Escape') {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        closePlayerIdentityPanel();
+    }
+}, true);
 
 // 1) 先把所有战绩输入框的 Tab 顺序移除，这样 Tab 永远跳不到它们
 document.querySelectorAll('.stat-kill, .stat-death, .stat-ak').forEach(inp => {

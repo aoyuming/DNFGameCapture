@@ -11,9 +11,11 @@
 #include <condition_variable>
 #include <future>
 #include <memory>
+#include <set>
 #include <winhttp.h>
 #include "NameMatcher.hpp"
 #include "TemporalIdentityMatcher.hpp" // 【新增】：固定红框时间窗身份融合匹配
+#include "PlayerIdentityGroupService.h"
 #include <map>
 #include "WGCCapture.h"
 #include "CameraCapture.h" // 【新增】
@@ -35,11 +37,17 @@ struct ScorePointF {
     float y = 0.0f;
 };
 
+struct PlayerIdentityGroupRecord {
+    CString groupId;
+    std::vector<CString> names;
+    std::map<CString, std::vector<CString>> beforeMerge;
+};
+
 #include <urlmon.h>
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"5.0.2"    //当前版本号
+#define CURRENT_VERSION L"5.1.0"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -81,6 +89,9 @@ struct ScorePointF {
 #define WM_CAPTURE_SOURCE_SWITCH_DONE (WM_USER + 116)
 #define WM_CAMERA_LIST_READY (WM_USER + 117)
 #define WM_ALIAS_AUTO_SYNC_RESULT (WM_USER + 118)
+#define WM_STARTUP_STAGE (WM_USER + 119)
+#define WM_CLOUD_PROGRESS (WM_USER + 120)
+#define WM_ALIAS_MANUAL_SYNC_RESULT (WM_USER + 121)
 
 // =========================================================
 // 【编译环境切换开关】
@@ -237,11 +248,44 @@ protected:
     afx_msg LRESULT OnKeyMappingLanChanged(WPARAM wParam, LPARAM lParam);
     afx_msg LRESULT OnKeyMappingTeamSync(WPARAM wParam, LPARAM lParam);
     afx_msg LRESULT OnAliasDbAutoSyncResult(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnStartupStage(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnCloudProgress(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnAliasManualSyncResult(WPARAM wParam, LPARAM lParam);
+
+    void RunStartupStage(int stage);
+    void StartStartupBootstrap();
+    void SendStartupProgress(int progress, const CString& message,
+        const CString& phase = CString());
+    void SendCloudProgress(const CString& task, const CString& phase,
+        int progress, const CString& message, bool indeterminate = false);
+    void StartManualAliasDbSync(bool pull, const std::string& aliasDbPayload = {},
+        int mainCount = 0, int pairCount = 0);
 
     std::vector<CString> m_autoExpandedNodes; // 【新增】：记忆刚才修改过，需要临时展开3秒的选手
 
     // 🚨 C++ 战场级查重引擎：检查某个即将上场的选手及其游戏ID，是否与场上现有的选手冲突
     CString CheckFieldConflict(const CString& newMain, const std::vector<CString>& extraAliases, int excludeIdx);
+
+    // 本地选手身份组：只维护游戏ID归并关系，不参与比赛战绩和云端比赛协议。
+    void LoadPlayerIdentityGroups();
+    bool SavePlayerIdentityGroups() const;
+    nlohmann::json BuildPlayerIdentityStateJson();
+    bool MergePlayerIdentityNames(const std::vector<CString>& names, CString& error);
+    bool AddPlayerIdentityAlias(const CString& groupId, const CString& sourceName,
+        const CString& newName, CString& error);
+    bool UpdatePlayerIdentityIds(const CString& groupId,
+        const std::vector<CString>& ids, CString& error);
+    bool UpdateStandalonePlayerIdentityIds(const CString& name,
+        const std::vector<CString>& ids, CString& error);
+    bool UnmergePlayerIdentityNames(const CString& groupId,
+        const std::vector<CString>& names, bool splitAll, CString& error);
+    bool DeletePlayerIdentityAlias(const CString& groupId,
+        const CString& name, CString& error);
+    void NormalizePlayerIdentityGroups();
+    void RefreshActivePlayerAliasLists();
+    std::string PlayerIdentityGroupFingerprint(const std::vector<CString>& names) const;
+    bool IgnorePlayerIdentityOverlap(const CString& leftName,
+        const CString& rightName, CString& error);
 
 private:
 
@@ -276,6 +320,7 @@ private:
     nlohmann::json DnfBuildKillDisplayStateJson();
     nlohmann::json DnfBuildSharedWebStateJson();
     void OpenKillDisplayWindow();
+    void TryOpenDeferredDisplayWindows();
     void HideKillDisplayWindow();
     void ToggleKillDisplayWindow();
     bool IsKillDisplayWindowVisible() const;
@@ -504,6 +549,7 @@ private:
     CKeyDisplayDlg* m_pKeyDisplayDlg = nullptr;
     CString m_webFrontDir;
     bool m_bKillDisplayHttpReady = false;
+    bool m_deferredDisplayWindowsPending = false;
     CString m_killDisplayHttpError;
 
 
@@ -521,6 +567,16 @@ private:
     bool SaveAliasDB(bool mergeActivePlayers);
     std::string BuildAliasDbJsonPayload(int& mainCount, int& pairCount) const;
     std::string BuildAliasDbAppendPayload(int& mainCount, int& pairCount) const;
+
+    CString m_playerIdentityGroupsPath;
+    std::vector<PlayerIdentityGroupRecord> m_playerIdentityGroups;
+    std::set<CString> m_playerIdentityAutoSplitFingerprints;
+    std::uint64_t m_playerIdentityRevision = 1;
+    nlohmann::json m_playerIdentityStateCache;
+    std::uint64_t m_playerIdentityStateCacheRevision = 0;
+    std::uint64_t m_playerIdentityStateCacheAliasFingerprint = 0;
+    bool m_playerIdentityStateCacheValid = false;
+    std::mutex m_playerIdentityStateCacheMutex;
     void LoadAliasCloudDeleteBaseline();
     void SaveAliasCloudDeleteBaseline() const;
     void SetAliasCloudDeleteBaselineFromPublicPlayers(const nlohmann::json& players);
@@ -767,7 +823,7 @@ private:
     bool BeginLicenseLeaseEndpointRefresh();
     CString SubmitAliasDbForReview(const std::string& aliasDbPayload, int mainCount, int pairCount);
     CString DirectSyncAliasDbToCloud(const std::string& aliasDbPayload, int mainCount, int pairCount);
-    CString SyncAliasDbFromCloud();
+    CString SyncAliasDbFromCloud(const std::string& prefetchedPublicAliasDbJson = {});
     std::string FilterAliasDbPayloadForReview(const std::string& aliasDbPayload, int& mainCount, int& pairCount, int& containedNakedAliasCount) const;
     void ResetAliasDbCloudBaseline();
     void AutoSubmitAliasDbIfDirty();
@@ -793,6 +849,8 @@ private:
     bool m_aliasAutoSyncInFlight = false;
     bool m_aliasAutoSyncAttemptedThisRun = false;
     std::atomic<std::uint64_t> m_aliasAutoSyncGeneration{ 1 };
+    std::atomic<std::uint64_t> m_aliasManualSyncGeneration{ 1 };
+    bool m_aliasManualSyncInFlight = false;
     std::int64_t m_aliasAutoSyncLastSuccessAt = 0;
     std::string m_aliasAutoSyncLastPushHash;
     CString m_aliasAutoSyncLastPushStatus = L"pending";
@@ -803,6 +861,10 @@ private:
     bool m_aliasAutoSyncAppendSupported = false;
     bool m_aliasAutoSyncLastKnownAuthorized = false;
     std::shared_ptr<std::atomic<bool>> m_aliasAutoSyncLifetime;
+
+    std::atomic<bool> m_startupReady{ false };
+    std::atomic<int> m_startupStage{ 0 };
+    std::atomic<bool> m_startupBootstrapStarted{ false };
 
     // 【新增】：仅在 Debug 模式下编译的调试输出函数
     void OutputDebugAuthInfo();

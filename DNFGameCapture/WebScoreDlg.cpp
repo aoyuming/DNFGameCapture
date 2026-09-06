@@ -8,12 +8,16 @@ void WriteMatchLog(const CString& logLine);
 
 namespace {
     // 参考图1的紧凑 CSS 视口尺寸。窗口外框会按当前系统边框自动反推。
-    constexpr int kCompactClientWidth = 980;
-    constexpr int kExpandedClientWidth = 1240;
+    constexpr int kCompactClientWidth = 1140;
+    constexpr int kExpandedClientWidth = 1400;
     constexpr int kReferenceClientHeight = 480;
     constexpr int kAppearanceExtraClientHeight = 300;
     constexpr int kBroadcasterPreviewClientHeight = 760;
+    constexpr int kPlayerIdentityClientHeight = 720;
     constexpr double kTargetVisualScale = 1.25;
+    constexpr COLORREF kWebViewBackgroundColor = RGB(20, 24, 30);
+    constexpr UINT kWebViewLoadingControlId = 0x7F01;
+    constexpr UINT_PTR kWebViewRetryTimerId = 0x7F12;
 
     double GetDpiScaleForWindow(HWND hwnd)
     {
@@ -61,6 +65,9 @@ void CWebScoreDlg::DoDataExchange(CDataExchange* pDX)
 
 BEGIN_MESSAGE_MAP(CWebScoreDlg, CDialogEx)
 	ON_WM_SIZE()
+    ON_WM_TIMER()
+    ON_WM_ERASEBKGND()
+    ON_WM_CTLCOLOR()
     ON_WM_CLOSE() // 🚨 【新增】：绑定点 X 的消息
 END_MESSAGE_MAP()
 
@@ -68,6 +75,19 @@ END_MESSAGE_MAP()
 BOOL CWebScoreDlg::OnInitDialog()
 {
     CDialogEx::OnInitDialog();
+
+    m_webViewBackgroundBrush.CreateSolidBrush(kWebViewBackgroundColor);
+    m_webViewLoadingFont.CreatePointFont(110, L"Microsoft YaHei");
+    CRect loadingRect;
+    GetClientRect(&loadingRect);
+    m_webViewLoadingLabel.Create(
+        L"正在加载计分界面...",
+        WS_CHILD | SS_CENTER | SS_CENTERIMAGE,
+        loadingRect,
+        this,
+        kWebViewLoadingControlId);
+    m_webViewLoadingLabel.SetFont(&m_webViewLoadingFont);
+    SetWebViewLoadingState(true, L"正在加载计分界面...");
 
     // 🚨 动态读取版本号并设置窗口标题
     CString title;
@@ -78,6 +98,112 @@ BOOL CWebScoreDlg::OnInitDialog()
     ApplyFixedWindowHeight();
 
     return TRUE;
+}
+
+BOOL CWebScoreDlg::OnEraseBkgnd(CDC* pDC)
+{
+    if (!pDC) return TRUE;
+    CRect rect;
+    GetClientRect(&rect);
+    pDC->FillSolidRect(&rect, kWebViewBackgroundColor);
+    return TRUE;
+}
+
+HBRUSH CWebScoreDlg::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor)
+{
+    HBRUSH brush = CDialogEx::OnCtlColor(pDC, pWnd, nCtlColor);
+    if (pWnd && pWnd->GetSafeHwnd() == m_webViewLoadingLabel.GetSafeHwnd()) {
+        pDC->SetTextColor(RGB(225, 230, 238));
+        pDC->SetBkColor(kWebViewBackgroundColor);
+        pDC->SetBkMode(OPAQUE);
+        return static_cast<HBRUSH>(m_webViewBackgroundBrush.GetSafeHandle());
+    }
+    return brush;
+}
+
+void CWebScoreDlg::LayoutWebViewLoadingLabel(int cx, int cy)
+{
+    if (!m_webViewLoadingLabel.GetSafeHwnd()) return;
+    // 失败/重试提示只占底部一小块，不能盖住已经绘制完成的计分板。
+    const int labelWidth = (std::min)(520, (std::max)(240, cx - 24));
+    const int labelHeight = (std::min)(32, (std::max)(24, cy - 12));
+    const int left = (std::max)(12, (cx - labelWidth) / 2);
+    const int top = (std::max)(8, cy - labelHeight - 10);
+    m_webViewLoadingLabel.MoveWindow(left, top, labelWidth, labelHeight, FALSE);
+    if (m_webViewLoadingLabel.IsWindowVisible()) {
+        m_webViewLoadingLabel.SetWindowPos(
+            &wndTop, left, top, labelWidth, labelHeight,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+}
+
+void CWebScoreDlg::SetWebViewLoadingState(bool loading, const wchar_t* message)
+{
+    if (!m_webViewLoadingLabel.GetSafeHwnd()) return;
+    if (message && *message) m_webViewLoadingLabel.SetWindowText(message);
+    m_webViewPageReady = !loading;
+    if (loading) {
+        const CString loadingText = message ? message : L"";
+        const bool showLoadingMessage =
+            loadingText.Find(L"失败") >= 0 ||
+            loadingText.Find(L"重试") >= 0 ||
+            loadingText.Find(L"错误") >= 0 ||
+            loadingText.Find(L"请检查") >= 0;
+        CRect rect;
+        GetClientRect(&rect);
+        LayoutWebViewLoadingLabel(rect.Width(), rect.Height());
+        m_webViewLoadingLabel.ShowWindow(showLoadingMessage ? SW_SHOW : SW_HIDE);
+        if (showLoadingMessage) m_webViewLoadingLabel.BringWindowToTop();
+    }
+    else {
+        m_webViewLoadingLabel.ShowWindow(SW_HIDE);
+    }
+}
+
+bool CWebScoreDlg::SwitchToWebViewRecoveryDataFolder(HRESULT result)
+{
+    if (result != HRESULT_FROM_WIN32(ERROR_BUSY) ||
+        m_webViewUsingFallbackDataFolder) {
+        return false;
+    }
+
+    wchar_t tempPath[MAX_PATH] = {};
+    const DWORD length = ::GetTempPathW(static_cast<DWORD>(std::size(tempPath)), tempPath);
+    if (length == 0 || length >= std::size(tempPath)) return false;
+
+    CString folder(tempPath, static_cast<int>(length));
+    folder.TrimRight(L"\\/");
+    CString suffix;
+    suffix.Format(L"\\DNFGameCapture-WebView2-%lu-%llu",
+        static_cast<unsigned long>(::GetCurrentProcessId()),
+        static_cast<unsigned long long>(::GetTickCount64()));
+    folder += suffix;
+
+    if (!::CreateDirectoryW(folder, nullptr) &&
+        ::GetLastError() != ERROR_ALREADY_EXISTS) {
+        return false;
+    }
+
+    m_webViewUserDataFolder = folder;
+    m_webViewUsingFallbackDataFolder = true;
+    WriteMatchLog(L"[WebView启动] 检测到用户数据目录忙（0x800700AA），切换备用目录：" + folder);
+    return true;
+}
+
+void CWebScoreDlg::ScheduleWebViewRetry(const CString& reason)
+{
+    if (!m_hWnd || !::IsWindow(m_hWnd)) return;
+
+    const UINT delayMs = (std::min)(5000u,
+        500u + m_webViewInitAttempt * 500u);
+    KillTimer(kWebViewRetryTimerId);
+    m_webViewRetryScheduled = true;
+    SetTimer(kWebViewRetryTimerId, delayMs, nullptr);
+
+    CString line;
+    line.Format(L"[WebView启动] %s；将在 %u ms 后重试，第 %u 次。",
+        reason.GetString(), delayMs, m_webViewInitAttempt + 1);
+    WriteMatchLog(line);
 }
 
 // ==========================================
@@ -97,30 +223,133 @@ void CWebScoreDlg::OnOK() {
 
 void CWebScoreDlg::InitWebView2()
 {
-    CreateCoreWebView2EnvironmentWithOptions(nullptr, nullptr, nullptr,
+    if (!m_hWnd || !::IsWindow(m_hWnd) || m_webviewController ||
+        m_webViewInitInFlight) {
+        return;
+    }
+
+    m_webViewInitInFlight = true;
+    ++m_webViewInitAttempt;
+    m_webViewInitStartedAt = ::GetTickCount64();
+    m_webViewControllerStartedAt = 0;
+
+    // 不使用 WebView2 的系统默认用户数据目录，避免和 Edge 或其他
+    // WebView2 进程争用同一个 profile，导致首次环境创建长时间等待。
+    if (m_webViewUserDataFolder.IsEmpty()) {
+        wchar_t tempPath[MAX_PATH] = {};
+        const DWORD length = ::GetTempPathW(
+            static_cast<DWORD>(std::size(tempPath)), tempPath);
+        if (length > 0 && length < std::size(tempPath)) {
+            CString folder(tempPath, static_cast<int>(length));
+            folder.TrimRight(L"\\/");
+            folder += L"\\DNFGameCapture-WebView2-Profile";
+            if (::CreateDirectoryW(folder, nullptr) ||
+                ::GetLastError() == ERROR_ALREADY_EXISTS) {
+                m_webViewUserDataFolder = folder;
+                WriteMatchLog(L"[WebView启动] 使用应用专用用户数据目录：" + folder);
+            }
+        }
+    }
+
+    LPCWSTR userDataFolder = m_webViewUserDataFolder.IsEmpty()
+        ? nullptr : m_webViewUserDataFolder.GetString();
+    const HRESULT environmentRequestResult =
+        CreateCoreWebView2EnvironmentWithOptions(nullptr, userDataFolder, nullptr,
         Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
             [this](HRESULT result, ICoreWebView2Environment* env) -> HRESULT {
 
                 // 🚨【关键修复 1】：拦截空指针和失败状态
                 if (FAILED(result) || env == nullptr) {
-                    MessageBox(L"WebView2 运行环境加载失败！\r\n请检查您的电脑是否已安装 Microsoft Edge WebView2 运行时。", L"组件缺失", MB_ICONERROR);
+                    m_webViewInitInFlight = false;
+                    CString timing;
+                    timing.Format(L"[WebView启动] 环境创建失败耗时=%llu ms。",
+                        static_cast<unsigned long long>(::GetTickCount64() - m_webViewInitStartedAt));
+                    WriteMatchLog(timing);
+                    CString reason;
+                    reason.Format(L"WebView2环境创建失败；hr=0x%08X。",
+                        static_cast<unsigned int>(result));
+                    const bool switchedToRecovery =
+                        SwitchToWebViewRecoveryDataFolder(result);
+                    WriteMatchLog(L"[WebView启动] " + reason);
+                    CString failureMessage;
+                    failureMessage.Format(L"计分界面正在重试（环境 0x%08X，备用目录%s）...",
+                        static_cast<unsigned int>(result),
+                        switchedToRecovery ? L"已切换" : L"未切换");
+                    SetWebViewLoadingState(true, failureMessage.GetString());
+                    ScheduleWebViewRetry(reason);
                     return S_OK;
                 }
 
-                env->CreateCoreWebView2Controller(m_hWnd,
+                m_webViewControllerStartedAt = ::GetTickCount64();
+                CString environmentTiming;
+                environmentTiming.Format(L"[WebView启动] 环境创建回调耗时=%llu ms。",
+                    static_cast<unsigned long long>(m_webViewControllerStartedAt - m_webViewInitStartedAt));
+                WriteMatchLog(environmentTiming);
+
+                const HRESULT controllerRequestResult = env->CreateCoreWebView2Controller(m_hWnd,
                     Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
                         [this](HRESULT result, ICoreWebView2Controller* controller) -> HRESULT {
 
                             // 🚨【关键修复 2】：控制器拦截
-                            if (FAILED(result) || controller == nullptr) return S_OK;
+                            if (FAILED(result) || controller == nullptr) {
+                                m_webViewInitInFlight = false;
+                                CString reason;
+                                reason.Format(L"WebView2控制器创建失败；hr=0x%08X。",
+                                    static_cast<unsigned int>(result));
+                                const bool switchedToRecovery =
+                                    SwitchToWebViewRecoveryDataFolder(result);
+                                WriteMatchLog(L"[WebView启动] " + reason);
+                                CString failureMessage;
+                                failureMessage.Format(L"计分界面正在重试（控制器 0x%08X，备用目录%s）...",
+                                    static_cast<unsigned int>(result),
+                                    switchedToRecovery ? L"已切换" : L"未切换");
+                                SetWebViewLoadingState(true, failureMessage.GetString());
+                                ScheduleWebViewRetry(reason);
+                                return S_OK;
+                            }
 
                             m_webviewController = controller;
-                            m_webviewController->get_CoreWebView2(&m_webview);
+                            m_webview.Reset();
+                            const HRESULT coreWebViewResult =
+                                m_webviewController->get_CoreWebView2(&m_webview);
+                            if (FAILED(coreWebViewResult) || !m_webview) {
+                                m_webviewController.Reset();
+                                m_webViewInitInFlight = false;
+                                CString reason;
+                                reason.Format(L"获取CoreWebView2接口失败；hr=0x%08X。",
+                                    static_cast<unsigned int>(coreWebViewResult));
+                                WriteMatchLog(L"[WebView启动] " + reason);
+                                CString failureMessage;
+                                failureMessage.Format(L"计分界面正在重试（接口 0x%08X）...",
+                                    static_cast<unsigned int>(coreWebViewResult));
+                                SetWebViewLoadingState(true, failureMessage.GetString());
+                                ScheduleWebViewRetry(reason);
+                                return S_OK;
+                            }
+
+                            m_webViewInitInFlight = false;
+                            m_webViewRetryScheduled = false;
+                            KillTimer(kWebViewRetryTimerId);
+                            CString timing;
+                            timing.Format(L"[WebView启动] 环境和控制器创建耗时=%llu ms。",
+                                static_cast<unsigned long long>(::GetTickCount64() - m_webViewInitStartedAt));
+                            WriteMatchLog(timing);
+                            CString controllerTiming;
+                            controllerTiming.Format(L"[WebView启动] 控制器创建回调耗时=%llu ms。",
+                                static_cast<unsigned long long>(::GetTickCount64() - m_webViewControllerStartedAt));
+                            WriteMatchLog(controllerTiming);
 
                             // 调整网页大小铺满窗口
                             CRect rect;
                             GetClientRect(&rect);
                             m_webviewController->put_Bounds(rect);
+                            Microsoft::WRL::ComPtr<ICoreWebView2Controller2> controller2;
+                            if (SUCCEEDED(m_webviewController.As(&controller2)) && controller2) {
+                                const COREWEBVIEW2_COLOR backgroundColor = { 0xFF, 0x14, 0x18, 0x1E };
+                                controller2->put_DefaultBackgroundColor(backgroundColor);
+                            }
+                            // WebView2 控制器是后创建的子窗口，再次置顶保证加载提示不会被覆盖。
+                            if (!m_webViewPageReady) m_webViewLoadingLabel.BringWindowToTop();
                             ApplyDpiNormalizedZoom();
                             WriteWebHostDiagnostics(L"WebView2控制器已创建");
 
@@ -149,17 +378,112 @@ void CWebScoreDlg::InitWebView2()
                                     return S_OK;
                                 }).Get(), &token);
 
+                            EventRegistrationToken navigationToken;
+                            m_webview->add_NavigationCompleted(
+                                Microsoft::WRL::Callback<ICoreWebView2NavigationCompletedEventHandler>(
+                                    [this](ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs* args) -> HRESULT {
+                                        BOOL success = FALSE;
+                                        COREWEBVIEW2_WEB_ERROR_STATUS webErrorStatus =
+                                            COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
+                                        if (args) {
+                                            args->get_IsSuccess(&success);
+                                            args->get_WebErrorStatus(&webErrorStatus);
+                                        }
+                                        if (!success) {
+                                            CString line;
+                                            line.Format(L"[WebView启动] 本地页面导航失败，WebErrorStatus=%d，保留加载提示。",
+                                                static_cast<int>(webErrorStatus));
+                                            WriteMatchLog(line);
+                                            CString failureMessage;
+                                            failureMessage.Format(L"计分界面加载失败（WebView错误 %d），请检查 web前端 文件后重试。",
+                                                static_cast<int>(webErrorStatus));
+                                            SetWebViewLoadingState(true, failureMessage.GetString());
+                                        }
+                                        else {
+                                            // 页面导航成功后即使前端握手稍晚或丢失，也不能让原生
+                                            // 加载层永久盖住已经绘制出的计分界面。page_ready 仍会
+                                            // 继续负责桥接确认和首帧状态同步。
+                                            WriteMatchLog(L"[WebView启动] 本地页面导航成功，解除原生加载覆盖层，等待前端page_ready。");
+                                            if (!m_webViewPageReady) {
+                                                SetWebViewLoadingState(false);
+                                            }
+                                        }
+                                        return S_OK;
+                                    }).Get(), &navigationToken);
+
                             // 加载本地网页
                             wchar_t exePath[MAX_PATH];
                             GetModuleFileName(NULL, exePath, MAX_PATH);
-                            CString path = exePath;
-                            path = path.Left(path.ReverseFind(L'\\') + 1) + L"web前端\\index.html";
-                            m_webview->Navigate(path);
+                            CString pagePath = exePath;
+                            pagePath = pagePath.Left(pagePath.ReverseFind(L'\\') + 1) + L"web前端\\index.html";
+                            CString pageDir = pagePath.Left(pagePath.ReverseFind(L'\\'));
+                            CString pageUri;
+                            Microsoft::WRL::ComPtr<ICoreWebView2_3> webView3;
+                            const HRESULT mappingQueryResult = m_webview.As(&webView3);
+                            HRESULT mappingResult = E_NOINTERFACE;
+                            if (SUCCEEDED(mappingQueryResult) && webView3) {
+                                mappingResult = webView3->SetVirtualHostNameToFolderMapping(
+                                    L"appassets.example", pageDir.GetString(),
+                                    COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
+                            }
+                            if (SUCCEEDED(mappingResult)) {
+                                pageUri = L"http://appassets.example/index.html";
+                            }
+                            else {
+                                pageUri = L"file:///";
+                                CString normalizedPagePath = pagePath;
+                                normalizedPagePath.Replace(L'\\', L'/');
+                                pageUri += normalizedPagePath;
+                                CString mappingLog;
+                                mappingLog.Format(L"[WebView启动] 虚拟主机映射失败；hr=0x%08X，回退file URI。",
+                                    static_cast<unsigned int>(mappingResult));
+                                WriteMatchLog(mappingLog);
+                            }
+                            WriteMatchLog(L"[WebView启动] 正在导航本地页面：" + pageUri);
+                            const HRESULT navigateResult = m_webview->Navigate(pageUri.GetString());
+                            if (FAILED(navigateResult)) {
+                                CString line;
+                                line.Format(L"[WebView启动] Navigate调用失败；hr=0x%08X；路径=%s。",
+                                    static_cast<unsigned int>(navigateResult), pagePath.GetString());
+                                WriteMatchLog(line);
+                                SetWebViewLoadingState(true,
+                                    L"计分界面启动失败，请关闭后重新打开。 ");
+                            }
 
                             return S_OK;
                         }).Get());
+                if (FAILED(controllerRequestResult)) {
+                    m_webViewInitInFlight = false;
+                    const bool switchedToRecovery =
+                        SwitchToWebViewRecoveryDataFolder(controllerRequestResult);
+                    CString reason;
+                    reason.Format(L"请求创建WebView2控制器失败；hr=0x%08X。",
+                        static_cast<unsigned int>(controllerRequestResult));
+                    WriteMatchLog(L"[WebView启动] " + reason);
+                    CString failureMessage;
+                    failureMessage.Format(L"计分界面正在重试（控制器请求 0x%08X，备用目录%s）...",
+                        static_cast<unsigned int>(controllerRequestResult),
+                        switchedToRecovery ? L"已切换" : L"未切换");
+                    SetWebViewLoadingState(true, failureMessage.GetString());
+                    ScheduleWebViewRetry(reason);
+                }
                 return S_OK;
             }).Get());
+    if (FAILED(environmentRequestResult)) {
+        m_webViewInitInFlight = false;
+        const bool switchedToRecovery =
+            SwitchToWebViewRecoveryDataFolder(environmentRequestResult);
+        CString reason;
+        reason.Format(L"请求创建WebView2环境失败；hr=0x%08X。",
+            static_cast<unsigned int>(environmentRequestResult));
+        WriteMatchLog(L"[WebView启动] " + reason);
+        CString failureMessage;
+        failureMessage.Format(L"计分界面正在重试（环境请求 0x%08X，备用目录%s）...",
+            static_cast<unsigned int>(environmentRequestResult),
+            switchedToRecovery ? L"已切换" : L"未切换");
+        SetWebViewLoadingState(true, failureMessage.GetString());
+        ScheduleWebViewRetry(reason);
+    }
 }
 
 // 窗口拉伸时，网页跟着拉伸
@@ -171,10 +495,26 @@ void CWebScoreDlg::OnSize(UINT nType, int cx, int cy)
 		m_webviewController->put_Bounds(bounds);
         if (!m_webZoomCalibrated) ApplyDpiNormalizedZoom();
 	}
+    LayoutWebViewLoadingLabel(cx, cy);
+}
+
+void CWebScoreDlg::OnTimer(UINT_PTR nIDEvent)
+{
+    if (nIDEvent == kWebViewRetryTimerId) {
+        KillTimer(kWebViewRetryTimerId);
+        m_webViewRetryScheduled = false;
+        if (!m_webviewController && !m_webViewInitInFlight) {
+            SetWebViewLoadingState(true, L"正在重新连接计分界面...");
+            InitWebView2();
+        }
+        return;
+    }
+
+    CDialogEx::OnTimer(nIDEvent);
 }
 
 // 暴露给主窗口的方法：向网页发数据
-void CWebScoreDlg::SendStateToWeb(const CString& jsonStr)
+bool CWebScoreDlg::SendStateToWeb(const CString& jsonStr)
 {
 	if (m_webview == nullptr) {
 		const ULONGLONG now = ::GetTickCount64();
@@ -184,7 +524,7 @@ void CWebScoreDlg::SendStateToWeb(const CString& jsonStr)
 			m_lastWebMessageFailure = E_POINTER;
 			m_lastWebMessageFailureTick = now;
 		}
-		return;
+		return false;
 	}
 
 	HRESULT hr = m_webview->PostWebMessageAsJson(jsonStr.GetString());
@@ -199,11 +539,13 @@ void CWebScoreDlg::SendStateToWeb(const CString& jsonStr)
 			m_lastWebMessageFailure = hr;
 			m_lastWebMessageFailureTick = now;
 		}
+		return false;
 	}
 	else if (!m_webMessageSuccessLogged) {
 		WriteMatchLog(L"[WebView桥] PostWebMessageAsJson首次发送成功。");
 		m_webMessageSuccessLogged = true;
 	}
+	return true;
 }
 
 bool CWebScoreDlg::CopyWindowImageToClipboard(CString& errorMsg)
@@ -431,6 +773,9 @@ void CWebScoreDlg::ApplyExpandedWindowSize()
     if (m_broadcasterPreviewExpanded) {
         targetClientHeight = max(targetClientHeight, kBroadcasterPreviewClientHeight);
     }
+    if (m_playerIdentityExpanded) {
+        targetClientHeight = max(targetClientHeight, kPlayerIdentityClientHeight);
+    }
 
     ResizeWindowForClientSize(
         ScaleCssSizeToNativePixels(GetReferenceClientWidth(), kTargetVisualScale),
@@ -469,4 +814,14 @@ void CWebScoreDlg::SetConsolePanelExpanded(bool expanded)
     ApplyExpandedWindowSize();
     WriteWebHostDiagnostics(m_consolePanelExpanded ?
         L"C++日志面板打开扩宽" : L"C++日志面板关闭还原");
+}
+
+void CWebScoreDlg::SetPlayerIdentityPanelExpanded(bool expanded)
+{
+    if (m_playerIdentityExpanded == expanded) return;
+    m_playerIdentityExpanded = expanded;
+
+    ApplyExpandedWindowSize();
+    WriteWebHostDiagnostics(m_playerIdentityExpanded ?
+        L"选手身份面板打开扩高" : L"选手身份面板关闭还原");
 }

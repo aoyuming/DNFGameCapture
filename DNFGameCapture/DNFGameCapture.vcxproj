@@ -218,6 +218,7 @@
     <ClInclude Include="CloudMatchSync.h" />
     <ClInclude Include="CrashDump.h" />
     <ClInclude Include="AliasDbAutoSyncPolicy.h" />
+    <ClInclude Include="PlayerIdentityGroupService.h" />
     <ClInclude Include="KillDisplayDlg.h" />
     <ClInclude Include="KeyDisplayDlg.h" />
     <ClInclude Include="KeyMappingHook.h" />
@@ -251,6 +252,9 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AliasDbAutoSyncPolicy.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="PlayerIdentityGroupService.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="DNFGameCaptureDlg_IdentityPatch.cpp" />
