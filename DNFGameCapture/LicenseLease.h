@@ -13,13 +13,17 @@ struct DnfLicenseLeaseRecord {
     std::wstring licenseKey;
     std::wstring machineId;
     std::wstring cloudServerUrl;
-    // Only populated by the opt-in server-auth-v2 path.  It is stored inside
+    // Populated by server-auth-v2. It is stored inside
     // the same DPAPI-protected record as the endpoint, never in config.ini.
     std::wstring serverSessionToken;
     std::int64_t cardDuration = 0;
     std::int64_t expireTime = 0;
     std::int64_t validatedAt = 0;
     std::int64_t lastUsedAt = 0;
+    // Set only after online authorization against the release's manifest.
+    // Legacy leases keep both fields empty and require online renewal.
+    std::wstring environment;
+    std::wstring endpointManifestUrl;
 };
 
 enum class DnfLicenseLeaseValidation {

@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "DNFGameCaptureDlg.h"
+#include "PlayerIdentityOcrCache.h"
 #include <cwctype>
 
 void WriteMatchLog(const CString& logLine);
@@ -15,13 +16,6 @@ namespace {
         // 约定：0 = 左上固定红框，1 = 右上固定红框。
         // 如果你的 RunOCR_Internal(nAreaIndex) 编号不同，只改这里。
         return areaIndex == 0 ? TDnfPanelSide::LeftNameArea : TDnfPanelSide::RightAreaName;
-    }
-
-    static int PanelSideToTeam(TDnfPanelSide side) {
-        // 当前截图规则：左框是蓝队，右框是红队。
-        // 你的 JS 同步里 red=0, blue=1，所以这里默认 left->1, right->0。
-        // 如果 C++ 内部 team 语义相反，只改这里。
-        return side == TDnfPanelSide::LeftNameArea ? 1 : 0;
     }
 
     static TDnfPanelSide TeamToPanelSide(int team) {
@@ -100,6 +94,8 @@ namespace {
         body.Trim();
 
         int sharp = body.Find(L'#');
+        const int wideSharp = body.Find(L'＃');
+        if (sharp < 0 || (wideSharp >= 0 && wideSharp < sharp)) sharp = wideSharp;
         if (sharp >= 0) {
             meta.job = body.Mid(sharp + 1);
             meta.job.Trim();
@@ -116,10 +112,66 @@ namespace {
         meta.realId.Trim();
         return meta;
     }
+
+    static dnf::identity::OcrGameIdMetadata DnfParseCachedGameId(const std::wstring& raw) {
+        const CString id(raw.c_str());
+        const auto meta = DnfParseAliasForIdentity(id);
+        dnf::identity::OcrGameIdMetadata result;
+        result.fullMatchName = (meta.fullId.IsEmpty() ? id : meta.fullId).GetString();
+        result.matchName = (meta.realId.IsEmpty() ? id : meta.realId).GetString();
+        result.declaredArea = meta.area.GetString();
+        result.declaredJob = meta.job.GetString();
+        result.isSymbolicId = DnfIdentityIsSymbolLikeId(CString(result.matchName.c_str()));
+        return result;
+    }
+
+    static bool DnfPrepareIdentityCache(dnf::identity::OcrLookupCache& cache,
+        dnf::player_library::SnapshotPtr snapshot, const PlayerData* players,
+        CTemporalIdentityMatcher& matcher, DWORD now,
+        const CTemporalIdentityMatcher::DebugSink& dbg = nullptr) {
+        dnf::identity::OcrLookupCache::Roster roster;
+        for (std::size_t i = 0; i < roster.size(); ++i) {
+            roster[i].name = players[i].name.GetString();
+            roster[i].team = players[i].team;
+            for (const auto& alias : players[i].aliases) roster[i].gameIds.emplace_back(alias.name.GetString());
+        }
+        if (cache.Prepare(std::move(snapshot), roster, DnfParseCachedGameId)) {
+            matcher.Reset(L"Player library or active roster changed", now, dbg);
+            return true;
+        }
+        return false;
+    }
+
+    static std::vector<TDnfCandidateIdentity> DnfCachedCandidates(
+        const dnf::identity::OcrLookupCache& cache, const PlayerData* players) {
+        std::vector<TDnfCandidateIdentity> out;
+        out.reserve(cache.GameCandidates().size());
+        for (const auto& game : cache.GameCandidates()) {
+            TDnfCandidateIdentity candidate;
+            candidate.name = game.name.c_str();
+            candidate.ownerName = players[game.playerIndex].name;
+            candidate.team = players[game.playerIndex].team;
+            candidate.isAlias = true;
+            candidate.fullMatchName = game.metadata.fullMatchName.c_str();
+            candidate.matchName = game.metadata.matchName.c_str();
+            candidate.declaredArea = game.metadata.declaredArea.c_str();
+            candidate.declaredJob = game.metadata.declaredJob.c_str();
+            candidate.hasDeclaredArea = !game.metadata.declaredArea.empty();
+            candidate.hasDeclaredJob = !game.metadata.declaredJob.empty();
+            candidate.isSymbolicId = game.metadata.isSymbolicId;
+            out.push_back(std::move(candidate));
+        }
+        return out;
+    }
 }
 
-void CDNFGameCaptureDlg::UpdateIdentityPanelCache(int areaIndex, const CString& rawOcrText)
+void CDNFGameCaptureDlg::UpdateIdentityPanelCache(int areaIndex, const CString& rawOcrText, std::uint64_t monitoringGeneration)
 {
+    if (areaIndex < 0 || areaIndex > 1) return;
+    // Kill/reset notifications may already hold the data lock: never invert this order.
+    std::lock_guard<std::mutex> dataLock(m_dataMutex);
+    std::lock_guard<std::mutex> identityLock(m_identityMutex);
+    if (monitoringGeneration != m_ocrMonitoringGeneration.load()) return;
     TDnfPanelSide side = AreaIndexToPanelSide(areaIndex);
     DWORD now = GetTickCount();
 
@@ -128,51 +180,25 @@ void CDNFGameCaptureDlg::UpdateIdentityPanelCache(int areaIndex, const CString& 
         WriteMatchLog(line); // 身份融合详细日志只写入文件，不再刷软件界面
     };
 
+    DnfPrepareIdentityCache(m_identityOcrCache, std::atomic_load(&m_playerLibrarySnapshot),
+        m_players, m_identityMatcher, now, dbg);
     m_identityMatcher.UpdatePanelFromOcr(side, rawOcrText, now, dbg);
 }
 
 std::vector<TDnfCandidateIdentity> CDNFGameCaptureDlg::BuildIdentityCandidatesForPanel(TDnfPanelSide side)
 {
-    std::vector<TDnfCandidateIdentity> out;
-    std::lock_guard<std::mutex> lock(m_dataMutex);
-
-    for (int i = 0; i < 8; ++i) {
-        if (m_players[i].name.IsEmpty()) continue;
-
-        // 不再在候选构建阶段强行按“左框=蓝队/右框=红队”过滤。
-        // 原因：录像翻转、红蓝互换或用户手动翻转时，固定框与队伍映射可能变化；
-        // 纯符号 ID 兜底更需要从 8 人中按“职业/大区唯一性”判断。
-        // 最终若两侧候选同队，DoRetryMatchingTask 里仍会按 lockedTeam 做冲突拒绝。
-
-        // 选手只作为归属 owner，不参与身份融合名称匹配。
-        // 真正用于 OCR 命中的候选只有游戏ID。
-        for (const auto& a : m_players[i].aliases) {
-            if (a.name.IsEmpty()) continue;
-            TDnfCandidateIdentity alias;
-            alias.name = a.name;
-            alias.ownerName = m_players[i].name;
-            alias.team = m_players[i].team;
-            alias.isAlias = true;
-
-            TAliasMetaForIdentity meta = DnfParseAliasForIdentity(a.name);
-            alias.fullMatchName = meta.fullId.IsEmpty() ? a.name : meta.fullId;
-            alias.matchName = meta.realId.IsEmpty() ? a.name : meta.realId;
-            alias.declaredArea = meta.area;
-            alias.declaredJob = meta.job;
-            alias.hasDeclaredArea = meta.hasArea;
-            alias.hasDeclaredJob = meta.hasJob;
-            alias.isSymbolicId = DnfIdentityIsSymbolLikeId(alias.matchName);
-
-            out.push_back(alias);
-        }
-    }
-
-    return out;
+    (void)side; // Both physical panels consider only the current eight players.
+    std::lock_guard<std::mutex> dataLock(m_dataMutex);
+    std::lock_guard<std::mutex> identityLock(m_identityMutex);
+    DnfPrepareIdentityCache(m_identityOcrCache, std::atomic_load(&m_playerLibrarySnapshot),
+        m_players, m_identityMatcher, GetTickCount());
+    return DnfCachedCandidates(m_identityOcrCache, m_players);
 }
 
 TDnfPanelMatchResult CDNFGameCaptureDlg::MatchIdentityPanel(TDnfPanelSide side)
 {
-    auto candidates = BuildIdentityCandidatesForPanel(side);
+    std::lock_guard<std::mutex> dataLock(m_dataMutex);
+    std::lock_guard<std::mutex> identityLock(m_identityMutex);
     DWORD now = GetTickCount();
 
     auto dbg = [](const CString& line) {
@@ -180,22 +206,27 @@ TDnfPanelMatchResult CDNFGameCaptureDlg::MatchIdentityPanel(TDnfPanelSide side)
         WriteMatchLog(line); // 身份融合详细日志只写入文件，不再刷软件界面
     };
 
+    DnfPrepareIdentityCache(m_identityOcrCache, std::atomic_load(&m_playerLibrarySnapshot),
+        m_players, m_identityMatcher, now, dbg);
+    const auto candidates = DnfCachedCandidates(m_identityOcrCache, m_players);
+    TDnfPanelMatchResult result;
     if (candidates.empty()) {
         CString msg;
         msg.Format(L"[融合匹配][%s] 候选列表为空，请检查红蓝队上场数据。\r\n",
             side == TDnfPanelSide::LeftNameArea ? L"左框" : L"右框");
         dbg(msg);
-        TDnfPanelMatchResult r;
-        r.ok = false;
-        r.debugText = msg;
-        return r;
+        result.debugText = msg;
+    }
+    else {
+        result = m_identityMatcher.MatchPanel(side, candidates, now, dbg);
     }
 
-    return m_identityMatcher.MatchPanel(side, candidates, now, dbg);
+    return result;
 }
 
 void CDNFGameCaptureDlg::NotifyIdentityKillConfirmed(int deadTeam, const CString& deadName)
 {
+    std::lock_guard<std::mutex> identityLock(m_identityMutex);
     TDnfPanelSide deadSide = TeamToPanelSide(deadTeam);
     DWORD now = GetTickCount();
 
@@ -209,6 +240,8 @@ void CDNFGameCaptureDlg::NotifyIdentityKillConfirmed(int deadTeam, const CString
 
 void CDNFGameCaptureDlg::NotifyIdentityRoundReset(const CString& reason)
 {
+    m_ocrMonitoringGeneration.fetch_add(1);
+    std::lock_guard<std::mutex> identityLock(m_identityMutex);
     DWORD now = GetTickCount();
 
     auto dbg = [](const CString& line) {
@@ -216,5 +249,6 @@ void CDNFGameCaptureDlg::NotifyIdentityRoundReset(const CString& reason)
         WriteMatchLog(line);
     };
 
+    m_identityOcrCache.Reset();
     m_identityMatcher.Reset(reason, now, dbg);
 }

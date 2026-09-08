@@ -35,6 +35,8 @@
 
 ## 重要数据文件
 
+新版规范化选手库使用内嵌 SQLite，选手及别名共用游戏 ID。数据库路径、旧 INI 迁移与回退方式见 [本地选手库说明](docs/local-player-library.md)。
+
 这些文件通常位于 EXE 同目录或用户选择的输出目录：
 
 - `players_config.txt`：本地选手、队伍、战绩和游戏ID配置。

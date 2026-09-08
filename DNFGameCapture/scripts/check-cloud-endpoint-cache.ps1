@@ -19,15 +19,17 @@ function Require-Text([string]$content, [string]$needle, [string]$message) {
     }
 }
 
-Require-Text $header 'bool m_cloudServerAuthV2 = false;' `
-    'Server authorization v2 must remain opt-in for production clients.'
+Require-Text $header 'bool m_cloudServerAuthV2 = true;' `
+    '5.2.0 production clients must default to server authorization v2.'
 Require-Text $header 'CString m_cloudEndpointManifestUrl;' `
     'The endpoint manifest URL is not persisted in the client state.'
 Require-Text $header 'CString m_cloudServerLastKnownUrl;' `
     'The cached server URL field is missing.'
 
-Require-Text $source 'L"CloudMatch", L"ServerAuthV2", 0' `
-    'ServerAuthV2 must default to disabled.'
+Require-Text $source 'm_cloudServerAuthV2 = true;' `
+    'Old opt-in settings must not disable production server authorization.'
+Require-Text $source 'dnf::cloud_release::CanUseCachedEndpoint(' `
+    'Cached endpoints must match the compiled release environment and manifest.'
 Require-Text $source 'DnfFetchServerEndpointManifest(' `
     'The OSS endpoint-manifest fallback is missing.'
 Require-Text $source 'L"CloudMatch", L"LastKnownServerUrl"' `

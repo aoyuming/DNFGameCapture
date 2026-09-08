@@ -1,10 +1,14 @@
 let libraryNames = [];
+let libraryNamesRevision = -1;
 
 self.onmessage = event => {
     const message = event?.data || {};
     const type = String(message.type || '');
 
     if (type === 'set-names') {
+        const revision = Number(message.revision ?? libraryNamesRevision + 1);
+        if (revision <= libraryNamesRevision) return;
+        libraryNamesRevision = revision;
         libraryNames = Array.isArray(message.names) ? message.names.slice() : [];
         return;
     }

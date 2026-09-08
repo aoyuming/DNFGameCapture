@@ -1,10 +1,12 @@
-export type IdentifierKind = 'game' | 'adventure';
+export type IdentifierKind = 'game';
+
+// Normalized identity unions are bounded by the total library byte limit too.
+export const MAX_PLAYER_ENTITY_VALUES = 10_000;
 
 export interface PlayerEntity {
   entityId: string;
   names: string[];
   gameIds: string[];
-  adventureGroupIds: string[];
 }
 
 export interface IdentifierConflict {
@@ -14,7 +16,6 @@ export interface IdentifierConflict {
 
 export interface IdentifierConflicts {
   gameIds: IdentifierConflict[];
-  adventureGroupIds: IdentifierConflict[];
 }
 
 export type PlayerMatch =
@@ -55,11 +56,10 @@ export function canonicalizeIdentifiers(values: readonly string[]): string[] {
 
 function conflictMap(
   entities: readonly PlayerEntity[],
-  field: 'gameIds' | 'adventureGroupIds',
 ): IdentifierConflict[] {
   const owners = new Map<string, { display: string; entityIds: Set<string> }>();
   for (const entity of entities) {
-    for (const identifier of canonicalizeIdentifiers(entity[field])) {
+    for (const identifier of canonicalizeIdentifiers(entity.gameIds)) {
       const key = identifierKey(identifier);
       const current = owners.get(key) ?? { display: identifier, entityIds: new Set<string>() };
       current.entityIds.add(entity.entityId);
@@ -79,41 +79,36 @@ export function detectIdentifierConflicts(
   entities: readonly PlayerEntity[],
 ): IdentifierConflicts {
   return {
-    gameIds: conflictMap(entities, 'gameIds'),
-    adventureGroupIds: conflictMap(entities, 'adventureGroupIds'),
+    gameIds: conflictMap(entities),
   };
 }
 
 function findCandidates(
   entities: readonly PlayerEntity[],
   identifiers: readonly string[],
-  field: 'gameIds' | 'adventureGroupIds',
 ): string[] {
   const requested = new Set(canonicalizeIdentifiers(identifiers).map(identifierKey));
   if (requested.size === 0) return [];
   return entities
-    .filter((entity) => canonicalizeIdentifiers(entity[field]).some((value) => requested.has(identifierKey(value))))
+    .filter((entity) => canonicalizeIdentifiers(entity.gameIds).some((value) => requested.has(identifierKey(value))))
     .map((entity) => entity.entityId)
     .sort();
 }
 
-/** Game IDs deliberately win over adventure-group IDs when both match. */
 export function resolvePlayerIdentity(
   entities: readonly PlayerEntity[],
   gameIds: readonly string[],
-  adventureGroupIds: readonly string[],
+  activeEntityIds?: readonly string[],
 ): PlayerMatch {
-  const gameCandidates = findCandidates(entities, gameIds, 'gameIds');
+  if (activeEntityIds !== undefined) {
+    const active = new Set(activeEntityIds);
+    entities = entities.filter(entity => active.has(entity.entityId));
+  }
+  const gameCandidates = findCandidates(entities, gameIds);
   if (gameCandidates.length > 0) {
     return gameCandidates.length === 1
       ? { entityId: gameCandidates[0], matchedBy: 'game', candidateEntityIds: gameCandidates }
       : { entityId: null, matchedBy: 'game', candidateEntityIds: gameCandidates, conflict: true };
   }
-  const adventureCandidates = findCandidates(entities, adventureGroupIds, 'adventureGroupIds');
-  if (adventureCandidates.length === 0) {
-    return { entityId: null, matchedBy: 'none', candidateEntityIds: [] };
-  }
-  return adventureCandidates.length === 1
-    ? { entityId: adventureCandidates[0], matchedBy: 'adventure', candidateEntityIds: adventureCandidates }
-    : { entityId: null, matchedBy: 'adventure', candidateEntityIds: adventureCandidates, conflict: true };
+  return { entityId: null, matchedBy: 'none', candidateEntityIds: [] };
 }

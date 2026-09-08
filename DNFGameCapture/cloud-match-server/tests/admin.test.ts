@@ -122,6 +122,62 @@ afterEach(() => {
 });
 
 describe('localhost admin console', () => {
+  test('serves exactly three authenticated hub entries and isolated workspaces', async () => {
+    const { app } = createFixture();
+    const home = await request(app).get('/admin').auth('admin', adminPassword).expect(200);
+    expect([...home.text.matchAll(/<a\b[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/g)]
+      .map(match => [match[1], match[2]])).toEqual([
+      ['/admin/licenses', '管理密钥'], ['/admin/broadcasters', '管理主播'], ['/admin/library', '管理共享库'],
+    ]);
+    for (const id of ['broadcaster-list', 'license-list', 'submission-list', 'submission-dialog']) {
+      expect(home.text).not.toContain(`id="${id}"`);
+    }
+    for (const [workspace, present, absent] of [
+      ['licenses', 'license-list', 'broadcaster-list'],
+      ['broadcasters', 'broadcaster-list', 'license-list'],
+      ['library', 'pending-list', 'license-list'],
+    ]) {
+      const path = `/admin/${workspace}`;
+      for (const url of [path, path + '/app.js', path + '/style.css']) {
+        await request(app).get(url).expect('WWW-Authenticate', /Basic/).expect(401);
+        await request(app).get(url).auth('admin', 'wrong-password').expect(401);
+        const response = await request(app).get(url).auth('admin', adminPassword).expect(200);
+        expect(response.headers['cache-control']).toContain('no-store');
+      }
+      const page = await request(app).get(path).auth('admin', adminPassword).expect(200);
+      expect(page.text).toContain(`id="${present}"`);
+      expect(page.text).not.toContain(`id="${absent}"`);
+      expect(page.text).toContain('href="/admin">管理首页</a>');
+      expect(page.text).toContain(`content="${csrfToken}"`);
+    }
+    const broadcasters = await request(app).get('/admin/broadcasters/app.js').auth('admin', adminPassword);
+    expect(broadcasters.text).not.toContain('player-library');
+    expect(broadcasters.text).not.toContain('/api/licenses');
+    expect(broadcasters.text).toContain('/admin/api/broadcasters/state');
+    const licenses = await request(app).get('/admin/licenses/app.js').auth('admin', adminPassword);
+    expect(licenses.text).not.toContain('/api/state');
+    for (const path of ['/admin/api/licenses', '/admin/api/cleanup/expired', '/admin/api/library/review']) {
+      await request(app).post(path).auth('admin', adminPassword).send({}).expect(403, { ok: false, code: 'invalid_csrf' });
+    }
+  });
+
+  test('provides lean broadcaster state without changing the legacy aggregate API', async () => {
+    const { app, db } = createFixture();
+    seedBroadcaster(db, 'lean-broadcaster-01', 'Lean broadcaster', now);
+    await request(app).get('/admin/api/broadcasters/state').expect(401);
+    const response = await request(app).get('/admin/api/broadcasters/state').auth('admin', adminPassword).expect(200);
+    expect(response.body.broadcasters).toHaveLength(1);
+    for (const field of ['licenses', 'playerLibrary', 'pendingLibrarySubmissions']) {
+      expect(response.body).not.toHaveProperty(field);
+    }
+    const filtered = await request(app).get('/admin/api/broadcasters/state').query({ q: 'absent' })
+      .auth('admin', adminPassword).expect(200);
+    expect(filtered.body.broadcasters).toEqual([]);
+    const legacy = await request(app).get('/admin/api/state').auth('admin', adminPassword).expect(200);
+    expect(legacy.body).toHaveProperty('licenses');
+    expect(legacy.body).toHaveProperty('playerLibrary');
+  });
+
   test('wires the admin console to an independently startable HTTP server', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'dnf-cloud-admin-app-'));
     const cloudApp = createCloudMatchApp({
@@ -382,7 +438,6 @@ describe('localhost admin console', () => {
         entities: Array.from({ length: 100 }, (_, index) => ({
           names: [`测试选手-${index}-${'名称'.repeat(12)}`],
           gameIds: [`game-id-${index}-${'x'.repeat(16)}`],
-          adventureGroupIds: [`guild-id-${index}`],
         })),
       };
       expect(Buffer.byteLength(JSON.stringify(payload), 'utf8')).toBeGreaterThan(4 * 1024);
@@ -443,12 +498,14 @@ describe('localhost admin console', () => {
     const inserted = db.prepare(
       `INSERT INTO player_library_submissions (device_id, payload_json, status, created_at)
        VALUES (?, ?, 'pending', ?)`,
-    ).run('device-test-0001', JSON.stringify({ entities: [{ names: ['测试选手'], gameIds: ['测试ID'], adventureGroupIds: [] }] }), now);
+    ).run('device-test-0001', JSON.stringify({ entities: [{ names: ['测试选手'], gameIds: ['测试ID'] }] }), now);
+    const review = await request(app).get(`/admin/api/player-library/submissions/${inserted.lastInsertRowid}`)
+      .auth('admin', adminPassword).expect(200);
     await request(app)
       .post(`/admin/api/player-library/submissions/${inserted.lastInsertRowid}/approve`)
       .auth('admin', adminPassword)
       .set('x-dnf-admin-csrf', csrfToken)
-      .send({})
+      .send({ revision: review.body.submission.revision, submissionRevision: review.body.submission.submissionRevision })
       .expect(200, { ok: true, revision: 1 });
 
     const library = await request(app)
@@ -472,5 +529,68 @@ describe('localhost admin console', () => {
       .set('x-dnf-admin-csrf', csrfToken)
       .send({ disabled: true })
       .expect(200, { ok: true, disabled: true });
+  });
+
+  test('shows pending overlap details only to admins and can reject without changing the public library', async () => {
+    const { app, db } = createFixture();
+    const entities = [
+      { entityId: 'player-a', names: ['Alpha'], gameIds: ['shared', 'only-a'] },
+      { entityId: 'player-b', names: ['Beta'], gameIds: ['SHARED', 'only-b'] },
+    ];
+    const inserted = db.prepare(
+      `INSERT INTO player_library_submissions (device_id, payload_json, status, created_at)
+       VALUES (?, ?, 'pending', ?)`,
+    ).run('device-test-0001', JSON.stringify({ entities }), now);
+    const url = `/admin/api/player-library/submissions/${inserted.lastInsertRowid}`;
+    await request(app).get(url).expect(401);
+    const details = await request(app).get(url).auth('admin', adminPassword).expect(200);
+    expect(details.body).toMatchObject({
+      ok: true,
+      submission: {
+        entities,
+        conflicts: { gameIds: [] },
+        sharedIdentifiers: { gameIds: [{ identifier: 'shared', entityIds: ['player-a', 'player-b'] }] },
+      },
+    });
+    await request(app).post(`${url}/reject`).auth('admin', adminPassword).send({}).expect(403);
+    const guard = { revision: details.body.submission.revision, submissionRevision: details.body.submission.submissionRevision };
+    await request(app).post(`${url}/reject`).auth('admin', adminPassword)
+      .set('x-dnf-admin-csrf', csrfToken).send(guard).expect(200, { ok: true });
+    expect(db.prepare('SELECT status FROM player_library_submissions WHERE id = ?')
+      .get(inserted.lastInsertRowid)).toEqual({ status: 'rejected' });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM player_entities').get()).toEqual({ count: 0 });
+    await request(app).post(`${url}/reject`).auth('admin', adminPassword)
+      .set('x-dnf-admin-csrf', csrfToken).send(guard).expect(409);
+    await request(app).get('/admin/api/player-library/submissions/99999')
+      .auth('admin', adminPassword).expect(404);
+    await request(app).get('/admin/api/player-library/submissions/1invalid')
+      .auth('admin', adminPassword).expect(400);
+  });
+
+  test('reads legacy or damaged review records without rewriting their stored payload', async () => {
+    const { app, db } = createFixture();
+    const insert = db.prepare(
+      `INSERT INTO player_library_submissions (device_id, payload_json, status, created_at)
+       VALUES (?, ?, 'pending', ?)`,
+    );
+    const payload = JSON.stringify({ entities: ['Alpha', 'Beta'].map(name => ({
+      names: [name], gameIds: ['shared'],
+    })) });
+    const legacy = insert.run('device-test-0001', payload, now);
+    const url = `/admin/api/player-library/submissions/${legacy.lastInsertRowid}`;
+    const first = await request(app).get(url).auth('admin', adminPassword).expect(200);
+    const second = await request(app).get(url).auth('admin', adminPassword).expect(200);
+    expect(first.body.submission).toEqual(second.body.submission);
+    expect(first.body.submission.valid).toBe(true);
+    expect(first.body.submission.conflicts.gameIds).toHaveLength(0);
+    expect(first.body.submission.sharedIdentifiers.gameIds).toHaveLength(1);
+    expect(db.prepare('SELECT payload_json FROM player_library_submissions WHERE id = ?')
+      .get(legacy.lastInsertRowid)).toEqual({ payload_json: payload });
+    const damaged = insert.run('device-test-0001', '{bad json', now);
+    const detail = await request(app).get(`/admin/api/player-library/submissions/${damaged.lastInsertRowid}`)
+      .auth('admin', adminPassword).expect(200);
+    expect(detail.body.submission).toMatchObject({ valid: false, entities: [] });
+    await request(app).post('/admin/api/player-library/submissions/0/reject')
+      .auth('admin', adminPassword).set('x-dnf-admin-csrf', csrfToken).send({}).expect(400);
   });
 });

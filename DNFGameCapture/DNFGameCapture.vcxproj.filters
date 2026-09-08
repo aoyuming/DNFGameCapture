@@ -63,6 +63,27 @@
     <ClInclude Include="PlayerIdentityGroupService.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="PlayerLibraryModel.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="PlayerLibraryDatabase.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="PlayerLibraryStore.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="PlayerLibraryPushPolicy.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="PlayerIdentityOcrCache.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="PreviewLayout.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="OcrServiceHealth.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="json.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -85,6 +106,9 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="LicenseLease.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="CloudReleasePolicy.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>
@@ -125,6 +149,21 @@
     <ClCompile Include="PlayerIdentityGroupService.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="PlayerLibraryModel.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="PlayerLibraryDatabase.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="PlayerLibraryStore.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="PlayerLibraryPushPolicy.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\sqlite\sqlite3.c">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="WebScoreDlg.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -144,6 +183,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="LicenseLease.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="CloudReleasePolicy.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

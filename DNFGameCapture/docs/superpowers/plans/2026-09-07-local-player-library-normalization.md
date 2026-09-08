@@ -1,5 +1,7 @@
 # 本地选手库规范化与索引 Implementation Plan
 
+实施中的兼容性修正、实际文件划分和验证结果见 [实施记录](2026-09-07-local-player-library-execution.md)。以下步骤保留为原始计划，不代表每条示例命令均原样执行。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (- [ ]) syntax for tracking.
 
 **Goal:** 将客户端的选手/别名库迁移到本地 SQLite 真实库，以唯一保存游戏 ID 和冒险团 ID，使用内存反向索引完成快速识别，同时保留 alias_db.ini 的迁移备份和兼容导出。

@@ -88,6 +88,9 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <DnfCloudEnvironment Condition="'$(DnfCloudEnvironment)'==''">Production</DnfCloudEnvironment>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <LinkIncremental>true</LinkIncremental>
   </PropertyGroup>
@@ -219,11 +222,20 @@
     <ClInclude Include="CrashDump.h" />
     <ClInclude Include="AliasDbAutoSyncPolicy.h" />
     <ClInclude Include="PlayerIdentityGroupService.h" />
+    <ClInclude Include="PlayerLibraryModel.h" />
+    <ClInclude Include="PlayerLibraryDatabase.h" />
+    <ClInclude Include="PlayerLibraryStore.h" />
+    <ClInclude Include="PlayerLibraryPushPolicy.h" />
+    <ClInclude Include="PlayerIdentityOcrCache.h" />
+    <ClInclude Include="PreviewLayout.h" />
+    <ClInclude Include="OcrServiceHealth.h" />
+    <ClInclude Include="third_party\sqlite\sqlite3.h" />
     <ClInclude Include="KillDisplayDlg.h" />
     <ClInclude Include="KeyDisplayDlg.h" />
     <ClInclude Include="KeyMappingHook.h" />
     <ClInclude Include="KeyMappingLanService.h" />
     <ClInclude Include="LicenseLease.h" />
+    <ClInclude Include="CloudReleasePolicy.h" />
     <ClInclude Include="TemporalIdentityMatcher.hpp" />
     <ClInclude Include="WebScoreDlg.h" />
     <ClInclude Include="DNFGameCapture.h" />
@@ -257,6 +269,24 @@
     <ClCompile Include="PlayerIdentityGroupService.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="PlayerLibraryModel.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="PlayerLibraryDatabase.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="PlayerLibraryStore.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="PlayerLibraryPushPolicy.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="third_party\sqlite\sqlite3.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <CompileAs>CompileAsC</CompileAs>
+      <PreprocessorDefinitions>SQLITE_THREADSAFE=1;SQLITE_OMIT_LOAD_EXTENSION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
     <ClCompile Include="DNFGameCaptureDlg_IdentityPatch.cpp" />
     <ClCompile Include="KillDisplayDlg.cpp" />
     <ClCompile Include="KeyDisplayDlg.cpp" />
@@ -265,6 +295,10 @@
     <ClCompile Include="LicenseLease.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="CloudReleasePolicy.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions Condition="'$(DnfCloudEnvironment)'=='Test'">DNF_CLOUD_TEST_BUILD=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <ClCompile Include="WebScoreDlg.cpp" />
     <ClCompile Include="DNFGameCapture.cpp" />

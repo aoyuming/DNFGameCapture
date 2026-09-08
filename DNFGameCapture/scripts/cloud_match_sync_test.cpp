@@ -163,6 +163,87 @@ void TestSnapshotRevisionCorrelation()
         "snapshot body revision must match the explicitly requested revision");
 }
 
+void TestRetiredEvidenceIsIgnored()
+{
+    auto source = Snapshot();
+    source["redPlayers"][0]["adventureGroupIds"] = json::array({"Group A", "Group B", "Group A"});
+    json converted;
+    std::string error;
+    Require(DnfConvertCloudMatchSnapshot(source, 17, false, NormalizeTestName, converted, error),
+        "historical snapshots still convert");
+    Require(!converted["players"][0].contains("adventureGroupIds"),
+        "retired evidence must not survive conversion");
+    Require(!converted["players"][1].contains("adventureGroupIds"),
+        "legacy missing evidence must remain absent");
+    auto local = converted;
+    local["players"][0]["adventureGroupIds"] = {"Ignored"};
+    Require(DnfBuildCloudMatchPreview(local, converted, false)["differenceCount"] == 0,
+        "retired evidence cannot create sync differences");
+    source["redPlayers"][0]["adventureGroupIds"] = json::array({1});
+    Require(DnfConvertCloudMatchSnapshot(source, 17, false, NormalizeTestName, converted, error),
+        "malformed retired evidence is ignored");
+    source["redPlayers"][0]["adventureGroupIds"] = json::array();
+    for (int i = 0; i < 33; ++i) source["redPlayers"][0]["adventureGroupIds"].push_back("G" + std::to_string(i));
+    Require(DnfConvertCloudMatchSnapshot(source, 17, false, NormalizeTestName, converted, error),
+        "retired evidence cannot block score synchronization");
+}
+
+void TestSyncedLibraryBatchIsAdditiveAndIndependentOfMatchStats()
+{
+    json team, payload;
+    std::string error;
+    Require(DnfConvertCloudMatchSnapshot(Snapshot(), 17, false, NormalizeTestName, team, error), "fixture converts");
+    team["players"][0]["adventureGroupIds"] = json::array({"Guild B", "Guild A", "Guild A"});
+    team["players"][1]["name"] = "Red 1";
+    team["players"][2]["aliases"] = json::array();
+    Require(DnfBuildSyncedPlayerLibrary(team, payload), "synced players must produce an additive batch");
+    Require(payload["entities"].size() == 7, "duplicate seat names are one library entity");
+    bool sawEmpty = false, sawUnion = false;
+    for (const auto& entity : payload["entities"]) {
+        Require(entity.size() == 2 && !entity.contains("kills") && !entity.contains("entityId"), "only game identity data enters local library");
+        if (entity["names"][0] == "Red 3") sawEmpty = entity["gameIds"].empty();
+        if (entity["names"][0] == "Red 1") sawUnion = entity["gameIds"].size() == 2 && !entity.contains("adventureGroupIds");
+    }
+    Require(sawEmpty, "players with zero game IDs still need a local name record for association");
+    Require(sawUnion, "duplicate names union evidence without dropping IDs");
+    const auto original = payload;
+    team["players"][0]["kills"] = 33;
+    std::reverse(team["players"].begin(), team["players"].end());
+    Require(DnfBuildSyncedPlayerLibrary(team, payload) && payload == original, "stats/order changes must coalesce into the same library batch");
+    team["players"][0]["adventureGroupIds"] = json::array({1});
+    Require(DnfBuildSyncedPlayerLibrary(team, payload) && payload == original, "retired evidence must not enter a library batch");
+    team["players"][0]["aliases"] = json::array({1});
+    Require(!DnfBuildSyncedPlayerLibrary(team, payload) && payload.empty(), "invalid game evidence must discard the entire batch");
+}
+
+void TestLibraryQueueRetainsEveryAcceptedBatch()
+{
+    DnfSyncedPlayerLibraryQueue queue;
+    const json a = {{"entities", json::array({{{"names", {"A"}}, {"gameIds", {"a"}}}})}};
+    auto b = a; b["entities"][0]["names"][0] = "B";
+    auto c = a; c["entities"][0]["names"][0] = "C";
+    Require(queue.Enqueue(a, false), "first evidence queues");
+    Require(queue.Begin() == a, "first batch begins");
+    Require(queue.Enqueue(b, false) && queue.Enqueue(c, false), "new accepted evidence queues behind active batch");
+    Require(!queue.Enqueue(a, false), "in-flight repeat coalesces without dropping other names");
+    queue.Complete(true);
+    Require(queue.Begin() == b, "middle accepted snapshot must be retained");
+    queue.Complete(false);
+    Require(queue.Begin() == c, "later batch survives failure");
+    queue.Complete(true);
+    Require(queue.Enqueue(b, false), "failed batch can be retried by a later received snapshot");
+    Require(queue.Begin() == b, "retry is explicit incoming work, not an internal retry loop");
+    queue.Complete(true);
+    Require(!queue.Enqueue(b, false) && queue.Begin().is_null(), "committed repeats are skipped");
+    Require(!queue.IsOutstanding(b), "committed repeats must not reinstall transient wire evidence");
+    Require(queue.Enqueue(b, true) && queue.HasPending(), "manual sync can repair deleted local names");
+    Require(queue.IsOutstanding(b), "pending repair still needs transient evidence until commit");
+    Require(queue.Begin() == b, "repair begins");
+    queue.Complete(true);
+    queue.InvalidateCommitted();
+    Require(queue.Enqueue(b, false), "local library editing invalidates repeat suppression for the next sync");
+}
+
 void TestStructuredDifferencePreview()
 {
     json local;
@@ -278,6 +359,9 @@ int main()
     TestCloudPresentationFieldsAreOptionalForLegacySnapshots();
     TestStrictCloudSchemaRejections();
     TestSnapshotRevisionCorrelation();
+    TestRetiredEvidenceIsIgnored();
+    TestSyncedLibraryBatchIsAdditiveAndIndependentOfMatchStats();
+    TestLibraryQueueRetainsEveryAcceptedBatch();
     TestStructuredDifferencePreview();
     TestRelativeOrientationUsesLocalAndTargetConsensusFlags();
     TestPreviewCorrelationInvalidatesOnRoomRevisionAndConnectionGeneration();

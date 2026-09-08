@@ -145,7 +145,7 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(sortJsonValue(value));
 }
 
-function contentHash(snapshot: MatchSnapshot): string {
+export function snapshotContentHash(snapshot: MatchSnapshot): string {
   const { clientRevision: _clientRevision, clientTime: _clientTime, ...content } = snapshot;
   return createHash('sha256').update(canonicalJson(content), 'utf8').digest('hex');
 }
@@ -263,7 +263,7 @@ export function saveSnapshot(
       return { ok: false, code: 'stale_revision' };
     }
 
-    const hash = contentHash(snapshot);
+    const hash = snapshotContentHash(snapshot);
     if (current?.content_hash === hash) {
       audit(false, 'duplicate_snapshot', snapshot.clientRevision);
       return { ok: false, code: 'duplicate_snapshot' };

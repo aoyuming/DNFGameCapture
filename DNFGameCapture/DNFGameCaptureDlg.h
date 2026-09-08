@@ -16,6 +16,11 @@
 #include "NameMatcher.hpp"
 #include "TemporalIdentityMatcher.hpp" // 【新增】：固定红框时间窗身份融合匹配
 #include "PlayerIdentityGroupService.h"
+#include "PlayerLibraryStore.h"
+#include "PlayerLibraryPushPolicy.h"
+#include "PlayerIdentityOcrCache.h"
+#include "OcrServiceHealth.h"
+#include <functional>
 #include <map>
 #include "WGCCapture.h"
 #include "CameraCapture.h" // 【新增】
@@ -26,6 +31,7 @@
 #include "KeyMappingHook.h"
 #include "KeyMappingLanService.h"
 #include "CloudMatchClient.h"
+#include "CloudMatchSync.h"
 #include "CloudMatchStatusDisplay.h"
 #include "AliasDbAutoSyncPolicy.h"
 #include "json.hpp"
@@ -47,7 +53,7 @@ struct PlayerIdentityGroupRecord {
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"5.1.0"    //当前版本号
+#define CURRENT_VERSION L"5.2.0"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -140,6 +146,7 @@ struct RecentEvent {
     CString algorithmName;
     CString snapshotPath;
     bool cloudSynced = false;
+    bool readOnly = false;
 };
 
 struct OcrResultData {
@@ -292,9 +299,9 @@ private:
     void Capture();
     void CheckColorTrigger();
     void Draw(CDC& dc, HBITMAP previewFrame, int previewW, int previewH);
-    OcrResultData RunOCR_Internal(HBITMAP hTargetBmp, int nAreaIndex);
+    OcrResultData RunOCR_Internal(HBITMAP hTargetBmp, int nAreaIndex, std::uint64_t monitoringGeneration);
 
-    void DoRetryMatchingTask(int triggerSide);
+    void DoRetryMatchingTask(int triggerSide, std::uint64_t monitoringGeneration);
 
     // =========================================================
     // 【新增】：固定红框身份融合辅助接口
@@ -303,7 +310,7 @@ private:
     // - 右框：大区 + ID
     // - 职业帧进入缓存，不再当 ID 直接匹配
     // =========================================================
-    void UpdateIdentityPanelCache(int areaIndex, const CString& rawOcrText);
+    void UpdateIdentityPanelCache(int areaIndex, const CString& rawOcrText, std::uint64_t monitoringGeneration);
     std::vector<TDnfCandidateIdentity> BuildIdentityCandidatesForPanel(TDnfPanelSide side);
     TDnfPanelMatchResult MatchIdentityPanel(TDnfPanelSide side);
     void NotifyIdentityKillConfirmed(int deadTeam, const CString& deadName);
@@ -361,7 +368,7 @@ private:
     void HandleUnifiedCloudSnapshot(const nlohmann::json& event, bool realtime);
     void RequestUnifiedCloudDirectory();
     void QueueCloudMatchSyncedUpload(const std::string& sourceDeviceId,
-        std::uint64_t sourceRevision);
+        std::uint64_t sourceRevision, const std::uint64_t* expectedEpoch = nullptr);
     void PollCloudMatch();
     CloudMatchDisplayStatus BuildCloudMatchDisplayStatusSnapshot(
         const CloudMatchStatusSnapshot& cloudStatus) const;
@@ -376,7 +383,8 @@ private:
     void SendCloudRoomPromptIfNeeded();
     bool ValidateTeamSyncSnapshot(const nlohmann::json& snapshot, CString& errorMessage) const;
     bool ApplyTeamSyncSnapshot(const nlohmann::json& snapshot, bool createBackup,
-        CString& errorMessage, bool automatic = false, bool preserveLocalFlip = false);
+        CString& errorMessage, bool automatic = false, bool preserveLocalFlip = false,
+        std::uint64_t* appliedEpoch = nullptr);
     bool RefreshAfterTeamSyncApply();
     void ClearTeamSyncState();
     void OpenKeyDisplayWindow();
@@ -395,7 +403,7 @@ private:
     bool IsTrackedOcrProcessAlive();
     void CloseTrackedOcrProcess();
     bool EnsureOcrRunning(bool forceRestart = false);
-    bool ProbeOcrServiceReady();
+    dnf::ocr::ProbeResult ProbeOcrServiceReady();
     void StartMonitoringAfterOcrReady();
     void BeginOcrServiceBootstrap();
     void BeginOcrServiceRecovery(bool probeBeforePending = false);
@@ -561,7 +569,41 @@ private:
     // 🚨【新增】：WGC 线程安全延迟销毁器
     void SafeDeleteWGC();
 
-    std::map<CString, CString> m_aliasDB;        // 本地游戏ID数据库
+    std::map<CString, CString> m_aliasDB;        // Legacy view of the committed SQLite library.
+    std::unique_ptr<dnf::player_library::PlayerLibraryStore> m_playerLibraryStore;
+    dnf::player_library::SnapshotPtr m_playerLibrarySnapshot;
+    std::map<CString, CString> m_playerLibraryCommittedView;
+    std::map<std::uint64_t, std::function<void(const dnf::player_library::Result&)>> m_playerLibraryRequests;
+    std::uint64_t m_playerLibraryLastSentRevision = 0;
+    bool m_playerLibraryReady = false;
+    bool m_playerLibraryExitPending = false;
+    CString m_playerLibraryError;
+    DnfSyncedPlayerLibraryQueue m_matchLibraryQueue;
+    nlohmann::json m_matchLibraryLatestEvidence;
+    std::string m_matchLibrarySourceDevice;
+    std::uint64_t m_matchLibrarySourceRevision = 0;
+    std::uint64_t m_matchLibraryRequestId = 0;
+    std::uint64_t m_matchLibraryMatchEpoch = 0;
+    void StartPlayerLibrary();
+    void PollPlayerLibrary();
+    void PublishPlayerLibrary(dnf::player_library::SnapshotPtr snapshot);
+    bool ApplyPlayerLibraryDelta(dnf::player_library::SnapshotPtr before,
+        dnf::player_library::SnapshotPtr after, const nlohmann::json& command);
+    bool RejectPlayerLibraryEditWhileBusy();
+    bool QueuePlayerLibrarySave(bool mergeActivePlayers);
+    bool QueueSyncedPlayerLibrary(const nlohmann::json& snapshot,
+        const std::string& sourceDeviceId, std::uint64_t revision, bool retry,
+        std::uint64_t appliedEpoch = 0);
+    void PumpSyncedPlayerLibrary();
+    void QueuePlayerIdentityCommand(nlohmann::json command,
+        std::function<void(const dnf::player_library::Result&)> onCommitted = {});
+    void QueuePlayerLibraryImport(const std::string& payload,
+        std::function<void(const dnf::player_library::Result&)> completed);
+    bool IsPlayerLibraryBusy() const;
+    bool m_playerLibraryResetInFlight = false;
+    std::map<CString, std::set<std::wstring>> m_resetMatchLibraryBaseline;
+    void CaptureResetMatchLibraryBaseline();
+    void ClearActivePlayersAfterLibraryReset();
     void LoadAliasDB();                          // 加载数据库
     bool SaveAliasDB();                          // 保存数据库
     bool SaveAliasDB(bool mergeActivePlayers);
@@ -571,6 +613,7 @@ private:
     CString m_playerIdentityGroupsPath;
     std::vector<PlayerIdentityGroupRecord> m_playerIdentityGroups;
     std::set<CString> m_playerIdentityAutoSplitFingerprints;
+    nlohmann::json m_playerIdentityAutoSplitNameSets = nlohmann::json::array();
     std::uint64_t m_playerIdentityRevision = 1;
     nlohmann::json m_playerIdentityStateCache;
     std::uint64_t m_playerIdentityStateCacheRevision = 0;
@@ -670,7 +713,9 @@ private:
     bool m_cloudMatchUsingLicenseLease = false;
     // Opt-in test-server authorization. Production/legacy clients keep the
     // cloud-function path until the test service is verified.
-    bool m_cloudServerAuthV2 = false;
+    bool m_cloudServerAuthV2 = true;
+    bool m_cloudReleaseSettingsReady = false;
+    CString m_priorPlayerLibrary;
     CString m_cloudEndpointManifestUrl;
     CString m_cloudServerLastKnownUrl;
     std::string m_cloudServerSessionToken;
@@ -776,6 +821,7 @@ private:
     PlayerData m_players[8];
     CNameMatcher m_matcher;
     CTemporalIdentityMatcher m_identityMatcher; // 【新增】：左/右固定红框 ID+大区+职业 时间窗融合缓存
+    dnf::identity::OcrLookupCache m_identityOcrCache;
     std::mutex m_identityMutex;                 // 【新增】：保护身份缓存，RunOCR 并发线程会同时写入左右框
     std::vector<RecentEvent> m_recentEvents;
 
@@ -836,6 +882,11 @@ private:
     CString SubmitAliasDbSnapshotIfDirty(bool saveBeforeBuild = true);
     void LoadAliasDbAutoSyncSettings();
     bool SaveAliasDbAutoSyncSettings() const;
+    std::string CurrentV2PlayerLibraryScope();
+    void AcknowledgeV2PlayerLibraryPush(const std::string& submittedSignature,
+        dnf::player_library_sync::SubmissionStatus status);
+    bool SaveV2PlayerLibraryPushCheckpoint() const;
+    dnf::player_library_sync::SubmissionTracker m_playerLibraryPushTracker;
     void MaybeStartAliasDbAutoSync(bool force = false);
     void StartAliasDbAutoSyncAttempt();
     bool MergePublicAliasDbForAutoSync(const nlohmann::json& players,
@@ -895,6 +946,7 @@ private:
     std::atomic<bool> m_bOcrSupervisorStarted{ false };
     std::atomic<bool> m_bOcrServiceReady{ false };
     std::atomic<bool> m_bOcrEngineReady{ false };
+    std::atomic<std::uint64_t> m_ocrMonitoringGeneration{1};
     std::atomic<bool> m_bStartAfterOcrReady{ false };
     std::atomic<DWORD> m_ocrStartPendingSince{ 0 };
     std::atomic<DWORD> m_ocrRecoveryPendingSince{ 0 };

@@ -19,17 +19,20 @@ import {
   ADMIN_PAGE_JS,
   buildAdminPage,
 } from './admin-page.js';
+import { buildBroadcasterAdminPage, BROADCASTER_ADMIN_CSS, BROADCASTER_ADMIN_JS } from './broadcaster-admin-page.js';
+import { buildLicenseAdminPage, LICENSE_ADMIN_CSS, LICENSE_ADMIN_JS } from './license-admin-page.js';
+import { createLicenseAdminApi } from './license-admin.js';
 import { deviceIdSchema } from './schemas.js';
-import { generateLicenseKey, isNativeLicenseKey } from './auth.js';
+import { createLibraryAdminApi } from './library-admin.js';
+import { LibraryAdminError, libraryReviewGuardSchema, reviewAdminSubmissions } from './library-admin-data.js';
+import { buildLibraryAdminPage, LIBRARY_ADMIN_CSS, LIBRARY_ADMIN_JS } from './library-admin-page.js';
 import {
-  approvePlayerLibrarySubmission,
-  createLicense,
   getBroadcasterOcrDisabledUntil,
+  getPlayerLibrarySubmission,
   listLicenses,
   listPendingPlayerLibrarySubmissions,
   listPlayerLibrary,
   setBroadcasterOcrDisabledUntil,
-  setLicenseDisabled,
 } from './v2-api.js';
 
 export interface AdminSocketController {
@@ -127,11 +130,37 @@ export function createCloudMatchAdminApp(
     response.json({ ok: true });
   });
   app.use('/admin', requireAdminAuthentication(adminPassword));
+  app.use('/admin/api', (request, response, next) => {
+    if (request.method !== 'GET' && request.get('x-dnf-admin-csrf') !== csrfToken) {
+      response.status(403).json({ ok: false, code: 'invalid_csrf' });
+      return;
+    }
+    next();
+  });
+  app.use('/admin/api/library', createLibraryAdminApi(db, now));
+  app.get('/admin/library', (_request, response) => {
+    response.type('html').send(buildLibraryAdminPage(csrfToken));
+  });
+  app.get('/admin/library/style.css', (_request, response) => {
+    response.type('css').send(LIBRARY_ADMIN_CSS);
+  });
+  app.get('/admin/library/app.js', (_request, response) => {
+    response.type('application/javascript').send(LIBRARY_ADMIN_JS);
+  });
   app.use(express.json({ limit: '4kb' }));
+  app.use('/admin/api/licenses', createLicenseAdminApi(db, now));
 
   app.get('/admin', (_request, response) => {
     response.type('html').send(buildAdminPage(csrfToken));
   });
+  for (const [path, buildPage, css, js] of [
+    ['/admin/licenses', buildLicenseAdminPage, LICENSE_ADMIN_CSS, LICENSE_ADMIN_JS],
+    ['/admin/broadcasters', buildBroadcasterAdminPage, BROADCASTER_ADMIN_CSS, BROADCASTER_ADMIN_JS],
+  ] as const) {
+    app.get(path, (_request, response) => response.type('html').send(buildPage(csrfToken)));
+    app.get(path + '/style.css', (_request, response) => response.type('css').send(css));
+    app.get(path + '/app.js', (_request, response) => response.type('application/javascript').send(js));
+  }
   app.get('/admin/style.css', (_request, response) => {
     response.type('css').send(ADMIN_PAGE_CSS);
   });
@@ -152,70 +181,9 @@ export function createCloudMatchAdminApp(
     });
   });
 
-  app.use('/admin/api', (request, response, next) => {
-    if (request.method === 'GET') {
-      next();
-      return;
-    }
-    if (request.get('x-dnf-admin-csrf') !== csrfToken) {
-      response.status(403).json({ ok: false, code: 'invalid_csrf' });
-      return;
-    }
-    next();
-  });
-
-  app.post('/admin/api/licenses', (request, response) => {
-    const body = request.body as Record<string, unknown> | null;
-    const label = typeof body?.label === 'string' ? body.label.trim().slice(0, 128) : '';
-    const expiresAt = body?.expiresAt === null
-      ? null
-      : typeof body?.expiresAt === 'number' && Number.isSafeInteger(body.expiresAt)
-        ? body.expiresAt
-        : null;
-    if (body?.expiresAt !== undefined && body.expiresAt !== null && expiresAt === null) {
-      response.status(400).json({ ok: false, code: 'invalid_expiry' });
-      return;
-    }
-    const suppliedKey = typeof body?.key === 'string' ? body.key.trim() : '';
-    const generatedDuration = expiresAt === null
-      ? 0xFFFFFFFF
-      : Math.max(1, Math.min(0xFFFFFFFF, expiresAt - now()));
-    const key = suppliedKey || generateLicenseKey(generatedDuration);
-    if (suppliedKey && !isNativeLicenseKey(key)) {
-      response.status(400).json({ ok: false, code: 'invalid_license_format' });
-      return;
-    }
-    try {
-      const created = createLicense(db, { key, label, expiresAt, nowSec: now() });
-      response.status(201).json({
-        ok: true,
-        id: created.id,
-        key,
-        label,
-        expiresAt: created.expiresAt,
-      });
-    } catch {
-      response.status(409).json({ ok: false, code: 'license_already_exists' });
-    }
-  });
-
-  app.get('/admin/api/licenses', (_request, response) => {
-    response.json({ ok: true, licenses: listLicenses(db) });
-  });
-
-  app.post('/admin/api/licenses/:licenseId/disable', (request, response) => {
-    const licenseId = Number.parseInt(request.params.licenseId, 10);
-    const disabled = (request.body as Record<string, unknown> | null)?.disabled;
-    if (!Number.isSafeInteger(licenseId) || typeof disabled !== 'boolean') {
-      response.status(400).json({ ok: false, code: 'invalid_request' });
-      return;
-    }
-    const changed = setLicenseDisabled(db, licenseId, disabled ? now() : null, now());
-    if (!changed) {
-      response.status(404).json({ ok: false, code: 'license_not_found' });
-      return;
-    }
-    response.json({ ok: true, disabled });
+  app.get('/admin/api/broadcasters/state', (request, response) => {
+    const query = typeof request.query.q === 'string' ? request.query.q.slice(0, 64) : '';
+    response.json({ ok: true, ...buildAdminState(db, socketController.getActiveDeviceIds(), now(), query) });
   });
 
   app.get('/admin/api/player-library', (_request, response) => {
@@ -226,19 +194,41 @@ export function createCloudMatchAdminApp(
     response.json({ ok: true, submissions: listPendingPlayerLibrarySubmissions(db) });
   });
 
-  app.post('/admin/api/player-library/submissions/:submissionId/approve', (request, response) => {
-    const submissionId = Number.parseInt(request.params.submissionId, 10);
-    if (!Number.isSafeInteger(submissionId)) {
+  app.get('/admin/api/player-library/submissions/:submissionId', (request, response) => {
+    const submissionId = Number(request.params.submissionId);
+    if (!Number.isSafeInteger(submissionId) || submissionId <= 0) {
       response.status(400).json({ ok: false, code: 'invalid_request' });
       return;
     }
-    const result = approvePlayerLibrarySubmission(db, submissionId, now());
-    if (!result.ok) {
-      response.status(result.code === 'submission_not_pending' ? 404 : 409).json(result);
+    const submission = getPlayerLibrarySubmission(db, submissionId);
+    if (!submission) {
+      response.status(404).json({ ok: false, code: 'submission_not_found' });
       return;
     }
-    response.json(result);
+    response.json({ ok: true, submission });
   });
+
+  for (const action of ['approve', 'reject'] as const) {
+    app.post(`/admin/api/player-library/submissions/:submissionId/${action}`, (request, response, next) => {
+      const submissionId = Number(request.params.submissionId);
+      const guard = libraryReviewGuardSchema.safeParse(request.body);
+      if (!Number.isSafeInteger(submissionId) || submissionId <= 0 || !guard.success) {
+        response.status(400).json({ ok: false, code: 'invalid_request' });
+        return;
+      }
+      try {
+        const result = reviewAdminSubmissions(db, guard.data.revision, now(), action,
+          [{ id: submissionId, submissionRevision: guard.data.submissionRevision }]);
+        response.json(action === 'approve' ? { ok: true, revision: result.revision } : { ok: true });
+      } catch (error) {
+        if (error instanceof LibraryAdminError) {
+          response.status(error.status).json({ ok: false, code: error.code, conflicts: error.conflicts });
+          return;
+        }
+        next(error);
+      }
+    });
+  }
 
   app.put('/admin/api/broadcasters/:deviceId/ocr-policy', (request, response) => {
     const deviceId = safeDeviceId(request.params.deviceId);

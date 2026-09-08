@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cwctype>
 #include <limits>
+#include <map>
 #include <iomanip>
 #include <sstream>
 #include <set>
@@ -124,11 +125,13 @@ bool IsDeviceId(const std::string& value)
     });
 }
 
-bool ConvertPlayer(const json& cloudPlayer, int team,
+bool ConvertPlayer(const json& inputPlayer, int team,
     const DnfCloudMatchNameNormalizer& normalizeName, json& teamPlayer)
 {
-    if (!HasExactKeys(cloudPlayer,
-        { "mainName", "aliases", "kills", "deaths", "ak", "streak" })) {
+    auto cloudPlayer = inputPlayer;
+    // Historical wire data is accepted only to discard the retired field.
+    if (cloudPlayer.is_object()) cloudPlayer.erase("adventureGroupIds");
+    if (!HasExactKeys(cloudPlayer, { "mainName", "aliases", "kills", "deaths", "ak", "streak" })) {
         return false;
     }
     if (!cloudPlayer["mainName"].is_string() ||
@@ -387,6 +390,68 @@ bool DnfConvertCloudMatchSnapshot(const json& cloudSnapshot,
     if (cloudSnapshot.contains("recentEvents")) {
         teamSnapshot["recentEvents"] = cloudSnapshot["recentEvents"];
     }
+    return true;
+}
+
+bool DnfSyncedPlayerLibraryQueue::Enqueue(const json& payload, bool force)
+{
+    if (IsOutstanding(payload) || (!force && payload == committed_)) return false;
+    pending_.push_back(payload);
+    return true;
+}
+
+bool DnfSyncedPlayerLibraryQueue::IsOutstanding(const json& payload) const
+{
+    if (payload == active_) return true;
+    for (const auto& queued : pending_) if (queued == payload) return true;
+    return false;
+}
+
+json DnfSyncedPlayerLibraryQueue::Begin()
+{
+    if (!active_.is_null() || pending_.empty()) return nullptr;
+    active_ = std::move(pending_.front());
+    pending_.pop_front();
+    return active_;
+}
+
+void DnfSyncedPlayerLibraryQueue::Complete(bool success)
+{
+    if (success) committed_ = active_;
+    active_ = nullptr;
+}
+
+bool DnfBuildSyncedPlayerLibrary(const json& teamSnapshot, json& libraryPayload)
+{
+    libraryPayload = json::object();
+    if (!teamSnapshot.is_object() || !teamSnapshot.contains("players") ||
+        !teamSnapshot["players"].is_array() || teamSnapshot["players"].size() != 8 ||
+        teamSnapshot.dump().size() > kMaxCloudSnapshotBytes) return false;
+    std::map<std::string, std::set<std::string>> byName;
+    for (const auto& player : teamSnapshot["players"]) {
+        if (!player.is_object() || !player.contains("name") || !player["name"].is_string()) return false;
+        const auto rawName = player["name"].get<std::string>();
+        if (rawName.find_first_not_of(" \t\r\n") == std::string::npos) continue;
+        std::string name;
+        if (!DnfNormalizeCloudMatchUtf8Name(rawName, name)) return false;
+        auto& ids = byName[name];
+        if (player.contains("aliases")) {
+            const auto& values = player["aliases"];
+            if (!values.is_array() || values.size() > 256) return false;
+            for (const auto& value : values) {
+                std::string normalized;
+                if (!value.is_string() || !DnfNormalizeCloudMatchUtf8Name(value.get<std::string>(), normalized)) return false;
+                ids.insert(std::move(normalized));
+            }
+            if (ids.size() > 256) return false;
+        }
+    }
+    json entities = json::array();
+    for (const auto& [name, ids] : byName) {
+        entities.push_back({ { "names", json::array({ name }) },
+            { "gameIds", ids } });
+    }
+    libraryPayload["entities"] = std::move(entities);
     return true;
 }
 

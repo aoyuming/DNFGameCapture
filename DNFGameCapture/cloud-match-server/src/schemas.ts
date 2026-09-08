@@ -110,7 +110,7 @@ export const playerSchema: z.ZodType<Player> = z
     ak: boundedSnapshotInteger,
     streak: boundedSnapshotInteger,
   })
-  .strict()
+  .strip()
   .superRefine((value, context) => {
     if (value.aliases.includes(value.mainName)) {
       context.addIssue({

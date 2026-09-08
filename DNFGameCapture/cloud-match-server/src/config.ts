@@ -5,6 +5,7 @@ export interface ServerConfig {
   adminPort: number;
   adminPassword: string;
   databasePath: string;
+  allowLegacyPermanentKeys: boolean;
   snapshotMaxBytes: number;
   broadcasterMaxLength: number;
   staleThresholdSeconds: number;
@@ -30,6 +31,7 @@ export const serverConfig: ServerConfig = {
   adminPort: readPort('ADMIN_PORT', 18881),
   adminPassword: process.env.ADMIN_PASSWORD?.trim() ?? '',
   databasePath: process.env.DATABASE_PATH ?? 'cloud-match.sqlite',
+  allowLegacyPermanentKeys: /^(true|1)$/i.test(process.env.ALLOW_LEGACY_PERMANENT_KEYS?.trim() ?? ''),
   snapshotMaxBytes: 65_536,
   broadcasterMaxLength: 32,
   staleThresholdSeconds: 30,

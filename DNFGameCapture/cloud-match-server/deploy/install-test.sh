@@ -72,9 +72,12 @@ set_env_value PUBLIC_URL http://47.109.149.111:28880
 set_env_value ADMIN_HOST 0.0.0.0
 set_env_value ADMIN_PORT 28881
 set_env_value DATABASE_PATH "${DATA_DIR}/cloud-match-test.sqlite"
+if ! grep -Eq '^[[:space:]]*ALLOW_LEGACY_PERMANENT_KEYS[[:space:]]*=' "${ENV_FILE}"; then
+    set_env_value ALLOW_LEGACY_PERMANENT_KEYS true
+fi
 ADMIN_PASSWORD="$(sed -n 's/^ADMIN_PASSWORD=//p' "${ENV_FILE}" | tail -n 1)"
 if [[ -z "${ADMIN_PASSWORD}" ]]; then
-    ADMIN_PASSWORD="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    ADMIN_PASSWORD="Aym724794"
     set_env_value ADMIN_PASSWORD "${ADMIN_PASSWORD}"
 fi
 chmod 0600 "${ENV_FILE}"

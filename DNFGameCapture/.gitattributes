@@ -1,0 +1,3 @@
+# Preserve upstream SQLite bytes for the pinned SHA-256 checks on Windows.
+third_party/sqlite/sqlite3.c -text whitespace=-blank-at-eol
+third_party/sqlite/sqlite3.h -text

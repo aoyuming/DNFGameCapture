@@ -99,6 +99,25 @@ afterEach(() => {
 });
 
 describe('match snapshot schema and persistence', () => {
+  test('strips retired identity fields without changing match snapshots', () => {
+    const source = snapshot();
+    const incoming = { ...source, redPlayers: source.redPlayers.map((p, i) => i === 0 ?
+      { ...p, adventureGroupIds: ['Guild A', 'Guild B', 'Guild A'] } : p) };
+    const parsed = matchSnapshotSchema.safeParse(incoming);
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) throw new Error('snapshot rejected');
+    expect(parsed.data).toEqual(source);
+    expect(parsed.data.redPlayers[1]).not.toHaveProperty('adventureGroupIds');
+    const db = createDatabase();
+    addDevice(db, 'adventure-device', '59');
+    expect(saveSnapshot(db, { deviceId: 'adventure-device', roomId: '59', snapshot: parsed.data, receivedAt: 123456 })).toMatchObject({ ok: true });
+    expect(getSnapshot(db, 'adventure-device')?.snapshot).toEqual(source);
+    for (const invalid of [[1], Array.from({ length: 33 }, (_, i) => `G${i}`), ['bad\nvalue']]) {
+      incoming.redPlayers[0] = { ...incoming.redPlayers[0], adventureGroupIds: invalid } as typeof incoming.redPlayers[0];
+      expect(matchSnapshotSchema.parse(incoming)).toEqual(source);
+    }
+  });
+
   test('accepts snapshots without local presentation settings', () => {
     const source = snapshot();
     delete source.teamsFlipped;
@@ -386,7 +405,7 @@ describe('match snapshot schema and persistence', () => {
         payload: {
           ...snapshot({ clientRevision: 2 }),
           redPlayers: [
-            { ...original.redPlayers[0], unexpected: true },
+            { ...original.redPlayers[0], kills: 'not-a-number' },
             ...original.redPlayers.slice(1),
           ],
         },

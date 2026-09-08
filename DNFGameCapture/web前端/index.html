@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DNF 赛事计分板 - WebView2 版</title>
-    <meta name="dnf-web-layout-version" content="20260906-5.1.0-web-startup-progress">
-    <link rel="stylesheet" href="style.css?v=20260906-5.1.0-web-startup-progress">
+    <meta name="dnf-web-layout-version" content="20260908-5.2.0-production">
+    <link rel="stylesheet" href="style.css?v=20260908-5.2.0-production">
 </head>
 <body>
 
@@ -87,6 +87,7 @@
                                 <button class="ctrl-btn btn-sync-db" id="btn-sync-alias-db">☁ 同步云端库</button>
                                 <button class="ctrl-btn btn-push-db" id="btn-push-alias-db">⬆ 推送本地库</button>
                                 <button class="ctrl-btn btn-identity-groups" id="btn-identity-groups">👥 选手身份与游戏ID</button>
+                                <button class="ctrl-btn btn-reset-local-library" id="btn-reset-local-library" disabled aria-disabled="true" title="选手库加载中">删除本地选手库</button>
                                 <div class="alias-auto-sync-box" id="alias-auto-sync-box">
                                     <label class="alias-auto-sync-toggle">
                                         <input type="checkbox" id="alias-auto-sync-enabled">
@@ -485,7 +486,7 @@
                 </div>
                 <button class="identity-close" id="btn-identity-close" title="关闭">&times;</button>
             </header>
-            <div class="identity-notice">归并只修改本地游戏ID库，云端仍按现有同步策略提交。</div>
+            <div class="identity-notice" id="identity-library-status" role="status" aria-live="polite">选手库加载中</div>
             <div class="identity-toolbar">
                 <label class="identity-search" for="identity-search-input">
                     <span>搜索</span>
@@ -514,6 +515,6 @@
         </section>
     </div>
 
-    <script src="main.js?v=20260906-5.1.0-async-name-library" defer></script>
+    <script src="main.js?v=20260908-5.2.0-production" defer></script>
 </body>
 </html>

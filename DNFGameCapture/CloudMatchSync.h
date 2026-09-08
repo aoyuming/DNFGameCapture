@@ -3,6 +3,7 @@
 #include "json.hpp"
 
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <string>
 
@@ -41,6 +42,26 @@ bool DnfConvertCloudMatchSnapshot(const nlohmann::json& cloudSnapshot,
     std::uint64_t expectedClientRevision, bool swapped,
     const DnfCloudMatchNameNormalizer& normalizeName,
     nlohmann::json& teamSnapshot, std::string& errorCode);
+
+// Identity-only additive import; stable across scores and seat order changes.
+bool DnfBuildSyncedPlayerLibrary(const nlohmann::json& teamSnapshot,
+    nlohmann::json& libraryPayload);
+
+// Keep accepted evidence in order; repeats may coalesce, distinct batches may not.
+class DnfSyncedPlayerLibraryQueue
+{
+public:
+    bool Enqueue(const nlohmann::json& payload, bool force);
+    bool IsOutstanding(const nlohmann::json& payload) const;
+    nlohmann::json Begin();
+    void Complete(bool success);
+    void InvalidateCommitted() { committed_ = nullptr; }
+    bool HasPending() const noexcept { return !pending_.empty(); }
+private:
+    std::deque<nlohmann::json> pending_;
+    nlohmann::json active_;
+    nlohmann::json committed_;
+};
 
 nlohmann::json DnfBuildCloudMatchPreview(
     const nlohmann::json& localTeamSnapshot,

@@ -57,6 +57,7 @@ export interface CreateCloudMatchAppOptions {
   adminCsrfToken?: string;
   adminPassword?: string;
   v2ServerUrl?: string;
+  allowLegacyPermanentKeys?: boolean;
 }
 
 export interface CloudMatchApp {
@@ -143,6 +144,7 @@ export function createCloudMatchApp(
     db,
     now,
     serverUrl: options.v2ServerUrl ?? serverConfig.publicUrl,
+    allowLegacyPermanentKeys: options.allowLegacyPermanentKeys ?? serverConfig.allowLegacyPermanentKeys,
   }));
   // Keep the legacy registration endpoint small, while letting the v2
   // player-library router enforce its own larger payload limit.

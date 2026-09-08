@@ -17,7 +17,7 @@ namespace {
 constexpr wchar_t DNF_LICENSE_LEASE_REG_PATH[] = L"Software\\DNFCapture";
 constexpr wchar_t DNF_LICENSE_LEASE_REG_VALUE[] = L"LicenseLeaseV1";
 constexpr std::uint32_t DNF_LICENSE_LEASE_MAGIC = 0x314C4644; // DFL1
-constexpr std::uint32_t DNF_LICENSE_LEASE_VERSION = 2;
+constexpr std::uint32_t DNF_LICENSE_LEASE_VERSION = 3;
 constexpr DWORD DNF_LICENSE_LEASE_MAX_BYTES = 64 * 1024;
 constexpr std::size_t DNF_LICENSE_LEASE_MAX_TEXT_BYTES = 16 * 1024;
 
@@ -143,6 +143,8 @@ bool SerializeLease(const DnfLicenseLeaseRecord& lease,
         !AppendText(output, lease.machineId) ||
         !AppendText(output, lease.cloudServerUrl) ||
         !AppendText(output, lease.serverSessionToken) ||
+        !AppendText(output, lease.environment) ||
+        !AppendText(output, lease.endpointManifestUrl) ||
         output.size() > DNF_LICENSE_LEASE_MAX_BYTES) {
         SecureWipe(output);
         return false;
@@ -160,7 +162,7 @@ bool DeserializeLease(const BYTE* bytes, std::size_t length,
     std::uint32_t magic = 0;
     std::uint32_t version = 0;
     if (!ReadU32(cursor, end, magic) || !ReadU32(cursor, end, version) ||
-        magic != DNF_LICENSE_LEASE_MAGIC || (version != 1 && version != 2) ||
+        magic != DNF_LICENSE_LEASE_MAGIC || (version < 1 || version > DNF_LICENSE_LEASE_VERSION) ||
         !ReadI64(cursor, end, lease.cardDuration) ||
         !ReadI64(cursor, end, lease.expireTime) ||
         !ReadI64(cursor, end, lease.validatedAt) ||
@@ -168,7 +170,9 @@ bool DeserializeLease(const BYTE* bytes, std::size_t length,
         !ReadText(cursor, end, lease.licenseKey) ||
         !ReadText(cursor, end, lease.machineId) ||
         !ReadText(cursor, end, lease.cloudServerUrl) ||
-        (version == 2 && !ReadText(cursor, end, lease.serverSessionToken)) ||
+        (version >= 2 && !ReadText(cursor, end, lease.serverSessionToken)) ||
+        (version >= 3 && (!ReadText(cursor, end, lease.environment) ||
+            !ReadText(cursor, end, lease.endpointManifestUrl))) ||
         cursor != end) {
         lease = {};
         return false;

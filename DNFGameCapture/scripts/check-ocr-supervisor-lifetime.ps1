@@ -56,7 +56,7 @@ foreach ($needle in @(
     "WaitForSingleObject",
     "GetExitCodeProcess",
     "TerminateProcess",
-    "staleProcessTimeoutMs",
+    "const bool forceRestart = decision.restart",
     "EnsureOcrRunning(forceRestart)"
 )) {
     Require-Text $source $needle "OCR process recovery implementation is missing: $needle"

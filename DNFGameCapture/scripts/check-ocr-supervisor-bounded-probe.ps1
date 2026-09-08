@@ -26,7 +26,7 @@ foreach ($needle in @(
     Require-Text $source $needle "Bounded OCR request contract is missing: $needle"
 }
 
-$probeStart = $source.IndexOf('bool CDNFGameCaptureDlg::ProbeOcrServiceReady()')
+$probeStart = $source.IndexOf('dnf::ocr::ProbeResult CDNFGameCaptureDlg::ProbeOcrServiceReady()')
 $probeEnd = $source.IndexOf('bool CDNFGameCaptureDlg::RefreshOcrExePathFromRunningProcess', $probeStart)
 if ($probeStart -lt 0 -or $probeEnd -le $probeStart) {
     throw 'Unable to inspect the OCR readiness probe.'

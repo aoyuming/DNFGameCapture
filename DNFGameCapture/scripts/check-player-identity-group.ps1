@@ -1,3 +1,4 @@
+param([string]$VsDevCmd = 'E:\VS2026\Common7\Tools\VsDevCmd.bat')
 $ErrorActionPreference = 'Stop'
 
 $sourceRoot = Split-Path -Parent $PSScriptRoot
@@ -22,7 +23,7 @@ function Require-File([string]$path) {
 }
 
 function Require-Text([string]$path, [string]$pattern, [string]$description) {
-    $text = Get-Content -LiteralPath $path -Raw
+    $text = Get-Content -LiteralPath $path -Raw -Encoding UTF8
     if ($text -notmatch $pattern) {
         throw "Missing $description in $path"
     }
@@ -36,8 +37,27 @@ Require-Text $project 'PlayerIdentityGroupService\.h' 'identity service header p
 Require-Text $project 'PlayerIdentityGroupService\.cpp' 'identity service source project entry'
 Require-Text $filters 'PlayerIdentityGroupService\.h' 'identity service header filter entry'
 Require-Text $filters 'PlayerIdentityGroupService\.cpp' 'identity service source filter entry'
-Require-Text $serviceHeader 'AUTO_GROUP_SHARED_ID_THRESHOLD\s*=\s*4' 'strong-overlap auto-group threshold'
-Require-Text $serviceHeader 'AUTO_GROUP_POLICY_VERSION\s*=\s*2' 'auto-group policy version'
+
+$tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('DNF-player-identity-' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $tempRoot
+try {
+    if (-not (Test-Path -LiteralPath $VsDevCmd)) { throw 'MSVC developer command file not found.' }
+    $test = Join-Path $PSScriptRoot 'player_identity_group_test.cpp'
+    $compile = 'call "{0}" -arch=x64 -host_arch=x64 >nul && cl /nologo /std:c++17 /EHsc /O2 /MT /W4 /utf-8 /Y- /Fe:"{1}\identity_test.exe" /Fo:"{1}\\" "{2}" "{3}"' -f $VsDevCmd, $tempRoot, $serviceCpp, $test
+    & $env:ComSpec /d /s /c $compile
+    if ($LASTEXITCODE -ne 0) { throw 'Player identity compilation failed.' }
+    & (Join-Path $tempRoot 'identity_test.exe')
+    if ($LASTEXITCODE -ne 0) { throw 'Player identity tests failed.' }
+} finally {
+    $resolved = [IO.Path]::GetFullPath($tempRoot)
+    $allowed = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+    if (-not $resolved.StartsWith($allowed, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe cleanup target.' }
+    Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+Require-Text $serviceHeader 'AUTO_GROUP_SHARED_ID_THRESHOLD\s*=\s*5' 'strong-overlap auto-group threshold'
+Require-Text $serviceHeader 'AUTO_GROUP_POLICY_VERSION\s*=\s*5' 'auto-group policy version'
+if ((Get-Content -LiteralPath $serviceHeader -Raw) -match '(?i)adventure') { throw 'Retired identifier API remains in the identity service.' }
 Require-Text $serviceCpp 'AUTO_GROUP_SHARED_ID_THRESHOLD' 'strong-overlap auto-group logic'
 Require-Text $serviceCpp 'ComputeAliasEntriesFingerprint' 'identity entry fingerprint helper'
 Require-Text $cpp 'autoGroupPolicyVersion' 'auto-group policy persistence'
@@ -59,13 +79,13 @@ foreach ($command in @(
 
 Require-Text $cpp 'DeletePlayerIdentityAlias' 'identity alias deletion handler'
 Require-Text $main 'identity-delete-alias' 'Web identity alias deletion action'
-Require-Text $main '删除别名' 'Web identity alias deletion label'
-Require-Text $main '添加别名' 'Web identity alias add label'
+Require-Text $main '\u5220\u9664\u522b\u540d' 'Web identity alias deletion label'
+Require-Text $main '\u6dfb\u52a0\u522b\u540d' 'Web identity alias add label'
 Require-Text $main 'identity-id-editor' 'inline identity ID editor'
 Require-Text $main 'identity-id-remove' 'inline identity ID remove action'
 Require-Text $main 'identityExpandedIdGroups' 'collapsed identity ID editor state'
 Require-Text $main 'identity-edit-ids' 'identity ID edit toggle'
-Require-Text $main '编辑游戏ID' 'identity ID edit toggle label'
+Require-Text $main 'identity-game-id-edit' 'inline game ID edit action'
 
 foreach ($symbol in @(
         'LoadPlayerIdentityGroups',
@@ -88,9 +108,8 @@ Require-Text $main 'identityFocusedName' 'focused identity name state'
 Require-Text $main 'identity-focused-member' 'focused identity member styling hook'
 Require-Text $main 'scrollIntoView' 'focused identity auto-scroll'
 Require-Text $main 'renderIdentitySelectionSummary' 'live identity selection summary'
-Require-Text $main 'Number\(Boolean\(right\.group\)\)\s*-\s*Number\(Boolean\(left\.group\)\)' 'grouped players before standalone players'
-Require-Text $main 'groupOrder' 'stable identity group ordering'
-Require-Text $main 'memberOrder' 'stable name ordering inside an identity group'
+Require-Text $main 'members\.push\(\{ name, group, ids: group\.ids' 'stable grouped-player ordering in cached snapshot'
+Require-Text $main 'for \(const entry of standalone\) \{ members\.push\(entry\)' 'standalone players appended after groups'
 $memberSort = [regex]::Match($main, 'visibleMembers\.sort\([\s\S]*?\);')
 if ($memberSort.Success -and $memberSort.Value -match 'right\.name\s*===\s*focusedName') {
     throw 'Clicking a player must not promote it to the first row.'

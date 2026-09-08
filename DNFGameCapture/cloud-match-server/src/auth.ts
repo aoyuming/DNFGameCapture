@@ -28,7 +28,7 @@ export function createSessionToken(): string {
 
 // The native client validates the compact CDK signature before it contacts
 // the authorization service. Keep server-generated cards compatible with that
-// legacy parser while storing only their SHA-256 hash in SQLite.
+// legacy parser. Validation uses SHA-256; administrator recovery uses a separate vault.
 const NATIVE_LICENSE_SIGNATURE_SECRET = 'MySuperSecretKey2026';
 const NATIVE_LICENSE_KEY_PATTERN = /^CDK-([0-9A-F]+)-([A-Z0-9]+)-([0-9A-F]+)$/i;
 
@@ -71,6 +71,13 @@ export function isNativeLicenseKey(value: string): boolean {
     `${duration.toString(16).toUpperCase()}-${match[2].toUpperCase()}-${NATIVE_LICENSE_SIGNATURE_SECRET}`,
   );
   return signature === BigInt(expected);
+}
+
+export function isLegacyPermanentLicenseKey(value: string): boolean {
+  const normalized = normalizeLicenseKey(value);
+  // Keygen.cpp uses %04X for the nonce and %08X for the signature. Requiring
+  // its original widths prevents another spelling from enrolling a second card.
+  return /^CDK-FFFFFFFF-[0-9A-F]{4}-[0-9A-F]{8}$/.test(normalized) && isNativeLicenseKey(normalized);
 }
 
 export function verifyLicenseKey(record: LicenseRecord, value: string): boolean {

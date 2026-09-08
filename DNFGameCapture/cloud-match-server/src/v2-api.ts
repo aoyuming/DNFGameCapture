@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import express, {
   type Express,
   type NextFunction,
@@ -10,22 +10,28 @@ import type Database from 'better-sqlite3';
 import { z } from 'zod';
 
 import {
-  createSessionToken,
-  generateLicenseKey,
-  hashLicenseKey,
   hashSessionToken,
   isLicenseUsable,
-  verifyLicenseKey,
   type LicenseRecord,
 } from './auth.js';
 import {
   canonicalizeIdentifiers,
+  MAX_PLAYER_ENTITY_VALUES,
   detectIdentifierConflicts,
-  normalizeIdentifier,
   resolvePlayerIdentity,
   type PlayerEntity,
 } from './player-library.js';
 import { deviceIdSchema, playerNameSchema } from './schemas.js';
+import { activateStoredLicense, disableLicense, LicenseError } from './license-store.js';
+export { createLicense, listLicenses } from './license-store.js';
+import { listPlayerLibrary, readAutomaticIdentityEvidence } from './library-store.js';
+import { reconcileLibrarySubmission } from './library-submission-reconcile.js';
+import { identityKey, type AutomaticIdentityEvidence } from './library-identity-policy.js';
+export { listPlayerLibrary } from './library-store.js';
+import {
+  LibraryAdminError, libraryReviewGuardSchema, mutatePublicLibrary, parseAdminEntities,
+  readAdminSubmission, reviewAdminSubmissions, revisionSchema, projectedLibrary,
+} from './library-admin-data.js';
 
 const MAX_LIBRARY_BYTES = 256 * 1024;
 const DEFAULT_SESSION_TTL_SECONDS = 5 * 24 * 60 * 60;
@@ -33,10 +39,9 @@ const entityIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/);
 const identifierSchema = z.string().min(1).max(128);
 const playerEntityInputSchema = z.object({
   entityId: entityIdSchema.optional(),
-  names: z.array(playerNameSchema).min(1).max(32),
-  gameIds: z.array(identifierSchema).max(256),
-  adventureGroupIds: z.array(identifierSchema).max(256),
-}).strict();
+  names: z.array(playerNameSchema).min(1).max(MAX_PLAYER_ENTITY_VALUES),
+  gameIds: z.array(identifierSchema).max(MAX_PLAYER_ENTITY_VALUES),
+}).strip();
 const playerLibraryPayloadSchema = z.object({
   entities: z.array(playerEntityInputSchema).max(10_000),
 }).strict();
@@ -51,44 +56,28 @@ const validateSchema = z.object({
 }).strict();
 const resolveSchema = z.object({
   gameIds: z.array(identifierSchema).max(64).default([]),
-  adventureGroupIds: z.array(identifierSchema).max(64).default([]),
-}).strict();
+  activeEntityIds: z.array(entityIdSchema).max(8).refine(ids => new Set(ids).size === ids.length).optional(),
+}).strip();
 
 export interface V2ApiOptions {
   db: Database.Database;
   now(): number;
   serverUrl: string;
   sessionTtlSeconds?: number;
+  allowLegacyPermanentKeys?: boolean;
 }
 
 export interface SubmittedPlayerEntity {
   entityId?: string;
   names: string[];
   gameIds: string[];
-  adventureGroupIds: string[];
 }
 
 export interface PublicPlayerEntity extends PlayerEntity {}
 
-interface StoredLicenseRow {
-  id: number;
-  key_hash: string;
-  expires_at: number | null;
-  disabled_at: number | null;
-  bound_device_id: string | null;
-}
-
 interface SessionContext {
   deviceId: string;
   license: LicenseRecord;
-}
-
-interface LibrarySubmissionRow {
-  id: number;
-  device_id: string;
-  payload_json: string;
-  status: 'pending' | 'approved' | 'rejected';
-  created_at: number;
 }
 
 class V2RequestError extends Error {
@@ -104,216 +93,100 @@ function jsonByteLength(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), 'utf8');
 }
 
-function safeEntityId(value: string | undefined): string {
-  return value ?? `player-${randomBytes(12).toString('hex')}`;
+function canonicalValues(values: readonly string[]): string[] {
+  return [...new Set(values.map(identityKey))].sort();
+}
+
+function submissionSignature(entities: readonly PlayerEntity[], redirects: ReadonlyMap<string, string>): string {
+  // Keep each source group and its identity; flattened public unions can hide new merge evidence.
+  return JSON.stringify([...new Set(entities.map(entity => JSON.stringify([
+    redirects.get(entity.entityId) ?? entity.entityId, canonicalValues(entity.names), canonicalValues(entity.gameIds),
+  ])))].sort());
 }
 
 function normalizeSubmittedEntities(
   entities: readonly SubmittedPlayerEntity[],
+  deviceId: string,
 ): PlayerEntity[] {
-  return entities.map((entity) => ({
-    entityId: safeEntityId(entity.entityId),
-    names: [...new Set(entity.names.map((name) => name.normalize('NFC').trim()))],
-    gameIds: canonicalizeIdentifiers(entity.gameIds),
-    adventureGroupIds: canonicalizeIdentifiers(entity.adventureGroupIds),
-  }));
+  const unique = new Map<string, PlayerEntity>();
+  for (const source of entities) {
+    const names = canonicalizeIdentifiers(source.names), gameIds = canonicalizeIdentifiers(source.gameIds);
+    // Anonymous retries need stable source IDs, scoped to this device and this exact normalized group.
+    const entityId = source.entityId ?? `player-${createHash('sha256')
+      .update(JSON.stringify(['submission-v1', deviceId, canonicalValues(names), canonicalValues(gameIds)]))
+      .digest('hex').slice(0, 24)}`;
+    const entity = { entityId, names, gameIds };
+    const signature = submissionSignature([entity], new Map());
+    if (!unique.has(signature)) unique.set(signature, entity);
+  }
+  return [...unique.values()];
 }
 
-function readLibraryEntities(db: Database.Database): PublicPlayerEntity[] {
-  const rows = db.prepare(
-    'SELECT entity_id, created_at, updated_at FROM player_entities ORDER BY entity_id',
-  ).all() as Array<{ entity_id: string; created_at: number; updated_at: number }>;
-  const names = db.prepare(
-    'SELECT entity_id, display_name FROM player_entity_names ORDER BY entity_id, name_norm',
-  ).all() as Array<{ entity_id: string; display_name: string }>;
-  const identifiers = db.prepare(
-    `SELECT entity_id, kind, display_value
-     FROM player_entity_identifiers
-     ORDER BY entity_id, kind, identifier_norm`,
-  ).all() as Array<{ entity_id: string; kind: 'game' | 'adventure'; display_value: string }>;
-  const byId = new Map<string, PublicPlayerEntity>();
-  for (const row of rows) {
-    byId.set(row.entity_id, {
-      entityId: row.entity_id,
-      names: [],
-      gameIds: [],
-      adventureGroupIds: [],
+function createPendingSignature(current: ReturnType<typeof listPlayerLibrary>, evidence: AutomaticIdentityEvidence) {
+  const redirects = new Map(current.entityRedirects.map(item => [item.fromEntityId, item.toEntityId]));
+  const known = new Map(current.entities.map(entity => [entity.entityId, {
+    names: new Set(canonicalValues(entity.names)), gameIds: new Set(canonicalValues(entity.gameIds)),
+  }]));
+  return (entities: PlayerEntity[], projection?: ReturnType<typeof projectedLibrary>): string => {
+    if (new Set(entities.map(entity => entity.entityId)).size !== entities.length) return submissionSignature(entities, redirects);
+    const changed = entities.filter(entity => {
+      const previous = known.get(redirects.get(entity.entityId) ?? entity.entityId);
+      return !previous || entity.names.some(value => !previous.names.has(identityKey(value))) ||
+        entity.gameIds.some(value => !previous.gameIds.has(identityKey(value)));
     });
-  }
-  for (const row of names) byId.get(row.entity_id)?.names.push(row.display_name);
-  for (const row of identifiers) {
-    const entity = byId.get(row.entity_id);
-    if (!entity) continue;
-    (row.kind === 'game' ? entity.gameIds : entity.adventureGroupIds).push(row.display_value);
-  }
-  return [...byId.values()];
-}
-
-export function listPlayerLibrary(db: Database.Database): {
-  revision: number;
-  entities: PublicPlayerEntity[];
-} {
-  const revision = (db.prepare(
-    'SELECT revision FROM player_library_meta WHERE id = 1',
-  ).get() as { revision: number } | undefined)?.revision ?? 0;
-  return { revision, entities: readLibraryEntities(db) };
-}
-
-function bumpLibraryRevision(db: Database.Database): number {
-  db.prepare('UPDATE player_library_meta SET revision = revision + 1 WHERE id = 1').run();
-  return (db.prepare(
-    'SELECT revision FROM player_library_meta WHERE id = 1',
-  ).get() as { revision: number }).revision;
-}
-
-function identifierConflictError(
-  conflicts: ReturnType<typeof detectIdentifierConflicts>,
-): V2RequestError | null {
-  if (conflicts.gameIds.length > 0 || conflicts.adventureGroupIds.length > 0) {
-    return new V2RequestError(409, 'identifier_conflict');
-  }
-  return null;
-}
-
-function mergePublicEntities(
-  db: Database.Database,
-  inputEntities: readonly PlayerEntity[],
-  nowSec: number,
-): { revision: number; entities: PublicPlayerEntity[] } {
-  const payloadConflict = identifierConflictError(detectIdentifierConflicts(inputEntities));
-  if (payloadConflict) throw payloadConflict;
-
-  return db.transaction(() => {
-    const existing = readLibraryEntities(db);
-    const byEntityId = new Map(existing.map((item) => [item.entityId, item]));
-    const byName = new Map<string, string>();
-    for (const entity of existing) {
-      for (const name of entity.names) byName.set(name.normalize('NFC').trim().toLocaleLowerCase(), entity.entityId);
+    if (changed.length !== entities.length) {
+      projection ??= projectedLibrary(current.entities,
+        reconcileLibrarySubmission(current.entities, entities, current.entityRedirects).entities, evidence);
+      // Even a no-op row can trigger publication when every changed row is blocked in partial review.
+      // Prune it only when the full projection cannot create redirects or new automatic evidence.
+      if (!projection.automaticGroups.length) return submissionSignature(changed, redirects);
     }
-
-    let changed = false;
-    for (const incoming of inputEntities) {
-      const namedOwners = [...new Set(incoming.names
-        .map((name) => byName.get(name.normalize('NFC').trim().toLocaleLowerCase()))
-        .filter((value): value is string => Boolean(value)))];
-      if (namedOwners.length > 1) throw new V2RequestError(409, 'name_conflict');
-      const entityId = incoming.entityId && byEntityId.has(incoming.entityId)
-        ? incoming.entityId
-        : namedOwners[0] ?? incoming.entityId ?? safeEntityId(undefined);
-      const current = byEntityId.get(entityId);
-      if (!current) {
-        db.prepare(
-          'INSERT INTO player_entities (entity_id, created_at, updated_at) VALUES (?, ?, ?)',
-        ).run(entityId, nowSec, nowSec);
-        byEntityId.set(entityId, {
-          entityId,
-          names: [],
-          gameIds: [],
-          adventureGroupIds: [],
-        });
-        changed = true;
-      }
-      const target = byEntityId.get(entityId)!;
-      const allNames = canonicalizeIdentifiers([...target.names, ...incoming.names]);
-      for (const name of allNames) {
-        const key = name.toLocaleLowerCase();
-        const otherOwner = byName.get(key);
-        if (otherOwner && otherOwner !== entityId) throw new V2RequestError(409, 'name_conflict');
-        if (!target.names.some((item) => item.toLocaleLowerCase() === key)) {
-          db.prepare(
-            `INSERT INTO player_entity_names (entity_id, name_norm, display_name)
-             VALUES (?, ?, ?)`,
-          ).run(entityId, key, name);
-          target.names.push(name);
-          byName.set(key, entityId);
-          changed = true;
-        }
-      }
-      for (const [kind, values] of [
-        ['game', incoming.gameIds] as const,
-        ['adventure', incoming.adventureGroupIds] as const,
-      ]) {
-        const targetValues = kind === 'game' ? target.gameIds : target.adventureGroupIds;
-        for (const value of canonicalizeIdentifiers(values)) {
-          const identifierNorm = value.toLocaleLowerCase();
-          const owner = db.prepare(
-            `SELECT entity_id FROM player_entity_identifiers
-             WHERE kind = ? AND identifier_norm = ?`,
-          ).get(kind, identifierNorm) as { entity_id: string } | undefined;
-          if (owner && owner.entity_id !== entityId) {
-            throw new V2RequestError(409, 'identifier_conflict');
-          }
-          if (!targetValues.some((item) => item.toLocaleLowerCase() === identifierNorm)) {
-            db.prepare(
-              `INSERT INTO player_entity_identifiers
-               (entity_id, kind, identifier_norm, display_value)
-               VALUES (?, ?, ?, ?)`,
-            ).run(entityId, kind, identifierNorm, value);
-            targetValues.push(value);
-            changed = true;
-          }
-        }
-      }
-      if (changed) {
-        db.prepare('UPDATE player_entities SET updated_at = ? WHERE entity_id = ?').run(nowSec, entityId);
-      }
-    }
-    const revision = changed ? bumpLibraryRevision(db) : listPlayerLibrary(db).revision;
-    return { revision, entities: readLibraryEntities(db) };
-  })();
+    return submissionSignature(entities, redirects);
+  };
 }
+
+function findPendingSubmission(db: Database.Database, deviceId: string, signature: string,
+  signatureOf: ReturnType<typeof createPendingSignature>): number | undefined {
+  const rows = db.prepare(`SELECT id,payload_json FROM player_library_submissions
+    WHERE device_id=? AND status='pending' ORDER BY id`).iterate(deviceId) as Iterable<{ id: number; payload_json: string }>;
+  for (const row of rows) {
+    if (Buffer.byteLength(row.payload_json, 'utf8') > MAX_LIBRARY_BYTES) continue;
+    let entities: PlayerEntity[];
+    try {
+      entities = parseAdminEntities(JSON.parse(row.payload_json), index => `submission-${row.id}-${index}`);
+    } catch { continue; }
+    if (signatureOf(entities) === signature) return row.id;
+  }
+  return undefined;
+}
+
+export interface PlayerLibraryReviewGuard { revision: number; submissionRevision: string }
 
 export function approvePlayerLibrarySubmission(
-  db: Database.Database,
-  submissionId: number,
-  nowSec: number,
+  db: Database.Database, submissionId: number, nowSec: number, guard: PlayerLibraryReviewGuard,
 ): { ok: true; revision: number } | { ok: false; code: string } {
-  const row = db.prepare(
-    `SELECT id, device_id, payload_json, status, created_at
-     FROM player_library_submissions WHERE id = ?`,
-  ).get(submissionId) as LibrarySubmissionRow | undefined;
-  if (!row || row.status !== 'pending') return { ok: false, code: 'submission_not_pending' };
-  let payload: unknown;
   try {
-    payload = JSON.parse(row.payload_json);
-  } catch {
-    db.prepare(
-      `UPDATE player_library_submissions SET status = 'rejected', reviewed_at = ?, review_reason = ? WHERE id = ?`,
-    ).run(nowSec, 'invalid_payload', submissionId);
-    return { ok: false, code: 'invalid_payload' };
-  }
-  const parsed = playerLibraryPayloadSchema.safeParse(payload);
-  if (!parsed.success) {
-    db.prepare(
-      `UPDATE player_library_submissions SET status = 'rejected', reviewed_at = ?, review_reason = ? WHERE id = ?`,
-    ).run(nowSec, 'invalid_payload', submissionId);
-    return { ok: false, code: 'invalid_payload' };
-  }
-  try {
-    const result = mergePublicEntities(db, normalizeSubmittedEntities(parsed.data.entities), nowSec);
-    db.prepare(
-      `UPDATE player_library_submissions SET status = 'approved', reviewed_at = ?, review_reason = NULL WHERE id = ?`,
-    ).run(nowSec, submissionId);
+    const parsed = libraryReviewGuardSchema.safeParse(guard);
+    if (!parsed.success) return { ok: false, code: 'invalid_request' };
+    const result = reviewAdminSubmissions(db, parsed.data.revision, nowSec, 'approve',
+      [{ id: submissionId, submissionRevision: parsed.data.submissionRevision }]);
     return { ok: true, revision: result.revision };
   } catch (error) {
-    const code = error instanceof V2RequestError ? error.code : 'internal_error';
-    db.prepare(
-      `UPDATE player_library_submissions SET status = 'rejected', reviewed_at = ?, review_reason = ? WHERE id = ?`,
-    ).run(nowSec, code, submissionId);
+    if (!(error instanceof LibraryAdminError)) return { ok: false, code: 'internal_error' };
+    // Names retain unique ownership; identifier references can be shared.
+    const code = error.code === 'ownership_conflict'
+      ? error.conflicts.some(conflict => conflict.kind === 'names') ? 'name_conflict' : 'identifier_conflict'
+      : error.code;
     return { ok: false, code };
   }
 }
 
 export function createPlayerLibraryEntity(
-  db: Database.Database,
-  entity: SubmittedPlayerEntity,
-  nowSec: number,
+  db: Database.Database, entity: SubmittedPlayerEntity, nowSec: number, revision: number,
 ): { revision: number; entity: PublicPlayerEntity } {
-  const result = mergePublicEntities(db, normalizeSubmittedEntities([entity]), nowSec);
-  const normalizedId = entity.entityId ?? result.entities.at(-1)?.entityId;
-  const found = result.entities.find((item) => item.entityId === normalizedId);
-  if (!found) throw new V2RequestError(500, 'entity_not_found');
-  return { revision: result.revision, entity: found };
+  if (!revisionSchema.safeParse(revision).success) throw new LibraryAdminError(400, 'invalid_request');
+  const result = mutatePublicLibrary(db, revision, nowSec, 'create', parseAdminEntities({ entities: [entity] }));
+  return { revision: result.revision, entity: result.entity! };
 }
 
 function loadSession(
@@ -410,7 +283,7 @@ function handleError(
   response: Response,
   _next: NextFunction,
 ): void {
-  if (error instanceof V2RequestError) {
+  if (error instanceof V2RequestError || error instanceof LicenseError) {
     response.status(error.status).json({ ok: false, code: error.code });
     return;
   }
@@ -422,47 +295,20 @@ export function createV2Api(options: V2ApiOptions): Router {
   const sessionTtlSeconds = options.sessionTtlSeconds ?? DEFAULT_SESSION_TTL_SECONDS;
   router.use(express.json({ limit: `${MAX_LIBRARY_BYTES + 32_768}b` }));
 
+  // Read-only deployment probe: never activate a real card just to verify an upgrade.
+  router.get('/health', (_request, response) => {
+    response.json({ ok: true, protocolVersion: 2, cloudServerUrl: options.serverUrl,
+      allowLegacyPermanentKeys: options.allowLegacyPermanentKeys === true });
+  });
+
   router.post('/auth/activate', (request, response, next) => {
     try {
       const parsed = activateSchema.safeParse(request.body);
       if (!parsed.success) throw new V2RequestError(400, 'invalid_request');
       const { key, deviceId } = parsed.data;
-      const row = options.db.prepare(
-        `SELECT id, key_hash, expires_at, disabled_at, bound_device_id
-         FROM licenses WHERE key_hash = ?`,
-      ).get(hashLicenseKey(key)) as StoredLicenseRow | undefined;
-      if (!row) throw new V2RequestError(401, 'invalid_license');
-      const license: LicenseRecord = {
-        id: row.id,
-        keyHash: row.key_hash,
-        expiresAt: row.expires_at,
-        disabledAt: row.disabled_at,
-        boundDeviceId: row.bound_device_id,
-      };
-      if (!verifyLicenseKey(license, key)) throw new V2RequestError(401, 'invalid_license');
-      const usable = isLicenseUsable(license, options.now());
-      if (!usable.ok) throw new V2RequestError(403, `license_${usable.code}`);
-      if (license.boundDeviceId && license.boundDeviceId !== deviceId) {
-        throw new V2RequestError(409, 'license_bound_to_other_device');
-      }
-      const token = createSessionToken();
-      const tokenHash = hashSessionToken(token);
-      const nowSec = options.now();
-      const expiresAt = Math.min(
-        nowSec + sessionTtlSeconds,
-        license.expiresAt ?? Number.MAX_SAFE_INTEGER,
-      );
-      options.db.transaction(() => {
-        options.db.prepare(
-          `UPDATE licenses SET bound_device_id = COALESCE(bound_device_id, ?), updated_at = ? WHERE id = ?`,
-        ).run(deviceId, nowSec, license.id);
-        options.db.prepare('DELETE FROM auth_sessions WHERE device_id = ?').run(deviceId);
-        options.db.prepare(
-          `INSERT INTO auth_sessions (token_hash, license_id, device_id, created_at, last_seen_at, expires_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-        ).run(tokenHash, license.id, deviceId, nowSec, nowSec, expiresAt);
-      })();
-      response.json(authResponse(options, deviceId, token, { ...license, boundDeviceId: deviceId }));
+      const { token, license } = activateStoredLicense(options.db, key, deviceId, options.now(), sessionTtlSeconds,
+        options.allowLegacyPermanentKeys);
+      response.json(authResponse(options, deviceId, token, license));
     } catch (error) {
       next(error);
     }
@@ -495,7 +341,10 @@ export function createV2Api(options: V2ApiOptions): Router {
       const parsed = resolveSchema.safeParse(request.body);
       if (!parsed.success) throw new V2RequestError(400, 'invalid_request');
       const library = listPlayerLibrary(options.db);
-      response.json({ ok: true, ...resolvePlayerIdentity(library.entities, parsed.data.gameIds, parsed.data.adventureGroupIds) });
+      const redirects = new Map(library.entityRedirects.map(item => [item.fromEntityId, item.toEntityId]));
+      const activeIds = parsed.data.activeEntityIds?.map(id => redirects.get(id) ?? id);
+      if (activeIds && new Set(activeIds).size !== activeIds.length) throw new V2RequestError(400, 'ambiguous_active_roster');
+      response.json({ ok: true, ...resolvePlayerIdentity(library.entities, parsed.data.gameIds, activeIds) });
     } catch (error) {
       next(error);
     }
@@ -508,15 +357,33 @@ export function createV2Api(options: V2ApiOptions): Router {
         throw new V2RequestError(400, 'invalid_library');
       }
       const session = (request as Request & { v2Session: SessionContext }).v2Session;
-      const normalized = normalizeSubmittedEntities(parsed.data.entities);
-      const conflict = identifierConflictError(detectIdentifierConflicts(normalized));
-      if (conflict) throw conflict;
-      const createdAt = options.now();
-      const result = options.db.prepare(
-        `INSERT INTO player_library_submissions (device_id, payload_json, status, created_at)
-         VALUES (?, ?, 'pending', ?)`,
-      ).run(session.deviceId, JSON.stringify({ entities: normalized } satisfies { entities: PlayerEntity[] }), createdAt);
-      response.status(202).json({ ok: true, status: 'pending_review', submissionId: Number(result.lastInsertRowid) });
+      const normalized = normalizeSubmittedEntities(parsed.data.entities, session.deviceId);
+      const result = options.db.transaction(() => {
+        const current = listPlayerLibrary(options.db);
+        if (!normalized.length) return { ok: true, status: 'no_changes', revision: current.revision,
+          identifierConflictCount: 0, ownershipConflictCount: 0 };
+        const analysis = reconcileLibrarySubmission(current.entities, normalized, current.entityRedirects);
+        const evidence = readAutomaticIdentityEvidence(options.db);
+        const projection = projectedLibrary(current.entities, analysis.entities, evidence);
+        const counts = { revision: current.revision,
+          identifierConflictCount: projection.conflicts.filter(conflict => conflict.kind !== 'names').length,
+          ownershipConflictCount: projection.conflicts.length };
+        if (new Set(normalized.map(entity => entity.entityId)).size === normalized.length &&
+          !analysis.addedEntityCount && !analysis.updatedEntityCount &&
+          !projection.conflicts.length && !projection.automaticGroups.length) {
+          return { ok: true, status: 'no_changes', ...counts };
+        }
+        const signatureOf = createPendingSignature(current, evidence);
+        const pendingId = findPendingSubmission(options.db, session.deviceId, signatureOf(normalized, projection), signatureOf);
+        if (pendingId !== undefined) return { ok: true, status: 'already_pending', submissionId: pendingId, ...counts };
+        // Check the current draft, never an original copy or a rejected/approved submission.
+        const inserted = options.db.prepare(
+          `INSERT INTO player_library_submissions (device_id, payload_json, status, created_at)
+           VALUES (?, ?, 'pending', ?)`,
+        ).run(session.deviceId, JSON.stringify({ entities: normalized } satisfies { entities: PlayerEntity[] }), options.now());
+        return { ok: true, status: 'pending_review', submissionId: Number(inserted.lastInsertRowid), ...counts };
+      }).immediate();
+      response.status(result.status === 'pending_review' ? 202 : 200).json(result);
     } catch (error) {
       next(error);
     }
@@ -543,24 +410,29 @@ export function listPendingPlayerLibrarySubmissions(db: Database.Database): Arra
   }));
 }
 
-export function createLicense(
-  db: Database.Database,
-  input: { key: string; label?: string; expiresAt?: number | null; nowSec: number },
-): { id: number; keyHash: string; expiresAt: number | null } {
-  const keyHash = hashLicenseKey(input.key);
-  const result = db.prepare(
-    `INSERT INTO licenses (key_hash, label, expires_at, disabled_at, bound_device_id, created_at, updated_at)
-     VALUES (?, ?, ?, NULL, NULL, ?, ?)`,
-  ).run(keyHash, input.label ?? '', input.expiresAt ?? null, input.nowSec, input.nowSec);
-  return { id: Number(result.lastInsertRowid), keyHash, expiresAt: input.expiresAt ?? null };
+export function getPlayerLibrarySubmission(db: Database.Database, submissionId: number) {
+  try {
+    return db.transaction(() => {
+      const library = listPlayerLibrary(db);
+      const submission = readAdminSubmission(db, submissionId, library.entities);
+      return { ...submission, revision: library.revision, ownershipConflicts: submission.conflicts,
+        conflicts: { gameIds: [] },
+        sharedIdentifiers: detectIdentifierConflicts(submission.entities) };
+    })();
+  } catch (error) {
+    if (error instanceof LibraryAdminError && error.code === 'submission_not_found') return null;
+    throw error;
+  }
 }
 
-export function listLicenses(db: Database.Database): Array<Record<string, unknown>> {
-  return (db.prepare(
-    `SELECT id, label, expires_at AS expiresAt, disabled_at AS disabledAt,
-            bound_device_id AS boundDeviceId, created_at AS createdAt, updated_at AS updatedAt
-     FROM licenses ORDER BY id DESC`,
-  ).all() as Array<Record<string, unknown>>);
+export function rejectPlayerLibrarySubmission(
+  db: Database.Database, submissionId: number, nowSec: number, guard: PlayerLibraryReviewGuard,
+): boolean {
+  const parsed = libraryReviewGuardSchema.safeParse(guard);
+  if (!parsed.success) throw new LibraryAdminError(400, 'invalid_request');
+  reviewAdminSubmissions(db, parsed.data.revision, nowSec, 'reject',
+    [{ id: submissionId, submissionRevision: parsed.data.submissionRevision }]);
+  return true;
 }
 
 export function setLicenseDisabled(
@@ -569,9 +441,9 @@ export function setLicenseDisabled(
   disabledAt: number | null,
   nowSec: number,
 ): boolean {
-  return db.prepare(
-    'UPDATE licenses SET disabled_at = ?, updated_at = ? WHERE id = ?',
-  ).run(disabledAt, nowSec, licenseId).changes === 1;
+  if (!db.prepare('SELECT 1 FROM licenses WHERE id=?').get(licenseId)) return false;
+  disableLicense(db, licenseId, disabledAt !== null, undefined, undefined, nowSec);
+  return true;
 }
 
 export function setBroadcasterOcrDisabledUntil(
