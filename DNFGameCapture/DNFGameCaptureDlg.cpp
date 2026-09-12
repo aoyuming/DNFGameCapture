@@ -14706,6 +14706,11 @@ void CDNFGameCaptureDlg::LoadAliasDbAutoSyncSettings()
         timeText, static_cast<DWORD>(std::size(timeText)), m_iniPath);
     m_aliasAutoSyncLastSuccessAt = _wtoi64(timeText);
     if (m_aliasAutoSyncLastSuccessAt < 0) m_aliasAutoSyncLastSuccessAt = 0;
+    const int syncWorkflowVersion = GetPrivateProfileInt(
+        L"AliasDbSync", L"PullBeforePushVersion", 0, m_iniPath);
+    if (m_cloudServerAuthV2 && syncWorkflowVersion < 1) {
+        m_aliasAutoSyncLastSuccessAt = 0;
+    }
 
     wchar_t hashText[128] = {};
     GetPrivateProfileString(L"AliasDbSync", L"LastPushHash", L"",
@@ -14771,7 +14776,9 @@ bool CDNFGameCaptureDlg::SaveAliasDbAutoSyncSettings() const
     CString hash = CA2W(m_aliasAutoSyncLastPushHash.c_str(), CP_UTF8);
     const bool hashSaved = WritePrivateProfileString(
         L"AliasDbSync", L"LastPushHash", hash, m_iniPath);
-    return enabledSaved && timestampSaved && hashSaved;
+    const bool workflowSaved = WritePrivateProfileString(
+        L"AliasDbSync", L"PullBeforePushVersion", L"1", m_iniPath);
+    return enabledSaved && timestampSaved && hashSaved && workflowSaved;
 }
 
 bool CDNFGameCaptureDlg::MergePublicAliasDbForAutoSync(
@@ -15027,12 +15034,11 @@ void CDNFGameCaptureDlg::StartAliasDbAutoSyncAttempt()
         BuildAliasDbAppendPayload(mainCount, pairCount);
     const auto librarySnapshot = std::atomic_load(&m_playerLibrarySnapshot);
     if (m_cloudServerAuthV2 && librarySnapshot) {
-        aliasPayload = json({ { "entities", librarySnapshot->v2Entities } }).dump();
         mainCount = static_cast<int>(librarySnapshot->entities.size());
     }
     const bool localPayloadEmpty = mainCount <= 0;
-    const std::string payloadHash = DnfAliasAutoSyncHash(
-        localPayloadEmpty ? std::string() : aliasPayload);
+    const std::string payloadHash = m_cloudServerAuthV2 ? std::string() :
+        DnfAliasAutoSyncHash(localPayloadEmpty ? std::string() : aliasPayload);
     const std::string previousPushHash = m_aliasAutoSyncLastPushHash;
     const bool useServerAuthV2 = m_cloudServerAuthV2;
     const CString serverEndpoint = m_cloudMatchServerUrl;
@@ -15091,29 +15097,10 @@ void CDNFGameCaptureDlg::StartAliasDbAutoSyncAttempt()
     try {
         const std::string v2Scope = useServerAuthV2 ?
             dnf::player_library_sync::SubmissionScope(std::string(CW2A(serverEndpoint, CP_UTF8)), serverDeviceId, keyUtf8) : std::string();
-        std::string submittedSignature;
-        std::string preparationError;
-        if (useServerAuthV2 && !localPayloadEmpty) {
-            try {
-                CString error;
-                std::string preparedPayload;
-                if (DnfPrepareV2PlayerLibraryPayload(aliasPayload, preparedPayload, error)) {
-                    aliasPayload = std::move(preparedPayload);
-                    submittedSignature = dnf::player_library_sync::SubmissionSignature(
-                        json::parse(aliasPayload), std::string(CW2A(serverEndpoint, CP_UTF8)), serverDeviceId, keyUtf8);
-                }
-                else preparationError = std::string(CW2A(error, CP_UTF8));
-            }
-            catch (const std::exception&) {
-                preparationError = "本地游戏ID库打包失败，已取消推送";
-            }
-        }
-        const bool v2Unchanged = m_playerLibraryPushTracker.ShouldSkip(submittedSignature);
         std::thread([notifyWindow, lifetime, generation, keyUtf8, hwidUtf8,
             clientVersion, aliasPayload, localPayloadEmpty, payloadHash,
             previousPushHash, useServerAuthV2, serverEndpoint,
-            serverSessionToken, serverDeviceId, v2Scope, submittedSignature,
-            v2Unchanged, preparationError]() {
+            serverSessionToken, serverDeviceId, v2Scope]() {
             auto postProgress = [&](int progress, const char* phase,
                 const char* message, bool indeterminate = false) {
                 if (!lifetime->load(std::memory_order_acquire)) return;
@@ -15147,7 +15134,6 @@ void CDNFGameCaptureDlg::StartAliasDbAutoSyncAttempt()
             result->localPayloadHash = payloadHash;
             result->useServerAuthV2 = useServerAuthV2;
             result->v2Scope = v2Scope;
-            result->submittedSignature = submittedSignature;
 
             try {
                 postProgress(20, "connect", "正在请求公共游戏ID库", true);
@@ -15214,6 +15200,16 @@ void CDNFGameCaptureDlg::StartAliasDbAutoSyncAttempt()
                 }
                 postProgress(52, "validate", "公共库已收到，正在校验数据");
 
+                // V2 entity IDs are attached by the local SQLite import.  Return
+                // to the UI thread now; it will submit a freshly published snapshot.
+                if (useServerAuthV2) {
+                    result->pushMessage = localPayloadEmpty ?
+                        "本地没有可追加的游戏ID，跳过上传" :
+                        "等待公共库身份落库后投稿";
+                    postResult(result.release());
+                    return;
+                }
+
                 if (localPayloadEmpty) {
                     result->pushOk = true;
                     result->pushMessage = "本地没有可追加的游戏ID，跳过上传";
@@ -15221,65 +15217,48 @@ void CDNFGameCaptureDlg::StartAliasDbAutoSyncAttempt()
                 else if (!result->appendSupported) {
                     result->pushMessage = "云函数需更新，已禁止自动上传";
                 }
-                else if (!preparationError.empty()) {
-                    result->pushMessage = preparationError;
-                }
-                else if (useServerAuthV2 ? v2Unchanged : payloadHash == previousPushHash) {
+                else if (payloadHash == previousPushHash) {
                     result->pushOk = true;
                     result->pushMessage = "本地库无变化，跳过重复上传";
                 }
                 else {
                     postProgress(72, "push", "正在提交本地新增游戏ID（待审核）", true);
                     result->pushAttempted = true;
-                    if (useServerAuthV2) {
-                        CString pushError;
-                        result->pushOk = DnfSubmitV2PlayerLibrary(
-                            serverEndpoint, serverSessionToken, serverDeviceId,
-                            aliasPayload, pushError, result->pushStatus);
-                        result->pushMessage = std::string(CW2A(
-                            pushError, CP_UTF8));
-                        if (result->pushMessage.empty()) {
-                            result->pushMessage = result->pushOk ?
-                                "已提交服务器审核区" : "服务器投稿失败";
-                        }
+                    json pushRequest;
+                    pushRequest["action"] = "submit_alias_db";
+                    pushRequest["appendOnly"] = true;
+                    pushRequest["key"] = keyUtf8;
+                    pushRequest["hwid"] = hwidUtf8;
+                    pushRequest["clientVersion"] = clientVersion;
+                    pushRequest["aliasDB"] = json::parse(aliasPayload);
+
+                    std::string pushResponse;
+                    CString pushError;
+                    if (!DnfPostCloudJson(pushRequest.dump(), pushResponse,
+                        pushError, DNF_ALIAS_DB_REQUEST_TIMEOUT_MS)) {
+                        result->pushMessage = std::string(CW2A(pushError, CP_UTF8));
                     }
                     else {
-                        json pushRequest;
-                        pushRequest["action"] = "submit_alias_db";
-                        pushRequest["appendOnly"] = true;
-                        pushRequest["key"] = keyUtf8;
-                        pushRequest["hwid"] = hwidUtf8;
-                        pushRequest["clientVersion"] = clientVersion;
-                        pushRequest["aliasDB"] = json::parse(aliasPayload);
-
-                        std::string pushResponse;
-                        CString pushError;
-                        if (!DnfPostCloudJson(pushRequest.dump(), pushResponse,
-                            pushError, DNF_ALIAS_DB_REQUEST_TIMEOUT_MS)) {
-                            result->pushMessage = std::string(CW2A(pushError, CP_UTF8));
+                        const json pushReply = json::parse(pushResponse,
+                            nullptr, false);
+                        if (!pushReply.is_discarded() &&
+                            pushReply.value("status", "error") == "ok" &&
+                            pushReply.value("aliasSubmit", false) &&
+                            pushReply.value("aliasAppend", false)) {
+                            result->pushOk = true;
+                            result->pushMessage =
+                                pushReply.value("msg", "已提交待审核");
+                        }
+                        else if (!pushReply.is_discarded() &&
+                            pushReply.value("status", "error") == "ok" &&
+                            !pushReply.value("aliasAppend", false)) {
+                            result->appendSupported = false;
+                            result->pushMessage = "云函数需更新，已禁止自动上传";
                         }
                         else {
-                            const json pushReply = json::parse(pushResponse,
-                                nullptr, false);
-                            if (!pushReply.is_discarded() &&
-                                pushReply.value("status", "error") == "ok" &&
-                                pushReply.value("aliasSubmit", false) &&
-                                pushReply.value("aliasAppend", false)) {
-                                result->pushOk = true;
-                                result->pushMessage =
-                                    pushReply.value("msg", "已提交待审核");
-                            }
-                            else if (!pushReply.is_discarded() &&
-                                pushReply.value("status", "error") == "ok" &&
-                                !pushReply.value("aliasAppend", false)) {
-                                result->appendSupported = false;
-                                result->pushMessage = "云函数需更新，已禁止自动上传";
-                            }
-                            else {
-                                result->pushMessage = pushReply.is_discarded() ?
-                                    "自动投稿响应不是有效 JSON" :
-                                    pushReply.value("msg", "自动投稿失败");
-                            }
+                            result->pushMessage = pushReply.is_discarded() ?
+                                "自动投稿响应不是有效 JSON" :
+                                pushReply.value("msg", "自动投稿失败");
                         }
                     }
                 }
@@ -15355,6 +15334,129 @@ LRESULT CDNFGameCaptureDlg::OnAliasDbAutoSyncResult(WPARAM wParam,
             }
             pending->libraryMessage = DnfPlayerLibraryImportSummary(committed);
             if (!committed.ok) pending->errorMessage = committed.error;
+
+            const auto currentGeneration =
+                m_aliasAutoSyncGeneration.load(std::memory_order_acquire);
+            const bool ownsCurrentAttempt =
+                pending->generation == currentGeneration;
+            if (pending->lifetime != m_aliasAutoSyncLifetime ||
+                !pending->lifetime ||
+                !pending->lifetime->load(std::memory_order_acquire) ||
+                !ownsCurrentAttempt ||
+                !m_aliasAutoSyncEnabled ||
+                m_playerLibraryExitPending ||
+                (pending->useServerAuthV2 &&
+                    pending->v2Scope != CurrentV2PlayerLibraryScope())) {
+                if (ownsCurrentAttempt) m_aliasAutoSyncInFlight = false;
+                return;
+            }
+
+            if (pending->useServerAuthV2 && committed.ok) {
+                if (pending->libraryPartial) {
+                    pending->pushMessage = "公共库存在归属冲突，已暂停自动投稿";
+                }
+                else if (pending->localPayloadEmpty) {
+                    pending->pushOk = true;
+                    pending->pushMessage = "本地没有可追加的游戏ID，跳过上传";
+                }
+                else if (pending->appendSupported) {
+                    const auto librarySnapshot = std::atomic_load(&m_playerLibrarySnapshot);
+                    if (!librarySnapshot || !librarySnapshot->persisted) {
+                        pending->pushMessage = "公共库身份尚未落库，已取消自动投稿";
+                    }
+                    else {
+                        CString prepareError;
+                        std::string submitRequest;
+                        const std::string freshPayload = json({
+                            { "entities", librarySnapshot->v2Entities }
+                        }).dump();
+                        if (!DnfPrepareV2PlayerLibraryPayload(
+                            freshPayload, submitRequest, prepareError)) {
+                            pending->pushMessage = std::string(CW2A(
+                                prepareError, CP_UTF8));
+                        }
+                        else {
+                            const CString serverEndpoint = m_cloudMatchServerUrl;
+                            const std::string serverSessionToken = m_cloudServerSessionToken;
+                            const std::string serverDeviceId = std::string(CW2A(
+                                GetMachineID(), CP_UTF8));
+                            const std::string keyUtf8 = std::string(CW2A(
+                                DnfReadLocalLicenseKey(), CP_UTF8));
+                            pending->submittedSignature =
+                                dnf::player_library_sync::SubmissionSignature(
+                                    json::parse(submitRequest),
+                                    std::string(CW2A(serverEndpoint, CP_UTF8)),
+                                    serverDeviceId, keyUtf8);
+                            if (m_playerLibraryPushTracker.ShouldSkip(
+                                pending->submittedSignature)) {
+                                pending->pushOk = true;
+                                pending->pushStatus = dnf::player_library_sync::SubmissionStatus::NoChanges;
+                                pending->pushMessage = "本地库无变化，跳过重复上传";
+                            }
+                            else if (serverEndpoint.IsEmpty() ||
+                                serverSessionToken.empty() || serverDeviceId.empty()) {
+                                pending->pushMessage = "服务器授权会话未就绪，自动投稿已取消";
+                            }
+                            else {
+                                SendCloudProgress(L"alias_auto_sync", L"push", 72,
+                                    L"公共库身份已落库，正在提交本地新增游戏ID", true);
+                                const HWND notifyWindow = GetSafeHwnd();
+                                const auto lifetime = pending->lifetime;
+                                const auto generation = pending->generation;
+                                const auto v2Scope = pending->v2Scope;
+                                auto continued = std::make_unique<DnfAliasAutoSyncResult>(*pending);
+                                try {
+                                    std::thread([notifyWindow, lifetime, generation,
+                                        v2Scope, serverEndpoint, serverSessionToken,
+                                        serverDeviceId, submitRequest = std::move(submitRequest),
+                                        continued = std::move(continued)]() mutable {
+                                        try {
+                                            continued->pushAttempted = true;
+                                            CString pushError;
+                                            continued->pushOk = DnfSubmitV2PlayerLibrary(
+                                                serverEndpoint, serverSessionToken,
+                                                serverDeviceId, submitRequest, pushError,
+                                                continued->pushStatus);
+                                            continued->pushMessage = std::string(CW2A(
+                                                pushError, CP_UTF8));
+                                            if (continued->pushMessage.empty()) {
+                                                continued->pushMessage = continued->pushOk ?
+                                                    "已提交服务器审核区" : "服务器投稿失败";
+                                            }
+                                        }
+                                        catch (const std::exception& error) {
+                                            continued->pushMessage = error.what();
+                                        }
+                                        catch (...) {
+                                            continued->pushMessage = "自动投稿发生未知异常";
+                                        }
+                                        DnfPostCloudProgress(notifyWindow,
+                                            "alias_auto_sync", "apply", 94,
+                                            continued->pushOk ? "云端已返回投稿结果" :
+                                                "云端投稿失败",
+                                            false, generation, lifetime, v2Scope);
+                                        auto* rawResult = continued.release();
+                                        if (!lifetime ||
+                                            !lifetime->load(std::memory_order_acquire) ||
+                                            !::PostMessage(notifyWindow,
+                                                WM_ALIAS_AUTO_SYNC_RESULT, 0,
+                                                reinterpret_cast<LPARAM>(rawResult))) {
+                                            delete rawResult;
+                                        }
+                                    }).detach();
+                                    return;
+                                }
+                                catch (const std::exception& error) {
+                                    pending->pushMessage = error.what();
+                                }
+                                catch (...) {
+                                    pending->pushMessage = "无法创建自动投稿后台线程";
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             OnAliasDbAutoSyncResult(0, reinterpret_cast<LPARAM>(new DnfAliasAutoSyncResult(*pending)));
         });
         return 0;
@@ -15427,6 +15529,11 @@ LRESULT CDNFGameCaptureDlg::OnAliasDbAutoSyncResult(WPARAM wParam,
     }
 
     if (result->localPayloadEmpty) {
+        m_aliasAutoSyncLastPushStatus = L"skipped";
+        m_aliasAutoSyncLastPushMessage = CA2W(
+            result->pushMessage.c_str(), CP_UTF8);
+    }
+    else if (result->libraryPartial) {
         m_aliasAutoSyncLastPushStatus = L"skipped";
         m_aliasAutoSyncLastPushMessage = CA2W(
             result->pushMessage.c_str(), CP_UTF8);

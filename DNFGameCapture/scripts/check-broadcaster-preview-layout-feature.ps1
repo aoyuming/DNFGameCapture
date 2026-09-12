@@ -67,8 +67,8 @@ foreach ($needle in @(
 )) {
     Require-Text $style $needle "Broadcaster preview typography is not enlarged: $needle"
 }
-Require-Text $index '20260905-5.1.0-identity-overlap-height' 'The broadcaster preview cache version was not updated.'
-Require-Text $main "const WEB_LAYOUT_VERSION = '20260905-5.1.0-identity-overlap-height';" 'The Web bridge layout version does not match the preview assets.'
+Require-Text $index '20260912-5.2.1-production' 'The broadcaster preview cache version was not updated.'
+Require-Text $main "const WEB_LAYOUT_VERSION = '20260912-5.2.1-production';" 'The Web bridge layout version does not match the preview assets.'
 
 Require-Text $webDialogHeader 'SetBroadcasterPreviewExpanded(bool expanded)' 'The Web host has no preview expansion API.'
 Require-Text $webDialogHeader 'm_broadcasterPreviewExpanded' 'The Web host does not track preview expansion independently.'

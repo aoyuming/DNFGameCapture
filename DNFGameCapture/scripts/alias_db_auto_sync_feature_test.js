@@ -106,11 +106,11 @@ assertContains(autoAttempt[0], 'const bool useServerAuthV2 = m_cloudServerAuthV2
     '自动同步没有读取测试服授权模式');
 assertContains(autoAttempt[0], 'DnfFetchV2PublicAliasDb',
     '测试服自动同步没有调用 v2 公共库接口');
-assertContains(autoAttempt[0], 'DnfSubmitV2PlayerLibrary',
+assertContains(autoResult[0], 'DnfSubmitV2PlayerLibrary',
     '测试服自动同步没有调用 v2 投稿接口');
-assertContains(autoAttempt[0], 'serverSessionToken',
+assertContains(autoResult[0], 'serverSessionToken',
     '自动同步没有携带测试服会话令牌');
-assertContains(autoAttempt[0], 'serverDeviceId',
+assertContains(autoResult[0], 'serverDeviceId',
     '自动同步没有携带测试服设备标识');
 
 console.log('Alias DB auto-sync feature checks passed.');

@@ -119,8 +119,8 @@ Require-Text $style 'identity-link-button' 'identity link button styling'
 Require-Text $style 'identity-selection-summary' 'identity selection summary styling'
 Require-Text $style 'background: rgba\(180, 24, 48, 0\.22\)' 'red focused identity background'
 Require-Text $style 'border-color: rgba\(255, 80, 110, 0\.72\)' 'red focused identity border'
-Require-Text $header '#define CURRENT_VERSION L"5\.1\.0"' 'application version 5.1.0'
-Require-Text $resources 'FILEVERSION 5,1,0,0' 'resource file version 5.1.0'
+Require-Text $header '#define CURRENT_VERSION L"5\.2\.1"' 'application version 5.2.1'
+Require-Text $resources 'FILEVERSION 5,2,1,0' 'resource file version 5.2.1'
 
 $payloadStart = $text = Get-Content -LiteralPath $cpp -Raw
 $payloadMatch = [regex]::Match(
