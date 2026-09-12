@@ -382,7 +382,7 @@ export function resolveAdminConflictGroups(db: Database.Database, revision: numb
     }
 
     const projected = [...next.values()];
-    const redirects = canonicalEntityRedirects(projected, [
+    const redirectCandidates: EntityRedirect[] = [
       ...current.entityRedirects.map(redirect => ({
         ...redirect,
         toEntityId: targetById.get(redirect.toEntityId) ?? redirect.toEntityId,
@@ -390,7 +390,11 @@ export function resolveAdminConflictGroups(db: Database.Database, revision: numb
       ...[...targetById]
         .filter(([fromEntityId, toEntityId]) => fromEntityId !== toEntityId)
         .map(([fromEntityId, toEntityId]) => ({ fromEntityId, toEntityId })),
-    ]);
+    ];
+    if (redirectCandidates.length > MAX_ENTITY_REDIRECTS) {
+      throw new LibraryAdminError(413, 'library_too_large');
+    }
+    const redirects = canonicalEntityRedirects(projected, redirectCandidates);
 
     const nextRevision = publishEntities(db, projected, current.entities, now, redirects, manualTargets);
     let associatedEntityCount = 0;

@@ -32,6 +32,37 @@ test('popular shared IDs still group 257 nonidentical qualifying sets', () => {
   expect(automaticIdentityGroups(rows)[0]).toHaveLength(257);
 });
 
+test('prefix pruning retains compatible nonidentical sets with five shared IDs', () => {
+  const shared = ['shared-1', 'shared-2', 'shared-3', 'shared-4', 'shared-5'];
+  expect(automaticIdentityGroups([
+    row('a', ['unique-a', ...shared]),
+    row('b', ['unique-b-1', 'unique-b-2', ...shared]),
+  ])).toEqual([['a', 'b']]);
+});
+
+test('bounds candidate expansion for 10,000 weak sets sharing one popular ID', () => {
+  const rows = Array.from({ length: 10_000 }, (_, index) => row(
+    `weak-${index.toString().padStart(5, '0')}`,
+    ['popular', `unique-${index}-1`, `unique-${index}-2`, `unique-${index}-3`, `unique-${index}-4`],
+  ));
+  const originalAdd = Set.prototype.add;
+  const operationLimit = 250_000;
+  let numericAdds = 0;
+  Set.prototype.add = function <T>(this: Set<T>, value: T): Set<T> {
+    if (typeof value === 'number' && ++numericAdds > operationLimit) {
+      throw new Error(`automatic identity operation budget exceeded: ${numericAdds}`);
+    }
+    return originalAdd.call(this, value) as Set<T>;
+  } as typeof Set.prototype.add;
+
+  try {
+    expect(automaticIdentityGroups(rows)).toEqual([]);
+  } finally {
+    Set.prototype.add = originalAdd;
+  }
+  expect(numericAdds).toBeLessThanOrEqual(operationLimit);
+});
+
 test('saved original constituents prevent union-generated evidence after reimport', () => {
   const a = row('a', ['1', '2', '3', '4', '5']);
   const c = row('c', ['6', '7', '8', '9', '10']);

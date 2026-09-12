@@ -8,7 +8,7 @@ import {
   resolveAdminConflictGroups,
   type ConflictResolutionDecision,
 } from '../src/library-admin-data.js';
-import { listPlayerLibrary } from '../src/library-store.js';
+import { listPlayerLibrary, MAX_ENTITY_REDIRECTS } from '../src/library-store.js';
 import type { PlayerEntity } from '../src/player-library.js';
 
 const databases: ReturnType<typeof openDatabase>[] = [];
@@ -405,6 +405,28 @@ describe('batch library conflict resolution', () => {
       { fromEntityId: 'older-a', toEntityId: 'public-b' },
       { fromEntityId: 'public-a', toEntityId: 'public-b' },
     ]);
+    expect(db.pragma('foreign_key_check')).toEqual([]);
+  });
+
+  test('returns a structured size error and rolls back when a selected group exceeds the redirect limit', () => {
+    const db = open();
+    mutatePublicLibrary(db, 0, 100, 'create', [entity('public-a', ['Alpha'])]);
+    const insert = db.prepare('INSERT INTO player_entity_redirects(from_entity_id,to_entity_id) VALUES(?,?)');
+    db.transaction(() => {
+      for (let index = 0; index < MAX_ENTITY_REDIRECTS; index++) {
+        insert.run(`retired-${index}`, 'public-a');
+      }
+    })();
+    insertPending(db, [entity('local-a', ['Alpha'], ['new-game'])]);
+    const state = readAdminConflictResolutionState(db);
+    const group = state.groups.find(item => item.kind === 'unique_name_target')!;
+    const before = mutationSnapshot(db);
+
+    expectLibraryAdminError(() => resolveAdminConflictGroups(db, state.revision, 200, [
+      { token: group.token, targetEntityId: 'public-a' },
+    ]), 413, 'library_too_large');
+
+    expect(mutationSnapshot(db)).toEqual(before);
     expect(db.pragma('foreign_key_check')).toEqual([]);
   });
 
