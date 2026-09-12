@@ -214,6 +214,53 @@ describe('library conflict resolution grouping', () => {
     expect(groups[0]).not.toHaveProperty('suggestedTargetEntityId');
   });
 
+  test('rejects a unique target when one source is reachable only through a game-ID edge', () => {
+    const groups = buildConflictResolutionGroups({
+      revision: 1,
+      publicEntities: [entity('public-a', ['Name'])],
+      submissions: [
+        submission(1, 'a',
+          entity('local-name', ['Name']),
+          entity('local-game', ['Other'], ['shared-game'])),
+      ],
+      conflicts: [
+        { kind: 'names', value: 'Name', entityIds: ['public-a', 'local-name'] },
+        { kind: 'gameIds', value: 'shared-game', entityIds: ['local-name', 'local-game'] },
+      ],
+    });
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({
+      kind: 'ambiguous',
+      publicEntityIds: ['public-a'],
+      sources: [
+        { entityId: 'local-game' },
+        { entityId: 'local-name' },
+      ],
+    });
+    expect(groups[0]).not.toHaveProperty('suggestedTargetEntityId');
+  });
+
+  test('allows redundant game-ID evidence between members already connected by name', () => {
+    const groups = buildConflictResolutionGroups({
+      revision: 1,
+      publicEntities: [entity('public-a', ['Name'], ['shared-game'])],
+      submissions: [
+        submission(1, 'a', entity('local-a', ['Name'], ['shared-game'])),
+      ],
+      conflicts: [
+        { kind: 'names', value: 'Name', entityIds: ['public-a', 'local-a'] },
+        { kind: 'gameIds', value: 'shared-game', entityIds: ['public-a', 'local-a'] },
+      ],
+    });
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({
+      kind: 'unique_name_target',
+      suggestedTargetEntityId: 'public-a',
+    });
+  });
+
   test('does not treat a same-ID pending source as a distinct unique-target association', () => {
     const groups = buildConflictResolutionGroups({
       revision: 1,

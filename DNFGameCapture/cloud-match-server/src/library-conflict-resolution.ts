@@ -65,16 +65,16 @@ export function buildConflictResolutionGroups(input: {
     .map(conflict => ({ ...conflict, entityIds: [...new Set(conflict.entityIds)].sort(compareStrings) }))
     .filter(conflict => conflict.entityIds.length >= 2);
   const neighbors = new Map<string, Set<string>>();
-  const connect = (left: string, right: string): void => {
-    const connected = neighbors.get(left) ?? new Set<string>();
+  const connect = (graph: Map<string, Set<string>>, left: string, right: string): void => {
+    const connected = graph.get(left) ?? new Set<string>();
     connected.add(right);
-    neighbors.set(left, connected);
+    graph.set(left, connected);
   };
   for (const conflict of conflicts) {
     const first = conflict.entityIds[0];
     for (const entityId of conflict.entityIds.slice(1)) {
-      connect(first, entityId);
-      connect(entityId, first);
+      connect(neighbors, first, entityId);
+      connect(neighbors, entityId, first);
     }
   }
 
@@ -108,10 +108,26 @@ export function buildConflictResolutionGroups(input: {
       .sort(compareSources);
     const hasNonTargetSource = publicEntityIds.length === 1 &&
       sources.some(source => source.entityId !== publicEntityIds[0]);
-    const hasAuthoritativeNameEvidence = componentConflicts.some(conflict => conflict.kind === 'names');
+    const nameNeighbors = new Map<string, Set<string>>();
+    for (const conflict of componentConflicts.filter(conflict => conflict.kind === 'names')) {
+      const first = conflict.entityIds[0];
+      for (const entityId of conflict.entityIds.slice(1)) {
+        connect(nameNeighbors, first, entityId);
+        connect(nameNeighbors, entityId, first);
+      }
+    }
+    const nameReachableIds = new Set<string>();
+    const namePending = publicEntityIds.length === 1 ? [publicEntityIds[0]] : [];
+    while (namePending.length > 0) {
+      const entityId = namePending.pop()!;
+      if (nameReachableIds.has(entityId)) continue;
+      nameReachableIds.add(entityId);
+      namePending.push(...(nameNeighbors.get(entityId) ?? []));
+    }
+    const isFullyNameConnected = component.every(entityId => nameReachableIds.has(entityId));
     const kind: ConflictResolutionKind = publicEntityIds.length >= 2
       ? 'public_merge'
-      : hasNonTargetSource && hasAuthoritativeNameEvidence
+      : hasNonTargetSource && isFullyNameConnected
         ? 'unique_name_target'
         : 'ambiguous';
     const signed = {
