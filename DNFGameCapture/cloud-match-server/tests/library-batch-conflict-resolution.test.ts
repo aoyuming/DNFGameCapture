@@ -432,7 +432,16 @@ describe('batch library conflict resolution', () => {
     expect(db.pragma('foreign_key_check')).toEqual([]);
   });
 
-  test('uses supplied library and submission objects and models automatic identity edges authoritatively', () => {
+  test('does not expose a clean automatic-only identity match as a conflict-resolution group', () => {
+    const db = open();
+    const games = ['g1', 'g2', 'g3', 'g4', 'g5'];
+    mutatePublicLibrary(db, 0, 100, 'create', [entity('public-a', ['Alpha'], games)]);
+    insertPending(db, [entity('local-a', ['Other'], games)]);
+
+    expect(readAdminConflictResolutionState(db).groups).toEqual([]);
+  });
+
+  test('expands an automatic peer into the authoritative projected name conflict and reuses supplied state', () => {
     const db = open();
     const games = ['g1', 'g2', 'g3', 'g4', 'g5'];
     mutatePublicLibrary(db, 0, 100, 'create', [entity('public-a', ['Alpha'])]);
@@ -447,8 +456,9 @@ describe('batch library conflict resolution', () => {
     expect(fresh.submissions.map(item => item.id)).toEqual([first.id]);
     expect(fresh.groups).toHaveLength(1);
     expect(fresh.groups[0]).toMatchObject({
-      kind: 'ambiguous',
+      kind: 'unique_name_target',
       publicEntityIds: ['public-a'],
+      suggestedTargetEntityId: 'public-a',
       sources: [{ entityId: 'local-game' }, { entityId: 'local-name' }],
     });
 

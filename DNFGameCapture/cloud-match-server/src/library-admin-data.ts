@@ -304,12 +304,9 @@ export function buildAdminConflictResolutionState(db: Database.Database,
   current: ReturnType<typeof listPlayerLibrary>,
   allSubmissions = listAdminSubmissions(db, current.entities)) {
   const submissions = allSubmissions.filter(submission => submission.valid);
-  const combined = additiveEntities(current.entities, submissions.flatMap(submission => submission.entities));
-  const automaticGroups = automaticIdentityGroups(combined, readAutomaticIdentityEvidence(db));
-  const conflicts = [
-    ...ownershipConflicts(combined),
-    ...automaticGroups.map(entityIds => ({ kind: 'gameIds' as const, value: 'automatic_identity', entityIds })),
-  ];
+  const evidence = readAutomaticIdentityEvidence(db);
+  const conflicts = projectedLibrary(current.entities,
+    submissions.flatMap(submission => submission.entities), evidence).conflicts;
   return {
     revision: current.revision,
     submissions,
