@@ -37,6 +37,7 @@ describe('openDatabase', () => {
         { name: 'player_entity_redirects' },
         { name: 'player_identifier_spellings' },
         { name: 'player_identifiers' },
+        { name: 'player_library_conflict_resolution_audit' },
         { name: 'player_library_merge_audit' },
         { name: 'player_library_meta' },
         { name: 'player_library_submission_originals' },
