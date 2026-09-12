@@ -79,7 +79,8 @@ export function buildConflictResolutionGroups(input: {
   }
 
   const seen = new Set<string>();
-  const groups: ConflictResolutionGroup[] = [];
+  const components: string[][] = [];
+  const componentByEntityId = new Map<string, number>();
   for (const start of [...neighbors.keys()].sort(compareStrings)) {
     if (seen.has(start)) continue;
     seen.add(start);
@@ -96,9 +97,20 @@ export function buildConflictResolutionGroups(input: {
     }
 
     component.sort(compareStrings);
-    const memberIds = new Set(component);
-    const componentConflicts = conflicts.filter(conflict =>
-      conflict.entityIds.some(entityId => memberIds.has(entityId)));
+    const componentIndex = components.length;
+    components.push(component);
+    for (const entityId of component) componentByEntityId.set(entityId, componentIndex);
+  }
+
+  const conflictsByComponent = components.map((): ResolutionConflict[] => []);
+  for (const conflict of conflicts) {
+    const componentIndex = componentByEntityId.get(conflict.entityIds[0]);
+    if (componentIndex !== undefined) conflictsByComponent[componentIndex].push(conflict);
+  }
+
+  const groups: ConflictResolutionGroup[] = [];
+  for (const [componentIndex, component] of components.entries()) {
+    const componentConflicts = conflictsByComponent[componentIndex];
     const conflictNames = [...new Set(componentConflicts
       .filter(conflict => conflict.kind === 'names')
       .map(conflict => conflict.value))].sort(compareStrings);

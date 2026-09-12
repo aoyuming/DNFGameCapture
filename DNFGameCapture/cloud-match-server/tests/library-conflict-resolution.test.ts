@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import {
   buildConflictResolutionGroups,
+  type ResolutionConflict,
   type ResolutionSubmission,
 } from '../src/library-conflict-resolution.js';
 import type { PlayerEntity } from '../src/player-library.js';
@@ -56,6 +57,26 @@ describe('library conflict resolution grouping', () => {
       ],
     });
     expect(groups[0].token).toMatch(/^[a-f0-9]{64}$/u);
+  });
+
+  test('preserves NFC and case variants authorized by normalized-name evidence', () => {
+    const sourceName = ' e\u0301clair ';
+    const groups = buildConflictResolutionGroups({
+      revision: 7,
+      publicEntities: [entity('public-a', ['ÉCLAIR'])],
+      submissions: [submission(1, 'a', entity('local-a', [sourceName]))],
+      conflicts: [
+        { kind: 'names', value: 'éclair', entityIds: ['public-a', 'local-a'] },
+      ],
+    });
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({
+      kind: 'unique_name_target',
+      conflictNames: ['éclair'],
+      suggestedTargetEntityId: 'public-a',
+      sources: [{ entityId: 'local-a', names: [sourceName] }],
+    });
   });
 
   test('classifies a connected component with multiple live public targets as a public merge', () => {
@@ -117,6 +138,52 @@ describe('library conflict resolution grouping', () => {
     expect(groups).toHaveLength(2);
     expect(groups.map(group => group.conflictNames).sort()).toEqual([['A'], ['B']]);
     expect(groups.every(group => group.kind === 'unique_name_target')).toBe(true);
+  });
+
+  test('assigns conflicts to disconnected components within a linear access budget', () => {
+    const pairCount = 256;
+    const suffix = (index: number) => index.toString().padStart(4, '0');
+    const publicEntities = Array.from({ length: pairCount }, (_, index) =>
+      entity(`perf-public-${suffix(index)}`, [`Name-${suffix(index)}`]));
+    const sourceEntities = Array.from({ length: pairCount }, (_, index) =>
+      entity(`perf-source-${suffix(index)}`, [`Name-${suffix(index)}`]));
+    const conflicts: ResolutionConflict[] = Array.from({ length: pairCount }, (_, index) => ({
+      kind: 'names',
+      value: `Name-${suffix(index)}`,
+      entityIds: [publicEntities[index].entityId, sourceEntities[index].entityId],
+    }));
+    let mappedEntityIdAccesses = 0;
+    conflicts.map = function <U>(
+      callback: (value: ResolutionConflict, index: number, array: ResolutionConflict[]) => U,
+      thisArg?: unknown,
+    ): U[] {
+      const mapped = Array.prototype.map.call(this, callback, thisArg) as U[];
+      for (const item of mapped) {
+        if (typeof item !== 'object' || item === null || !('entityIds' in item)) continue;
+        const mappedConflict = item as { entityIds: string[] };
+        const entityIds = mappedConflict.entityIds;
+        Object.defineProperty(mappedConflict, 'entityIds', {
+          configurable: true,
+          enumerable: true,
+          get: () => {
+            mappedEntityIdAccesses++;
+            return entityIds;
+          },
+        });
+      }
+      return mapped;
+    };
+
+    const groups = buildConflictResolutionGroups({
+      revision: 1,
+      publicEntities,
+      submissions: [submission(1, 'a', ...sourceEntities)],
+      conflicts,
+    });
+
+    expect(groups).toHaveLength(pairCount);
+    expect(mappedEntityIdAccesses).toBeGreaterThanOrEqual(pairCount);
+    expect(mappedEntityIdAccesses).toBeLessThanOrEqual(pairCount * 8);
   });
 
   test('orders group contents and final groups deterministically without mutating input', () => {
