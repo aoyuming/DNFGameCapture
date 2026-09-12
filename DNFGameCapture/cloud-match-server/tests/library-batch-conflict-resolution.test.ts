@@ -1,4 +1,6 @@
+import request from 'supertest';
 import { afterEach, describe, expect, test } from 'vitest';
+import { createCloudMatchAdminApp } from '../src/admin.js';
 import { openDatabase } from '../src/db.js';
 import {
   buildAdminConflictResolutionState,
@@ -19,6 +21,26 @@ function open() {
   const db = openDatabase(':memory:');
   databases.push(db);
   return db;
+}
+
+function httpFixture() {
+  const db = open();
+  const app = createCloudMatchAdminApp({
+    db,
+    now: () => 200,
+    csrfToken: 'csrf',
+    adminPassword: 'password',
+    socketController: {
+      getActiveDeviceIds: () => new Set(),
+      disconnectDevice: () => false,
+      stopRealtimeViewer: () => false,
+      notifyDirectoryChanged: () => {},
+    },
+  });
+  const getState = (query = '') => request(app).get('/admin/api/library/state' + query).auth('admin', 'password');
+  const postResolve = (body: object) => request(app).post('/admin/api/library/conflicts/resolve')
+    .auth('admin', 'password').set('x-dnf-admin-csrf', 'csrf').send(body);
+  return { app, db, getState, postResolve };
 }
 
 function insertPending(db: ReturnType<typeof openDatabase>, entities: unknown[], formatted = false) {
@@ -513,5 +535,201 @@ describe('batch library conflict resolution', () => {
     ]);
     expect(submissionRow(db, first.id).status).toBe('approved');
     expect(submissionRow(db, second.id).status).toBe('approved');
+  });
+});
+
+describe('guarded batch library conflict resolution API', () => {
+  test('state exposes every server-computed group and exact kind stats regardless of filters', async () => {
+    const { db, getState } = httpFixture();
+    mutatePublicLibrary(db, 0, 100, 'import', [
+      entity('public-unique', ['Unique']),
+      entity('public-left', ['Left']),
+      entity('public-right', ['Right']),
+    ]);
+    insertPending(db, [entity('local-unique', ['Unique'])]);
+    insertPending(db, [entity('public-left', ['Left', 'Right'])]);
+    insertPending(db, [entity('ambiguous-a', ['Ambiguous'])]);
+    insertPending(db, [entity('ambiguous-b', ['Ambiguous'])]);
+    const expected = readAdminConflictResolutionState(db);
+
+    const unfiltered = (await getState().expect(200)).body;
+    expect(unfiltered.conflictResolutionGroups).toEqual(expected.groups);
+    expect(unfiltered.conflictResolutionGroups.map((group: { kind: string }) => group.kind).sort()).toEqual([
+      'ambiguous',
+      'public_merge',
+      'unique_name_target',
+    ]);
+    expect(unfiltered.conflictResolutionGroups.every((group: { token: string }) => /^[a-f0-9]{64}$/.test(group.token))).toBe(true);
+    expect(unfiltered.conflictResolutionStats).toEqual({ uniqueNameTargets: 1, publicMerges: 1, ambiguous: 1 });
+
+    const filtered = (await getState('?q=missing&pendingQ=missing&filter=clean').expect(200)).body;
+    expect(filtered.entities).toEqual([]);
+    expect(filtered.submissions).toEqual([]);
+    expect(filtered.conflictResolutionGroups).toEqual(unfiltered.conflictResolutionGroups);
+    expect(filtered.conflictResolutionStats).toEqual(unfiltered.conflictResolutionStats);
+    expect(filtered.stats).toEqual(unfiltered.stats);
+  });
+
+  test('resolves a selected token through HTTP and returns publication counts', async () => {
+    const { db, postResolve } = httpFixture();
+    mutatePublicLibrary(db, 0, 100, 'create', [entity('public-a', ['Shared', 'Public Alias'], ['game-public'])]);
+    const first = insertPending(db, [entity('local-a', ['Shared', 'Alias A'], ['game-a'])], true);
+    const second = insertPending(db, [entity('local-b', ['Shared', 'Alias B'], ['game-b'])]);
+    const state = readAdminConflictResolutionState(db);
+    const group = state.groups.find(item => item.kind === 'unique_name_target')!;
+
+    const response = await postResolve({
+      revision: state.revision,
+      confirm: true,
+      groups: [{ token: group.token, targetEntityId: 'public-a' }],
+    }).expect(200);
+
+    expect(response.body).toEqual({
+      ok: true,
+      revision: 2,
+      resolvedGroupCount: 1,
+      associatedEntityCount: 2,
+      mergedPublicEntityCount: 0,
+      redirectCount: 2,
+      pendingSubmissionCount: 0,
+    });
+    const library = listPlayerLibrary(db);
+    expect(library).toMatchObject({
+      revision: 2,
+      entityRedirects: [
+        { fromEntityId: 'local-a', toEntityId: 'public-a' },
+        { fromEntityId: 'local-b', toEntityId: 'public-a' },
+      ],
+    });
+    expect(library.entities).toEqual([expect.objectContaining({
+      entityId: 'public-a',
+      names: expect.arrayContaining(['Shared', 'Public Alias', 'Alias A', 'Alias B']),
+      gameIds: expect.arrayContaining(['game-public', 'game-a', 'game-b']),
+    })]);
+    expect(submissionRow(db, first.id)).toMatchObject({ status: 'approved', reviewed_at: 200, review_reason: 'admin_conflicts_resolved' });
+    expect(submissionRow(db, second.id)).toMatchObject({ status: 'approved', reviewed_at: 200, review_reason: 'admin_conflicts_resolved' });
+    const audit = db.prepare('SELECT revision,created_at,groups_json FROM player_library_conflict_resolution_audit').get() as {
+      revision: number;
+      created_at: number;
+      groups_json: string;
+    };
+    expect(audit).toMatchObject({ revision: 2, created_at: 200 });
+    expect(JSON.parse(audit.groups_json)).toMatchObject([{
+      targetEntityId: 'public-a',
+      group: { token: group.token, kind: 'unique_name_target' },
+    }]);
+  });
+
+  test('strict request validation rejects malformed batches without mutation', async () => {
+    const { db, postResolve } = httpFixture();
+    mutatePublicLibrary(db, 0, 100, 'create', [entity('public-a', ['Alpha'])]);
+    insertPending(db, [entity('local-a', ['Alpha'])]);
+    const state = readAdminConflictResolutionState(db);
+    const decision = { token: state.groups[0].token, targetEntityId: 'public-a' };
+    const tooMany = Array.from({ length: 101 }, (_, index) => ({
+      token: index.toString(16).padStart(64, '0'),
+      targetEntityId: 'public-a',
+    }));
+    const cases: Array<{ name: string; body: object }> = [
+      { name: 'missing confirmation', body: { revision: state.revision, groups: [decision] } },
+      { name: 'duplicate token', body: { revision: state.revision, confirm: true, groups: [decision, decision] } },
+      { name: 'malformed token', body: { revision: state.revision, confirm: true,
+        groups: [{ token: 'A'.repeat(64), targetEntityId: 'public-a' }] } },
+      { name: 'invalid entity ID', body: { revision: state.revision, confirm: true,
+        groups: [{ token: decision.token, targetEntityId: 'invalid entity' }] } },
+      { name: 'empty list', body: { revision: state.revision, confirm: true, groups: [] } },
+      { name: 'more than 100 decisions', body: { revision: state.revision, confirm: true, groups: tooMany } },
+      { name: 'invalid request shape', body: { revision: state.revision, confirm: true, groups: 'invalid' } },
+      { name: 'extra top-level browser data', body: { revision: state.revision, confirm: true, groups: [decision], targetName: 'Alpha' } },
+      { name: 'extra decision browser data', body: { revision: state.revision, confirm: true,
+        groups: [{ ...decision, names: ['Alpha'], sourceEntities: [] }] } },
+    ];
+    const before = mutationSnapshot(db);
+
+    for (const scenario of cases) {
+      const response = await postResolve(scenario.body).expect(400);
+      expect(response.body, scenario.name).toMatchObject({ ok: false, code: 'invalid_request' });
+      expect(mutationSnapshot(db), scenario.name).toEqual(before);
+    }
+  });
+
+  test('requires Basic authentication and CSRF before resolving', async () => {
+    const { app, db } = httpFixture();
+    mutatePublicLibrary(db, 0, 100, 'create', [entity('public-a', ['Alpha'])]);
+    insertPending(db, [entity('local-a', ['Alpha'])]);
+    const state = readAdminConflictResolutionState(db);
+    const body = { revision: state.revision, confirm: true,
+      groups: [{ token: state.groups[0].token, targetEntityId: 'public-a' }] };
+    const url = '/admin/api/library/conflicts/resolve';
+    const before = mutationSnapshot(db);
+
+    await request(app).post(url).set('x-dnf-admin-csrf', 'csrf').send(body).expect(401);
+    await request(app).post(url).auth('admin', 'wrong').set('x-dnf-admin-csrf', 'csrf').send(body).expect(401);
+    await request(app).post(url).auth('admin', 'password').send(body).expect(403, { ok: false, code: 'invalid_csrf' });
+    expect(mutationSnapshot(db)).toEqual(before);
+  });
+
+  test('returns stale_conflict_group when a pending payload changes after state was read', async () => {
+    const { db, getState, postResolve } = httpFixture();
+    mutatePublicLibrary(db, 0, 100, 'create', [entity('public-a', ['Alpha'])]);
+    const input = insertPending(db, [entity('local-a', ['Alpha'])]);
+    const expected = readAdminConflictResolutionState(db);
+    const state = (await getState().expect(200)).body;
+    expect(state.conflictResolutionGroups).toEqual(expected.groups);
+    db.prepare('UPDATE player_library_submissions SET payload_json=? WHERE id=?')
+      .run(JSON.stringify({ entities: [entity('local-a', ['Changed'])] }), input.id);
+    const before = mutationSnapshot(db);
+
+    const response = await postResolve({
+      revision: state.revision,
+      confirm: true,
+      groups: [{ token: state.conflictResolutionGroups[0].token, targetEntityId: 'public-a' }],
+    }).expect(409);
+
+    expect(response.body).toEqual({ ok: false, code: 'stale_conflict_group', conflicts: [] });
+    expect(mutationSnapshot(db)).toEqual(before);
+    expect(listPlayerLibrary(db).revision).toBe(1);
+  });
+
+  test('preserves the stale revision conflict contract without mutation', async () => {
+    const { db, postResolve } = httpFixture();
+    mutatePublicLibrary(db, 0, 100, 'create', [entity('public-a', ['Alpha'])]);
+    insertPending(db, [entity('local-a', ['Alpha'])]);
+    const state = readAdminConflictResolutionState(db);
+    const before = mutationSnapshot(db);
+
+    const response = await postResolve({
+      revision: state.revision - 1,
+      confirm: true,
+      groups: [{ token: state.groups[0].token, targetEntityId: 'public-a' }],
+    }).expect(409);
+
+    expect(response.body).toEqual({ ok: false, code: 'stale_revision', conflicts: [] });
+    expect(mutationSnapshot(db)).toEqual(before);
+  });
+
+  test('rejects ambiguous groups and targets outside a public-merge component through HTTP', async () => {
+    const { db, postResolve } = httpFixture();
+    mutatePublicLibrary(db, 0, 100, 'import', [
+      entity('public-left', ['Left']),
+      entity('public-right', ['Right']),
+      entity('public-outside', ['Outside']),
+    ]);
+    insertPending(db, [entity('public-left', ['Left', 'Right'])]);
+    insertPending(db, [entity('ambiguous-a', ['Ambiguous'])]);
+    insertPending(db, [entity('ambiguous-b', ['Ambiguous'])]);
+    const state = readAdminConflictResolutionState(db);
+    const ambiguous = state.groups.find(group => group.kind === 'ambiguous')!;
+    const publicMerge = state.groups.find(group => group.kind === 'public_merge')!;
+    const before = mutationSnapshot(db);
+
+    for (const decision of [
+      { token: ambiguous.token, targetEntityId: 'ambiguous-a' },
+      { token: publicMerge.token, targetEntityId: 'public-outside' },
+    ]) {
+      const response = await postResolve({ revision: state.revision, confirm: true, groups: [decision] }).expect(400);
+      expect(response.body).toEqual({ ok: false, code: 'invalid_conflict_target', conflicts: [] });
+      expect(mutationSnapshot(db)).toEqual(before);
+    }
   });
 });

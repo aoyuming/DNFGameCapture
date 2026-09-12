@@ -3,9 +3,9 @@ import type Database from 'better-sqlite3';
 import { z } from 'zod';
 import { listPlayerLibrary, readAutomaticIdentityEvidence } from './library-store.js';
 import {
-  adminEntitySchema, editAdminSubmission, entityIdSchema, LIBRARY_ADMIN_MAX_BYTES, LibraryAdminError,
+  adminEntitySchema, buildAdminConflictResolutionState, editAdminSubmission, entityIdSchema, LIBRARY_ADMIN_MAX_BYTES, LibraryAdminError,
   listAdminSubmissions, mergePublicLibrary, mutatePublicLibrary, parseAdminEntities, parseLibraryImport, projectedLibrary,
-  readAdminSubmission, requireLibraryRevision, reviewAdminSubmissions, revisionSchema,
+  readAdminSubmission, requireLibraryRevision, resolveAdminConflictGroups, reviewAdminSubmissions, revisionSchema,
 } from './library-admin-data.js';
 
 const guarded = z.object({ revision: revisionSchema }).strict();
@@ -18,6 +18,14 @@ const reviewBody = guarded.extend({ action: z.enum(['approve', 'reject']), submi
   .refine(body => new Set(body.submissions.map(ref => ref.id)).size === body.submissions.length);
 const editBody = guarded.extend({ submissionRevision: submissionRef.shape.submissionRevision, entities: z.array(adminEntitySchema).min(1).max(10_000),
   confirmReconciliations: z.boolean().optional() });
+const conflictDecision = z.object({
+  token: z.string().regex(/^[a-f0-9]{64}$/),
+  targetEntityId: entityIdSchema,
+}).strict();
+const resolveConflictsBody = guarded.extend({
+  groups: z.array(conflictDecision).min(1).max(100),
+  confirm: z.literal(true),
+}).strict().refine(body => new Set(body.groups.map(group => group.token)).size === body.groups.length);
 function parse<T>(schema: z.ZodType<T>, body: unknown): T {
   const parsed = schema.safeParse(body);
   if (!parsed.success) throw new LibraryAdminError(400, 'invalid_request');
@@ -37,16 +45,28 @@ export function createLibraryAdminApi(db: Database.Database, now: () => number) 
     const result = db.transaction(() => {
       const library = listPlayerLibrary(db);
       const submissions = listAdminSubmissions(db, library.entities);
+      const conflictResolutionGroups = buildAdminConflictResolutionState(db, library, submissions).groups;
+      const conflictResolutionStats = {
+        uniqueNameTargets: conflictResolutionGroups.filter(group => group.kind === 'unique_name_target').length,
+        publicMerges: conflictResolutionGroups.filter(group => group.kind === 'public_merge').length,
+        ambiguous: conflictResolutionGroups.filter(group => group.kind === 'ambiguous').length,
+      };
       const q = queryText(request.query.q); const pendingQ = queryText(request.query.pendingQ);
       const filter = request.query.filter;
       return { revision: library.revision, entityRedirects: library.entityRedirects, entities: library.entities.filter(entity => matches(entity, q)),
         submissions: submissions.filter(item => (!pendingQ || item.deviceId.toLocaleLowerCase().includes(pendingQ) || item.entities.some(entity => matches(entity, pendingQ))) &&
           (filter === 'conflict' ? !item.valid || item.conflicts.length > 0 : filter === 'clean' ? item.valid && !item.conflicts.length : true)),
+        conflictResolutionGroups,
+        conflictResolutionStats,
         stats: { pending: submissions.length, conflicts: submissions.filter(item => !item.valid || item.conflicts.length > 0).length,
           pendingGameIds: submissions.reduce((total, item) => total + item.entities.reduce((sum, entity) => sum + entity.gameIds.length, 0), 0),
           entities: library.entities.length, gameIds: library.entities.reduce((sum, entity) => sum + entity.gameIds.length, 0) } };
     })();
     response.json({ ok: true, ...result });
+  });
+  router.post('/conflicts/resolve', (request, response) => {
+    const body = parse(resolveConflictsBody, request.body);
+    response.json({ ok: true, ...resolveAdminConflictGroups(db, body.revision, now(), body.groups) });
   });
   router.get('/entities/:entityId', (request, response) => {
     const id = parse(entityIdSchema, request.params.entityId);
