@@ -6,6 +6,7 @@ import { playerNameSchema } from './schemas.js';
 import { canonicalEntityRedirects, listPlayerLibrary, MAX_AUTOMATIC_EVIDENCE_BYTES, MAX_ENTITY_REDIRECTS, readAutomaticIdentityEvidence, readEntityRedirects, type EntityRedirect } from './library-store.js';
 import { createSubmissionReconciler } from './library-submission-reconcile.js';
 import { automaticIdentityGroups, type AutomaticIdentityEvidence } from './library-identity-policy.js';
+import { buildConflictResolutionGroups } from './library-conflict-resolution.js';
 
 export const LIBRARY_ADMIN_MAX_BYTES = 256 * 1024;
 export const revisionSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -142,13 +143,13 @@ export function projectedLibrary(existing: PlayerEntity[], incoming: PlayerEntit
   return { entities, conflicts, automaticGroups: groups };
 }
 function publishEntities(db: Database.Database, entities: PlayerEntity[], previous: PlayerEntity[], now: number,
-  entityRedirects = readEntityRedirects(db, previous), manualTargetId?: string): number {
+  entityRedirects = readEntityRedirects(db, previous), manualTargetIds?: ReadonlySet<string>): number {
   entities = entities.length ? parseAdminEntities({ entities }) : [];
   const beforeRedirects = readEntityRedirects(db, previous);
   const beforeEvidence = readAutomaticIdentityEvidence(db);
   const sourceEntities = new Map(entities.map(entity => [entity.entityId, entity]));
-  const normalized = normalizePublicEntities(previous, entities, beforeEvidence, manualTargetId === undefined);
-  if (manualTargetId !== undefined) normalized.evidence.delete(manualTargetId);
+  const normalized = normalizePublicEntities(previous, entities, beforeEvidence, manualTargetIds === undefined);
+  for (const targetEntityId of manualTargetIds ?? []) normalized.evidence.delete(targetEntityId);
   const { conflicts, groups, targets } = normalized;
   entities = normalized.entities;
   if (conflicts.length) throw new LibraryAdminError(409, 'ownership_conflict', conflicts);
@@ -267,7 +268,7 @@ export function mergePublicLibrary(db: Database.Database, revision: number, now:
     if (redirects.length > MAX_ENTITY_REDIRECTS) throw new LibraryAdminError(413, 'library_too_large');
     const entityRedirects = canonicalEntityRedirects(projected, redirects);
     const beforeEvidence = readAutomaticIdentityEvidence(db);
-    const nextRevision = publishEntities(db, projected, current.entities, now, entityRedirects, targetEntityId);
+    const nextRevision = publishEntities(db, projected, current.entities, now, entityRedirects, new Set([targetEntityId]));
     const published = listPlayerLibrary(db);
     const canonicalId = published.entityRedirects.find(item => item.fromEntityId === targetEntityId)?.toEntityId ?? targetEntityId;
     const publishedEntity = published.entities.find(item => item.entityId === canonicalId)!;
@@ -298,6 +299,163 @@ export function listAdminSubmissions(db: Database.Database, publicEntities: Play
   return (db.prepare("SELECT id FROM player_library_submissions WHERE status='pending' ORDER BY created_at,id").all() as { id: number }[])
     .map(row => readAdminSubmission(db, row.id, publicEntities, reconcile, evidence));
 }
+
+export function buildAdminConflictResolutionState(db: Database.Database,
+  current: ReturnType<typeof listPlayerLibrary>,
+  allSubmissions = listAdminSubmissions(db, current.entities)) {
+  const submissions = allSubmissions.filter(submission => submission.valid);
+  const combined = additiveEntities(current.entities, submissions.flatMap(submission => submission.entities));
+  const automaticGroups = automaticIdentityGroups(combined, readAutomaticIdentityEvidence(db));
+  const conflicts = [
+    ...ownershipConflicts(combined),
+    ...automaticGroups.map(entityIds => ({ kind: 'gameIds' as const, value: 'automatic_identity', entityIds })),
+  ];
+  return {
+    revision: current.revision,
+    submissions,
+    groups: buildConflictResolutionGroups({
+      revision: current.revision,
+      publicEntities: current.entities,
+      submissions: submissions.map(({ id, submissionRevision, entities }) => ({ id, submissionRevision, entities })),
+      conflicts,
+    }),
+  };
+}
+
+export function readAdminConflictResolutionState(db: Database.Database) {
+  const current = listPlayerLibrary(db);
+  return buildAdminConflictResolutionState(db, current);
+}
+
+export interface ConflictResolutionDecision { token: string; targetEntityId: string }
+
+export function resolveAdminConflictGroups(db: Database.Database, revision: number, now: number,
+  decisions: ConflictResolutionDecision[]) {
+  return db.transaction(() => {
+    const current = requireLibraryRevision(db, revision);
+    const state = buildAdminConflictResolutionState(db, current);
+    if (!decisions.length || new Set(decisions.map(decision => decision.token)).size !== decisions.length) {
+      throw new LibraryAdminError(400, 'invalid_request');
+    }
+
+    const available = new Map(state.groups.map(group => [group.token, group]));
+    const selected = decisions.map(decision => {
+      const group = available.get(decision.token);
+      if (!group) throw new LibraryAdminError(409, 'stale_conflict_group');
+      const validTarget = group.kind === 'unique_name_target'
+        ? decision.targetEntityId === group.suggestedTargetEntityId
+        : group.kind === 'public_merge' && group.publicEntityIds.includes(decision.targetEntityId);
+      if (!validTarget) throw new LibraryAdminError(400, 'invalid_conflict_target');
+      return { group, targetEntityId: decision.targetEntityId };
+    });
+
+    const publicIds = new Set(current.entities.map(entity => entity.entityId));
+    const targetById = new Map<string, string>();
+    const selectedSourceKeys = new Set<string>();
+    const manualTargets = new Set<string>();
+    for (const { group, targetEntityId } of selected) {
+      manualTargets.add(targetEntityId);
+      for (const entityId of [...group.publicEntityIds, ...group.sources.map(source => source.entityId)]) {
+        const previousTarget = targetById.get(entityId);
+        if (previousTarget !== undefined && previousTarget !== targetEntityId) {
+          throw new LibraryAdminError(409, 'conflicting_resolution');
+        }
+        targetById.set(entityId, targetEntityId);
+      }
+      for (const source of group.sources) {
+        selectedSourceKeys.add(`${source.submissionId}\0${source.entityId}`);
+      }
+    }
+
+    const next = new Map(current.entities.map(entity => [entity.entityId, structuredClone(entity)]));
+    const append = (targetEntityId: string, source: PlayerEntity) => {
+      const target = next.get(targetEntityId);
+      if (!target) throw new LibraryAdminError(404, 'entity_not_found');
+      next.set(targetEntityId, additiveEntities([target], [{ ...source, entityId: targetEntityId }])[0]);
+    };
+    for (const entity of current.entities) {
+      const targetEntityId = targetById.get(entity.entityId);
+      if (targetEntityId !== undefined && targetEntityId !== entity.entityId) {
+        append(targetEntityId, entity);
+        next.delete(entity.entityId);
+      }
+    }
+    for (const { group, targetEntityId } of selected) {
+      for (const source of group.sources) append(targetEntityId, source);
+    }
+
+    const projected = [...next.values()];
+    const redirects = canonicalEntityRedirects(projected, [
+      ...current.entityRedirects.map(redirect => ({
+        ...redirect,
+        toEntityId: targetById.get(redirect.toEntityId) ?? redirect.toEntityId,
+      })),
+      ...[...targetById]
+        .filter(([fromEntityId, toEntityId]) => fromEntityId !== toEntityId)
+        .map(([fromEntityId, toEntityId]) => ({ fromEntityId, toEntityId })),
+    ]);
+
+    const nextRevision = publishEntities(db, projected, current.entities, now, redirects, manualTargets);
+    let associatedEntityCount = 0;
+    const affectedSubmissions: { id: number; submissionRevision: string }[] = [];
+    for (const submission of state.submissions) {
+      const acceptedIndexes = submission.entityTargets
+        .map((entityId, index) => selectedSourceKeys.has(`${submission.id}\0${entityId}`) ? index : -1)
+        .filter(index => index >= 0);
+      if (!acceptedIndexes.length) continue;
+
+      const row = db.prepare('SELECT payload_json FROM player_library_submissions WHERE id=?').get(submission.id) as
+        { payload_json: string } | undefined;
+      if (!row) throw new LibraryAdminError(409, 'stale_conflict_group');
+      const raw = boundedJson(row.payload_json) as {
+        entities: Array<Omit<PlayerEntity, 'entityId'> & { entityId?: string }>;
+      };
+      db.prepare(`INSERT OR IGNORE INTO player_library_submission_originals(submission_id,payload_json)
+        VALUES(?,?)`).run(submission.id, row.payload_json);
+      const accepted = new Set(acceptedIndexes);
+      const remaining = raw.entities.flatMap((entity, index) => accepted.has(index) ? [] : [{
+        ...entity,
+        entityId: entity.entityId ?? `submission-${submission.id}-${index}`,
+      }]);
+      db.prepare(`UPDATE player_library_submissions
+        SET payload_json=?,status=?,reviewed_at=?,review_reason=? WHERE id=?`).run(
+        remaining.length ? JSON.stringify({ entities: remaining }) : row.payload_json,
+        remaining.length ? 'pending' : 'approved',
+        now,
+        remaining.length ? 'admin_conflicts_partially_resolved' : 'admin_conflicts_resolved',
+        submission.id,
+      );
+      associatedEntityCount += acceptedIndexes.length;
+      affectedSubmissions.push({ id: submission.id, submissionRevision: submission.submissionRevision });
+    }
+
+    const published = listPlayerLibrary(db);
+    db.prepare(`INSERT INTO player_library_conflict_resolution_audit
+      (revision,created_at,groups_json,before_entities_json,after_entities_json,before_redirects_json,after_redirects_json,submissions_json)
+      VALUES(?,?,?,?,?,?,?,?)`).run(
+        nextRevision,
+        now,
+        JSON.stringify(selected),
+        JSON.stringify(current.entities),
+        JSON.stringify(published.entities),
+        JSON.stringify(current.entityRedirects),
+        JSON.stringify(published.entityRedirects),
+        JSON.stringify(affectedSubmissions),
+      );
+    const pendingSubmissionCount = (db.prepare(`SELECT COUNT(*) AS count FROM player_library_submissions
+      WHERE status='pending'`).get() as { count: number }).count;
+    return {
+      revision: nextRevision,
+      resolvedGroupCount: selected.length,
+      associatedEntityCount,
+      mergedPublicEntityCount: [...targetById]
+        .filter(([fromEntityId, toEntityId]) => fromEntityId !== toEntityId && publicIds.has(fromEntityId)).length,
+      redirectCount: published.entityRedirects.length - current.entityRedirects.length,
+      pendingSubmissionCount,
+    };
+  }).immediate();
+}
+
 function requireSubmission(db: Database.Database, id: number, token: string, publicEntities = listPlayerLibrary(db).entities,
   reconcile = createSubmissionReconciler(publicEntities, readEntityRedirects(db, publicEntities)),
   evidence: AutomaticIdentityEvidence = readAutomaticIdentityEvidence(db)) {

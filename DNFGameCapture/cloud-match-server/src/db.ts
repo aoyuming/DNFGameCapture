@@ -193,6 +193,18 @@ function initializeSchema(db: Database.Database): void {
         after_evidence_json TEXT NOT NULL DEFAULT '{}'
       );
 
+      CREATE TABLE IF NOT EXISTS player_library_conflict_resolution_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        revision INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        groups_json TEXT NOT NULL,
+        before_entities_json TEXT NOT NULL,
+        after_entities_json TEXT NOT NULL,
+        before_redirects_json TEXT NOT NULL,
+        after_redirects_json TEXT NOT NULL,
+        submissions_json TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS broadcaster_policies (
         device_id TEXT PRIMARY KEY,
         ocr_disabled_until INTEGER,
