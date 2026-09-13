@@ -67,6 +67,7 @@ export const LIBRARY_ADMIN_CSS = String.raw`
 .batchbar{position:fixed;left:0;right:0;bottom:0;min-height:64px;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:10px 22px;background:#0c1119fa;border-top:1px solid var(--line);z-index:10}.batch-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.batch-actions button{white-space:nowrap}#selected-info{color:var(--muted);font-size:12px}#message{position:fixed;right:22px;top:82px;max-width:min(560px,calc(100vw - 44px));max-height:190px;overflow:auto;padding:12px 16px;border:1px solid var(--accent);background:#0d1118;z-index:20;font-size:13px;line-height:1.6;overflow-wrap:anywhere;box-shadow:0 8px 24px #0008;cursor:pointer}#message.error{border-color:var(--danger);color:#ffe5e5}
 .pending-title{font-size:14px;line-height:20px;white-space:nowrap}.pending-device{display:block;margin-top:4px;color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pending-sub{line-height:1.55}.submission-summary{padding:10px 0;border-bottom:1px solid var(--line);font-size:12px;line-height:1.7;overflow-wrap:anywhere}.submission-summary p{margin:4px 0}.submission-summary p:nth-child(2){color:var(--accent)}.reconciliation-list,.unchanged-entities{margin:12px 0;border-top:1px solid var(--line);font-size:12px;overflow-wrap:anywhere}summary{cursor:pointer;padding:10px 0;color:var(--muted)}summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.reconciliation-rows{max-height:180px;overflow:auto}.reconciliation-rows p{margin:0 0 8px;line-height:1.6}.entity-delta{font-size:12px;line-height:1.6;color:var(--accent);overflow-wrap:anywhere;margin-bottom:12px}.entity-delta p{margin:4px 0}.unchanged-entities .entity-delta{color:var(--muted)}
 @media(max-width:1080px){body{padding-bottom:0}.workspace{grid-template-columns:1fr 1fr;height:auto;min-height:0}.pending-panel,.detail-panel{height:580px}.public-panel{grid-column:1/-1;max-height:900px}.public-editor{max-height:530px}.stats-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.batchbar{position:sticky;flex-wrap:wrap;bottom:0}.batch-actions{justify-content:flex-start}}@media(max-width:680px){.topbar{align-items:flex-start;flex-direction:column;padding:14px 12px;gap:10px}h1{font-size:20px}.top-actions{width:100%;justify-content:space-between}.stats-grid{grid-template-columns:repeat(2,minmax(0,1fr));padding:12px;gap:8px}.stat-card{padding:10px}.stat-card b{font-size:22px}.workspace{grid-template-columns:minmax(0,1fr);padding:0 12px 12px}.pending-panel{height:380px}.detail-panel{height:650px}.public-panel{grid-column:auto;max-height:none}.public-editor{max-height:660px}.batchbar{padding:10px 12px;gap:8px}.batch-actions{display:grid;grid-template-columns:1fr 1fr;width:100%}.batch-actions button{font-size:12px;white-space:normal;padding:8px 5px}.public-actions{grid-template-columns:repeat(2,minmax(0,1fr))}#message{right:12px;top:12px;max-width:calc(100vw - 24px)}#conflict-batch-dialog{width:calc(100vw - 16px);height:calc(100dvh - 16px);padding:12px}.conflict-batch-row{grid-template-columns:44px minmax(0,1fr);gap:8px}.conflict-batch-target{grid-column:2}.conflict-batch-tools,.conflict-batch-actions{display:grid;grid-template-columns:minmax(0,1fr)}.conflict-batch-tools button,.conflict-batch-actions button{width:100%}}
+@media(max-height:480px){#conflict-batch-dialog{height:calc(100dvh - 8px);overflow-y:auto}}
 `;
 
 export const LIBRARY_ADMIN_JS = String.raw`
@@ -75,6 +76,9 @@ export const LIBRARY_ADMIN_JS = String.raw`
   const $ = id => document.getElementById(id);
   const csrf = document.querySelector('meta[name="dnf-admin-csrf"]').content;
   const fields = [['names', '并列名称 / 别名'], ['gameIds', '游戏ID']];
+  const CONFLICT_BATCH_GROUP_LIMIT = 100;
+  const conflictBatchLimitMessage = '单次最多选择 100 组冲突。当前批次已满，请先提交后再处理其余候选。';
+  const conflictBatchStaleMessage = '冲突数据已变化，已刷新预览并清空旧选择，请重新核对。';
   let state = { revision: 0, entities: [], submissions: [], conflictResolutionGroups: [], conflictResolutionStats: {}, stats: {} };
   let loaded = false, busy = false, active = null, reviewDirty = false, reviewRevision = 0;
   let publicId = null, publicDirty = false, publicRevision = 0;
@@ -170,7 +174,8 @@ export const LIBRARY_ADMIN_JS = String.raw`
       (group.kind === 'public_merge' && conflictBatchSelections.get(group.token)?.targetEntityId));
     $('btn-conflict-batch-clear').disabled = busy || !checkedConflictCount;
     $('btn-conflict-batch-cancel').disabled = busy;
-    $('btn-conflict-batch-confirm').disabled = busy || !loaded || !conflictChoices.length || conflictChoices.length !== checkedConflictCount;
+    $('btn-conflict-batch-confirm').disabled = busy || !loaded || !conflictChoices.length || checkedConflictCount > CONFLICT_BATCH_GROUP_LIMIT ||
+      conflictChoices.length !== checkedConflictCount;
     $('btn-conflict-batch-confirm').textContent = busy && $('conflict-batch-dialog').open ? '合并中...' : '确认合并';
     if (busy && $('conflict-batch-dialog').open) $('conflict-batch-dialog').setAttribute('aria-busy', 'true');
     else $('conflict-batch-dialog').removeAttribute('aria-busy');
@@ -460,6 +465,10 @@ export const LIBRARY_ADMIN_JS = String.raw`
       targetEntityId: select ? select.value : row.dataset.targetEntityId || '',
     });
   }
+  function setConflictBatchError(text = '') {
+    $('conflict-batch-error').textContent = text;
+    $('conflict-batch-error').hidden = !text;
+  }
   function resolutionChoices() {
     const authorized = new Map(currentConflictGroups().map(group => [group.token, group]));
     const choices = [];
@@ -472,7 +481,7 @@ export const LIBRARY_ADMIN_JS = String.raw`
       const authorizedTarget = group.kind === 'unique_name_target'
         ? targetEntityId === group.suggestedTargetEntityId
         : group.publicEntityIds.includes(targetEntityId);
-      if (authorizedTarget) choices.push({ token: group.token, targetEntityId });
+      if (authorizedTarget && choices.length < CONFLICT_BATCH_GROUP_LIMIT) choices.push({ token: group.token, targetEntityId });
     }
     return choices;
   }
@@ -506,9 +515,11 @@ export const LIBRARY_ADMIN_JS = String.raw`
     const publicMergeCount = Number(provided.publicMerges) || groups.filter(group => group.kind === 'public_merge').length;
     const ambiguousCount = Number(provided.ambiguous) || groups.filter(group => group.kind === 'ambiguous').length;
     const preview = conflictBatchPreview();
-    $('conflict-batch-summary').textContent = '按名称可合并 ' + uniqueCount + ' · 已跳过 ' + (publicMergeCount + ambiguousCount) +
-      '（公共实体合并 ' + publicMergeCount + '，需要人工整理 ' + ambiguousCount + '）。当前选择 ' + preview.selectedGroupCount +
-      ' 组 · 关联待审投稿 ' + preview.submissionCount + ' 条 / 实体 ' + preview.sourceCount + ' 个 · 合并公共实体 ' +
+    const deferredSafeCount = Math.max(0, uniqueCount - CONFLICT_BATCH_GROUP_LIMIT);
+    $('conflict-batch-summary').textContent = '按名称可合并 ' + uniqueCount + ' 组（安全候选总数） · 当前批次已选择 ' +
+      preview.selectedGroupCount + ' 组 / 上限 ' + CONFLICT_BATCH_GROUP_LIMIT + ' 组 · 因上限延后 ' + deferredSafeCount +
+      ' 组 · 已跳过 ' + (publicMergeCount + ambiguousCount) + ' 组（公共实体合并 ' + publicMergeCount + '，需要人工整理 ' +
+      ambiguousCount + '）。关联待审投稿 ' + preview.submissionCount + ' 条 / 实体 ' + preview.sourceCount + ' 个 · 合并公共实体 ' +
       preview.mergedPublicEntityCount + ' 个 · 预计重定向 ' + preview.redirectCount + ' 条。';
   }
   function renderConflictBatch() {
@@ -530,7 +541,12 @@ export const LIBRARY_ADMIN_JS = String.raw`
       check.checked = group.kind !== 'ambiguous' && !!saved.checked &&
         (group.kind !== 'public_merge' || !!targetEntityId);
       check.setAttribute('aria-label', '选择冲突组 ' + (group.conflictNames.join(' / ') || group.token));
-      check.onchange = () => { rememberConflictBatchRow(row); renderConflictBatchSummary(); controls(); };
+      check.onchange = () => {
+        if (check.checked && $('conflict-batch-list').querySelectorAll('input[type="checkbox"]:checked').length > CONFLICT_BATCH_GROUP_LIMIT) {
+          check.checked = false; setConflictBatchError(conflictBatchLimitMessage);
+        } else setConflictBatchError();
+        rememberConflictBatchRow(row); renderConflictBatchSummary(); controls();
+      };
       checkLabel.append(check);
 
       const copy = node('div', 'conflict-batch-copy');
@@ -563,6 +579,7 @@ export const LIBRARY_ADMIN_JS = String.raw`
         select.onchange = () => {
           row.dataset.targetEntityId = select.value;
           if (!select.value) check.checked = false;
+          setConflictBatchError();
           rememberConflictBatchRow(row); renderConflictBatchSummary(); controls();
         };
         target.append(select);
@@ -585,11 +602,16 @@ export const LIBRARY_ADMIN_JS = String.raw`
     const groups = currentConflictGroups();
     if (!groups.length) throw new Error('当前没有可处理的冲突组。');
     conflictBatchRevision = state.revision; conflictBatchSelections.clear();
-    for (const group of groups) conflictBatchSelections.set(group.token, {
-      checked: group.kind === 'unique_name_target',
-      targetEntityId: group.kind === 'unique_name_target' ? group.suggestedTargetEntityId || '' : '',
-    });
-    $('conflict-batch-error').hidden = true; $('conflict-batch-error').textContent = '';
+    let selectedSafeCount = 0;
+    for (const group of groups) {
+      const checked = group.kind === 'unique_name_target' && selectedSafeCount < CONFLICT_BATCH_GROUP_LIMIT;
+      if (checked) ++selectedSafeCount;
+      conflictBatchSelections.set(group.token, {
+        checked,
+        targetEntityId: group.kind === 'unique_name_target' ? group.suggestedTargetEntityId || '' : '',
+      });
+    }
+    setConflictBatchError();
     renderConflictBatch(); $('conflict-batch-dialog').showModal(); controls();
   }
   function mergeIds() { return [...$('merge-options').querySelectorAll('input:checked')].map(input => input.value); }
@@ -664,25 +686,34 @@ export const LIBRARY_ADMIN_JS = String.raw`
   $('btn-resolve-by-name').onclick = () => run(openConflictBatch);
   $('btn-conflict-batch-safe-all').onclick = () => {
     const authorized = new Map(currentConflictGroups().map(group => [group.token, group]));
-    for (const row of $('conflict-batch-list').querySelectorAll('.conflict-batch-row')) {
-      const group = authorized.get(row.dataset.token), check = row.querySelector('input[type="checkbox"]'), select = row.querySelector('select');
-      check.checked = group?.kind === 'unique_name_target' ||
-        (group?.kind === 'public_merge' && group.publicEntityIds.includes(select?.value));
+    const rows = [...$('conflict-batch-list').querySelectorAll('.conflict-batch-row')];
+    const eligibleRows = [...rows.filter(row => authorized.get(row.dataset.token)?.kind === 'unique_name_target'),
+      ...rows.filter(row => {
+        const group = authorized.get(row.dataset.token), select = row.querySelector('select');
+        return group?.kind === 'public_merge' && group.publicEntityIds.includes(select?.value);
+      })];
+    const selectedRows = new Set(eligibleRows.slice(0, CONFLICT_BATCH_GROUP_LIMIT));
+    for (const row of rows) {
+      const check = row.querySelector('input[type="checkbox"]');
+      check.checked = selectedRows.has(row);
       rememberConflictBatchRow(row);
     }
+    setConflictBatchError();
     renderConflictBatchSummary(); controls();
   };
   $('btn-conflict-batch-clear').onclick = () => {
     for (const row of $('conflict-batch-list').querySelectorAll('.conflict-batch-row')) {
       row.querySelector('input[type="checkbox"]').checked = false; rememberConflictBatchRow(row);
     }
+    setConflictBatchError();
     renderConflictBatchSummary(); controls();
   };
   $('btn-conflict-batch-cancel').onclick = () => $('conflict-batch-dialog').close();
   $('conflict-batch-dialog').addEventListener('cancel', event => { if (busy) event.preventDefault(); });
   $('btn-conflict-batch-confirm').onclick = () => {
     const choices = resolutionChoices();
-    if (!choices.length) return;
+    const checkedCount = $('conflict-batch-list').querySelectorAll('input[type="checkbox"]:checked').length;
+    if (!choices.length || choices.length !== checkedCount || checkedCount > CONFLICT_BATCH_GROUP_LIMIT) return;
     run(async () => {
       const preview = conflictBatchPreview(choices);
       if (!confirm('确认处理 ' + preview.selectedGroupCount + ' 组冲突？关联待审投稿 ' + preview.submissionCount + ' 条 / 实体 ' +
@@ -693,7 +724,6 @@ export const LIBRARY_ADMIN_JS = String.raw`
         result = await api('/conflicts/resolve', { revision: conflictBatchRevision, groups: choices, confirm: true });
       } catch (error) {
         if (error.code !== 'stale_conflict_group' && error.code !== 'stale_revision') throw error;
-        const staleCode = error.code;
         const previousSelections = new Map(conflictBatchSelections);
         conflictBatchSelections.clear();
         try { await refresh(); }
@@ -707,7 +737,7 @@ export const LIBRARY_ADMIN_JS = String.raw`
           checked: false,
           targetEntityId: group.kind === 'unique_name_target' ? group.suggestedTargetEntityId || '' : '',
         });
-        renderConflictBatch(); message(errors[staleCode], true); return;
+        renderConflictBatch(); message(conflictBatchStaleMessage, true); return;
       }
       $('conflict-batch-dialog').close();
       await refresh();

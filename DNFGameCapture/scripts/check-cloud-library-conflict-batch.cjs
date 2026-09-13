@@ -15,7 +15,7 @@ function removeFixtureDirectory(directory) {
   rmSync(resolved, { recursive: true, force: true });
 }
 
-async function fixture() {
+async function fixture({ safeGroupCount = 0 } = {}) {
   const { createCloudMatchAdminApp } = await load('admin');
   const { openDatabase } = await load('db');
   const { mutatePublicLibrary } = await load('library-admin-data');
@@ -29,34 +29,51 @@ async function fixture() {
     db = openDatabase(path.join(directory, 'fixture.sqlite'));
     initializeSyncRelationSchema(db);
     const now = 1789185600;
-    mutatePublicLibrary(db, 0, now, 'import', [
-      entity('public-name-a', ['同名甲', '甲公开名', '<img src=x onerror=alert(1)>'], ['甲公开游戏ID']),
-      entity('public-name-b', ['同名乙', '乙公开名'], ['乙公开游戏ID']),
-      entity('public-merge-left', ['公共冲突甲'], ['公共甲游戏ID']),
-      entity('public-merge-right', ['公共冲突乙'], ['公共乙游戏ID']),
-    ]);
-
     const insertPending = (deviceId, entities) => Number(db.prepare(`INSERT INTO player_library_submissions
       (device_id,payload_json,status,created_at) VALUES (?,?,'pending',?)`)
       .run(deviceId, JSON.stringify({ entities }), now).lastInsertRowid);
-    const uniqueAId = insertPending('name-device-a', [
-      entity('local-name-a', ['同名甲', '甲投稿别名', '<img src=x onerror=alert(1)>'], ['甲投稿游戏ID']),
-    ]);
-    const uniqueA2Id = insertPending('name-device-a-2', [
-      entity('local-name-a-2', ['同名甲', '甲第二投稿别名'], ['甲第二投稿游戏ID']),
-    ]);
-    const uniqueBId = insertPending('name-device-b', [
-      entity('local-name-b', ['同名乙', '乙投稿别名'], ['乙投稿游戏ID']),
-    ]);
-    const publicMergeId = insertPending('public-merge-device', [
-      entity('public-merge-left', ['公共冲突甲', '公共冲突乙', '公共桥接别名'], ['公共桥接游戏ID']),
-    ]);
-    const ambiguousAId = insertPending('ambiguous-device-a', [
-      entity('local-ambiguous-a', ['无归属同名', '待人工甲'], ['待人工游戏ID甲']),
-    ]);
-    const ambiguousBId = insertPending('ambiguous-device-b', [
-      entity('local-ambiguous-b', ['无归属同名', '待人工乙'], ['待人工游戏ID乙']),
-    ]);
+    let uniqueAId;
+    let uniqueA2Id;
+    let uniqueBId;
+    let publicMergeId;
+    let ambiguousAId;
+    let ambiguousBId;
+    if (safeGroupCount) {
+      const publicEntities = Array.from({ length: safeGroupCount }, (_, index) => {
+        const suffix = String(index).padStart(3, '0');
+        return entity('limit-public-' + suffix, ['批量同名' + suffix]);
+      });
+      mutatePublicLibrary(db, 0, now, 'import', publicEntities);
+      for (let index = 0; index < safeGroupCount; ++index) {
+        const suffix = String(index).padStart(3, '0');
+        insertPending('limit-device-' + suffix, [entity('limit-local-' + suffix, ['批量同名' + suffix])]);
+      }
+    } else {
+      mutatePublicLibrary(db, 0, now, 'import', [
+        entity('public-name-a', ['同名甲', '甲公开名', '<img src=x onerror=alert(1)>'], ['甲公开游戏ID']),
+        entity('public-name-b', ['同名乙', '乙公开名'], ['乙公开游戏ID']),
+        entity('public-merge-left', ['公共冲突甲'], ['公共甲游戏ID']),
+        entity('public-merge-right', ['公共冲突乙'], ['公共乙游戏ID']),
+      ]);
+      uniqueAId = insertPending('name-device-a', [
+        entity('local-name-a', ['同名甲', '甲投稿别名', '<img src=x onerror=alert(1)>'], ['甲投稿游戏ID']),
+      ]);
+      uniqueA2Id = insertPending('name-device-a-2', [
+        entity('local-name-a-2', ['同名甲', '甲第二投稿别名'], ['甲第二投稿游戏ID']),
+      ]);
+      uniqueBId = insertPending('name-device-b', [
+        entity('local-name-b', ['同名乙', '乙投稿别名'], ['乙投稿游戏ID']),
+      ]);
+      publicMergeId = insertPending('public-merge-device', [
+        entity('public-merge-left', ['公共冲突甲', '公共冲突乙', '公共桥接别名'], ['公共桥接游戏ID']),
+      ]);
+      ambiguousAId = insertPending('ambiguous-device-a', [
+        entity('local-ambiguous-a', ['无归属同名', '待人工甲'], ['待人工游戏ID甲']),
+      ]);
+      ambiguousBId = insertPending('ambiguous-device-b', [
+        entity('local-ambiguous-b', ['无归属同名', '待人工乙'], ['待人工游戏ID乙']),
+      ]);
+    }
 
     const app = createCloudMatchAdminApp({
       db,
@@ -128,7 +145,9 @@ function assertExactValues(actual, expected, label) {
 (async () => {
   let browser;
   let context;
+  let limitContext;
   let f;
+  let limitF;
   try {
     f = await fixture();
     const { chromium } = require('playwright');
@@ -159,6 +178,7 @@ function assertExactValues(actual, expected, label) {
     const resolveRequests = [];
     const stateRequests = [];
     const nativeConfirmations = [];
+    const expectedBatchStaleMessage = '冲突数据已变化，已刷新预览并清空旧选择，请重新核对。';
     let nextDialogAction = null;
     page.on('pageerror', error => pageErrors.push(error.message));
     page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()); });
@@ -235,7 +255,7 @@ function assertExactValues(actual, expected, label) {
     await publicTarget.selectOption('public-merge-right');
     assert.equal(await publicMergeRow.locator('input[type="checkbox"]').isEnabled(), true);
     await publicMergeRow.locator('input[type="checkbox"]').check();
-    assert.match(await page.locator('#conflict-batch-summary').innerText(), /当前选择 3 组/);
+    assert.match(await page.locator('#conflict-batch-summary').innerText(), /当前批次已选择 3 组 \/ 上限 100 组/);
     await click('#btn-conflict-batch-clear');
     assert.equal(await page.locator('#conflict-batch-list input[type="checkbox"]:checked').count(), 0);
     assert.equal(await page.locator('#btn-conflict-batch-confirm').isDisabled(), true);
@@ -243,7 +263,7 @@ function assertExactValues(actual, expected, label) {
     await click('#btn-conflict-batch-safe-all');
     assert.equal(await uniqueRows.locator('input[type="checkbox"]:checked').count(), 2);
     assert.equal(await publicMergeRow.locator('input[type="checkbox"]').isChecked(), false);
-    assert.match(await page.locator('#conflict-batch-summary').innerText(), /当前选择 2 组/);
+    assert.match(await page.locator('#conflict-batch-summary').innerText(), /当前批次已选择 2 组 \/ 上限 100 组/);
     assert.match(await page.locator('#conflict-batch-summary').innerText(), /待审投稿 3 条 \/ 实体 3 个/);
     assert.match(await page.locator('#conflict-batch-summary').innerText(), /合并公共实体 0 个/);
     assert.match(await page.locator('#conflict-batch-summary').innerText(), /重定向 3 条/);
@@ -301,7 +321,59 @@ function assertExactValues(actual, expected, label) {
     };
     await assertOpenDialogLayout(1366, 900);
     await assertOpenDialogLayout(390, 844);
+    const assertShortLandscapeDialogLayout = async () => {
+      const width = 568, height = 320;
+      await page.setViewportSize({ width, height });
+      await page.locator('#conflict-batch-list').evaluate(list => { list.scrollTop = 0; });
+      await dialog.evaluate(modal => { modal.scrollTop = 0; });
+      const metrics = await page.evaluate(() => {
+        const modal = document.getElementById('conflict-batch-dialog');
+        const list = document.getElementById('conflict-batch-list');
+        const bounds = modal.getBoundingClientRect();
+        return {
+          pageWidth: document.documentElement.scrollWidth,
+          dialog: { left: bounds.left, right: bounds.right },
+          dialogOverflowY: getComputedStyle(modal).overflowY,
+          dialogScrollWidth: modal.scrollWidth,
+          dialogClientWidth: modal.clientWidth,
+          dialogScrollHeight: modal.scrollHeight,
+          dialogClientHeight: modal.clientHeight,
+          listScrollWidth: list.scrollWidth,
+          listClientWidth: list.clientWidth,
+        };
+      });
+      assert(metrics.pageWidth <= width + 1, 'page must not overflow horizontally at 568x320');
+      assert(metrics.dialog.left >= -1 && metrics.dialog.right <= width + 1, 'dialog must fit horizontally at 568x320');
+      assert(metrics.dialogScrollWidth <= metrics.dialogClientWidth + 1, 'dialog must not overflow horizontally at 568x320');
+      assert(metrics.listScrollWidth <= metrics.listClientWidth + 1, 'dialog list must not overflow horizontally at 568x320');
+      assert(metrics.dialogScrollHeight > metrics.dialogClientHeight, 'short landscape must expose vertical dialog overflow');
+      assert.match(metrics.dialogOverflowY, /auto|scroll/, 'short landscape dialog overflow must be user-scrollable');
+
+      await page.locator('#conflict-batch-heading').hover();
+      await page.mouse.wheel(0, 2000);
+      await page.waitForFunction(() => document.getElementById('conflict-batch-dialog').scrollTop > 0);
+      for (const control of [
+        page.locator('#btn-conflict-batch-safe-all'),
+        page.locator('#btn-conflict-batch-clear'),
+        uniqueRows.first().locator('input[type="checkbox"]'),
+        publicTarget,
+        page.locator('#btn-conflict-batch-cancel'),
+        page.locator('#btn-conflict-batch-confirm'),
+      ]) {
+        await control.scrollIntoViewIfNeeded();
+        assert.equal(await control.isVisible(), true, 'each enabled conflict control must be reachable at 568x320');
+        assert.equal(await control.isEnabled(), true, 'each expected conflict control must remain operable at 568x320');
+        const bounds = await control.boundingBox();
+        assert(bounds && bounds.x >= -1 && bounds.x + bounds.width <= width + 1 && bounds.y >= -1 && bounds.y + bounds.height <= height + 1,
+          'each conflict control must scroll fully inside the 568x320 viewport');
+        await control.click({ trial: true });
+      }
+      await page.locator('#btn-conflict-batch-confirm').scrollIntoViewIfNeeded();
+      await page.screenshot({ path: path.join(output, 'dialog-568x320.png') });
+    };
+    await assertShortLandscapeDialogLayout();
     await page.setViewportSize({ width: 1366, height: 900 });
+    await dialog.evaluate(modal => { modal.scrollTop = 0; });
 
     const stateCallsWhileOpen = stateRequests.length;
     await page.evaluate(() => window.dispatchEvent(new Event('focus')));
@@ -418,8 +490,7 @@ function assertExactValues(actual, expected, label) {
       'a stale revision must clear every old selection for explicit re-checking');
     assert.equal(await refreshedPublicTarget.inputValue(), '', 'a stale revision must clear the old retained target');
     assert.equal(await page.locator('#btn-conflict-batch-confirm').isDisabled(), true);
-    assert.equal(await page.locator('#conflict-batch-error').innerText(),
-      '公共库版本已变化。草稿已保留，请重新载入后核对再提交。');
+    assert.equal(await page.locator('#conflict-batch-error').innerText(), expectedBatchStaleMessage);
     assert(stateRequests.length > staleRevisionStateRequestCount, 'a stale revision must refresh authoritative state');
     assert.match(await page.locator('#status-text').innerText(), new RegExp('公共库版本 ' + raced.revision));
     const afterStaleRevision = await api('/state');
@@ -453,7 +524,7 @@ function assertExactValues(actual, expected, label) {
     await page.unroute(logicalErrorRoute);
     assert.equal(resolveRequests.length, staleRequestCount + 1, 'stale data must produce one request only');
     assert.equal(await dialog.evaluate(element => element.open), true, 'stale data keeps the refreshed dialog open');
-    assert.match(await page.locator('#conflict-batch-error').innerText(), /冲突数据已变化，请刷新后重新确认。/);
+    assert.equal(await page.locator('#conflict-batch-error').innerText(), expectedBatchStaleMessage);
     assert.equal(await page.locator('#conflict-batch-list input[type="checkbox"]:checked').count(), 0,
       'authoritative stale refresh requires explicit re-checking');
     assert.equal(await refreshedPublicTarget.inputValue(), '', 'stale conflict data must clear the old retained target');
@@ -465,13 +536,108 @@ function assertExactValues(actual, expected, label) {
 
     assert.deepEqual(pageErrors, [], 'no page errors');
     assert.deepEqual(consoleErrors, [], 'no console errors');
-    console.log('PASS: real Edge batch conflict preview, distinct success counts, cancellation atomicity, exact two-group POST, unions, redirects, stale revision/group recovery, and responsive dialog');
+
+    limitF = await fixture({ safeGroupCount: 101 });
+    limitContext = await browser.newContext({
+      httpCredentials: { username: 'admin', password: 'conflict-batch-only' },
+      viewport: { width: 1366, height: 900 },
+      locale: 'zh-CN',
+      timezoneId: 'America/New_York',
+    });
+    const limitPage = await limitContext.newPage();
+    limitPage.setDefaultTimeout(15000);
+    await limitPage.clock.install({ time: new Date('2026-09-12T16:00:00Z') });
+    await limitPage.clock.pauseAt(new Date('2026-09-12T16:00:01Z'));
+    await limitPage.route('**/favicon.ico', route => route.fulfill({ status: 204, body: '' }));
+    await limitPage.addInitScript(() => {
+      window.__batchApiPending = 0;
+      const originalFetch = window.fetch;
+      window.fetch = async (...args) => {
+        ++window.__batchApiPending;
+        try { return await originalFetch(...args); }
+        finally { --window.__batchApiPending; }
+      };
+    });
+    const limitPageErrors = [];
+    const limitConsoleErrors = [];
+    const limitResolveRequests = [];
+    const limitConfirmations = [];
+    limitPage.on('pageerror', error => limitPageErrors.push(error.message));
+    limitPage.on('console', message => { if (message.type() === 'error') limitConsoleErrors.push(message.text()); });
+    limitPage.on('request', request => {
+      if (request.url().endsWith('/admin/api/library/conflicts/resolve') && request.method() === 'POST') limitResolveRequests.push(request);
+    });
+    limitPage.on('dialog', async dialog => {
+      limitConfirmations.push(dialog.message());
+      await dialog.accept();
+    });
+    const limitIdle = () => limitPage.waitForFunction(() => window.__batchApiPending === 0 && !document.body.hasAttribute('aria-busy'));
+    const limitClick = async selector => { await limitPage.locator(selector).click(); await limitIdle(); };
+    const limitApi = async route => {
+      const response = await fetch(limitF.url + '/admin/api/library' + route, { headers });
+      const data = await response.json();
+      assert(response.ok, JSON.stringify(data));
+      return data;
+    };
+
+    await limitPage.goto(limitF.url + '/admin/library');
+    await limitIdle();
+    const limitState = await limitApi('/state');
+    assert.deepEqual(limitState.conflictResolutionStats, { uniqueNameTargets: 101, publicMerges: 0, ambiguous: 0 });
+    await limitClick('#btn-resolve-by-name');
+    const limitRows = limitPage.locator('.conflict-batch-row[data-kind="unique_name_target"]');
+    assert.equal(await limitRows.count(), 101);
+    assert.equal(await limitRows.locator('input[type="checkbox"]:checked').count(), 100,
+      'one-click must cap its preselection at the API maximum');
+    const limitSummary = limitPage.locator('#conflict-batch-summary');
+    assert.match(await limitSummary.innerText(), /按名称可合并 101 组（安全候选总数）/);
+    assert.match(await limitSummary.innerText(), /当前批次已选择 100 组 \/ 上限 100 组/);
+    assert.match(await limitSummary.innerText(), /因上限延后 1 组/);
+    assert.match(await limitSummary.innerText(), /已跳过 0 组（公共实体合并 0，需要人工整理 0）/);
+
+    const deferredCheck = limitRows.locator('input[type="checkbox"]:not(:checked)');
+    assert.equal(await deferredCheck.count(), 1);
+    await deferredCheck.click();
+    assert.equal(await deferredCheck.isChecked(), false, 'the 101st manual selection must be rejected');
+    assert.equal(await limitPage.locator('#conflict-batch-error').innerText(),
+      '单次最多选择 100 组冲突。当前批次已满，请先提交后再处理其余候选。');
+    assert.equal(await limitPage.locator('#btn-conflict-batch-confirm').isEnabled(), true,
+      'the valid 100-group batch remains submittable');
+
+    await limitClick('#btn-conflict-batch-clear');
+    assert.equal(await limitRows.locator('input[type="checkbox"]:checked').count(), 0);
+    await limitClick('#btn-conflict-batch-safe-all');
+    assert.equal(await limitRows.locator('input[type="checkbox"]:checked').count(), 100,
+      'safe-select must also cap its selection at the API maximum');
+    const limitPosted = limitPage.waitForRequest(request =>
+      request.url().endsWith('/admin/api/library/conflicts/resolve') && request.method() === 'POST');
+    await limitClick('#btn-conflict-batch-confirm');
+    const limitBody = (await limitPosted).postDataJSON();
+    const expectedLimitGroups = limitState.conflictResolutionGroups.slice(0, 100)
+      .map(group => ({ token: group.token, targetEntityId: group.suggestedTargetEntityId }));
+    assert.deepEqual(limitBody, { revision: limitState.revision, groups: expectedLimitGroups, confirm: true });
+    assert.equal(limitBody.groups.length, 100, 'the browser must never POST 101 conflict groups');
+    assert.equal(limitResolveRequests.length, 1, 'the capped batch must submit exactly once');
+    assert.match(limitConfirmations.at(-1), /确认处理 100 组冲突/);
+    const limitRemaining = await limitApi('/state');
+    assert.equal(limitRemaining.stats.pending, 1);
+    assert.deepEqual(limitRemaining.conflictResolutionStats, { uniqueNameTargets: 1, publicMerges: 0, ambiguous: 0 });
+    assert.deepEqual(limitPageErrors, [], 'no page errors in the 101-group regression');
+    assert.deepEqual(limitConsoleErrors, [], 'no console errors in the 101-group regression');
+
+    console.log('PASS: real Edge batch conflict preview, 100-group boundary, distinct success counts, cancellation atomicity, exact POSTs, unions, redirects, stale recovery, and responsive dialog');
     console.log('Screenshots: ' + output);
   } finally {
-    try { await context?.close(); }
+    try { await limitContext?.close(); }
     finally {
-      try { await browser?.close(); }
-      finally { await f?.close(); }
+      try { await context?.close(); }
+      finally {
+        try { await browser?.close(); }
+        finally {
+          try { await limitF?.close(); }
+          finally { await f?.close(); }
+        }
+      }
     }
   }
 })().catch(error => {
