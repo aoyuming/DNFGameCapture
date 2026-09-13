@@ -42,6 +42,9 @@ async function fixture() {
     const uniqueAId = insertPending('name-device-a', [
       entity('local-name-a', ['同名甲', '甲投稿别名', '<img src=x onerror=alert(1)>'], ['甲投稿游戏ID']),
     ]);
+    const uniqueA2Id = insertPending('name-device-a-2', [
+      entity('local-name-a-2', ['同名甲', '甲第二投稿别名'], ['甲第二投稿游戏ID']),
+    ]);
     const uniqueBId = insertPending('name-device-b', [
       entity('local-name-b', ['同名乙', '乙投稿别名'], ['乙投稿游戏ID']),
     ]);
@@ -97,6 +100,7 @@ async function fixture() {
       close,
       mutationSnapshot,
       uniqueAId,
+      uniqueA2Id,
       uniqueBId,
       publicMergeId,
       ambiguousAId,
@@ -178,8 +182,12 @@ function assertExactValues(actual, expected, label) {
       'Content-Type': 'application/json',
       'x-dnf-admin-csrf': 'conflict-batch-csrf',
     };
-    const api = async route => {
-      const response = await fetch(f.url + '/admin/api/library' + route, { headers });
+    const api = async (route, body, method = 'POST') => {
+      const response = await fetch(f.url + '/admin/api/library' + route, {
+        method: body === undefined ? 'GET' : method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
       const data = await response.json();
       assert(response.ok, JSON.stringify(data));
       return data;
@@ -236,9 +244,9 @@ function assertExactValues(actual, expected, label) {
     assert.equal(await uniqueRows.locator('input[type="checkbox"]:checked').count(), 2);
     assert.equal(await publicMergeRow.locator('input[type="checkbox"]').isChecked(), false);
     assert.match(await page.locator('#conflict-batch-summary').innerText(), /当前选择 2 组/);
-    assert.match(await page.locator('#conflict-batch-summary').innerText(), /待审投稿 2 条 \/ 实体 2 个/);
+    assert.match(await page.locator('#conflict-batch-summary').innerText(), /待审投稿 3 条 \/ 实体 3 个/);
     assert.match(await page.locator('#conflict-batch-summary').innerText(), /合并公共实体 0 个/);
-    assert.match(await page.locator('#conflict-batch-summary').innerText(), /重定向 2 条/);
+    assert.match(await page.locator('#conflict-batch-summary').innerText(), /重定向 3 条/);
 
     const output = path.resolve(__dirname, '../build/cloud-library-conflict-batch');
     mkdirSync(output, { recursive: true });
@@ -315,9 +323,9 @@ function assertExactValues(actual, expected, label) {
     assert.equal(await dialog.evaluate(element => element.open), true, 'dismissed confirmation keeps selections in the dialog');
     assert.equal(await uniqueRows.locator('input[type="checkbox"]:checked').count(), 2);
     assert.match(nativeConfirmations.at(-1), /2 组/);
-    assert.match(nativeConfirmations.at(-1), /待审投稿 2 条 \/ 实体 2 个/);
+    assert.match(nativeConfirmations.at(-1), /待审投稿 3 条 \/ 实体 3 个/);
     assert.match(nativeConfirmations.at(-1), /合并公共实体 0 个/);
-    assert.match(nativeConfirmations.at(-1), /重定向 2 条/);
+    assert.match(nativeConfirmations.at(-1), /重定向 3 条/);
 
     const expectedGroups = initial.conflictResolutionGroups
       .filter(group => group.kind === 'unique_name_target')
@@ -335,23 +343,24 @@ function assertExactValues(actual, expected, label) {
     assert.deepEqual(resolved.submissions.map(item => item.id), [f.publicMergeId, f.ambiguousAId, f.ambiguousBId]);
     const targetA = resolved.entities.find(item => item.entityId === 'public-name-a');
     const targetB = resolved.entities.find(item => item.entityId === 'public-name-b');
-    assertExactValues(targetA.names, ['同名甲', '甲公开名', '甲投稿别名', '<img src=x onerror=alert(1)>'], 'first target names');
-    assertExactValues(targetA.gameIds, ['甲公开游戏ID', '甲投稿游戏ID'], 'first target game IDs');
+    assertExactValues(targetA.names, ['同名甲', '甲公开名', '甲投稿别名', '<img src=x onerror=alert(1)>', '甲第二投稿别名'], 'first target names');
+    assertExactValues(targetA.gameIds, ['甲公开游戏ID', '甲投稿游戏ID', '甲第二投稿游戏ID'], 'first target game IDs');
     assertExactValues(targetB.names, ['同名乙', '乙公开名', '乙投稿别名'], 'second target names');
     assertExactValues(targetB.gameIds, ['乙公开游戏ID', '乙投稿游戏ID'], 'second target game IDs');
     assert.deepEqual(resolved.entityRedirects, [
       { fromEntityId: 'local-name-a', toEntityId: 'public-name-a' },
+      { fromEntityId: 'local-name-a-2', toEntityId: 'public-name-a' },
       { fromEntityId: 'local-name-b', toEntityId: 'public-name-b' },
     ]);
     assert(resolved.entities.some(item => item.entityId === 'public-merge-left'));
     assert(resolved.entities.some(item => item.entityId === 'public-merge-right'));
     assert.equal(f.db.prepare('SELECT status FROM player_library_submissions WHERE id=?').get(f.uniqueAId).status, 'approved');
+    assert.equal(f.db.prepare('SELECT status FROM player_library_submissions WHERE id=?').get(f.uniqueA2Id).status, 'approved');
     assert.equal(f.db.prepare('SELECT status FROM player_library_submissions WHERE id=?').get(f.uniqueBId).status, 'approved');
     assert.equal(await page.locator('#stat-pending').innerText(), '3');
     assert.match(await page.locator('#status-text').innerText(), new RegExp('公共库版本 ' + resolved.revision));
-    assert.match(await page.locator('#message').innerText(), /已接纳 2 个待审实体/);
-    assert.match(await page.locator('#message').innerText(), /剩余待审核 3 条/);
-    assert.match(await page.locator('#message').innerText(), new RegExp('公共库版本 ' + resolved.revision));
+    assert.equal(await page.locator('#message').innerText(),
+      '冲突合并完成：已处理 2 组冲突，已接纳 3 个待审实体，剩余待审核 3 条，公共库版本 ' + resolved.revision + '。');
 
     await click('#btn-resolve-by-name');
     const refreshedPublicMergeRow = page.locator('.conflict-batch-row[data-kind="public_merge"]');
@@ -373,6 +382,59 @@ function assertExactValues(actual, expected, label) {
     assert.match(await page.locator('#conflict-batch-error').innerText(), /服务器处理失败/);
     await page.unroute(logicalErrorRoute);
 
+    const publicMergeGroup = resolved.conflictResolutionGroups.find(group => group.kind === 'public_merge');
+    assert(publicMergeGroup, 'the public-merge group must remain available for the revision race');
+    const raced = await api('/entities', {
+      revision: resolved.revision,
+      entity: entity('external-revision-race', ['外部版本竞态'], ['外部版本游戏ID']),
+    });
+    assert.equal(raced.revision, resolved.revision + 1, 'the external write must advance the public revision');
+    const beforeStaleRevisionSubmit = f.mutationSnapshot();
+    let staleRevisionUpstreamStatus;
+    let staleRevisionUpstreamCode;
+    await page.route(logicalErrorRoute, async route => {
+      const upstream = await route.fetch();
+      staleRevisionUpstreamStatus = upstream.status();
+      staleRevisionUpstreamCode = (await upstream.json()).code;
+      await route.fulfill({ response: upstream, status: 200 });
+    }, { times: 1 });
+    const staleRevisionRequestCount = resolveRequests.length;
+    const staleRevisionStateRequestCount = stateRequests.length;
+    nextDialogAction = 'accept';
+    await click('#btn-conflict-batch-confirm');
+    assert.equal(staleRevisionUpstreamStatus, 409, 'the real server must reject the stale public revision with HTTP 409');
+    assert.equal(staleRevisionUpstreamCode, 'stale_revision');
+    await page.unroute(logicalErrorRoute);
+    assert.equal(resolveRequests.length, staleRevisionRequestCount + 1, 'a stale revision must produce one request only');
+    assert.deepEqual(resolveRequests.at(-1).postDataJSON(), {
+      revision: resolved.revision,
+      groups: [{ token: publicMergeGroup.token, targetEntityId: 'public-merge-right' }],
+      confirm: true,
+    }, 'the rejected request must contain the dialog revision and explicit retained target');
+    assert.deepEqual(f.mutationSnapshot(), beforeStaleRevisionSubmit,
+      'the rejected stale decision must not change library, submissions, redirects, or audit state');
+    assert.equal(await dialog.evaluate(element => element.open), true, 'a stale revision keeps the refreshed dialog open');
+    assert.equal(await page.locator('#conflict-batch-list input[type="checkbox"]:checked').count(), 0,
+      'a stale revision must clear every old selection for explicit re-checking');
+    assert.equal(await refreshedPublicTarget.inputValue(), '', 'a stale revision must clear the old retained target');
+    assert.equal(await page.locator('#btn-conflict-batch-confirm').isDisabled(), true);
+    assert.equal(await page.locator('#conflict-batch-error').innerText(),
+      '公共库版本已变化。草稿已保留，请重新载入后核对再提交。');
+    assert(stateRequests.length > staleRevisionStateRequestCount, 'a stale revision must refresh authoritative state');
+    assert.match(await page.locator('#status-text').innerText(), new RegExp('公共库版本 ' + raced.revision));
+    const afterStaleRevision = await api('/state');
+    assert.equal(afterStaleRevision.revision, raced.revision);
+    assert(afterStaleRevision.entities.some(item => item.entityId === 'external-revision-race'));
+    assert(afterStaleRevision.entities.some(item => item.entityId === 'public-merge-left'));
+    assert(afterStaleRevision.entities.some(item => item.entityId === 'public-merge-right'));
+    assert.equal(afterStaleRevision.entityRedirects.some(redirect =>
+      redirect.fromEntityId === 'public-merge-left' || redirect.fromEntityId === 'public-merge-right'), false,
+    'the stale public merge must not create a redirect');
+    await page.waitForTimeout(250);
+    assert.equal(resolveRequests.length, staleRevisionRequestCount + 1, 'stale revision choices must not be resubmitted');
+
+    await refreshedPublicTarget.selectOption('public-merge-right');
+    await refreshedPublicCheck.check();
     const stalePayloadRow = f.db.prepare('SELECT payload_json FROM player_library_submissions WHERE id=?').get(f.publicMergeId);
     const stalePayload = JSON.parse(stalePayloadRow.payload_json);
     stalePayload.entities[0].names.push('公共冲突数据已变化');
@@ -394,15 +456,16 @@ function assertExactValues(actual, expected, label) {
     assert.match(await page.locator('#conflict-batch-error').innerText(), /冲突数据已变化，请刷新后重新确认。/);
     assert.equal(await page.locator('#conflict-batch-list input[type="checkbox"]:checked').count(), 0,
       'authoritative stale refresh requires explicit re-checking');
+    assert.equal(await refreshedPublicTarget.inputValue(), '', 'stale conflict data must clear the old retained target');
     assert.equal(await page.locator('#btn-conflict-batch-confirm').isDisabled(), true);
-    assert.equal((await api('/state')).revision, resolved.revision, 'stale resolution must not publish');
+    assert.equal((await api('/state')).revision, raced.revision, 'stale resolution must not publish');
     await page.waitForTimeout(250);
     assert.equal(resolveRequests.length, staleRequestCount + 1, 'stale selections must not be resubmitted');
     await click('#btn-conflict-batch-cancel');
 
     assert.deepEqual(pageErrors, [], 'no page errors');
     assert.deepEqual(consoleErrors, [], 'no console errors');
-    console.log('PASS: real Edge batch conflict preview, cancellation atomicity, exact two-group POST, unions, redirects, stale recovery, and responsive dialog');
+    console.log('PASS: real Edge batch conflict preview, distinct success counts, cancellation atomicity, exact two-group POST, unions, redirects, stale revision/group recovery, and responsive dialog');
     console.log('Screenshots: ' + output);
   } finally {
     try { await context?.close(); }

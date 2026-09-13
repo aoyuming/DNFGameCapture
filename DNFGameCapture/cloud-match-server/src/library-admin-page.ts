@@ -692,7 +692,8 @@ export const LIBRARY_ADMIN_JS = String.raw`
       try {
         result = await api('/conflicts/resolve', { revision: conflictBatchRevision, groups: choices, confirm: true });
       } catch (error) {
-        if (error.code !== 'stale_conflict_group') throw error;
+        if (error.code !== 'stale_conflict_group' && error.code !== 'stale_revision') throw error;
+        const staleCode = error.code;
         const previousSelections = new Map(conflictBatchSelections);
         conflictBatchSelections.clear();
         try { await refresh(); }
@@ -706,12 +707,12 @@ export const LIBRARY_ADMIN_JS = String.raw`
           checked: false,
           targetEntityId: group.kind === 'unique_name_target' ? group.suggestedTargetEntityId || '' : '',
         });
-        renderConflictBatch(); message(errors.stale_conflict_group, true); return;
+        renderConflictBatch(); message(errors[staleCode], true); return;
       }
       $('conflict-batch-dialog').close();
       await refresh();
-      message('冲突合并完成：已接纳 ' + result.associatedEntityCount + ' 个待审实体，剩余待审核 ' + result.pendingSubmissionCount +
-        ' 条，公共库版本 ' + result.revision + '。');
+      message('冲突合并完成：已处理 ' + result.resolvedGroupCount + ' 组冲突，已接纳 ' + result.associatedEntityCount +
+        ' 个待审实体，剩余待审核 ' + result.pendingSubmissionCount + ' 条，公共库版本 ' + result.revision + '。');
     });
   };
   $('btn-public-merge').onclick = () => run(() => openMerge(publicId ? [publicId] : []));
