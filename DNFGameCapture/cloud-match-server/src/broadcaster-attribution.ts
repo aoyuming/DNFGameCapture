@@ -247,27 +247,31 @@ export function createBroadcasterAttributionService(
     },
 
     manualLink(deviceId, licenseId, nowSec): BroadcasterLicenseLink {
-      const broadcaster = db.prepare('SELECT broadcaster_name FROM memberships WHERE device_id=?')
-        .get(deviceId) as { broadcaster_name: string } | undefined;
-      if (!broadcaster) throw new BroadcasterAttributionError(404, 'broadcaster_not_found');
-      const license = db.prepare(`SELECT bound_device_id,activated_at FROM licenses WHERE id=?`)
-        .get(licenseId) as { bound_device_id: string | null; activated_at: number | null } | undefined;
-      if (!license) throw new BroadcasterAttributionError(404, 'license_not_found');
-      if (!license.bound_device_id || license.activated_at === null) {
-        throw new BroadcasterAttributionError(409, 'license_not_activated');
-      }
-      db.prepare(`
-        INSERT INTO broadcaster_license_links(
-          broadcaster_device_id,license_id,license_device_id,broadcaster_name,source,linked_at,updated_at
-        ) VALUES(?,?,?,?,'manual',?,?)
-        ON CONFLICT(broadcaster_device_id) DO UPDATE SET
-          license_id=excluded.license_id,
-          license_device_id=excluded.license_device_id,
-          broadcaster_name=excluded.broadcaster_name,
-          source='manual',
-          updated_at=excluded.updated_at
-      `).run(deviceId, licenseId, license.bound_device_id, broadcaster.broadcaster_name, nowSec, nowSec);
-      return getBroadcasterAttribution(deviceId)!;
+      return db.transaction(() => {
+        const broadcaster = db.prepare('SELECT broadcaster_name FROM memberships WHERE device_id=?')
+          .get(deviceId) as { broadcaster_name: string } | undefined;
+        if (!broadcaster) throw new BroadcasterAttributionError(404, 'broadcaster_not_found');
+        const license = db.prepare(`SELECT bound_device_id,activated_at FROM licenses WHERE id=?`)
+          .get(licenseId) as { bound_device_id: string | null; activated_at: number | null } | undefined;
+        if (!license) throw new BroadcasterAttributionError(404, 'license_not_found');
+        if (!license.bound_device_id || license.activated_at === null) {
+          throw new BroadcasterAttributionError(409, 'license_not_activated');
+        }
+        db.prepare(`DELETE FROM broadcaster_license_links
+          WHERE license_id=? AND broadcaster_device_id<>?`).run(licenseId, deviceId);
+        db.prepare(`
+          INSERT INTO broadcaster_license_links(
+            broadcaster_device_id,license_id,license_device_id,broadcaster_name,source,linked_at,updated_at
+          ) VALUES(?,?,?,?,'manual',?,?)
+          ON CONFLICT(broadcaster_device_id) DO UPDATE SET
+            license_id=excluded.license_id,
+            license_device_id=excluded.license_device_id,
+            broadcaster_name=excluded.broadcaster_name,
+            source='manual',
+            updated_at=excluded.updated_at
+        `).run(deviceId, licenseId, license.bound_device_id, broadcaster.broadcaster_name, nowSec, nowSec);
+        return getBroadcasterAttribution(deviceId)!;
+      }).immediate();
     },
 
     getActiveDeviceIps(): ReadonlyMap<string, string> {

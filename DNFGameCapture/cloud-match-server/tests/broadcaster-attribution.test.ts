@@ -146,6 +146,21 @@ describe('server-side broadcaster attribution', () => {
     });
   });
 
+  test('manual attribution transfers one license away from its previous broadcaster', () => {
+    const { service, addLicense, addBroadcaster } = fixture();
+    const licenseId = addLicense('machine-a');
+    addBroadcaster('socket-a', '主播甲');
+    addBroadcaster('socket-b', '主播乙');
+
+    service.manualLink('socket-a', licenseId, 100);
+    service.manualLink('socket-b', licenseId, 101);
+
+    expect(service.getBroadcasterAttribution('socket-a')).toBeNull();
+    expect(service.getBroadcasterAttribution('socket-b')).toMatchObject({
+      licenseId, broadcasterName: '主播乙', source: 'manual',
+    });
+  });
+
   test('rejects a manual link when the license is not activated or no longer bound', () => {
     const { db, service, addBroadcaster } = fixture();
     addBroadcaster('socket-a', '主播甲');

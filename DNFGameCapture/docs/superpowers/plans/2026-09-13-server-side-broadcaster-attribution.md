@@ -252,17 +252,17 @@ git commit -m "在后台显示主播来源网络与密钥"
 - Modify: `cloud-match-server/tests/production-deployment.test.ts`
 - Modify: `docs/superpowers/plans/2026-09-13-server-side-broadcaster-attribution.md`
 
-- [ ] **Step 1: 先更新发布测试并确认 5.2.3 产物缺失**
+- [x] **Step 1: 先更新发布测试并确认 5.2.3 产物缺失**
 
 Run: `npm test -- --run tests/production-package.test.ts tests/production-deployment.test.ts`
 
 Expected: FAIL，5.2.3 脚本或发布说明尚不存在。
 
-- [ ] **Step 2: 增加仅服务器发布脚本与中文部署说明**
+- [x] **Step 2: 增加仅服务器发布脚本与中文部署说明**
 
 从 5.2.2 的凭据隔离和白名单打包逻辑派生 5.2.3，包名使用 `dnf-cloud-match-server-production-5.2.3.zip`，客户端版本仍标记 5.2.2，并加入 GeoIP 运行时依赖安装说明。
 
-- [ ] **Step 3: 跑完整验证**
+- [x] **Step 3: 跑完整验证**
 
 Run:
 
@@ -276,13 +276,13 @@ powershell -ExecutionPolicy Bypass -File scripts/package-production-5.2.3.ps1 -V
 
 Expected: 全套测试、构建、类型检查和打包校验通过，`diff --check` 无错误。
 
-- [ ] **Step 4: 生成并校验服务器 ZIP**
+- [x] **Step 4: 生成并校验服务器 ZIP**
 
 Run: `powershell -ExecutionPolicy Bypass -File scripts/package-production-5.2.3.ps1 -OutputDirectory deployment-packages`
 
 Expected: 生成新的 5.2.3 ZIP 与 SHA-256 旁车文件；ZIP 内无数据库、主密钥或管理员密码。
 
-- [ ] **Step 5: 记录证据、提交并推送**
+- [x] **Step 5: 记录证据、提交并推送**
 
 将计划复选框和验证结果更新为实际值，然后运行：
 
@@ -293,3 +293,15 @@ git push origin codex/batch-library-conflict-resolution-5.2.2
 ```
 
 Expected: 远端分支与本地 HEAD 一致，并向用户提供 ZIP 路径、SHA-256 和从 `/root` 解压部署的准确命令。
+
+### 2026-09-13 实际验证
+
+- 服务器全量测试：27 个测试文件、380 个测试全部通过。
+- 生产构建：`npm run build` 通过。
+- 测试类型检查：`npm run typecheck:test` 通过。
+- 差异检查：`git -c core.safecrlf=false diff --check` 通过。
+- Edge 浏览器检查：主播、密钥、共享库三个后台检查全部通过，覆盖桌面、窄屏和手机宽度。
+- 打包白名单校验：45 个文件通过，未创建验证期产物。
+- 正式服务器包：`deployment-packages/dnf-cloud-match-server-production-5.2.3.zip`，157921 字节。
+- ZIP SHA-256：`093979fbc95b659388efbe3b467b3a4b236fa203eb023aae1287322cb201b558`。
+- 包内 `release.json`：服务器 `5.2.3`、客户端 `5.2.2`、生产地址和协议版本 2 均正确。

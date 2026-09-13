@@ -6,9 +6,12 @@ import { fileURLToPath } from 'node:url';
 import request from 'supertest';
 import { afterEach, expect, test } from 'vitest';
 import { createCloudMatchApp } from '../src/app.js';
+import { createBroadcasterAttributionService } from '../src/broadcaster-attribution.js';
+import { registerDevice } from '../src/identity.js';
 import { mutatePublicLibrary } from '../src/library-admin-data.js';
 import { listPlayerLibrary } from '../src/library-store.js';
 import { createLicense, listLicenses, revealLicense } from '../src/license-store.js';
+import { joinUnifiedPool } from '../src/unified.js';
 
 const require = createRequire(import.meta.url);
 const deploy = new URL('../deploy/', import.meta.url);
@@ -104,13 +107,26 @@ test('production restart preserves library, session, registered license and vaul
   mutatePublicLibrary(old.db, 0, options.now(), 'create', [{ entityId: 'preserved', names: ['Old player'], gameIds: ['Game ID'] }]);
   const activate = (app: typeof old, key: string, deviceId: string) => request(app.expressApp).post('/api/v2/auth/activate').send({ key, deviceId });
   const first = await activate(old, 'CDK-FFFFFFFF-458E-A78EEAC3', 'production-existing-device').expect(200);
+  expect(registerDevice(old.db, 'production-broadcaster', options.now())).not.toBeNull();
+  expect(joinUnifiedPool(old.db, 'production-broadcaster', '生产主播', options.now())).not.toBeNull();
+  const attribution = createBroadcasterAttributionService(old.db, { resolveRegion: () => '中国 · 浙江 · 杭州' });
+  attribution.connectBroadcaster({ deviceId: 'production-broadcaster', broadcasterName: '生产主播',
+    ipAddress: '47.1.2.3', observedAt: options.now() });
+  attribution.manualLink('production-broadcaster', registered.id, options.now());
   const library = listPlayerLibrary(old.db), cards = listLicenses(old.db);
   const vault = readFileSync(databasePath + '.license-key');
   await old.close(); apps.pop();
   const next = createCloudMatchApp(options); apps.push(next);
+  const restoredAttribution = createBroadcasterAttributionService(next.db);
   expect(listPlayerLibrary(next.db)).toEqual(library);
   expect(listLicenses(next.db)).toEqual(cards);
   expect(revealLicense(next.db, registered.id)).toBe('CDK-FFFFFFFF-458E-A78EEAC3');
+  expect(restoredAttribution.getBroadcasterAttribution('production-broadcaster')).toMatchObject({
+    licenseId: registered.id, broadcasterName: '生产主播', source: 'manual',
+  });
+  expect(restoredAttribution.getBroadcasterNetwork('production-broadcaster')).toMatchObject({
+    currentIp: null, lastIp: '47.1.2.3', region: '中国 · 浙江 · 杭州',
+  });
   await request(next.expressApp).get('/api/v2/player-library').set('Authorization', 'Bearer ' + first.body.sessionToken)
     .set('x-dnf-device-id', 'production-existing-device').expect(200);
   // Previously supplied output from the original native Keygen, not newly generated server keys.
