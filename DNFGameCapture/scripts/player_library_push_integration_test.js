@@ -43,11 +43,55 @@ test('automatic V2 push is rebuilt only after pulled cloud identities are commit
   assert.doesNotMatch(automatic, /DnfSubmitV2PlayerLibrary\(/,
     'the network pull stage must not submit the pre-import snapshot');
   const imported = autoResult.indexOf('QueuePlayerLibraryImport(pending->publicAliasDbJson');
+  const committed = autoResult.indexOf('pending->libraryApplied = true', imported);
+  const guarded = autoResult.indexOf('const auto currentGeneration =', committed);
+  const snapshot = autoResult.indexOf('const auto librarySnapshot =', guarded);
+  const persisted = autoResult.indexOf('!librarySnapshot || !librarySnapshot->persisted', snapshot);
   const rebuilt = autoResult.indexOf('librarySnapshot->v2Entities', imported);
+  const endpoint = autoResult.indexOf('serverEndpoint.IsEmpty()', rebuilt);
   const submitted = autoResult.indexOf('DnfSubmitV2PlayerLibrary(', rebuilt);
-  assert(imported >= 0 && rebuilt > imported && submitted > rebuilt,
-    'the committed pull must publish cloud entity IDs before rebuilding and submitting');
-  assert.match(autoResult, /pending->libraryPartial[\s\S]*公共库存在归属冲突，已暂停自动投稿/);
+  assert(imported >= 0 && committed > imported && guarded > committed &&
+    snapshot > guarded && persisted > snapshot && rebuilt > persisted &&
+    endpoint > rebuilt && submitted > endpoint,
+  'the committed pull and post-import guards must precede the persisted V2 rebuild and submit');
+});
+
+test('partial public pulls report the persisted conflicting snapshot without completing the cycle', () => {
+  const imported = autoResult.indexOf('QueuePlayerLibraryImport(pending->publicAliasDbJson');
+  const partial = autoResult.indexOf('pending->libraryPartial', imported);
+  const rebuilt = autoResult.indexOf('librarySnapshot->v2Entities', partial);
+  const submitDecision = autoResult.indexOf('const bool shouldSubmit', rebuilt);
+  const submitted = autoResult.indexOf('DnfSubmitV2PlayerLibrary(', submitDecision);
+  assert(imported >= 0 && partial > imported && rebuilt > partial &&
+    submitDecision > rebuilt && submitted > submitDecision);
+  assert.doesNotMatch(autoResult, /公共库存在归属冲突，已暂停自动投稿/);
+  assert.match(autoResult, /冲突资料已送后台，等待管理员批量确认/);
+  assert.match(autoResult, /冲突资料已在后台，等待管理员批量确认/);
+  assert.match(autoResult,
+    /const bool shouldSubmit = pending->libraryPartial \|\|\s*!m_playerLibraryPushTracker\.ShouldSkip/);
+  assert.match(autoResult, /const bool cycleReady = !result->libraryPartial/);
+});
+
+test('partial reporting preserves POST failures and treats AlreadyPending as one idempotent submit', () => {
+  const submitted = autoResult.indexOf('DnfSubmitV2PlayerLibrary(');
+  const capturedMessage = autoResult.indexOf('continued->pushMessage = std::string', submitted);
+  const acknowledgedPartial = autoResult.indexOf(
+    'continued->libraryPartial && continued->pushOk', capturedMessage);
+  const finalPartial = autoResult.indexOf('else if (result->libraryPartial)');
+  const checkpoint = autoResult.indexOf('const bool cycleReady = !result->libraryPartial');
+  assert(submitted >= 0 && capturedMessage > submitted &&
+    acknowledgedPartial > capturedMessage && finalPartial > acknowledgedPartial &&
+    checkpoint > finalPartial);
+  assert.equal((autoResult.match(/DnfSubmitV2PlayerLibrary\(/g) || []).length, 1,
+    'AlreadyPending is a server acknowledgment, not a reason for a second POST');
+  const partialReply = autoResult.slice(acknowledgedPartial, finalPartial);
+  assert.match(partialReply, /SubmissionStatus::PendingReview[\s\S]*冲突资料已送后台，等待管理员批量确认/);
+  assert.match(partialReply, /SubmissionStatus::AlreadyPending[\s\S]*冲突资料已在后台，等待管理员批量确认/);
+  const finalState = autoResult.slice(finalPartial, checkpoint);
+  assert.match(finalState, /!result->pushOk[\s\S]*L"failed"/,
+    'a failed conflict POST must remain failed');
+  assert.match(finalState, /IsSkipped\(result->pushStatus\)[\s\S]*L"skipped"[\s\S]*L"success"/,
+    'PendingReview is successful while AlreadyPending remains skipped');
 });
 
 test('only the acknowledged captured request is saved and V2 never resets the live legacy baseline', () => {
@@ -88,8 +132,11 @@ test('post-import automatic push rechecks cancellation before reading the commit
   assert.match(continuationGuard, /!ownsCurrentAttempt/);
   assert.match(continuationGuard, /!m_aliasAutoSyncEnabled/);
   assert.match(continuationGuard, /m_playerLibraryExitPending/);
+  assert.match(continuationGuard, /pending->v2Scope != CurrentV2PlayerLibraryScope\(\)/);
   assert.match(continuationGuard,
     /if \(ownsCurrentAttempt\) m_aliasAutoSyncInFlight = false/);
+  assert.match(continuationGuard, /return;/,
+    'invalid lifetime, generation, scope, or disabled auto-sync must stop before reporting conflicts');
 });
 
 test('versioned digest persistence is separate from the legacy raw hash', () => {

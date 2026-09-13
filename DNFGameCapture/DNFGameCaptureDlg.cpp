@@ -15352,10 +15352,7 @@ LRESULT CDNFGameCaptureDlg::OnAliasDbAutoSyncResult(WPARAM wParam,
             }
 
             if (pending->useServerAuthV2 && committed.ok) {
-                if (pending->libraryPartial) {
-                    pending->pushMessage = "公共库存在归属冲突，已暂停自动投稿";
-                }
-                else if (pending->localPayloadEmpty) {
+                if (pending->localPayloadEmpty && !pending->libraryPartial) {
                     pending->pushOk = true;
                     pending->pushMessage = "本地没有可追加的游戏ID，跳过上传";
                 }
@@ -15387,8 +15384,10 @@ LRESULT CDNFGameCaptureDlg::OnAliasDbAutoSyncResult(WPARAM wParam,
                                     json::parse(submitRequest),
                                     std::string(CW2A(serverEndpoint, CP_UTF8)),
                                     serverDeviceId, keyUtf8);
-                            if (m_playerLibraryPushTracker.ShouldSkip(
-                                pending->submittedSignature)) {
+                            const bool shouldSubmit = pending->libraryPartial ||
+                                !m_playerLibraryPushTracker.ShouldSkip(
+                                    pending->submittedSignature);
+                            if (!shouldSubmit) {
                                 pending->pushOk = true;
                                 pending->pushStatus = dnf::player_library_sync::SubmissionStatus::NoChanges;
                                 pending->pushMessage = "本地库无变化，跳过重复上传";
@@ -15419,6 +15418,14 @@ LRESULT CDNFGameCaptureDlg::OnAliasDbAutoSyncResult(WPARAM wParam,
                                                 continued->pushStatus);
                                             continued->pushMessage = std::string(CW2A(
                                                 pushError, CP_UTF8));
+                                            if (continued->libraryPartial && continued->pushOk) {
+                                                if (continued->pushStatus == dnf::player_library_sync::SubmissionStatus::PendingReview) {
+                                                    continued->pushMessage = "冲突资料已送后台，等待管理员批量确认";
+                                                }
+                                                else if (continued->pushStatus == dnf::player_library_sync::SubmissionStatus::AlreadyPending) {
+                                                    continued->pushMessage = "冲突资料已在后台，等待管理员批量确认";
+                                                }
+                                            }
                                             if (continued->pushMessage.empty()) {
                                                 continued->pushMessage = continued->pushOk ?
                                                     "已提交服务器审核区" : "服务器投稿失败";
@@ -15528,13 +15535,20 @@ LRESULT CDNFGameCaptureDlg::OnAliasDbAutoSyncResult(WPARAM wParam,
         return 0;
     }
 
-    if (result->localPayloadEmpty) {
+    if (result->localPayloadEmpty && !result->libraryPartial) {
         m_aliasAutoSyncLastPushStatus = L"skipped";
         m_aliasAutoSyncLastPushMessage = CA2W(
             result->pushMessage.c_str(), CP_UTF8);
     }
     else if (result->libraryPartial) {
-        m_aliasAutoSyncLastPushStatus = L"skipped";
+        if (!result->pushOk) {
+            m_aliasAutoSyncLastPushStatus = L"failed";
+        }
+        else {
+            m_aliasAutoSyncLastPushStatus =
+                dnf::player_library_sync::IsSkipped(result->pushStatus) ?
+                L"skipped" : L"success";
+        }
         m_aliasAutoSyncLastPushMessage = CA2W(
             result->pushMessage.c_str(), CP_UTF8);
     }
