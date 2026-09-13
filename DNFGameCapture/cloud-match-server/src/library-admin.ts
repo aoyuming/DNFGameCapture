@@ -54,7 +54,8 @@ export function createLibraryAdminApi(db: Database.Database, now: () => number) 
       const q = queryText(request.query.q); const pendingQ = queryText(request.query.pendingQ);
       const filter = request.query.filter;
       return { revision: library.revision, entityRedirects: library.entityRedirects, entities: library.entities.filter(entity => matches(entity, q)),
-        submissions: submissions.filter(item => (!pendingQ || item.deviceId.toLocaleLowerCase().includes(pendingQ) || item.entities.some(entity => matches(entity, pendingQ))) &&
+        submissions: submissions.filter(item => (!pendingQ || item.deviceId.toLocaleLowerCase().includes(pendingQ) ||
+          item.sourceBroadcasterName?.toLocaleLowerCase().includes(pendingQ) || item.entities.some(entity => matches(entity, pendingQ))) &&
           (filter === 'conflict' ? !item.valid || item.conflicts.length > 0 : filter === 'clean' ? item.valid && !item.conflicts.length : true)),
         conflictResolutionGroups,
         conflictResolutionStats,

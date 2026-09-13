@@ -197,6 +197,7 @@ export function createCloudMatchApp(
     csrfToken: adminCsrfToken,
     adminPassword,
     socketController: socketHandlers,
+    attribution,
   });
   const adminHttpServer = createServer(adminExpressApp);
 

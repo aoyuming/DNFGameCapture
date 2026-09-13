@@ -6,6 +6,7 @@ import express, {
   type Request,
   type Response,
 } from 'express';
+import { z } from 'zod';
 
 import {
   buildAdminState,
@@ -14,6 +15,11 @@ import {
   listAdminTemporaryBroadcasterIds,
   pruneExpiredAdminData,
 } from './admin-data.js';
+import {
+  BroadcasterAttributionError,
+  createBroadcasterAttributionService,
+  type BroadcasterAttributionService,
+} from './broadcaster-attribution.js';
 import {
   ADMIN_PAGE_CSS,
   ADMIN_PAGE_JS,
@@ -48,7 +54,12 @@ export interface CreateCloudMatchAdminAppOptions {
   csrfToken: string;
   adminPassword: string;
   socketController: AdminSocketController;
+  attribution?: BroadcasterAttributionService;
 }
+
+const manualLicenseLinkSchema = z.object({
+  licenseId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+}).strict();
 
 function safeDeviceId(value: unknown): string | null {
   const parsed = deviceIdSchema.safeParse(value);
@@ -122,6 +133,7 @@ export function createCloudMatchAdminApp(
   options: CreateCloudMatchAdminAppOptions,
 ): Express {
   const { db, now, csrfToken, adminPassword, socketController } = options;
+  const attribution = options.attribution ?? createBroadcasterAttributionService(db);
   const app = express();
   app.disable('x-powered-by');
   app.use(securityHeaders);
@@ -174,7 +186,7 @@ export function createCloudMatchAdminApp(
       : '';
     response.json({
       ok: true,
-      ...buildAdminState(db, socketController.getActiveDeviceIds(), now(), query),
+      ...buildAdminState(db, socketController.getActiveDeviceIds(), now(), attribution, query),
       licenses: listLicenses(db),
       playerLibrary: listPlayerLibrary(db),
       pendingLibrarySubmissions: listPendingPlayerLibrarySubmissions(db),
@@ -183,7 +195,7 @@ export function createCloudMatchAdminApp(
 
   app.get('/admin/api/broadcasters/state', (request, response) => {
     const query = typeof request.query.q === 'string' ? request.query.q.slice(0, 64) : '';
-    response.json({ ok: true, ...buildAdminState(db, socketController.getActiveDeviceIds(), now(), query) });
+    response.json({ ok: true, ...buildAdminState(db, socketController.getActiveDeviceIds(), now(), attribution, query) });
   });
 
   app.get('/admin/api/player-library', (_request, response) => {
@@ -244,6 +256,23 @@ export function createCloudMatchAdminApp(
       deviceId,
       disabledUntil: getBroadcasterOcrDisabledUntil(db, deviceId),
     });
+  });
+
+  app.put('/admin/api/broadcasters/:deviceId/license', (request, response, next) => {
+    const deviceId = safeDeviceId(request.params.deviceId);
+    const parsed = manualLicenseLinkSchema.safeParse(request.body);
+    if (!deviceId || !parsed.success) {
+      response.status(400).json({ ok: false, code: 'invalid_request' });
+      return;
+    }
+    try {
+      response.json({
+        ok: true,
+        link: attribution.manualLink(deviceId, parsed.data.licenseId, now()),
+      });
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.post('/admin/api/broadcasters/:deviceId/disconnect', (request, response) => {
@@ -313,6 +342,10 @@ export function createCloudMatchAdminApp(
   });
 
   app.use((_error: unknown, _request: Request, response: Response, _next: NextFunction) => {
+    if (_error instanceof BroadcasterAttributionError) {
+      response.status(_error.status).json({ ok: false, code: _error.code });
+      return;
+    }
     response.status(500).json({ ok: false, code: 'internal_error' });
   });
   return app;

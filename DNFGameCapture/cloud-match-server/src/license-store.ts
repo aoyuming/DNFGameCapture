@@ -127,11 +127,31 @@ export function extendLicense(db: Database.Database, id: number, preset: string,
 }
 export function listLicenseDevices(db: Database.Database) {
   // Authorization machine IDs and lobby device IDs belong to different namespaces.
-  return db.prepare(`SELECT deviceId,'' AS name FROM (
-    SELECT device_id AS deviceId FROM auth_sessions
-    UNION SELECT bound_device_id FROM licenses WHERE bound_device_id IS NOT NULL
-    UNION SELECT json_extract(details_json,'$.deviceId') FROM license_audit WHERE action='activate'
-  ) WHERE deviceId IS NOT NULL ORDER BY deviceId`).all() as { deviceId: string; name: string }[];
+  return db.prepare(`
+    WITH identities AS (
+      SELECT device_id AS deviceId FROM auth_sessions
+      UNION SELECT bound_device_id FROM licenses WHERE bound_device_id IS NOT NULL
+      UNION SELECT json_extract(details_json,'$.deviceId') FROM license_audit WHERE action='activate'
+    )
+    SELECT identity.deviceId,
+           COALESCE(link.broadcaster_name,'') AS name,
+           link.broadcaster_name AS broadcasterName,
+           link.broadcaster_device_id AS broadcasterDeviceId
+    FROM identities AS identity
+    LEFT JOIN broadcaster_license_links AS link ON link.rowid=(
+      SELECT candidate.rowid FROM broadcaster_license_links AS candidate
+      WHERE candidate.license_device_id=identity.deviceId
+      ORDER BY candidate.source='manual' DESC,candidate.updated_at DESC,candidate.rowid DESC
+      LIMIT 1
+    )
+    WHERE identity.deviceId IS NOT NULL
+    ORDER BY identity.deviceId
+  `).all() as Array<{
+    deviceId: string;
+    name: string;
+    broadcasterName: string | null;
+    broadcasterDeviceId: string | null;
+  }>;
 }
 export function rebindLicense(db: Database.Database, id: number, deviceId: string | null, revision: number, requestId: string, now: number) {
   const result = operation(db, requestId, { action: 'rebind', id, deviceId, revision }, now, () => {

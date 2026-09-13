@@ -7,8 +7,10 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { createCloudMatchAdminApp } from '../src/admin.js';
 import { createCloudMatchApp } from '../src/app.js';
 import { generateLicenseKey, hashLicenseKey } from '../src/auth.js';
+import { createBroadcasterAttributionService } from '../src/broadcaster-attribution.js';
 import { openDatabase } from '../src/db.js';
 import { registerDevice } from '../src/identity.js';
+import { activateStoredLicense, createLicense } from '../src/license-store.js';
 import type { MatchSnapshot, Player } from '../src/schemas.js';
 import { saveSnapshot } from '../src/snapshots.js';
 import {
@@ -78,6 +80,9 @@ function createFixture() {
   const directory = mkdtempSync(join(tmpdir(), 'dnf-cloud-admin-'));
   const db = openDatabase(join(directory, 'admin.sqlite'));
   initializeSyncRelationSchema(db);
+  const attribution = createBroadcasterAttributionService(db, {
+    resolveRegion: () => '中国 · 浙江 · 杭州',
+  });
   const activeDeviceIds = new Set<string>();
   const disconnected: string[] = [];
   const stopped: string[] = [];
@@ -102,6 +107,7 @@ function createFixture() {
     csrfToken,
     adminPassword,
     socketController,
+    attribution,
   });
   resources.push({ directory, close: () => db.close() });
   return {
@@ -111,6 +117,7 @@ function createFixture() {
     disconnected,
     stopped,
     notifications,
+    attribution,
   };
 }
 
@@ -176,6 +183,54 @@ describe('localhost admin console', () => {
     const legacy = await request(app).get('/admin/api/state').auth('admin', adminPassword).expect(200);
     expect(legacy.body).toHaveProperty('licenses');
     expect(legacy.body).toHaveProperty('playerLibrary');
+  });
+
+  test('shows broadcaster network and safe license attribution and allows a manual rebind', async () => {
+    const { app, db, activeDeviceIds, attribution } = createFixture();
+    seedBroadcaster(db, 'attributed-broadcaster-01', '归属主播', now);
+    activeDeviceIds.add('attributed-broadcaster-01');
+    const firstKey = generateLicenseKey();
+    const first = createLicense(db, { key: firstKey, label: '自动卡', nowSec: now });
+    activateStoredLicense(db, firstKey, 'license-machine-0001', now, 3600);
+    attribution.observeLicense({
+      licenseId: first.id,
+      licenseDeviceId: 'license-machine-0001',
+      ipAddress: '47.1.2.3',
+      observedAt: now,
+    });
+    attribution.connectBroadcaster({
+      deviceId: 'attributed-broadcaster-01',
+      broadcasterName: '归属主播',
+      ipAddress: '47.1.2.3',
+      observedAt: now,
+    });
+
+    const state = await request(app).get('/admin/api/broadcasters/state')
+      .auth('admin', adminPassword).expect(200);
+    expect(state.body.broadcasters[0]).toMatchObject({
+      currentIp: '47.1.2.3',
+      lastIp: '47.1.2.3',
+      region: '中国 · 浙江 · 杭州',
+      license: {
+        id: first.id,
+        label: '自动卡',
+        deviceId: 'license-machine-0001',
+        hasKey: true,
+        source: 'automatic',
+      },
+    });
+    expect(JSON.stringify(state.body)).not.toContain(firstKey);
+
+    const secondKey = generateLicenseKey();
+    const second = createLicense(db, { key: secondKey, label: '人工卡', nowSec: now });
+    activateStoredLicense(db, secondKey, 'license-machine-0002', now, 3600);
+    const linked = await request(app)
+      .put('/admin/api/broadcasters/attributed-broadcaster-01/license')
+      .auth('admin', adminPassword)
+      .set('x-dnf-admin-csrf', csrfToken)
+      .send({ licenseId: second.id })
+      .expect(200);
+    expect(linked.body.link).toMatchObject({ licenseId: second.id, source: 'manual' });
   });
 
   test('wires the admin console to an independently startable HTTP server', async () => {

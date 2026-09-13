@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 
+import type { BroadcasterAttributionService } from './broadcaster-attribution.js';
 import type { MatchSnapshot } from './schemas.js';
 import { getSnapshot } from './snapshots.js';
 import {
@@ -21,6 +22,17 @@ export interface AdminBroadcasterState {
   receivedAt: number | null;
   offlineExpiresAt: number | null;
   snapshot: MatchSnapshot | null;
+  currentIp: string | null;
+  lastIp: string | null;
+  region: string;
+  ipObservedAt: number | null;
+  license: {
+    id: number;
+    label: string;
+    deviceId: string;
+    hasKey: boolean;
+    source: 'automatic' | 'manual';
+  } | null;
 }
 
 export interface AdminState {
@@ -39,15 +51,39 @@ export function buildAdminState(
   db: Database.Database,
   activeDeviceIds: ReadonlySet<string>,
   nowSec: number,
+  attribution: BroadcasterAttributionService,
   query = '',
 ): AdminState {
   const normalizedQuery = query.normalize('NFC').trim().toLocaleLowerCase();
   const broadcasters = listUnifiedBroadcasters(db, activeDeviceIds, nowSec)
+    .map((item) => {
+      const network = attribution.getBroadcasterNetwork(item.deviceId);
+      const link = attribution.getBroadcasterAttribution(item.deviceId);
+      return {
+        ...item,
+        currentIp: network.currentIp,
+        lastIp: network.lastIp,
+        region: network.region,
+        ipObservedAt: network.observedAt,
+        license: link ? {
+          id: link.licenseId,
+          label: link.licenseLabel,
+          deviceId: link.licenseDeviceId,
+          hasKey: link.hasKey,
+          source: link.source,
+        } : null,
+      };
+    })
     .filter((item) => {
       if (!normalizedQuery) return true;
       return item.broadcasterName.toLocaleLowerCase().includes(normalizedQuery) ||
         item.deviceId.toLocaleLowerCase().includes(normalizedQuery) ||
-        item.deviceSuffix.toLocaleLowerCase().includes(normalizedQuery);
+        item.deviceSuffix.toLocaleLowerCase().includes(normalizedQuery) ||
+        item.currentIp?.toLocaleLowerCase().includes(normalizedQuery) ||
+        item.lastIp?.toLocaleLowerCase().includes(normalizedQuery) ||
+        item.region.toLocaleLowerCase().includes(normalizedQuery) ||
+        item.license?.label.toLocaleLowerCase().includes(normalizedQuery) ||
+        item.license?.deviceId.toLocaleLowerCase().includes(normalizedQuery);
     })
     .map((item) => ({
       ...item,

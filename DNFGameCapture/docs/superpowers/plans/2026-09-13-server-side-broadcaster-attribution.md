@@ -150,7 +150,7 @@ git commit -m "接入授权与主播网络观察"
 - Modify: `cloud-match-server/tests/license-management.test.ts`
 - Modify: `cloud-match-server/tests/library-admin.test.ts`
 
-- [ ] **Step 1: 先写三个管理接口的失败测试**
+- [x] **Step 1: 先写三个管理接口的失败测试**
 
 ```ts
 expect(broadcaster).toMatchObject({
@@ -163,13 +163,13 @@ expect(submission.sourceBroadcasterName).toBe('主播甲');
 expect(JSON.stringify(state)).not.toContain(rawLicenseKey);
 ```
 
-- [ ] **Step 2: 运行测试并确认字段缺失**
+- [x] **Step 2: 运行测试并确认字段缺失**
 
 Run: `npm test -- --run tests/admin.test.ts tests/license-management.test.ts tests/library-admin.test.ts`
 
 Expected: FAIL，主播、密钥和投稿响应缺少归属字段。
 
-- [ ] **Step 3: 实现安全摘要与人工绑定接口**
+- [x] **Step 3: 实现安全摘要与人工绑定接口**
 
 ```ts
 app.put('/admin/api/broadcasters/:deviceId/license', (request, response) => {
@@ -181,7 +181,7 @@ app.put('/admin/api/broadcasters/:deviceId/license', (request, response) => {
 
 `buildAdminState` 增加当前/最后 IP、地区和无明文密钥摘要；`listLicenseDevices` 增加关联主播名；`listAdminSubmissions` 增加来源主播名与设备 ID，筛选同时匹配主播名。
 
-- [ ] **Step 4: 运行相关测试并提交**
+- [x] **Step 4: 运行相关测试并提交**
 
 Run: `npm test -- --run tests/admin.test.ts tests/license-management.test.ts tests/library-admin.test.ts`
 

@@ -10,6 +10,8 @@ import Database from 'better-sqlite3';
 import { openDatabase } from '../src/db.js';
 import { activateStoredLicense, generateLicenseBatch, listLicenses, revealLicense } from '../src/license-store.js';
 import { decryptLicenseKey } from '../src/license-vault.js';
+import { registerDevice } from '../src/identity.js';
+import { joinUnifiedPool } from '../src/unified.js';
 
 const resources: { app: ReturnType<typeof createCloudMatchApp>; directory: string }[] = [];
 const password = 'license-fixture-password', csrf = 'license-fixture-csrf';
@@ -231,6 +233,30 @@ test('rebind options use authorization hardware IDs, not unrelated broadcaster i
   expect(state.devices.map((d: { deviceId: string }) => d.deviceId)).toContain(device);
   expect(state.devices.map((d: { deviceId: string }) => d.deviceId)).not.toContain('socket-broadcaster-01');
   await f.post(`/${created.id}/rebind`, { deviceId: 'socket-broadcaster-01', revision: state.licenses[0].revision, requestId: 'wrong-kind-0001' }).expect(400);
+});
+
+test('license devices show the broadcaster linked to the activated key', async () => {
+  const f = await fixture();
+  expect(registerDevice(f.app.db, 'linked-broadcaster-01', f.clock.now)).not.toBeNull();
+  expect(joinUnifiedPool(f.app.db, 'linked-broadcaster-01', '密钥主播', f.clock.now)).not.toBeNull();
+  const created = (await f.post('', {
+    preset: 'day', count: 1, requestId: 'linked-device-create-0001',
+  }).expect(201)).body.licenses[0];
+  await f.activate(created.key, device).expect(200);
+  await request(f.app.adminExpressApp)
+    .put('/admin/api/broadcasters/linked-broadcaster-01/license')
+    .auth('admin', password)
+    .set('x-dnf-admin-csrf', csrf)
+    .send({ licenseId: created.id })
+    .expect(200);
+
+  const linkedDevice = (await f.get().expect(200)).body.devices
+    .find((item: { deviceId: string }) => item.deviceId === device);
+  expect(linkedDevice).toMatchObject({
+    name: '密钥主播',
+    broadcasterName: '密钥主播',
+    broadcasterDeviceId: 'linked-broadcaster-01',
+  });
 });
 
 test('old license schema migrates without touching fixed expiry, disabled state or binding', () => {

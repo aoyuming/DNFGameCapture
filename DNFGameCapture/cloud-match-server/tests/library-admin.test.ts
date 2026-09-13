@@ -1,7 +1,12 @@
 import request from 'supertest';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createCloudMatchAdminApp } from '../src/admin.js';
+import { generateLicenseKey } from '../src/auth.js';
+import { createBroadcasterAttributionService } from '../src/broadcaster-attribution.js';
 import { openDatabase } from '../src/db.js';
+import { registerDevice } from '../src/identity.js';
+import { activateStoredLicense, createLicense } from '../src/license-store.js';
+import { joinUnifiedPool } from '../src/unified.js';
 import { approvePlayerLibrarySubmission, createPlayerLibraryEntity } from '../src/v2-api.js';
 
 const databases: ReturnType<typeof openDatabase>[] = [];
@@ -10,9 +15,10 @@ const entity = (entityId = 'alpha', names = ['Alpha', 'Alias'], gameIds = ['Game
 function fixture() {
   const db = openDatabase(':memory:');
   databases.push(db);
+  const attribution = createBroadcasterAttributionService(db);
   const app = createCloudMatchAdminApp({ db, now: () => 1700000000, csrfToken: 'csrf', adminPassword: 'password',
     socketController: { getActiveDeviceIds: () => new Set(), disconnectDevice: () => false,
-      stopRealtimeViewer: () => false, notifyDirectoryChanged: () => {} } });
+      stopRealtimeViewer: () => false, notifyDirectoryChanged: () => {} }, attribution });
   const get = (url: string) => request(app).get('/admin/api/library' + url).auth('admin', 'password');
   const post = (url: string, body: object) => request(app).post('/admin/api/library' + url)
     .auth('admin', 'password').set('x-dnf-admin-csrf', 'csrf').send(body);
@@ -21,7 +27,7 @@ function fixture() {
   const pending = (entities: unknown[]) => Number(db.prepare(`INSERT INTO player_library_submissions
     (device_id,payload_json,status,created_at) VALUES ('fixture-device',?,'pending',1700000000)`)
     .run(JSON.stringify({ entities })).lastInsertRowid);
-  return { db, app, get, post, put, pending };
+  return { db, app, get, post, put, pending, attribution };
 }
 afterEach(() => databases.splice(0).forEach(db => db.close()));
 
@@ -236,6 +242,28 @@ describe('normalized library administration', () => {
     expect((await get('/state?filter=conflict')).body.submissions).toHaveLength(1);
     expect((await get('/state?filter=clean')).body.submissions).toHaveLength(1);
     expect(db.prepare('SELECT revision FROM player_library_meta').get()).toEqual({ revision: 0 });
+  });
+
+  test('shows and searches the broadcaster that submitted a pending player library', async () => {
+    const { get, pending, db, attribution } = fixture();
+    expect(registerDevice(db, 'source-broadcaster-01', 1700000000)).not.toBeNull();
+    expect(joinUnifiedPool(db, 'source-broadcaster-01', '投稿主播甲', 1700000000)).not.toBeNull();
+    const key = generateLicenseKey();
+    const license = createLicense(db, { key, label: '投稿卡', nowSec: 1700000000 });
+    activateStoredLicense(db, key, 'fixture-device', 1700000000, 3600);
+    attribution.manualLink('source-broadcaster-01', license.id, 1700000000);
+    const id = pending([entity('from-streamer', ['来源选手'], ['来源ID'])]);
+
+    const state = (await get('/state')).body;
+    expect(state.submissions[0]).toMatchObject({
+      id,
+      sourceBroadcasterName: '投稿主播甲',
+      sourceBroadcasterDeviceId: 'source-broadcaster-01',
+    });
+    expect((await get('/state?pendingQ=' + encodeURIComponent('投稿主播甲'))).body.submissions)
+      .toHaveLength(1);
+    expect((await get('/submissions/' + id)).body.submission.sourceBroadcasterName)
+      .toBe('投稿主播甲');
   });
 
   test('guards review edits and reject against stale public revisions, and allows rejecting corrupt records', async () => {

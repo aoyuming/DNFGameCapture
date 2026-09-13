@@ -289,7 +289,18 @@ export function readAdminSubmission(db: Database.Database, id: number, publicEnt
   try { entities = parseAdminEntities(boundedJson(row.payload_json), index => `submission-${id}-${index}`); } catch { valid = false; }
   const analysis = reconcile(entities);
   const { conflicts, automaticGroups } = projectedLibrary(publicEntities, analysis.entities, evidence);
-  return { id, deviceId: row.device_id, createdAt: row.created_at, status: row.status, valid, ...analysis, conflicts, automaticGroups,
+  let source: { broadcaster_name: string; broadcaster_device_id: string } | undefined;
+  try {
+    source = db.prepare(`SELECT broadcaster_name,broadcaster_device_id
+      FROM broadcaster_license_links WHERE license_device_id=?
+      ORDER BY source='manual' DESC,updated_at DESC,rowid DESC LIMIT 1`).get(row.device_id) as typeof source;
+  } catch {
+    // Older standalone databases may not have initialized attribution tables yet.
+  }
+  return { id, deviceId: row.device_id,
+    sourceBroadcasterName: source?.broadcaster_name ?? null,
+    sourceBroadcasterDeviceId: source?.broadcaster_device_id ?? null,
+    createdAt: row.created_at, status: row.status, valid, ...analysis, conflicts, automaticGroups,
     reviewReason: row.review_reason,
     submissionRevision: createHash('sha256').update(JSON.stringify([row.payload_json, row.status])).digest('hex') };
 }
