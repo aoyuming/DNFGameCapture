@@ -19,13 +19,13 @@
 - Modify: `cloud-match-server/package.json`
 - Modify: `cloud-match-server/package-lock.json`
 
-- [ ] **Step 1: 安装本地 GeoIP 依赖**
+- [x] **Step 1: 安装本地 GeoIP 依赖**
 
 Run: `npm install geoip-lite && npm install --save-dev @types/geoip-lite`
 
 Expected: `package.json` 和锁文件只增加 GeoIP 运行时依赖及类型依赖。
 
-- [ ] **Step 2: 先写失败测试**
+- [x] **Step 2: 先写失败测试**
 
 ```ts
 test('只在同一公网 IP 的授权与在线主播均唯一时自动关联', () => {
@@ -48,13 +48,13 @@ test('共享 IP 存在多个候选时不自动关联且人工关联不会被覆�
 });
 ```
 
-- [ ] **Step 3: 运行测试并确认因模块不存在而失败**
+- [x] **Step 3: 运行测试并确认因模块不存在而失败**
 
 Run: `npm test -- --run tests/broadcaster-attribution.test.ts`
 
 Expected: FAIL，原因是 `broadcaster-attribution.ts` 尚不存在。
 
-- [ ] **Step 4: 实现最小核心服务**
+- [x] **Step 4: 实现最小核心服务**
 
 ```ts
 export interface BroadcasterAttributionService {
@@ -70,7 +70,7 @@ export interface BroadcasterAttributionService {
 
 实现启动幂等建表、IP 规范化、公网判断、120 秒唯一候选匹配、人工优先和本地地区解析。所有观察写入异常在服务边界内降级，不影响业务请求；人工写入异常正常返回。
 
-- [ ] **Step 5: 运行核心测试并提交**
+- [x] **Step 5: 运行核心测试并提交**
 
 Run: `npm test -- --run tests/broadcaster-attribution.test.ts`
 
