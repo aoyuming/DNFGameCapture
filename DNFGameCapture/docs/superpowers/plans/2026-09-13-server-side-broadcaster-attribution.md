@@ -204,7 +204,7 @@ git commit -m "向管理接口提供主播归属信息"
 - Modify: `scripts/check-license-admin.cjs`
 - Modify: `scripts/check-cloud-library-admin.cjs`
 
-- [ ] **Step 1: 先写页面契约失败测试**
+- [x] **Step 1: 先写页面契约失败测试**
 
 ```ts
 expect(BROADCASTER_ADMIN_JS).toContain('/license');
@@ -215,17 +215,17 @@ expect(LIBRARY_ADMIN_JS).toContain('sourceBroadcasterName');
 
 浏览器检查还要断言选中主播后显示完整卡密，未关联时显示“未关联密钥”，投稿列表显示主播名，所有表格在桌面和手机宽度无横向内容溢出。
 
-- [ ] **Step 2: 运行测试并确认页面尚未渲染新字段**
+- [x] **Step 2: 运行测试并确认页面尚未渲染新字段**
 
 Run: `npm test -- --run tests/admin.test.ts tests/license-admin-page.test.ts`
 
 Expected: FAIL，缺少归属渲染和直接查看密钥逻辑。
 
-- [ ] **Step 3: 按现有后台样式实现页面**
+- [x] **Step 3: 按现有后台样式实现页面**
 
 主播详情增加网络与授权信息区、已激活密钥选择器；选择主播后自动 POST `/admin/api/licenses/:id/reveal` 并直接显示结果。密钥页绑定栏显示主播名；选手库列表和详情显示来源主播，设备 ID 作为次要文字。所有动态文本继续使用 `textContent`。
 
-- [ ] **Step 4: 运行页面测试和浏览器检查并提交**
+- [x] **Step 4: 运行页面测试和浏览器检查并提交**
 
 Run:
 

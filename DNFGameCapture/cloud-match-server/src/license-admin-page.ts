@@ -19,7 +19,7 @@ export function buildLicenseAdminPage(csrfToken: string): string {
 <div class="license-heading"><h2 id="issued-heading">本次生成 <span id="issued-count" class="muted"></span></h2><div class="license-actions"><button id="copy-all-keys" type="button">复制全部</button><button id="export-keys" type="button">导出文本</button><button id="hide-issued-keys" type="button">隐藏本批密钥</button></div></div>
 <div id="issued-keys" class="license-key-list"></div></section></section>
 <section aria-labelledby="licenses-heading"><div class="license-heading"><h2 id="licenses-heading">密钥列表 <span id="license-count" class="muted">0</span></h2><label>搜索<input id="license-search" type="search" placeholder="备注 / 设备 / 编号"></label></div>
-<div class="table-scroll" tabindex="0" role="region" aria-label="密钥列表"><table><thead><tr><th scope="col">编号 / 备注</th><th scope="col">状态</th><th scope="col">有效期</th><th scope="col">绑定设备</th><th scope="col">卡密</th><th scope="col">管理</th></tr></thead><tbody id="license-list"></tbody></table></div>
+  <div class="table-scroll" tabindex="0" role="region" aria-label="密钥列表"><table><thead><tr><th scope="col">编号 / 备注</th><th scope="col">状态</th><th scope="col">有效期</th><th scope="col">激活主播 / 绑定设备</th><th scope="col">卡密</th><th scope="col">管理</th></tr></thead><tbody id="license-list"></tbody></table></div>
 <p id="license-empty" class="empty" hidden>暂无匹配密钥</p></section>
 <div id="copy-fallback-wrap" class="license-copy-fallback" hidden><label>待复制密钥<textarea id="copy-fallback" readonly spellcheck="false" rows="4"></textarea></label></div>
 </main>
@@ -172,7 +172,7 @@ export const LICENSE_ADMIN_JS = String.raw`
   }
   function render() {
     const query = $('license-search').value.trim().toLocaleLowerCase();
-    const visible = licenses.filter(item => [item.id, item.label, item.boundDeviceId, devices.find(device => device.deviceId === item.boundDeviceId)?.name]
+    const visible = licenses.filter(item => [item.id, item.label, item.boundDeviceId, devices.find(device => device.deviceId === item.boundDeviceId)?.broadcasterName]
       .some(value => String(value ?? '').toLocaleLowerCase().includes(query)));
     $('license-list').replaceChildren(); $('license-count').textContent = visible.length + ' / ' + licenses.length;
     $('license-empty').hidden = !!visible.length;
@@ -186,8 +186,8 @@ export const LICENSE_ADMIN_JS = String.raw`
       if (unactivated(item) && item.durationSeconds !== null) expiry.append(node('span', '首次使用起算', 'muted'));
       row.append(expiry);
       const device = devices.find(device => device.deviceId === item.boundDeviceId);
-      const binding = node('td', device?.name || item.boundDeviceId || '未绑定');
-      if (device?.name) binding.append(node('span', item.boundDeviceId, 'muted')); row.append(binding);
+      const binding = node('td', device?.broadcasterName ? '主播：' + device.broadcasterName : item.boundDeviceId || '未绑定');
+      if (device?.broadcasterName) binding.append(node('span', '授权设备：' + item.boundDeviceId, 'muted')); row.append(binding);
       const keyCell = node('td', undefined, 'license-key-cell'), keyActions = node('div', undefined, 'license-actions');
       if (revealed.has(item.id)) {
         keyCell.append(keyInput(revealed.get(item.id), '密钥 ' + item.id));
@@ -309,7 +309,7 @@ export const LICENSE_ADMIN_JS = String.raw`
     $('audit-list').hidden = action !== 'audit'; $('audit-list').replaceChildren();
     presetOptions($('dialog-preset')); $('dialog-preset').selectedIndex = 0;
     $('dialog-device').replaceChildren(); const unbind = node('option', '解除绑定（下次使用时绑定）'); unbind.value = ''; $('dialog-device').append(unbind);
-    for (const device of devices) { const option = node('option', (device.name || '授权设备') + ' · ' + device.deviceId); option.value = device.deviceId; $('dialog-device').append(option); }
+    for (const device of devices) { const option = node('option', (device.broadcasterName ? '主播 ' + device.broadcasterName : '授权设备') + ' · ' + device.deviceId); option.value = device.deviceId; $('dialog-device').append(option); }
     if (devices.some(device => device.deviceId === item.boundDeviceId)) $('dialog-device').value = item.boundDeviceId;
     preview(); controls(); $('license-dialog').showModal();
   }
@@ -331,7 +331,7 @@ export const LICENSE_ADMIN_JS = String.raw`
       }
     } else if (action === 'rebind') {
       const device = devices.find(device => device.deviceId === $('dialog-device').value);
-      text = device ? '确认绑定至：' + (device.name || device.deviceId) + '\n' + device.deviceId : '确认解除绑定，下次使用时绑定设备。';
+      text = device ? '确认绑定至：' + (device.broadcasterName || device.deviceId) + '\n' + device.deviceId : '确认解除绑定，下次使用时绑定设备。';
       text += '\n有效期不变，不会重新计时。旧服务端授权会话将撤销，已签发的离线授权不会被远程清除。';
     } else if (action === 'key') text = '仅补录与当前记录匹配的原始卡密，不会更换卡密或改变有效期。';
     else if (action === 'disable') text = item.disabledAt !== null ? '确认恢复此密钥使用资格？原有效期和绑定设备保持不变。' : '确认禁用此密钥？已签发的离线授权不会被远程清除。';

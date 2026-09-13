@@ -159,8 +159,12 @@ describe('localhost admin console', () => {
     }
     const broadcasters = await request(app).get('/admin/broadcasters/app.js').auth('admin', adminPassword);
     expect(broadcasters.text).not.toContain('player-library');
-    expect(broadcasters.text).not.toContain('/api/licenses');
+    expect(broadcasters.text).toContain('/admin/api/licenses');
+    expect(broadcasters.text).toContain('/license');
+    expect(broadcasters.text).toContain('/reveal');
     expect(broadcasters.text).toContain('/admin/api/broadcasters/state');
+    const library = await request(app).get('/admin/library/app.js').auth('admin', adminPassword);
+    expect(library.text).toContain('sourceBroadcasterName');
     const licenses = await request(app).get('/admin/licenses/app.js').auth('admin', adminPassword);
     expect(licenses.text).not.toContain('/api/state');
     for (const path of ['/admin/api/licenses', '/admin/api/cleanup/expired', '/admin/api/library/review']) {

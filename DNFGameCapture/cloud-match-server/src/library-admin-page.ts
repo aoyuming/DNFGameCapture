@@ -17,7 +17,7 @@ export function buildLibraryAdminPage(csrfToken: string): string {
 <section class="panel pending-panel" aria-labelledby="pending-heading">
 <div class="panel-head"><div><h2 id="pending-heading">待审核投稿</h2><span id="pending-meta">读取中...</span></div>
 <label class="checkbox-line"><input type="checkbox" id="check-all">全选</label></div>
-<div class="filters"><input id="pending-search" aria-label="搜索待审核投稿" placeholder="搜索名称 / ID / 提交者">
+<div class="filters"><input id="pending-search" aria-label="搜索待审核投稿" placeholder="搜索名称 / ID / 主播">
 <select id="conflict-filter" aria-label="名称归属冲突筛选"><option value="all">全部</option><option value="clean">无名称冲突</option><option value="conflict">有名称冲突</option></select></div>
 <div class="pending-list-box list-box"><span>待审核列表</span><div id="pending-list" class="pending-list"></div></div></section>
 <section class="panel detail-panel" aria-labelledby="detail-heading">
@@ -207,7 +207,7 @@ export const LIBRARY_ADMIN_JS = String.raw`
   }
   function visiblePending() {
     const q = normalize($('pending-search').value), filter = $('conflict-filter').value;
-    return state.submissions.filter(item => (!q || normalize(item.deviceId).includes(q) || item.entities.some(entity => matches(entity, q))) &&
+    return state.submissions.filter(item => (!q || normalize(item.deviceId).includes(q) || normalize(item.sourceBroadcasterName || '').includes(q) || item.entities.some(entity => matches(entity, q))) &&
       (filter === 'conflict' ? !item.valid || item.conflicts.length : filter === 'clean' ? item.valid && !item.conflicts.length : true));
   }
   function renderPending() {
@@ -219,7 +219,7 @@ export const LIBRARY_ADMIN_JS = String.raw`
       const check = node('input'); check.type = 'checkbox'; check.checked = selected.has(item.id); check.setAttribute('aria-label', '选择投稿 ' + item.id);
       check.onchange = () => { ++refreshGeneration; if (check.checked) selected.set(item.id, { submissionRevision: item.submissionRevision, revision: state.revision }); else selected.delete(item.id); renderPending(); controls(); };
       const open = node('button', 'pending-open'); open.dataset.submissionId = item.id; open.setAttribute('aria-label', '查看投稿 ' + item.id);
-      open.append(node('span', 'pending-title', '投稿 #' + item.id));
+      open.append(node('span', 'pending-title', '投稿 #' + item.id + ' · ' + (item.sourceBroadcasterName || '未关联主播')));
       const device = node('span', 'pending-device', item.deviceId); device.title = item.deviceId; open.append(device);
       open.append(node('span', 'pending-sub', new Date(item.createdAt * 1000).toLocaleString() + ' · ' + item.entities.length + ' 个实体'));
       open.append(node('span', 'pending-sub', changeSummary(item)));
@@ -339,7 +339,7 @@ export const LIBRARY_ADMIN_JS = String.raw`
     const container = $('detail-view'), scroll = container.scrollTop; container.replaceChildren();
     if (!active) { $('detail-meta').textContent = '未选择投稿'; container.append(node('p', 'empty', '暂无选中投稿')); return; }
     $('detail-meta').textContent = '#' + active.id + ' · ' + ({ pending: '待审核', approved: '已通过', rejected: '已驳回' }[active.status] || active.status);
-    container.append(node('div', 'detail-summary', active.deviceId + ' · ' + new Date(active.createdAt * 1000).toLocaleString()));
+    container.append(node('div', 'detail-summary', (active.sourceBroadcasterName || '未关联主播') + ' · ' + active.deviceId + ' · ' + new Date(active.createdAt * 1000).toLocaleString()));
     const summary = node('div', 'submission-summary');
     summary.append(node('p', '', '原始 ' + (active.rawEntityCount ?? active.entities.length) + ' · 归并后 ' + active.entities.length + ' 个实体' +
       (active.matchedEntityCount === undefined ? '' : ' · 匹配公共实体 ' + active.matchedEntityCount)));

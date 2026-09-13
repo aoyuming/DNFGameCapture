@@ -40,6 +40,8 @@ describe('license admin page contract', () => {
     expect(page.LICENSE_ADMIN_JS).toContain('requestId');
     expect(page.LICENSE_ADMIN_JS).toContain('revision');
     expect(page.LICENSE_ADMIN_JS).not.toMatch(/localStorage|sessionStorage|https?:\/\//);
+    expect(page.LICENSE_ADMIN_JS).toContain('broadcasterName');
+    expect(page.buildLicenseAdminPage('token')).toContain('激活主播');
   });
 
   test('bounds stalled requests and names backend audit fields in Chinese', () => {

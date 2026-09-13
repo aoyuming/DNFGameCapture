@@ -9,6 +9,8 @@ const load = name => import(pathToFileURL(path.resolve(__dirname, '../cloud-matc
 (async () => {
   const { openDatabase } = await load('db');
   const { createCloudMatchAdminApp } = await load('admin');
+  const { createBroadcasterAttributionService } = await load('broadcaster-attribution');
+  const licenseStore = await load('license-store');
   const { initializeSyncRelationSchema } = await load('sync-relations');
   const { registerDevice } = await load('identity');
   const { joinUnifiedPool } = await load('unified');
@@ -18,8 +20,10 @@ const load = name => import(pathToFileURL(path.resolve(__dirname, '../cloud-matc
   for (const [id, name] of [['hub-online-device', '在线主播'], ['hub-offline-device', '离线主播']]) {
     registerDevice(db, id, now); joinUnifiedPool(db, id, name, now);
   }
+  const attribution = createBroadcasterAttributionService(db, { resolveRegion: () => '中国 · 浙江 · 杭州' });
+  attribution.connectBroadcaster({ deviceId: 'hub-online-device', broadcasterName: '在线主播', ipAddress: '47.1.2.3', observedAt: now });
   const app = createCloudMatchAdminApp({ db, now: () => now, csrfToken: 'hub-csrf', adminPassword: 'hub-fixture-password',
-    socketController: { getActiveDeviceIds: () => new Set(active), disconnectDevice: id => active.delete(id), stopRealtimeViewer: () => false, notifyDirectoryChanged: () => {} } });
+    socketController: { getActiveDeviceIds: () => new Set(active), disconnectDevice: id => active.delete(id), stopRealtimeViewer: () => false, notifyDirectoryChanged: () => {} }, attribution });
   const server = await new Promise(resolve => { const server = app.listen(0, '127.0.0.1', () => resolve(server)); });
   const url = 'http://127.0.0.1:' + server.address().port;
   let browser;
@@ -88,12 +92,21 @@ const load = name => import(pathToFileURL(path.resolve(__dirname, '../cloud-matc
     assert.match(await page.locator('#message').innerText(), /请求失败/);
     await page.unroute('**/admin/api/licenses'); await click('#refresh-licenses');
     await screenshots('licenses');
+    const activated = licenseStore.activateStoredLicense(db, key, 'hub-license-machine', now, 3600).license;
+    attribution.observeLicense({ licenseId: activated.id, licenseDeviceId: 'hub-license-machine', ipAddress: '47.1.2.3', observedAt: now });
     await page.getByRole('link', { name: '管理首页', exact: true }).click(); requests.length = 0;
     await page.getByRole('link', { name: '管理主播', exact: true }).click();
     await page.waitForFunction(() => document.getElementById('broadcaster-count').textContent === '2');
-    assert(requests.every(route => route === '/admin/api/broadcasters/state'));
+    assert(requests.every(route => route === '/admin/api/broadcasters/state' || route === '/admin/api/licenses'));
     assert.equal(await page.locator('#license-list').count(), 0);
     await page.locator('.broadcaster-row').filter({ hasText: '在线主播' }).click();
+    await page.waitForFunction(expected => document.getElementById('license-key-value').value === expected, key);
+    assert.equal(await page.locator('#current-ip').innerText(), '47.1.2.3');
+    assert.equal(await page.locator('#ip-region').innerText(), '中国 · 浙江 · 杭州');
+    assert.equal(await page.locator('#license-key-value').inputValue(), key);
+    const bound = page.waitForResponse(response => response.request().method() === 'PUT' && response.url().endsWith('/admin/api/broadcasters/hub-online-device/license'));
+    await page.locator('#bind-license').click(); await bound;
+    assert.equal(db.prepare("SELECT source FROM broadcaster_license_links WHERE broadcaster_device_id='hub-online-device'").get().source, 'manual');
     assert.equal(await page.locator('#delete-button').isDisabled(), true);
     assert.equal(await page.locator('#ocr-device-id').inputValue(), 'hub-online-device');
     await page.locator('#ocr-until').fill(String(now + 600));

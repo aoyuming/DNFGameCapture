@@ -9,12 +9,23 @@ const entity = (entityId, names, gameIds = []) => ({ entityId, names, gameIds })
 async function fixture() {
   const { openDatabase } = await load('db');
   const { createCloudMatchAdminApp } = await load('admin');
+  const { generateLicenseKey } = await load('auth');
+  const { createBroadcasterAttributionService } = await load('broadcaster-attribution');
   const { initializeSyncRelationSchema } = await load('sync-relations');
+  const { registerDevice } = await load('identity');
+  const { createLicense, activateStoredLicense } = await load('license-store');
+  const { joinUnifiedPool } = await load('unified');
   const { mutatePublicLibrary } = await load('library-admin-data');
   const directory = mkdtempSync(path.join(tmpdir(), 'dnf-library-admin-'));
   const db = openDatabase(path.join(directory, 'fixture.sqlite'));
   initializeSyncRelationSchema(db);
   const now = Math.floor(Date.now() / 1000);
+  const attribution = createBroadcasterAttributionService(db);
+  registerDevice(db, 'source-broadcaster', now); joinUnifiedPool(db, 'source-broadcaster', '投稿来源主播', now);
+  const sourceKey = generateLicenseKey();
+  const sourceLicense = createLicense(db, { key: sourceKey, label: '投稿来源卡', nowSec: now });
+  activateStoredLicense(db, sourceKey, 'dnf-test-broadcaster', now, 3600);
+  attribution.manualLink('source-broadcaster', sourceLicense.id, now);
   const entities = [entity('public-alpha', ['丁真', '抖音丁真'], ['江西2马搞#驱魔师', '抖音暗黑马区', '马区#驱魔师'])];
   for (let i = 1; i <= 32; i++) entities.push(entity('public-' + i, ['测试选手' + String(i).padStart(2, '0')], ['游戏角色' + i, '游戏别号' + i]));
   mutatePublicLibrary(db, 0, now, 'import', entities);
@@ -39,7 +50,7 @@ async function fixture() {
   ]);
   for (let i = 1; i <= 18; i++) pending([entity('pending-' + i, ['投稿选手' + i], ['投稿角色' + i])], 'fixture-device-' + i);
   const app = createCloudMatchAdminApp({ db, now: () => now, csrfToken: 'library-preview-csrf', adminPassword: 'library-preview-only',
-    socketController: { getActiveDeviceIds: () => new Set(), disconnectDevice: () => false, stopRealtimeViewer: () => false, notifyDirectoryChanged: () => {} } });
+    socketController: { getActiveDeviceIds: () => new Set(), disconnectDevice: () => false, stopRealtimeViewer: () => false, notifyDirectoryChanged: () => {} }, attribution });
   const server = await new Promise((resolve, reject) => { const server = app.listen(0, '127.0.0.1', () => resolve(server)); server.once('error', reject); });
   const url = 'http://127.0.0.1:' + server.address().port;
   const close = async () => {
@@ -85,7 +96,8 @@ async function fixture() {
     assert.equal(reconciled.updatedEntityCount, 1); assert.equal(reconciled.unchangedCount, 1);
     assert.equal(reconciled.conflicts.length, 0);
     await click('[data-submission-id="' + f.reconciledId + '"]');
-    assert.equal(await page.locator('[data-submission-id="' + f.reconciledId + '"] .pending-title').innerText(), '投稿 #' + f.reconciledId);
+    assert.equal(await page.locator('[data-submission-id="' + f.reconciledId + '"] .pending-title').innerText(), '投稿 #' + f.reconciledId + ' · 投稿来源主播');
+    assert.match(await page.locator('#detail-view').innerText(), /投稿来源主播/);
     assert.match(await page.locator('.submission-summary').innerText(), /原始 3.*归并后 2/);
     assert.match(await page.locator('.submission-summary').innerText(), /新增 0.*补充 1.*无变化 1/);
     assert.match(await page.locator('.entity-delta').first().innerText(), /新关联别名/);

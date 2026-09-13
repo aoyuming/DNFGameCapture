@@ -23,7 +23,8 @@ const presets = [
   ['ten_days', '十天卡', 864000], ['quarter', '季度卡', 7776000],
   ['half_year', '半年卡', 15552000], ['year', '年卡', 31536000], ['permanent', '永久卡', null],
 ].map(([id, label, durationSeconds]) => ({ id, label, durationSeconds }));
-const devices = [{ deviceId: 'device-known', name: '已知设备 <img src=x onerror=alert(1)>' }];
+const devices = [{ deviceId: 'device-known', name: '已知设备',
+  broadcasterName: '激活主播 · 已知设备 <img src=x onerror=alert(1)>', broadcasterDeviceId: 'fixture-broadcaster' }];
 
 function fixture() {
   const keys = new Map(), events = new Map(), replay = new Map(), writes = [];
@@ -133,8 +134,10 @@ async function realSecurity() {
 async function realBrowser(browser, output) {
   const { openDatabase } = load('db');
   const { createCloudMatchAdminApp } = load('admin');
-  const store = load('license-store');
-  const { registerDevice } = load('identity');
+    const store = load('license-store');
+    const { createBroadcasterAttributionService } = load('broadcaster-attribution');
+    const { registerDevice } = load('identity');
+    const { joinUnifiedPool } = load('unified');
   const db = openDatabase(':memory:');
   let server, context;
   try {
@@ -144,9 +147,12 @@ async function realBrowser(browser, output) {
     db.prepare('UPDATE licenses SET key_ciphertext=NULL WHERE id=?').run(legacy.id);
     const permanent = store.createLicense(db, { key: generateLicenseKey(), label: '永久', expiresAt: null, nowSec: now });
     store.activateStoredLicense(db, store.revealLicense(db, permanent.id), 'known-device-b', now, 3600);
+    registerDevice(db, 'real-broadcaster', now); joinUnifiedPool(db, 'real-broadcaster', '真实激活主播', now);
+    const attribution = createBroadcasterAttributionService(db);
+    attribution.manualLink('real-broadcaster', permanent.id, now);
     const disconnected = [];
     const app = createCloudMatchAdminApp({ db, now: () => now, csrfToken: csrf, adminPassword: password,
-      socketController: { getActiveDeviceIds: () => new Set(), disconnectDevice: id => { disconnected.push(id); return true; }, stopRealtimeViewer: () => false, notifyDirectoryChanged() {} } });
+      socketController: { getActiveDeviceIds: () => new Set(), disconnectDevice: id => { disconnected.push(id); return true; }, stopRealtimeViewer: () => false, notifyDirectoryChanged() {} }, attribution });
     server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
     const url = 'http://127.0.0.1:' + server.address().port;
     context = await browser.newContext({ httpCredentials: { username: 'admin', password }, viewport: { width: 1366, height: 900 } });
@@ -185,6 +191,7 @@ async function realBrowser(browser, output) {
     assert.equal(cssResponse.text, LICENSE_ADMIN_CSS, 'parent mounts composed license stylesheet');
     assert.equal(await page.locator('#license-preset option').count(), 8);
     assert.match(await row(legacy.id).innerText(), /已过期/);
+    assert.match(await row(permanent.id).innerText(), /真实激活主播/);
     await page.locator('#license-quantity').fill('2'); await page.locator('#license-preset').selectOption('hour');
     await page.locator('#license-label').fill('真实批次 <img src=x onerror=alert(1)>');
     await lostWrite('', '#create-license');
@@ -361,7 +368,7 @@ async function realBrowser(browser, output) {
     await page.locator('#dialog-device').selectOption('device-known');
     assert.match(await page.locator('#dialog-preview').innerText(), /离线/);
     await screenshot('rebind'); await click('#dialog-submit');
-    assert.equal(f.licenses[0].boundDeviceId, 'device-known'); assert.match(await row(1).innerText(), /已知设备/);
+    assert.equal(f.licenses[0].boundDeviceId, 'device-known'); assert.match(await row(1).innerText(), /激活主播.*已知设备/);
     await action(1, '换绑'); await page.locator('#dialog-device').selectOption(''); await click('#dialog-cancel');
     assert.equal(f.licenses[0].boundDeviceId, 'device-known');
     await action(1, '换绑'); await page.locator('#dialog-device').selectOption(''); await click('#dialog-submit');
