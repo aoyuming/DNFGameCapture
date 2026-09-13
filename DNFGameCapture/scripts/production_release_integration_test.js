@@ -73,12 +73,16 @@ test('interrupted settings migration cannot mistake a legacy production token fo
   assert.match(settings, /const bool environmentChanged = previousEnvironment\.IsEmpty\(\) \?\s*\(production \? m_priorPlayerLibrary == L"test" : !previousTest\)/);
 });
 
-test('5.2.2 release notes keep deployment manual and packaging evidence unfilled', () => {
+test('5.2.2 release notes keep deployment manual and record measured package evidence', () => {
   const notes = read('docs/release-5.2.2.md');
   for (const marker of ['源头预防', '部分冲突', '名称确认', '持久重定向', 'server-first',
     '不自动部署', '不上传 OSS', '不发布更新清单', '不执行真实冲突批次',
-    'TEST_TOTALS_TBD', 'CLIENT_ARTIFACT_PATH_TBD', 'SERVER_ARTIFACT_PATH_TBD',
-    'CLIENT_SHA256_TBD', 'SERVER_SHA256_TBD']) assert.match(notes, new RegExp(marker));
-  assert.doesNotMatch(notes, /\b[A-Fa-f0-9]{64}\b/,
-    'Task 6 must not invent artifact hashes before final packaging');
+    'update_v522\\.zip', 'dnf-cloud-match-server-production-5\\.2\\.2\\.zip',
+    '364/364', '91/91', '5\\.2\\.2\\.0', '43 allowlisted entries', '14 allowlisted runtime entries']) {
+    assert.match(notes, new RegExp(marker));
+  }
+  assert.doesNotMatch(notes, /_TBD\b/, 'final release evidence must not retain placeholders');
+  const hashes = [...notes.matchAll(/SHA256:\s*([A-Fa-f0-9]{64})\b/g)].map(match => match[1]);
+  assert.equal(hashes.length, 3, 'client ZIP, server ZIP and client EXE hashes must be recorded');
+  assert.equal(new Set(hashes).size, 3, 'each recorded artifact must have its own measured hash');
 });
