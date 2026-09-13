@@ -7,7 +7,9 @@ import request from 'supertest';
 import { afterEach, describe, expect, test } from 'vitest';
 
 import { createCloudMatchApp } from '../src/app.js';
+import { generateLicenseKey } from '../src/auth.js';
 import * as comparisonStore from '../src/comparison.js';
+import { createLicense } from '../src/license-store.js';
 import { createCloudMatchRateLimitService } from '../src/rate-limits.js';
 import * as roomStore from '../src/rooms.js';
 import type { MatchSnapshot, Player } from '../src/schemas.js';
@@ -286,6 +288,33 @@ afterEach(async () => {
 });
 
 describe('cloud match Socket.IO integration', () => {
+  test('associates one recent license and broadcaster observed on the same unique public IP', async () => {
+    const clock = { now: 1_700_000_000 };
+    const { app, url } = await startApp({
+      now: () => clock.now,
+      resolveClientIp: () => '47.1.2.3',
+    });
+    const key = generateLicenseKey();
+    const license = createLicense(app.db, { key, label: '主播测试卡', nowSec: clock.now });
+    await request(url).post('/api/v2/auth/activate').send({
+      key, deviceId: 'machine-attribution-0001',
+    }).expect(200);
+    const broadcaster = await createDevice(url, 'socket-attribution-0001');
+
+    await emitAck(broadcaster.socket, 'broadcaster:join', { broadcasterName: '归属测试主播' });
+
+    await waitUntil(() => {
+      expect(app.db.prepare(`SELECT broadcaster_device_id,license_id,license_device_id,broadcaster_name,source
+        FROM broadcaster_license_links WHERE broadcaster_device_id=?`).get('socket-attribution-0001')).toEqual({
+        broadcaster_device_id: 'socket-attribution-0001',
+        license_id: license.id,
+        license_device_id: 'machine-attribution-0001',
+        broadcaster_name: '归属测试主播',
+        source: 'automatic',
+      });
+    });
+  });
+
   test('keeps comparison tokens stable across presence churn and advances only data revisions', async () => {
     const { app, url } = await startApp();
     const viewer = await createDevice(url, 'revision-viewer-0001');

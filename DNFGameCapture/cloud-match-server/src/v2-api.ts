@@ -9,6 +9,7 @@ import express, {
 import type Database from 'better-sqlite3';
 import { z } from 'zod';
 
+import type { BroadcasterAttributionService } from './broadcaster-attribution.js';
 import {
   hashSessionToken,
   isLicenseUsable,
@@ -65,6 +66,8 @@ export interface V2ApiOptions {
   serverUrl: string;
   sessionTtlSeconds?: number;
   allowLegacyPermanentKeys?: boolean;
+  resolveClientIp?(remoteAddress: string): string;
+  attribution?: BroadcasterAttributionService;
 }
 
 export interface SubmittedPlayerEntity {
@@ -228,6 +231,26 @@ function bearerToken(request: Request): string | null {
   return value?.startsWith('Bearer ') ? value.slice(7).trim() || null : null;
 }
 
+function observeLicenseRequest(
+  options: V2ApiOptions,
+  request: Request,
+  deviceId: string,
+  license: LicenseRecord,
+): void {
+  if (!options.attribution) return;
+  try {
+    const remoteAddress = request.socket.remoteAddress ?? 'unknown';
+    options.attribution.observeLicense({
+      licenseId: license.id,
+      licenseDeviceId: deviceId,
+      ipAddress: options.resolveClientIp?.(remoteAddress) ?? remoteAddress,
+      observedAt: options.now(),
+    });
+  } catch {
+    // Attribution is diagnostic and must not block a valid authorization request.
+  }
+}
+
 function requireSession(options: V2ApiOptions) {
   return (request: Request, _response: Response, next: NextFunction): void => {
     const deviceId = typeof request.header('x-dnf-device-id') === 'string'
@@ -243,6 +266,7 @@ function requireSession(options: V2ApiOptions) {
       return;
     }
     (request as Request & { v2Session: SessionContext }).v2Session = session;
+    observeLicenseRequest(options, request, session.deviceId, session.license);
     next();
   };
 }
@@ -308,6 +332,7 @@ export function createV2Api(options: V2ApiOptions): Router {
       const { key, deviceId } = parsed.data;
       const { token, license } = activateStoredLicense(options.db, key, deviceId, options.now(), sessionTtlSeconds,
         options.allowLegacyPermanentKeys);
+      observeLicenseRequest(options, request, deviceId, license);
       response.json(authResponse(options, deviceId, token, license));
     } catch (error) {
       next(error);
@@ -320,6 +345,7 @@ export function createV2Api(options: V2ApiOptions): Router {
       if (!parsed.success) throw new V2RequestError(400, 'invalid_request');
       const session = loadSession(options.db, parsed.data.sessionToken, parsed.data.deviceId, options.now());
       if (!session) throw new V2RequestError(401, 'invalid_session');
+      observeLicenseRequest(options, request, parsed.data.deviceId, session.license);
       response.json(authResponse(options, parsed.data.deviceId, parsed.data.sessionToken, session.license));
     } catch (error) {
       next(error);

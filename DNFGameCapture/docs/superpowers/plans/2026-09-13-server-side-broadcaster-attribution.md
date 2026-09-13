@@ -90,7 +90,7 @@ git commit -m "实现服务器端主播归属核心"
 - Modify: `cloud-match-server/tests/v2-api.test.ts`
 - Modify: `cloud-match-server/tests/socket-integration.test.ts`
 
-- [ ] **Step 1: 先写 HTTP 与 Socket 失败测试**
+- [x] **Step 1: 先写 HTTP 与 Socket 失败测试**
 
 ```ts
 test('现有 v2 请求记录授权机器码和解析后的客户端 IP', async () => {
@@ -107,13 +107,13 @@ test('主播连接记录当前 IP 且断开后移出当前 IP 映射', async () 
 });
 ```
 
-- [ ] **Step 2: 运行测试并确认缺少观察调用而失败**
+- [x] **Step 2: 运行测试并确认缺少观察调用而失败**
 
 Run: `npm test -- --run tests/v2-api.test.ts tests/socket-integration.test.ts`
 
 Expected: FAIL，观察记录或 `getActiveDeviceIps` 不存在。
 
-- [ ] **Step 3: 注入并调用归属服务**
+- [x] **Step 3: 注入并调用归属服务**
 
 ```ts
 const attribution = createBroadcasterAttributionService(db);
@@ -127,7 +127,7 @@ expressApp.use('/api/v2', createV2Api({
 
 授权激活、验证及 `requireSession` 成功后调用 `observeLicense`；Socket 连接、恢复会员身份、加入、改名和断开分别调用对应观察方法。旧协议字段和事件响应保持不变。
 
-- [ ] **Step 4: 运行相关测试并提交**
+- [x] **Step 4: 运行相关测试并提交**
 
 Run: `npm test -- --run tests/v2-api.test.ts tests/socket-integration.test.ts`
 

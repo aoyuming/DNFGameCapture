@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { Server as SocketIoServer, Socket } from 'socket.io';
 import { z } from 'zod';
 
+import type { BroadcasterAttributionService } from './broadcaster-attribution.js';
 import { compareRoomSnapshots, type RoomComparison } from './comparison.js';
 import { ALL_BROADCASTERS_ROOM_ID, openDatabase } from './db.js';
 import { authenticateDevice, touchLastSeen } from './identity.js';
@@ -206,6 +207,7 @@ export interface RegisterCloudMatchSocketHandlersContext {
   rateLimitService: CloudMatchRateLimitService;
   resolveClientIp(remoteAddress: string): string;
   socketRoomAdapter: SocketRoomAdapter;
+  attribution?: BroadcasterAttributionService;
 }
 
 export interface CloudMatchSocketHandlerRegistration {
@@ -406,6 +408,7 @@ export function registerCloudMatchSocketHandlers(
     rateLimitService,
     resolveClientIp,
     socketRoomAdapter,
+    attribution,
     snapshotService = { saveSnapshot, getSnapshot, getRoomSnapshots },
     comparisonService = { compareRoomSnapshots },
   } = context;
@@ -838,6 +841,14 @@ export function registerCloudMatchSocketHandlers(
         });
         previousSocket.disconnect(true);
       }
+      if (membership) {
+        attribution?.connectBroadcaster({
+          deviceId,
+          broadcasterName: membership.broadcasterName,
+          ipAddress: socketIpAddress,
+          observedAt: now(),
+        });
+      }
       if (restoredRoomId) {
         scheduleRoomPresence(restoredRoomId, deviceId, true);
       }
@@ -845,6 +856,7 @@ export function registerCloudMatchSocketHandlers(
     void initialization.catch(async () => {
       if (activeSockets.get(deviceId) === socket) {
         activeSockets.delete(deviceId);
+        attribution?.disconnectBroadcaster(deviceId);
       }
       if (restoredRoomId && socket.rooms.has(roomNamespace(restoredRoomId))) {
         try {
@@ -970,6 +982,12 @@ export function registerCloudMatchSocketHandlers(
             throw new Error('Membership persistence did not match the requested room');
           }
           persisted = true;
+          attribution?.connectBroadcaster({
+            deviceId,
+            broadcasterName: membership.broadcasterName,
+            ipAddress: socketIpAddress,
+            observedAt: now(),
+          });
 
           const roomChanged =
             previousRoomId !== membership.room.id ||
@@ -1052,6 +1070,7 @@ export function registerCloudMatchSocketHandlers(
           };
         }
         if (previousMembership?.broadcasterName !== membership.broadcasterName) {
+          attribution?.renameBroadcaster(deviceId, membership.broadcasterName, now());
           emitRoomChanged(
             socket,
             membership.room.id,
@@ -1099,6 +1118,7 @@ export function registerCloudMatchSocketHandlers(
           await setAdapterMembership(socketRoomAdapter, socket, previousRoomId, null);
           await roomService.leaveRoom(db, deviceId);
           persisted = true;
+          attribution?.disconnectBroadcaster(deviceId);
           if (previousRoomId) {
             emitRoomChanged(
               socket,
@@ -1177,6 +1197,12 @@ export function registerCloudMatchSocketHandlers(
           return { ok: false, code: 'invalid_broadcaster_name', ...(requestId ? { requestId } : {}) };
         }
         await socketRoomAdapter.join(socket, UNIFIED_POOL_NAMESPACE);
+        attribution?.connectBroadcaster({
+          deviceId,
+          broadcasterName: membership.broadcasterName,
+          ipAddress: socketIpAddress,
+          observedAt: now(),
+        });
         emitUnifiedChanged('joined');
         return {
           ok: true,
@@ -1214,6 +1240,7 @@ export function registerCloudMatchSocketHandlers(
         }
         const membership = renameUnifiedBroadcaster(db, deviceId, parsed.data.broadcasterName, now());
         if (!membership) return { ok: false, code: 'not_registered', ...(requestId ? { requestId } : {}) };
+        attribution?.renameBroadcaster(deviceId, membership.broadcasterName, now());
         emitUnifiedChanged('renamed');
         return { ok: true, ...membership, ...(requestId ? { requestId } : {}) };
       },
@@ -1633,6 +1660,7 @@ export function registerCloudMatchSocketHandlers(
       const wasActive = activeSockets.get(deviceId) === socket;
       if (wasActive) {
         activeSockets.delete(deviceId);
+        attribution?.disconnectBroadcaster(deviceId);
       }
       void enqueueDeviceOperation(deviceId, async () => {
         try {

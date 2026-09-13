@@ -9,6 +9,7 @@ import express, {
 import { Server as SocketIoServer } from 'socket.io';
 
 import { createCloudMatchAdminApp } from './admin.js';
+import { createBroadcasterAttributionService } from './broadcaster-attribution.js';
 import { compareRoomSnapshots } from './comparison.js';
 import { serverConfig } from './config.js';
 import { openDatabase } from './db.js';
@@ -130,6 +131,7 @@ export function createCloudMatchApp(
       },
     };
   const db = openDatabase(options.databasePath ?? serverConfig.databasePath);
+  const attribution = createBroadcasterAttributionService(db);
   initializeSyncRelationSchema(db);
   pruneSyncRelationData(db, now());
   const expressApp = express();
@@ -145,6 +147,8 @@ export function createCloudMatchApp(
     now,
     serverUrl: options.v2ServerUrl ?? serverConfig.publicUrl,
     allowLegacyPermanentKeys: options.allowLegacyPermanentKeys ?? serverConfig.allowLegacyPermanentKeys,
+    resolveClientIp: (remoteAddress) => resolveClientIp('http', remoteAddress),
+    attribution,
   }));
   // Keep the legacy registration endpoint small, while letting the v2
   // player-library router enforce its own larger payload limit.
@@ -183,6 +187,7 @@ export function createCloudMatchApp(
     rateLimitService,
     resolveClientIp: (remoteAddress) => resolveClientIp('socket', remoteAddress),
     socketRoomAdapter,
+    attribution,
   });
   const adminCsrfToken = options.adminCsrfToken ?? randomBytes(32).toString('base64url');
   const adminPassword = options.adminPassword ?? randomBytes(24).toString('base64url');

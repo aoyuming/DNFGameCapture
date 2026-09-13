@@ -6,6 +6,7 @@ import request from 'supertest';
 import { afterEach, describe, expect, test } from 'vitest';
 
 import { hashLicenseKey } from '../src/auth.js';
+import { createBroadcasterAttributionService } from '../src/broadcaster-attribution.js';
 import { openDatabase } from '../src/db.js';
 import { mergePublicLibrary, mutatePublicLibrary } from '../src/library-admin-data.js';
 import {
@@ -29,6 +30,9 @@ function createFixture() {
     `INSERT INTO licenses (key_hash, label, expires_at, disabled_at, bound_device_id, created_at, updated_at)
      VALUES (?, ?, ?, NULL, NULL, ?, ?)`,
   ).run(hashLicenseKey('CDK-TEST-ONE'), 'test card', now + 86_400, now, now);
+  const attribution = createBroadcasterAttributionService(db, {
+    resolveRegion: () => '中国 · 浙江 · 杭州',
+  });
   const app = express();
   app.use(express.json({ limit: '128kb' }));
   app.use('/api/v2', createV2Api({
@@ -36,6 +40,8 @@ function createFixture() {
     now: () => now,
     serverUrl: 'http://127.0.0.1:28880',
     sessionTtlSeconds: 86_400,
+    resolveClientIp: () => '47.1.2.3',
+    attribution,
   }));
   resources.push({ directory, close: () => db.close() });
   return { app, db };
@@ -49,6 +55,19 @@ afterEach(() => {
 });
 
 describe('test-server v2 API', () => {
+  test('records authorization activity with the server-resolved client IP', async () => {
+    const { app, db } = createFixture();
+
+    await request(app).post('/api/v2/auth/activate').send({
+      key: 'CDK-TEST-ONE', deviceId: 'device-test-0001',
+    }).expect(200);
+
+    expect(db.prepare(`SELECT license_device_id,ip_address,observed_at
+      FROM license_ip_observations`).get()).toEqual({
+      license_device_id: 'device-test-0001', ip_address: '47.1.2.3', observed_at: now,
+    });
+  });
+
   test('downloads full redirects and resolves retired upload IDs with new fields while retaining raw IDs for audit', async () => {
     const { app, db } = createFixture();
     const row = (entityId: string, names = [entityId], gameIds: string[] = []) => ({ entityId, names, gameIds });
