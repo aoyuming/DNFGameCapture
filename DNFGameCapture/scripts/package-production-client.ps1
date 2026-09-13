@@ -5,14 +5,14 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $ReleaseDir) { $ReleaseDir = Join-Path (Split-Path -Parent $root) 'x64\Release' }
-if (-not $OutputPath) { $OutputPath = Join-Path $root 'deployment-packages\update_v521.zip' }
+if (-not $OutputPath) { $OutputPath = Join-Path $root 'deployment-packages\update_v522.zip' }
 $ReleaseDir = (Resolve-Path -LiteralPath $ReleaseDir).Path
 $OutputPath = [IO.Path]::GetFullPath($OutputPath)
 if (Test-Path -LiteralPath $OutputPath) { throw "Output already exists: $OutputPath" }
 
 $exe = Join-Path $ReleaseDir 'DNFGameCapture.exe'
 $version = (Get-Item -LiteralPath $exe).VersionInfo.FileVersion
-if ($version -ne '5.2.1.0') { throw "Expected EXE version 5.2.1.0, got $version" }
+if ($version -ne '5.2.2.0') { throw "Expected EXE version 5.2.2.0, got $version" }
 $manifestUrl = 'https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/cloud-server-prod.json'
 $binaryText = [Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($exe))
 if (-not $binaryText.Contains($manifestUrl)) { throw 'The executable does not contain the production manifest URL' }

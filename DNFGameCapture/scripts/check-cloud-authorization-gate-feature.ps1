@@ -165,17 +165,17 @@ Require-Text $poll 'DisableCloudMatchForAuthorization(' `
 Require-Text $source 'DnfIsCloudMatchWebAction(action) && !HasAuthorizedCloudMatchEndpoint()' `
     'Cloud Web commands are not blocked before authorization.'
 
-Require-Text $header '#define CURRENT_VERSION L"5.2.1"' `
-    'Application version is not 5.2.1.'
+Require-Text $header '#define CURRENT_VERSION L"5.2.2"' `
+    'Application version is not 5.2.2.'
 foreach ($needle in @(
-    'FILEVERSION 5,2,1,0',
-    'PRODUCTVERSION 5,2,1,0',
-    'VALUE "FileVersion", "5.2.1.0"',
-    'VALUE "ProductVersion", "5.2.1.0"'
+    'FILEVERSION 5,2,2,0',
+    'PRODUCTVERSION 5,2,2,0',
+    'VALUE "FileVersion", "5.2.2.0"',
+    'VALUE "ProductVersion", "5.2.2.0"'
 )) {
     Require-Text $resources $needle "Windows version resource is outdated: $needle"
 }
-Require-Text $resources '5.2.1",IDC_STATIC' `
+Require-Text $resources '5.2.2",IDC_STATIC' `
     'The About dialog still shows an outdated user-visible version.'
 
 Write-Host 'Cloud authorization gate static checks passed.'

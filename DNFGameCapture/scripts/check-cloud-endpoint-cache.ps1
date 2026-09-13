@@ -20,7 +20,7 @@ function Require-Text([string]$content, [string]$needle, [string]$message) {
 }
 
 Require-Text $header 'bool m_cloudServerAuthV2 = true;' `
-    '5.2.1 production clients must default to server authorization v2.'
+    '5.2.2 production clients must default to server authorization v2.'
 Require-Text $header 'CString m_cloudEndpointManifestUrl;' `
     'The endpoint manifest URL is not persisted in the client state.'
 Require-Text $header 'CString m_cloudServerLastKnownUrl;' `

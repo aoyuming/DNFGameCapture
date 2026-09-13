@@ -7,22 +7,22 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 const source = read('DNFGameCaptureDlg.cpp');
 const body = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start) + start.length));
 
-test('5.2.1 release metadata and client package stay aligned', () => {
-  assert.match(read('DNFGameCaptureDlg.h'), /CURRENT_VERSION L"5\.2\.1"/);
+test('5.2.2 release metadata and client package stay aligned', () => {
+  assert.match(read('DNFGameCaptureDlg.h'), /CURRENT_VERSION L"5\.2\.2"/);
   const resource = fs.readFileSync(path.join(root, 'DNFGameCapture.rc'), 'utf16le');
-  assert.match(resource, /FILEVERSION 5,2,1,0/);
-  assert.match(resource, /PRODUCTVERSION 5,2,1,0/);
-  assert.match(resource, /VALUE "FileVersion", "5\.2\.1\.0"/);
-  assert.match(resource, /VALUE "ProductVersion", "5\.2\.1\.0"/);
-  assert.match(resource, /5\.2\.1",IDC_STATIC/);
+  assert.match(resource, /FILEVERSION 5,2,2,0/);
+  assert.match(resource, /PRODUCTVERSION 5,2,2,0/);
+  assert.match(resource, /VALUE "FileVersion", "5\.2\.2\.0"/);
+  assert.match(resource, /VALUE "ProductVersion", "5\.2\.2\.0"/);
+  assert.match(resource, /5\.2\.2",IDC_STATIC/);
   const packageClient = read('scripts/package-production-client.ps1');
-  assert.match(packageClient, /update_v521\.zip/);
-  assert.match(packageClient, /Expected EXE version 5\.2\.1\.0/);
+  assert.match(packageClient, /deployment-packages\\update_v522\.zip/);
+  assert.match(packageClient, /Expected EXE version 5\.2\.2\.0/);
   assert.match(packageClient, /Get-FileHash[\s\S]*Release web file does not match source/);
-  assert.match(read('scripts/DNFGameCapture-5.0.2.iss'), /AppVersion "5\.2\.1"/);
+  assert.match(read('scripts/DNFGameCapture-5.0.2.iss'), /AppVersion "5\.2\.2"/);
 });
 
-test('5.2.1 release wiring uses compiled environment, not legacy opt-in', () => {
+test('5.2.2 release wiring uses compiled environment, not legacy opt-in', () => {
   const settings = body('void CDNFGameCaptureDlg::LoadCloudMatchSettings()', 'bool CDNFGameCaptureDlg::SaveCloudMatchSettings()');
   assert.match(settings, /m_cloudServerAuthV2 = true;/);
   assert.match(settings, /dnf::cloud_release::CurrentManifestUrl\(\)/);
@@ -71,4 +71,14 @@ test('automatic registration restores the saved broadcaster name before joining'
 test('interrupted settings migration cannot mistake a legacy production token for a test token', () => {
   const settings = body('void CDNFGameCaptureDlg::LoadCloudMatchSettings()', 'bool CDNFGameCaptureDlg::SaveCloudMatchSettings()');
   assert.match(settings, /const bool environmentChanged = previousEnvironment\.IsEmpty\(\) \?\s*\(production \? m_priorPlayerLibrary == L"test" : !previousTest\)/);
+});
+
+test('5.2.2 release notes keep deployment manual and packaging evidence unfilled', () => {
+  const notes = read('docs/release-5.2.2.md');
+  for (const marker of ['源头预防', '部分冲突', '名称确认', '持久重定向', 'server-first',
+    '不自动部署', '不上传 OSS', '不发布更新清单', '不执行真实冲突批次',
+    'TEST_TOTALS_TBD', 'CLIENT_ARTIFACT_PATH_TBD', 'SERVER_ARTIFACT_PATH_TBD',
+    'CLIENT_SHA256_TBD', 'SERVER_SHA256_TBD']) assert.match(notes, new RegExp(marker));
+  assert.doesNotMatch(notes, /\b[A-Fa-f0-9]{64}\b/,
+    'Task 6 must not invent artifact hashes before final packaging');
 });
