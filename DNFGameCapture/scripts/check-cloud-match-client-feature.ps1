@@ -403,6 +403,10 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Cloud match client tests failed with exit code $LASTEXITCODE."
     }
+    & node (Join-Path $PSScriptRoot 'cloud_match_handshake_integration.cjs') $exe
+    if ($LASTEXITCODE -ne 0) {
+        throw "Cloud match handshake integration failed with exit code $LASTEXITCODE."
+    }
 }
 finally {
     if (Test-Path -LiteralPath $tempRoot) {

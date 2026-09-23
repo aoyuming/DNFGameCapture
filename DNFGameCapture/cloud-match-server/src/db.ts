@@ -210,6 +210,19 @@ function initializeSchema(db: Database.Database): void {
         ocr_disabled_until INTEGER,
         updated_at INTEGER NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS client_bans (
+        broadcaster_device_id TEXT PRIMARY KEY,
+        license_device_id TEXT,
+        banned_at INTEGER NOT NULL,
+        expires_at INTEGER,
+        updated_at INTEGER NOT NULL,
+        CHECK (expires_at IS NULL OR expires_at>banned_at)
+      );
+      CREATE INDEX IF NOT EXISTS idx_client_bans_license_device
+        ON client_bans(license_device_id);
+      CREATE INDEX IF NOT EXISTS idx_client_bans_expiry
+        ON client_bans(expires_at);
     `);
 
     const identifierColumns = db.pragma('table_info(player_entity_identifiers)') as Array<{ name: string }>;

@@ -10,6 +10,7 @@ import { createCloudMatchApp } from '../src/app.js';
 import { generateLicenseKey } from '../src/auth.js';
 import * as comparisonStore from '../src/comparison.js';
 import { createLicense } from '../src/license-store.js';
+import { setClientBan } from '../src/client-ban.js';
 import { createCloudMatchRateLimitService } from '../src/rate-limits.js';
 import * as roomStore from '../src/rooms.js';
 import type { MatchSnapshot, Player } from '../src/schemas.js';
@@ -166,10 +167,11 @@ async function register(url: string, deviceId: string): Promise<Registration> {
 async function connectRegistered(
   url: string,
   registration: Registration,
+  authExtras: Record<string, unknown> = {},
 ): Promise<Socket> {
   return new Promise((resolve, reject) => {
     const socket = createSocketClient(url, {
-      auth: { ...registration, protocolVersion: 1 },
+      auth: { ...registration, ...authExtras, protocolVersion: 1 },
       forceNew: true,
       reconnection: false,
       timeout: 2_000,
@@ -288,6 +290,21 @@ afterEach(async () => {
 });
 
 describe('cloud match Socket.IO integration', () => {
+  test('rejects banned broadcaster and linked authorization device identities', async () => {
+    const { app, url } = await startApp();
+    const registration = await register(url, 'socket-banned-device-0001');
+    setClientBan(app.db, {
+      broadcasterDeviceId: registration.deviceId,
+      licenseDeviceId: 'license-banned-device-0001',
+      bannedAt: 1_700_000_000,
+      expiresAt: null,
+    });
+
+    await expect(connectRegistered(url, registration)).rejects.toMatchObject({
+      data: { code: 'account_banned', bannedUntil: null },
+    });
+  });
+
   test('associates one recent license and broadcaster observed on the same unique public IP', async () => {
     const clock = { now: 1_700_000_000 };
     const { app, url } = await startApp({
@@ -314,6 +331,63 @@ describe('cloud match Socket.IO integration', () => {
       });
     });
   });
+
+  test('associates a broadcaster from its valid license session and preserves it when the IP is shared', async () => {
+    const clock = { now: 1_700_000_000 };
+    const { app, url } = await startApp({
+      now: () => clock.now,
+      resolveClientIp: () => '47.1.2.3',
+    });
+    const key = generateLicenseKey();
+    const license = createLicense(app.db, { key, label: '会话归属测试卡', nowSec: clock.now });
+    const activated = await request(url).post('/api/v2/auth/activate').send({
+      key, deviceId: 'machine-authenticated-0001',
+    }).expect(200);
+    const firstRegistration = await register(url, 'socket-authenticated-0001');
+    const first = await connectRegistered(url, firstRegistration, {
+      licenseDeviceId: 'machine-authenticated-0001',
+      licenseSessionToken: activated.body.sessionToken,
+    });
+    await emitAck(first, 'broadcaster:join', { broadcasterName: '会话主播甲' });
+
+    const second = await createDevice(url, 'socket-authenticated-0002');
+    await emitAck(second.socket, 'broadcaster:join', { broadcasterName: '同 IP 主播乙' });
+
+    await waitUntil(() => {
+      expect(app.db.prepare(`SELECT broadcaster_device_id,license_id,license_device_id,broadcaster_name,source,authenticated_at
+        FROM broadcaster_license_links WHERE broadcaster_device_id=?`).get('socket-authenticated-0001')).toEqual({
+        broadcaster_device_id: 'socket-authenticated-0001',
+        license_id: license.id,
+        license_device_id: 'machine-authenticated-0001',
+        broadcaster_name: '会话主播甲',
+        source: 'manual',
+        authenticated_at: clock.now,
+      });
+    });
+  });
+
+  test.each(['invalid', 'expired', 'wrong-device', 'revoked-after-connect'])(
+    'keeps legacy IP attribution when the optional license session is %s', async kind => {
+      const { app, url } = await startApp({ resolveClientIp: () => '47.1.2.3' });
+      const key = generateLicenseKey();
+      const license = createLicense(app.db, { key, nowSec: 1_700_000_000 });
+      const activated = await request(url).post('/api/v2/auth/activate').send({
+        key, deviceId: 'machine-session-fallback',
+      }).expect(200);
+      if (kind === 'expired') app.db.prepare('UPDATE auth_sessions SET expires_at=0').run();
+      const registration = await register(url, 'socket-session-fallback');
+      const socket = await connectRegistered(url, registration, {
+        licenseDeviceId: kind === 'wrong-device' ? 'wrong-machine' : 'machine-session-fallback',
+        licenseSessionToken: kind === 'invalid' ? 'invalid' : activated.body.sessionToken,
+      });
+      if (kind === 'revoked-after-connect') app.db.prepare('DELETE FROM auth_sessions').run();
+      await expect(emitAck(socket, 'broadcaster:join', { broadcasterName: 'Fallback' }))
+        .resolves.toMatchObject({ ok: true });
+      expect(app.db.prepare(`SELECT license_id,source,authenticated_at
+        FROM broadcaster_license_links WHERE broadcaster_device_id=?`).get(registration.deviceId))
+        .toEqual({ license_id: license.id, source: 'automatic', authenticated_at: null });
+    },
+  );
 
   test('keeps comparison tokens stable across presence churn and advances only data revisions', async () => {
     const { app, url } = await startApp();

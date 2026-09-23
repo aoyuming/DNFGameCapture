@@ -25,6 +25,7 @@ describe('openDatabase', () => {
       ).toEqual([
         { name: 'auth_sessions' },
         { name: 'broadcaster_policies' },
+        { name: 'client_bans' },
         { name: 'devices' },
         { name: 'license_admin_operations' },
         { name: 'license_audit' },

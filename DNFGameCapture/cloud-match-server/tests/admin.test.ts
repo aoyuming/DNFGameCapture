@@ -85,13 +85,15 @@ function createFixture() {
   });
   const activeDeviceIds = new Set<string>();
   const disconnected: string[] = [];
+  const disconnectErrors: unknown[] = [];
   const stopped: string[] = [];
   const notifications: string[] = [];
   const socketController = {
     getActiveDeviceIds: () => new Set(activeDeviceIds),
-    disconnectDevice: (deviceId: string) => {
+    disconnectDevice: (deviceId: string, error?: unknown) => {
       if (!activeDeviceIds.delete(deviceId)) return false;
       disconnected.push(deviceId);
+      disconnectErrors.push(error);
       return true;
     },
     stopRealtimeViewer: (viewerDeviceId: string) => {
@@ -115,6 +117,7 @@ function createFixture() {
     db,
     activeDeviceIds,
     disconnected,
+    disconnectErrors,
     stopped,
     notifications,
     attribution,
@@ -129,6 +132,76 @@ afterEach(() => {
 });
 
 describe('localhost admin console', () => {
+  test('bans the selected broadcaster and linked authorization device, then unbans both', async () => {
+    const { app, db, activeDeviceIds, disconnected, disconnectErrors, notifications, attribution } = createFixture();
+    seedBroadcaster(db, 'online-device-ban-0001', '封号测试主播', now);
+    const key = generateLicenseKey();
+    const license = createLicense(db, { key, label: '封号测试卡', nowSec: now });
+    activateStoredLicense(db, key, 'license-device-ban-0001', now, 86_400);
+    attribution.connectBroadcaster({
+      deviceId: 'online-device-ban-0001', broadcasterName: '封号测试主播',
+      ipAddress: '47.1.2.3', observedAt: now,
+    });
+    attribution.manualLink('online-device-ban-0001', license.id, now);
+    activeDeviceIds.add('online-device-ban-0001');
+
+    const banned = await request(app)
+      .put('/admin/api/broadcasters/online-device-ban-0001/ban')
+      .auth('admin', adminPassword)
+      .set('x-dnf-admin-csrf', csrfToken)
+      .send({ duration: 'week' })
+      .expect(200);
+    expect(banned.body).toMatchObject({
+      ok: true,
+      ban: {
+        broadcasterDeviceId: 'online-device-ban-0001',
+        licenseDeviceId: 'license-device-ban-0001',
+        bannedAt: now,
+        expiresAt: now + 7 * 24 * 60 * 60,
+      },
+    });
+    expect(disconnected).toEqual(['online-device-ban-0001']);
+    expect(disconnectErrors).toEqual([{
+      code: 'account_banned',
+      bannedUntil: now + 7 * 24 * 60 * 60,
+    }]);
+    expect(db.prepare('SELECT COUNT(*) AS count FROM auth_sessions WHERE device_id=?')
+      .get('license-device-ban-0001')).toEqual({ count: 0 });
+
+    const state = await request(app).get('/admin/api/broadcasters/state')
+      .auth('admin', adminPassword).expect(200);
+    expect(state.body.broadcasters.find((item: { deviceId: string }) =>
+      item.deviceId === 'online-device-ban-0001').ban).toMatchObject({
+      expiresAt: now + 7 * 24 * 60 * 60,
+    });
+
+    await request(app)
+      .delete('/admin/api/broadcasters/online-device-ban-0001/ban')
+      .auth('admin', adminPassword)
+      .set('x-dnf-admin-csrf', csrfToken)
+      .expect(200, { ok: true, ban: null });
+    expect(notifications).toEqual(['admin_ban', 'admin_unban']);
+  });
+
+  test('validates custom ban time and supports permanent bans', async () => {
+    const { app, db } = createFixture();
+    seedBroadcaster(db, 'offline-device-ban-0002', '离线封号测试', now);
+
+    await request(app)
+      .put('/admin/api/broadcasters/offline-device-ban-0002/ban')
+      .auth('admin', adminPassword)
+      .set('x-dnf-admin-csrf', csrfToken)
+      .send({ duration: 'custom', expiresAt: now })
+      .expect(400, { ok: false, code: 'invalid_request' });
+    const response = await request(app)
+      .put('/admin/api/broadcasters/offline-device-ban-0002/ban')
+      .auth('admin', adminPassword)
+      .set('x-dnf-admin-csrf', csrfToken)
+      .send({ duration: 'permanent' })
+      .expect(200);
+    expect(response.body.ban.expiresAt).toBeNull();
+  });
+
   test('serves exactly three authenticated hub entries and isolated workspaces', async () => {
     const { app } = createFixture();
     const home = await request(app).get('/admin').auth('admin', adminPassword).expect(200);
@@ -163,6 +236,15 @@ describe('localhost admin console', () => {
     expect(broadcasters.text).toContain('/license');
     expect(broadcasters.text).toContain('/reveal');
     expect(broadcasters.text).toContain('/admin/api/broadcasters/state');
+    expect(broadcasters.text).toContain("'/ban'");
+    expect(broadcasters.text).not.toContain('/disconnect');
+    expect(broadcasters.text).not.toContain('/ocr-policy');
+    const broadcasterPage = await request(app).get('/admin/broadcasters').auth('admin', adminPassword);
+    for (const id of ['ban-status', 'ban-duration', 'ban-custom-until', 'ban-button', 'unban-button']) {
+      expect(broadcasterPage.text).toContain(`id="${id}"`);
+    }
+    expect(broadcasterPage.text).not.toContain('id="disconnect-button"');
+    expect(broadcasterPage.text).not.toContain('主播 OCR 管控');
     const library = await request(app).get('/admin/library/app.js').auth('admin', adminPassword);
     expect(library.text).toContain('sourceBroadcasterName');
     const licenses = await request(app).get('/admin/licenses/app.js').auth('admin', adminPassword);

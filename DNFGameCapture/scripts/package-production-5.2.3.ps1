@@ -1,6 +1,7 @@
 param(
     [string]$OutputDirectory,
-    [switch]$ValidateOnly
+    [switch]$ValidateOnly,
+    [switch]$SessionAttributionFix
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -8,6 +9,7 @@ $server = Join-Path $root 'cloud-match-server'
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $root 'deployment-packages' }
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 $name = 'dnf-cloud-match-server-production-5.2.3'
+if ($SessionAttributionFix) { $name += '-session-fix-20260916' }
 $archive = Join-Path $OutputDirectory "$name.zip"
 $sidecar = Join-Path $OutputDirectory "$name.sha256.txt"
 $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
@@ -45,6 +47,10 @@ try {
         'README-production-5.2.3.md' = 'README.md'
         'README-game-id-only.md' = 'README-game-id-only.md'
     }
+    if ($SessionAttributionFix) {
+        $documents.Remove('README-production-5.2.3.md')
+        $documents['README-session-attribution-fix.md'] = 'README.md'
+    }
     foreach ($file in $documents.Keys) {
         Write-PackageText (Join-Path $payload $documents[$file]) ([IO.File]::ReadAllText((Join-Path $server $file)))
     }
@@ -71,6 +77,10 @@ try {
         manifestUrl = 'https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/cloud-server-prod.json'
         serverFirstRequired = $true
         unauthenticatedLibraryStatus = 401
+    }
+    if ($SessionAttributionFix) {
+        $release.buildId = '20260916-session-attribution-fix'
+        $release.sessionAttributionRequiresUpdatedClient = $true
     }
     Write-PackageText (Join-Path $payload 'release.json') (($release | ConvertTo-Json) + "`n")
     $files = @(Get-ChildItem -LiteralPath $payload -File -Recurse)

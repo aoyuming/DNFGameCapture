@@ -1,4 +1,5 @@
 #include "../CloudMatchClient.h"
+#include "../json.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -747,8 +748,42 @@ void TestRealtimeSnapshotsCoalescePerBroadcaster()
 
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
+    if (argc == 4 && std::string(argv[1]) == "--handshake") {
+        const std::string expected = argv[3];
+        CloudMatchClient client;
+        int joins = 0;
+        std::string error;
+        client.SetMessageCallback([&](std::string message) {
+            const auto event = nlohmann::json::parse(message);
+            if (event.value("type", "") == "cloud_error") error = event.value("code", "");
+            if (event.value("type", "") == "broadcaster_join_result" && event.value("ok", false)) ++joins;
+        });
+        Require(client.Configure(std::string(argv[2]), "compat-device", "compat-device-token",
+            "compat-license-machine", "compat-license-session"), "Handshake configuration should succeed");
+        Require(client.Start() && client.JoinUnifiedPool("Compatibility Test"), "Handshake should start and queue a join");
+        std::uint64_t observedConnection = 0;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (std::chrono::steady_clock::now() < deadline && error.empty() && joins < 2) {
+            client.DispatchMessages();
+            const auto status = client.GetStatusSnapshot();
+            if (status.connected && status.connectionGeneration != observedConnection) {
+                observedConnection = status.connectionGeneration;
+                if (observedConnection > 1) client.JoinUnifiedPool("Compatibility Test");
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        client.Stop();
+        if (expected == "connected") {
+            Require(error.empty(), "Legacy fallback must not emit a false identity failure");
+            Require(joins == 2, "Initial and reconnected transports must both accept a broadcaster join");
+        } else {
+            Require(error == expected, "Real authentication and format failures must retain their error code");
+        }
+        std::cout << "Handshake scenario passed: " << expected << '\n';
+        return 0;
+    }
     TestSnapshotResultsCarryLocalRevisionAndFilterOldGeneration();
     TestOversizedProtectedFallbackPreservesCorrelation();
     TestComparisonPaginationCarriesImmutableToken();

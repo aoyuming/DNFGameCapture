@@ -9,7 +9,7 @@ class CKillDisplayDlg : public CDialogEx
     DECLARE_DYNAMIC(CKillDisplayDlg)
 
 public:
-    CKillDisplayDlg(CWnd* pParent = nullptr);
+    CKillDisplayDlg(const CString& iniPath, CWnd* pParent = nullptr);
     virtual ~CKillDisplayDlg();
 
 #ifdef AFX_DESIGN_TIME
@@ -26,10 +26,13 @@ protected:
     afx_msg void OnLButtonDown(UINT nFlags, CPoint point);
     afx_msg BOOL OnEraseBkgnd(CDC* pDC);
     afx_msg void OnGetMinMaxInfo(MINMAXINFO* lpMMI);
+    afx_msg void OnExitSizeMove();
+    afx_msg void OnDestroy();
 
     DECLARE_MESSAGE_MAP()
 
 private:
+    CString m_iniPath;
     Microsoft::WRL::ComPtr<ICoreWebView2Controller> m_webviewController;
     Microsoft::WRL::ComPtr<ICoreWebView2> m_webview;
     CRect m_windowRectBeforeEdit;
@@ -37,6 +40,8 @@ private:
 
     void InitWebView2();
     void ResizeWindowForClientSize(int targetClientW, int targetClientH);
+    void RestoreWindowRect();
+    void SaveWindowRect();
     void HandleWebMessage(const CString& message);
     void SetEditModeWindowExpanded(bool expanded);
     void BeginWindowDrag();

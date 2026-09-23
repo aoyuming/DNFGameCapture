@@ -166,6 +166,16 @@ std::string SanitizeServerCode(const json& value, const char* key,
     return code;
 }
 
+std::int64_t ReadServerBanUntil(const json& value)
+{
+    const auto found = value.find("bannedUntil");
+    if (found == value.end()) return -1;
+    if (found->is_null()) return 0;
+    if (!found->is_number_integer()) return -1;
+    const std::int64_t bannedUntil = found->get<std::int64_t>();
+    return bannedUntil > 0 && bannedUntil <= 253402300799LL ? bannedUntil : -1;
+}
+
 bool ReadBoundedUnsigned(const json& value, const char* key,
     std::uint64_t maximum, std::uint64_t& result) noexcept
 {
@@ -251,13 +261,16 @@ public:
     }
 
     bool Configure(const std::wstring& serverUrl, const std::string& deviceId,
-        const std::string& deviceToken)
+        const std::string& deviceToken, const std::string& licenseDeviceId,
+        const std::string& licenseSessionToken)
     {
         std::lock_guard<std::recursive_mutex> dispatchLock(dispatchGate);
         Config parsed;
         const bool validUrl = ParseServerUrl(serverUrl, parsed);
         parsed.deviceId = deviceId;
         parsed.deviceToken = deviceToken;
+        parsed.licenseDeviceId = licenseDeviceId;
+        parsed.licenseSessionToken = licenseSessionToken;
         parsed.credentialsValid = validUrl && !deviceId.empty() && !deviceToken.empty();
         return ApplyConfig(std::move(parsed), validUrl);
     }
@@ -1162,6 +1175,8 @@ private:
             SecureClear(basePath);
             SecureClear(deviceId);
             SecureClear(deviceToken);
+            SecureClear(licenseDeviceId);
+            SecureClear(licenseSessionToken);
             generation = 0;
         }
 
@@ -1173,6 +1188,8 @@ private:
         std::wstring basePath;
         std::string deviceId;
         std::string deviceToken;
+        std::string licenseDeviceId;
+        std::string licenseSessionToken;
         std::uint64_t generation = 0;
 
     private:
@@ -1186,6 +1203,8 @@ private:
             basePath = other.basePath;
             deviceId = other.deviceId;
             deviceToken = other.deviceToken;
+            licenseDeviceId = other.licenseDeviceId;
+            licenseSessionToken = other.licenseSessionToken;
             generation = other.generation;
         }
 
@@ -1199,6 +1218,8 @@ private:
             basePath.swap(other.basePath);
             deviceId.swap(other.deviceId);
             deviceToken.swap(other.deviceToken);
+            licenseDeviceId.swap(other.licenseDeviceId);
+            licenseSessionToken.swap(other.licenseSessionToken);
             std::swap(generation, other.generation);
         }
     };
@@ -1983,7 +2004,7 @@ private:
     }
 
     void NotifyCloudError(std::uint64_t generation, std::string code,
-        std::string message = {})
+        std::string message = {}, std::int64_t bannedUntil = -1)
     {
         json output = {
             { "type", "cloud_error" },
@@ -1991,6 +2012,8 @@ private:
             { "code", std::move(code) }
         };
         if (!message.empty()) output["message"] = std::move(message);
+        if (bannedUntil == 0) output["bannedUntil"] = nullptr;
+        else if (bannedUntil > 0) output["bannedUntil"] = bannedUntil;
         NotifyJson(generation, output);
     }
 
@@ -2337,7 +2360,7 @@ private:
     }
 
     bool WaitForNamespaceConnection(const Config& activeConfig,
-        WebSocketConnection& connection)
+        WebSocketConnection& connection, bool& useLicenseSession)
     {
         const auto deadline = Clock::now() + kAckTimeout;
         bool sentConnect = false;
@@ -2371,7 +2394,9 @@ private:
                 UpdateOutboundLimit(activeConfig.generation, connection.outboundLimit);
                 if (ShouldAbort(activeConfig.generation)) return false;
                 std::string connectPacket = cloud_match::EncodeSocketIoConnectPacket(
-                    activeConfig.deviceId, activeConfig.deviceToken, 1);
+                    activeConfig.deviceId, activeConfig.deviceToken, 1,
+                    useLicenseSession ? activeConfig.licenseDeviceId : std::string_view{},
+                    useLicenseSession ? activeConfig.licenseSessionToken : std::string_view{});
                 const bool sent = SendText(connection, connectPacket,
                     activeConfig.generation);
                 SecureClear(connectPacket);
@@ -2386,10 +2411,17 @@ private:
             }
             cloud_match::SocketIoConnectError connectError;
             if (cloud_match::ParseSocketIoConnectError(packet, connectError)) {
+                if (sentConnect && useLicenseSession && connectError.code == "invalid_auth" &&
+                    !activeConfig.licenseDeviceId.empty() && !activeConfig.licenseSessionToken.empty()) {
+                    // Older strict schemas reject optional license fields, not the device identity.
+                    useLicenseSession = false;
+                    return false;
+                }
                 json error = { { "code", connectError.code }, { "message", connectError.message } };
                 NotifyCloudError(activeConfig.generation,
                     SanitizeServerCode(error, "code", "connect_error"),
-                    SanitizeServerText(error, "message"));
+                    SanitizeServerText(error, "message"),
+                    connectError.hasBannedUntil ? connectError.bannedUntil : -1);
                 return false;
             }
             if (cloud_match::IsSocketIoDisconnectPacket(packet)) return false;
@@ -2991,7 +3023,8 @@ private:
             if (event.payload.is_object()) {
                 NotifyCloudError(activeConfig.generation,
                     SanitizeServerCode(event.payload, "code", "session_error"),
-                    SanitizeServerText(event.payload, "message"));
+                    SanitizeServerText(event.payload, "message"),
+                    ReadServerBanUntil(event.payload));
             }
             else {
                 NotifyCloudError(activeConfig.generation, "session_error");
@@ -3299,13 +3332,13 @@ private:
         return false;
     }
 
-    bool RunConnection(const Config& activeConfig, bool& connectedOnce)
+    bool RunConnection(const Config& activeConfig, bool& connectedOnce, bool& useLicenseSession)
     {
         WebSocketConnection connection;
         if (!OpenWebSocket(activeConfig, connection) || ShouldAbort(activeConfig.generation)) {
             return false;
         }
-        if (!WaitForNamespaceConnection(activeConfig, connection) ||
+        if (!WaitForNamespaceConnection(activeConfig, connection, useLicenseSession) ||
             ShouldAbort(activeConfig.generation)) {
             if (connection.socket) {
                 WinHttpWebSocketClose(connection.socket.Get(),
@@ -3347,6 +3380,7 @@ private:
     {
         std::size_t reconnectIndex = 0;
         bool reconnecting = false;
+        bool useLicenseSession = true;
         std::uint64_t observedGeneration = (std::numeric_limits<std::uint64_t>::max)();
         for (;;) {
             Config activeConfig = CopyConfig();
@@ -3358,6 +3392,7 @@ private:
                 observedGeneration = activeConfig.generation;
                 reconnectIndex = 0;
                 reconnecting = false;
+                useLicenseSession = true;
             }
 
             ProcessRegistrationCommands(activeConfig);
@@ -3385,13 +3420,16 @@ private:
                 });
 
             bool connectedOnce = false;
-            RunConnection(activeConfig, connectedOnce);
+            const bool attemptedLicenseSession = useLicenseSession;
+            RunConnection(activeConfig, connectedOnce, useLicenseSession);
             if (ShouldStop()) break;
             if (ShouldAbort(activeConfig.generation)) {
                 std::lock_guard<std::mutex> lock(mutex);
                 ClearPendingAcksLocked();
                 continue;
             }
+            // Retry once on a fresh transport, retaining queued joins and the current device token.
+            if (attemptedLicenseSession && !useLicenseSession) continue;
             FailQueuedTransientRequests(activeConfig.generation, "connection_lost");
             FailPendingAcks(activeConfig, "connection_lost");
 
@@ -3463,19 +3501,21 @@ CloudMatchClient::~CloudMatchClient()
 }
 
 bool CloudMatchClient::Configure(const std::string& serverUrl,
-    const std::string& deviceId, const std::string& deviceToken)
+    const std::string& deviceId, const std::string& deviceToken,
+    const std::string& licenseDeviceId, const std::string& licenseSessionToken)
 {
     std::wstring wideUrl = Utf8ToWide(serverUrl);
-    const bool configured = wideUrl.empty() ? impl_->Configure({}, deviceId, deviceToken) :
-        impl_->Configure(wideUrl, deviceId, deviceToken);
+    const bool configured = impl_->Configure(wideUrl, deviceId, deviceToken,
+        licenseDeviceId, licenseSessionToken);
     SecureClear(wideUrl);
     return configured;
 }
 
 bool CloudMatchClient::Configure(const std::wstring& serverUrl,
-    const std::string& deviceId, const std::string& deviceToken)
+    const std::string& deviceId, const std::string& deviceToken,
+    const std::string& licenseDeviceId, const std::string& licenseSessionToken)
 {
-    return impl_->Configure(serverUrl, deviceId, deviceToken);
+    return impl_->Configure(serverUrl, deviceId, deviceToken, licenseDeviceId, licenseSessionToken);
 }
 
 bool CloudMatchClient::Start()

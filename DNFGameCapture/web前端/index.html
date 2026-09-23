@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DNF 赛事计分板 - WebView2 版</title>
-    <meta name="dnf-web-layout-version" content="20260912-5.2.2-production">
-    <link rel="stylesheet" href="style.css?v=20260912-5.2.2-production">
+    <meta name="dnf-web-layout-version" content="20260924-5.4.0-production-3">
+    <link rel="stylesheet" href="style.css?v=20260924-5.4.0-production-3">
 </head>
 <body>
 
@@ -21,6 +21,11 @@
         </aside>
 
         <div class="left-stack">
+            <div class="realtime-readonly-banner" id="realtime-readonly-banner" role="status" aria-live="polite" hidden>
+                <span class="realtime-readonly-icon" aria-hidden="true">&#9940;</span>
+                <strong>实时同步中</strong>
+                <span>本地比赛编辑已锁定，请在主播预览中停止实时同步后再修改。</span>
+            </div>
             <div class="main-container" id="main-container">
                 <div class="teams-wrap" id="teams-wrap">
                     <div class="team-panel team-red" id="team-red">
@@ -51,6 +56,10 @@
 
             <div class="control-panel">
                 <div class="control-row control-row-match">
+                    <button class="ctrl-btn btn-operation-history" id="btn-operation-history" aria-expanded="false" aria-controls="operation-history-overlay" title="查看比赛操作历史">
+                        <span aria-hidden="true">🧾</span> 操作历史
+                        <span class="operation-history-count" id="operation-history-count">0</span>
+                    </button>
                     <button class="ctrl-btn btn-swap" id="btn-swap">🔄 翻转红蓝</button>
                     <button class="ctrl-btn btn-monitor-start" id="btn-monitor">▶ 运行</button>
                     <button class="ctrl-btn btn-reset" id="btn-reset">✨ 重置战绩</button>
@@ -64,9 +73,9 @@
                     </button>
                     <button class="ctrl-btn btn-auth" id="btn-auth">🔑 授权</button>
                     <button class="ctrl-btn btn-appearance" id="btn-appearance">🎨 外观</button>
-                    <label class="output-seat-label-toggle" title="开启后，仅在 击杀.txt 的名字前输出选人顺序">
-                        <input type="checkbox" id="output-seat-label-toggle">
-                        <span>选人顺序</span>
+                    <label class="prefer-local-aliases-toggle" title="同步其他主播比分时，优先保留本地已填写的别名">
+                        <input type="checkbox" id="prefer-local-aliases-toggle">
+                        <span>别名以本地优先</span>
                     </label>
                     <label class="kill-show-death-toggle" title="控制击杀展示页是否显示死亡次数">
                         <input type="checkbox" id="kill-show-death-toggle-main">
@@ -109,6 +118,10 @@
                                         <option value="0">大X颜色个数判断</option>
                                         <option value="1">打补丁红蓝判断</option>
                                     </select>
+                                </label>
+                                <label class="output-seat-label-toggle" title="开启后，仅在 击杀.txt 的名字前输出选人顺序">
+                                    <input type="checkbox" id="output-seat-label-toggle">
+                                    <span>选人顺序</span>
                                 </label>
                             </div>
                             <div class="more-controls-section more-controls-danger">
@@ -158,6 +171,42 @@
             </div>
             <div class="review-list" id="review-list"></div>
         </div>
+    </div>
+
+    <div class="operation-history-overlay" id="operation-history-overlay" aria-hidden="true">
+        <section class="operation-history-dialog" id="operation-history-dialog" role="dialog" aria-modal="false" aria-labelledby="operation-history-title">
+            <header class="operation-history-header">
+                <div>
+                    <div class="operation-history-title-row">
+                        <span class="operation-history-title" id="operation-history-title">操作历史</span>
+                        <span class="operation-history-count operation-history-count-dialog" id="operation-history-count-dialog">0</span>
+                    </div>
+                    <div class="operation-history-subtitle">关键操作 · 支持撤销和重做</div>
+                </div>
+                <div class="operation-history-header-actions">
+                    <button class="operation-history-tool" id="btn-match-history-undo" title="撤销上一条场上操作" aria-label="撤销上一条场上操作">↶</button>
+                    <button class="operation-history-tool" id="btn-match-history-redo" title="重做下一条场上操作" aria-label="重做下一条场上操作">↷</button>
+                    <label class="operation-history-limit" title="最多保留的场上操作步数">
+                        <span>最多</span>
+                        <input id="match-history-max-steps" type="number" min="1" max="200" step="1" value="30" inputmode="numeric">
+                        <span>步</span>
+                    </label>
+                    <button class="operation-history-close" id="btn-operation-history-close" title="关闭" aria-label="关闭操作历史">&times;</button>
+                </div>
+            </header>
+            <div class="operation-history-layout">
+                <section class="operation-history-steps" aria-labelledby="operation-history-steps-title">
+                    <div class="operation-history-pane-header">
+                        <div>
+                            <div class="operation-history-pane-title" id="operation-history-steps-title">关键操作</div>
+                            <div class="operation-history-pane-note">时间 · 动作 · 来源 · 变动范围</div>
+                        </div>
+                        <span class="operation-history-step-state" id="operation-history-step-state">0 条</span>
+                    </div>
+                    <div class="operation-history-list" id="operation-history-list" role="listbox" aria-label="操作历史步骤"></div>
+                </section>
+            </div>
+        </section>
     </div>
 
     <div class="random-tool-overlay" id="random-tool-overlay" aria-hidden="true">
@@ -515,6 +564,6 @@
         </section>
     </div>
 
-    <script src="main.js?v=20260912-5.2.2-production" defer></script>
+    <script src="main.js?v=20260924-5.4.0-production-3" defer></script>
 </body>
 </html>

@@ -70,6 +70,27 @@ describe('server-side broadcaster attribution', () => {
       .toEqual([{ license_id: licenseId, ip_address: '47.1.2.3' }]);
   });
 
+  test('adds the authenticated attribution marker to an existing link table', () => {
+    const db = openDatabase(':memory:');
+    databases.push(db);
+    db.exec(`
+      CREATE TABLE broadcaster_license_links (
+        broadcaster_device_id TEXT PRIMARY KEY,
+        license_id INTEGER NOT NULL,
+        license_device_id TEXT NOT NULL,
+        broadcaster_name TEXT NOT NULL,
+        source TEXT NOT NULL CHECK(source IN ('automatic','manual')),
+        linked_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `);
+
+    initializeBroadcasterAttributionSchema(db);
+
+    expect((db.pragma('table_info(broadcaster_license_links)') as Array<{ name: string }>)
+      .some(column => column.name === 'authenticated_at')).toBe(true);
+  });
+
   test('automatically links the unique recent license and active broadcaster on one public IP', () => {
     const { service, addLicense, addBroadcaster } = fixture();
     const licenseId = addLicense('machine-a');
@@ -161,6 +182,44 @@ describe('server-side broadcaster attribution', () => {
     });
   });
 
+  test('links an authenticated session directly and preserves it when the shared IP becomes ambiguous', () => {
+    const { service, addLicense, addBroadcaster } = fixture();
+    const licenseId = addLicense('machine-a');
+    addBroadcaster('socket-a', '主播甲');
+    addBroadcaster('socket-b', '主播乙');
+
+    service.connectBroadcaster({ deviceId: 'socket-a', broadcasterName: '主播甲', ipAddress: '47.1.2.3', observedAt: 100 });
+    expect(service.linkAuthenticatedBroadcaster({
+      broadcasterDeviceId: 'socket-a',
+      broadcasterName: '主播甲',
+      licenseId,
+      licenseDeviceId: 'machine-a',
+      nowSec: 101,
+    })).toMatchObject({ licenseId, source: 'authenticated' });
+
+    service.connectBroadcaster({ deviceId: 'socket-b', broadcasterName: '主播乙', ipAddress: '47.1.2.3', observedAt: 102 });
+    service.observeLicense({ licenseId, licenseDeviceId: 'machine-a', ipAddress: '47.1.2.3', observedAt: 103 });
+
+    expect(service.getBroadcasterAttribution('socket-a')).toMatchObject({
+      licenseId, licenseDeviceId: 'machine-a', source: 'authenticated',
+    });
+  });
+
+  test('rejects an authenticated link when the session device does not match the license binding', () => {
+    const { service, addLicense, addBroadcaster } = fixture();
+    const licenseId = addLicense('machine-a');
+    addBroadcaster('socket-a', '主播甲');
+
+    expect(service.linkAuthenticatedBroadcaster({
+      broadcasterDeviceId: 'socket-a',
+      broadcasterName: '主播甲',
+      licenseId,
+      licenseDeviceId: 'machine-b',
+      nowSec: 101,
+    })).toBeNull();
+    expect(service.getBroadcasterAttribution('socket-a')).toBeNull();
+  });
+
   test('rejects a manual link when the license is not activated or no longer bound', () => {
     const { db, service, addBroadcaster } = fixture();
     addBroadcaster('socket-a', '主播甲');
@@ -168,6 +227,17 @@ describe('server-side broadcaster attribution', () => {
     const pending = createLicense(db, { key, nowSec: 100 });
 
     expect(() => service.manualLink('socket-a', pending.id, 101)).toThrow('license_not_activated');
+  });
+
+  test.each(['disabled', 'expired'])('rejects authenticated attribution for a %s license', state => {
+    const { db, service, addLicense, addBroadcaster } = fixture();
+    const licenseId = addLicense('machine-a');
+    addBroadcaster('socket-a', '主播甲');
+    if (state === 'disabled') db.prepare('UPDATE licenses SET disabled_at=100 WHERE id=?').run(licenseId);
+    else db.prepare('UPDATE licenses SET expires_at=100 WHERE id=?').run(licenseId);
+    expect(service.linkAuthenticatedBroadcaster({ broadcasterDeviceId: 'socket-a', broadcasterName: '主播甲',
+      licenseId, licenseDeviceId: 'machine-a', nowSec: 101 })).toBeNull();
+    expect(service.getBroadcasterAttribution('socket-a')).toBeNull();
   });
 
   test('keeps the last IP after disconnect while clearing the current IP', () => {

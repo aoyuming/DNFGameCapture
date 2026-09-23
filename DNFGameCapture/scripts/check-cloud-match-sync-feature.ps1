@@ -119,29 +119,29 @@ function Assert-DialogBlockContains {
 foreach ($block in @(
     @('bool CDNFGameCaptureDlg::ToggleReviewEvent(',
       'void CDNFGameCaptureDlg::DoRetryMatchingTask(',
-      'MarkMatchMutation();', 'Review undo/restore must advance the mutation epoch.'),
+      'MarkMatchMutation(', 'Review undo/restore must advance the mutation epoch.'),
     @('void CDNFGameCaptureDlg::OnBnClickedFlip()',
       'void CDNFGameCaptureDlg::OnBnClickedReset()',
-      'MarkMatchMutation();', 'Manual team flipping must advance the mutation epoch.'),
+      'MarkMatchMutation(', 'Manual team flipping must advance the mutation epoch.'),
     @('void CDNFGameCaptureDlg::OnBnClickedQuickAdd()',
       'LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(',
-      'MarkMatchMutation();', 'Quick player entry must advance the mutation epoch.'),
+      'MarkMatchMutation(', 'Quick player entry must advance the mutation epoch.'),
     @('void CDNFGameCaptureDlg::OnRClickTree(',
       'CString CDNFGameCaptureDlg::CheckFieldConflict(',
-      'if (matchStateMutationCommand) MarkMatchMutation();',
+      'MarkMatchMutation(',
       'Native tree mutations must advance the mutation epoch per command.'),
     @('void CDNFGameCaptureDlg::OnEndLabelEdit(',
       'void CDNFGameCaptureDlg::OnCustomDrawTree(',
-      'MarkMatchMutation();', 'Native score/player edits must advance the mutation epoch.'),
+      'MarkMatchMutation(', 'Native score/player edits must advance the mutation epoch.'),
     @('else if (action == "cmd_delete_alias")',
       'else if (action == "cmd_undo_event")',
-      'MarkMatchMutation();', 'Deleting an active alias must advance the mutation epoch.'),
+      'MarkMatchMutation(', 'Deleting an active alias must advance the mutation epoch.'),
     @('else if (action == "cmd_set_output_seat_label")',
       'else if (action == "cmd_set_red_pick_mode")',
-      'MarkMatchMutation();', 'TXT seat-order changes must advance the mutation epoch.'),
+      'MarkMatchMutation(', 'TXT seat-order changes must advance the mutation epoch.'),
     @('else if (action == "cmd_set_red_pick_mode")',
       'else if (action == "cmd_set_scoreboard_text_styles")',
-      'MarkMatchMutation();', 'Pick-order changes must advance the mutation epoch.')
+      'MarkMatchMutation(', 'Pick-order changes must advance the mutation epoch.')
 )) {
     Assert-DialogBlockContains -Start $block[0] -End $block[1] `
         -Needle $block[2] -Message $block[3]

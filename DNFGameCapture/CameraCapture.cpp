@@ -104,25 +104,54 @@ void CameraCapture::CaptureThreadFunc() {
 
         HRESULT hr = m_pReader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &streamIndex, &flags, &llTimeStamp, pSample.put());
         if (m_stopRequested.load(std::memory_order_acquire)) break;
-        if (FAILED(hr) || !pSample) {
+        if (FAILED(hr) || (flags & MF_SOURCE_READERF_ERROR) ||
+            (flags & MF_SOURCE_READERF_STREAMTICK) || !pSample) {
             Sleep(10); continue;
         }
 
         winrt::com_ptr<IMFMediaBuffer> pBuffer;
-        pSample->ConvertToContiguousBuffer(pBuffer.put());
+        if (FAILED(pSample->ConvertToContiguousBuffer(pBuffer.put())) || !pBuffer) {
+            continue;
+        }
 
         BYTE* pData = nullptr;
         DWORD currentLength = 0;
-        pBuffer->Lock(&pData, NULL, &currentLength);
+        const HRESULT lockHr = pBuffer->Lock(&pData, NULL, &currentLength);
+        if (FAILED(lockHr)) {
+            continue;
+        }
+        if (!pData) {
+            pBuffer->Unlock();
+            continue;
+        }
 
         // 获取视频分辨率
         winrt::com_ptr<IMFMediaType> pCurrentType;
-        m_pReader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, pCurrentType.put());
+        if (FAILED(m_pReader->GetCurrentMediaType(
+                MF_SOURCE_READER_FIRST_VIDEO_STREAM, pCurrentType.put())) ||
+            !pCurrentType) {
+            pBuffer->Unlock();
+            continue;
+        }
         UINT32 w = 0, h = 0;
-        MFGetAttributeSize(pCurrentType.get(), MF_MT_FRAME_SIZE, &w, &h);
+        if (FAILED(MFGetAttributeSize(pCurrentType.get(), MF_MT_FRAME_SIZE, &w, &h)) ||
+            w == 0 || h == 0 || w > 16384 || h > 16384) {
+            pBuffer->Unlock();
+            continue;
+        }
+        UINT32 strideValue = 0;
         LONG stride = 0;
-        pCurrentType->GetUINT32(MF_MT_DEFAULT_STRIDE, (UINT32*)&stride);
-        if (stride == 0) stride = w * 4; // RGB32 默认步长
+        if (SUCCEEDED(pCurrentType->GetUINT32(MF_MT_DEFAULT_STRIDE, &strideValue)) &&
+            strideValue <= static_cast<UINT32>(MAXLONG)) {
+            stride = static_cast<LONG>(strideValue);
+        }
+        if (stride == 0) stride = static_cast<LONG>(w * 4); // RGB32 默认步长
+        const size_t requiredBytes = static_cast<size_t>(stride) * (h - 1) +
+            static_cast<size_t>(w) * 4;
+        if (stride < static_cast<LONG>(w * 4) || requiredBytes > currentLength) {
+            pBuffer->Unlock();
+            continue;
+        }
 
         // 生成位图并加锁更新
         HBITMAP hNewBmp = BufferToHBITMAP(pData, w, h, stride);

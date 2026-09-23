@@ -7,19 +7,19 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 const source = read('DNFGameCaptureDlg.cpp');
 const body = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start) + start.length));
 
-test('5.2.2 release metadata and client package stay aligned', () => {
-  assert.match(read('DNFGameCaptureDlg.h'), /CURRENT_VERSION L"5\.2\.2"/);
+test('5.4.0 release metadata and client package stay aligned', () => {
+  assert.match(read('DNFGameCaptureDlg.h'), /CURRENT_VERSION L"5\.4\.0"/);
   const resource = fs.readFileSync(path.join(root, 'DNFGameCapture.rc'), 'utf16le');
-  assert.match(resource, /FILEVERSION 5,2,2,0/);
-  assert.match(resource, /PRODUCTVERSION 5,2,2,0/);
-  assert.match(resource, /VALUE "FileVersion", "5\.2\.2\.0"/);
-  assert.match(resource, /VALUE "ProductVersion", "5\.2\.2\.0"/);
-  assert.match(resource, /5\.2\.2",IDC_STATIC/);
+  assert.match(resource, /FILEVERSION 5,4,0,0/);
+  assert.match(resource, /PRODUCTVERSION 5,4,0,0/);
+  assert.match(resource, /VALUE "FileVersion", "5\.4\.0\.0"/);
+  assert.match(resource, /VALUE "ProductVersion", "5\.4\.0\.0"/);
+  assert.match(resource, /5\.4\.0",IDC_STATIC/);
   const packageClient = read('scripts/package-production-client.ps1');
-  assert.match(packageClient, /deployment-packages\\update_v522\.zip/);
-  assert.match(packageClient, /Expected EXE version 5\.2\.2\.0/);
+  assert.match(packageClient, /deployment-packages\\update_v540\.zip/);
+  assert.match(packageClient, /Expected EXE version 5\.4\.0\.0/);
   assert.match(packageClient, /Get-FileHash[\s\S]*Release web file does not match source/);
-  assert.match(read('scripts/DNFGameCapture-5.0.2.iss'), /AppVersion "5\.2\.2"/);
+  assert.match(read('scripts/DNFGameCapture-5.0.2.iss'), /AppVersion "5\.4\.0"/);
 });
 
 test('5.2.2 release wiring uses compiled environment, not legacy opt-in', () => {

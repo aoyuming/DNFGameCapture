@@ -75,6 +75,8 @@ struct DnfCloudAuthFailure {
     std::uint64_t requestGeneration = 0;
     bool leaseEndpointRefresh = false;
     bool serviceFailure = false;
+    bool accountBanned = false;
+    long long bannedUntil = -1;
 };
 
 struct DnfAliasAutoSyncResult {
@@ -191,7 +193,8 @@ static const int ID_CHK_AUTO_CROP_BLACK_BARS = 1040;
 static const int DNF_BLACK_BAR_PIXEL_MAX = 18;
 static const int DNF_BLACK_BAR_MIN_EDGE = 4;
 static const double DNF_BLACK_BAR_ROW_RATIO = 0.965;
-static constexpr UINT_PTR kStartupBootstrapTimerId = 10;
+static constexpr UINT_PTR kStartupBootstrapTimerId = 10001;
+static constexpr UINT_PTR kStartupMainWebRevealTimeoutTimerId = 10002;
 
 // 打补丁文件路径检查辅助函数在文件后部实现；这里提前声明，方便同步给 Web。
 static bool DnfFileExists(const CString& path);
@@ -201,7 +204,8 @@ static bool DnfPostCloudJson(const std::string& jsonUtf8, std::string& responseU
 static bool DnfCheckServerV2Binding(const CString& endpoint,
     const CString& manifestUrl, const CString& key, const CString& deviceId,
     long long duration, long long& outExpTime, CString& outCloudServerUrl,
-    std::string& outSessionToken, CString& errorMsg, bool& networkFailure);
+    std::string& outSessionToken, CString& errorMsg, bool& networkFailure,
+    long long& outBannedUntil);
 static bool DnfFetchV2PublicAliasDb(const CString& endpoint,
     const std::string& sessionToken, const std::string& deviceId,
     std::string& publicAliasDbJson, CString& errorMsg,
@@ -473,7 +477,8 @@ static bool DnfIsTransientCloudSnapshotFailure(const std::string& code)
 
 static bool DnfIsFatalCloudJoinError(const std::string& code)
 {
-    return code == "authentication_failed" || code == "invalid_auth" ||
+    return code == "account_banned" || code == "authentication_failed" ||
+        code == "invalid_auth" ||
         code == "unsupported_protocol" || code == "protocol_mismatch" ||
         code == "invalid_server_url" ||
         code == "binary_or_invalid_message" || code == "unknown_packet" ||
@@ -484,9 +489,13 @@ static bool DnfIsFatalCloudJoinError(const std::string& code)
 static bool DnfIsCloudRealtimeBlockedWebAction(const std::string& action)
 {
     return action == "update_state" ||
-        action == "cmd_monitor" || action == "cmd_set_output_seat_label" ||
+        action == "cmd_swap" || action == "cmd_monitor" ||
+        action == "cmd_set_output_seat_label" ||
         action == "cmd_set_red_pick_mode" || action == "cmd_delete_alias" ||
         action == "cmd_undo_event" || action == "cmd_reset_stats" ||
+        action == "cmd_match_history_undo" ||
+        action == "cmd_match_history_redo" ||
+        action == "cmd_match_history_restore" ||
         action == "cmd_cloud_sync_broadcaster" ||
         action == "cmd_cloud_realtime_start";
 }
@@ -498,9 +507,11 @@ static bool DnfIsCloudMatchWebAction(const std::string& action)
 
 static CString DnfCloudMatchErrorText(const std::string& code)
 {
+    if (code == "account_banned") return L"客户端已被封禁，授权登录、云端连接和 OCR 均已停用；请联系管理员解封。";
     if (code == "device_already_registered") return L"本机身份已被注册，正在生成新身份重试。";
     if (code == "network_error" || code == "connection_lost") return L"云端服务器暂时无法连接，请检查网络后重试。";
-    if (code == "authentication_failed" || code == "invalid_auth") return L"云端身份已失效，请重新加入房间以注册新身份。";
+    if (code == "authentication_failed") return L"云端身份已失效，请重新加入房间以注册新身份。";
+    if (code == "invalid_auth") return L"服务器不接受当前连接格式，请检查客户端与服务器版本。";
     if (code == "unsupported_protocol" || code == "protocol_mismatch") return L"云端协议版本不兼容，请升级软件或服务器。";
     if (code == "room_not_found") return L"选择的比赛房间不存在。";
     if (code == "broadcaster_name_taken") return L"这个主播名称已被在线主播使用，请重新输入一个名称。";
@@ -521,6 +532,16 @@ static CString DnfCloudMatchErrorText(const std::string& code)
     if (code == "reverse_sync_conflict") return L"对方正在实时同步你的数据，当前禁止反向同步，避免形成循环覆盖。";
     if (code == "not_in_room") return L"当前未加入云端比赛房间。";
     return L"云端比赛同步操作失败，请稍后重试。";
+}
+
+static long long DnfReadClientBanUntil(const json& value)
+{
+    const auto found = value.find("bannedUntil");
+    if (found == value.end()) return -1;
+    if (found->is_null()) return 0;
+    if (!found->is_number_integer()) return -1;
+    const long long bannedUntil = found->get<long long>();
+    return bannedUntil > 0 && bannedUntil <= 253402300799LL ? bannedUntil : -1;
 }
 
 static bool DnfReadCloudMatchUnsigned(const json& object, const char* key,
@@ -3603,6 +3624,7 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     ON_MESSAGE(WM_OCR_START_RESULT, &CDNFGameCaptureDlg::OnOcrStartResult)
     ON_MESSAGE(WM_OCR_RECOVER_RESULT, &CDNFGameCaptureDlg::OnOcrRecoverResult)
     ON_MESSAGE(WM_KILL_DISPLAY_VISIBILITY_CHANGED, &CDNFGameCaptureDlg::OnKillDisplayVisibilityChanged)
+    ON_MESSAGE(WM_KILL_DISPLAY_READY, &CDNFGameCaptureDlg::OnKillDisplayReady)
     ON_MESSAGE(WM_KEY_DISPLAY_VISIBILITY_CHANGED, &CDNFGameCaptureDlg::OnKeyDisplayVisibilityChanged)
     ON_MESSAGE(WM_KEY_MAPPING_LAN_CHANGED, &CDNFGameCaptureDlg::OnKeyMappingLanChanged)
     ON_MESSAGE(WM_KEY_MAPPING_TEAM_SYNC, &CDNFGameCaptureDlg::OnKeyMappingTeamSync)
@@ -3819,6 +3841,28 @@ void CDNFGameCaptureDlg::KillProcessByName(const CString& processName) {
     CloseHandle(hSnap);
 }
 
+void CDNFGameCaptureDlg::ShowClientBanNotice(long long bannedUntil)
+{
+    if (m_clientBanNoticeShown && m_clientBanNoticeUntil == bannedUntil) return;
+    m_clientBanNoticeShown = true;
+    m_clientBanNoticeUntil = bannedUntil;
+
+    CString message;
+    if (bannedUntil == 0) {
+        message = L"此客户端已被永久封禁。\r\n\r\n授权登录、云端连接和 OCR 均已停用，请联系管理员解封。";
+    }
+    else if (bannedUntil > 0) {
+        message = L"此客户端已被封禁。\r\n封禁至：" +
+            FormatTimeStamp(bannedUntil) +
+            L"\r\n\r\n授权登录、云端连接和 OCR 均已停用。";
+    }
+    else {
+        message = L"此客户端已被封禁。\r\n服务器未返回封禁截止时间，请联系管理员。";
+    }
+    ShowCenteredMsgBox(message, L"客户端已被封禁",
+        MB_OK | MB_ICONERROR | MB_TOPMOST);
+}
+
 
 LRESULT CDNFGameCaptureDlg::OnCloudAuthFail(WPARAM wParam, LPARAM lParam) {
     (void)wParam;
@@ -3829,7 +3873,7 @@ LRESULT CDNFGameCaptureDlg::OnCloudAuthFail(WPARAM wParam, LPARAM lParam) {
             WriteMatchLog(L"[云端验证] 已忽略过期的授权失败回调。");
             return 0;
         }
-        if (authFailure->leaseEndpointRefresh) {
+        if (authFailure->leaseEndpointRefresh && !authFailure->accountBanned) {
             m_cloudMatchLeaseRefreshInFlight = false;
             CString refreshLog = L"五天租约中的服务器地址连接失败，在线刷新地址也未成功；"
                 L"当前授权与租约保持有效，程序将继续重连原地址。原因：" +
@@ -3844,8 +3888,12 @@ LRESULT CDNFGameCaptureDlg::OnCloudAuthFail(WPARAM wParam, LPARAM lParam) {
         const bool wasManualAuthCheck = authFailure->manualCheck;
         m_bIsAuthValid = false;
         m_cloudExpireTime = 0;
-        DisableCloudMatchForAuthorization(
-            L"授权未通过，云端主播连接和比赛同步已关闭。");
+        DisableCloudMatchForAuthorization(authFailure->accountBanned
+            ? DnfCloudMatchErrorText("account_banned")
+            : L"授权未通过，云端主播连接和比赛同步已关闭。");
+        if (authFailure->accountBanned) {
+            ShowClientBanNotice(authFailure->bannedUntil);
+        }
         WriteMatchLog(L"[云端验证] " + authFailure->message);
         AppLog(L"[云端验证] " + authFailure->message, RGB(255, 190, 80));
 
@@ -3856,7 +3904,9 @@ LRESULT CDNFGameCaptureDlg::OnCloudAuthFail(WPARAM wParam, LPARAM lParam) {
         }
         else {
             WriteMatchLog(L"[授权备份] 云端校验失败（非手动授权），保留本地卡密，不覆盖授权存储。");
-            if (!authFailure->serviceFailure) DnfClearProtectedLicenseLease();
+            if (!authFailure->serviceFailure || authFailure->accountBanned) {
+                DnfClearProtectedLicenseLease();
+            }
         }
 
         if (m_editVisualLogs.m_hWnd) m_editVisualLogs.SetWindowText(L"");
@@ -3872,7 +3922,9 @@ LRESULT CDNFGameCaptureDlg::OnCloudAuthFail(WPARAM wParam, LPARAM lParam) {
         m_bIsManualAuthCheck = false; // 重置标记
 
         if (wasManualAuthCheck) {
-            CheckTrialAndLicense(); // 重新加载旧授权激活状态
+            if (!authFailure->accountBanned) {
+                CheckTrialAndLicense(); // 重新加载旧授权激活状态
+            }
             s_backupAuthCode.Empty();
             s_pendingAuthCode.Empty();
         }
@@ -3891,6 +3943,8 @@ LRESULT CDNFGameCaptureDlg::OnUpdateAuthTime(WPARAM wParam, LPARAM lParam) {
         return 0;
     }
     m_cloudMatchLeaseRefreshInFlight = false;
+    m_clientBanNoticeShown = false;
+    m_clientBanNoticeUntil = -1;
     long long cloudTime = authSuccess->expireTime;
     const bool wasManualAuthCheck = authSuccess->manualCheck;
     const long long currentTime = static_cast<long long>(time(nullptr));
@@ -4443,10 +4497,11 @@ bool CDNFGameCaptureDlg::BeginLicenseLeaseEndpointRefresh()
         CString cloudResult;
         std::string sessionToken;
         bool networkFailure = false;
+        long long bannedUntil = -1;
         if (useServerAuthV2) {
             const bool ok = DnfCheckServerV2Binding(endpoint, manifestUrl,
                 licenseKey, machineId, duration, cloudExpTime, cloudServerUrl,
-                sessionToken, cloudResult, networkFailure);
+                sessionToken, cloudResult, networkFailure, bannedUntil);
             if (ok) cloudResult = L"OK";
         }
         else {
@@ -4477,6 +4532,8 @@ bool CDNFGameCaptureDlg::BeginLicenseLeaseEndpointRefresh()
             cloudResult, false, requestGeneration };
         failure->leaseEndpointRefresh = true;
         failure->serviceFailure = networkFailure;
+        failure->accountBanned = cloudResult.Find(L"account_banned") >= 0;
+        failure->bannedUntil = bannedUntil;
         if (!::PostMessage(hWnd, WM_CLOUD_AUTH_FAIL, 0,
             reinterpret_cast<LPARAM>(failure))) {
             delete failure;
@@ -4519,6 +4576,8 @@ bool CDNFGameCaptureDlg::BeginLicenseCloudCheck(const CString& inputKey, bool ma
         const int maxAttempts = manualCheck ? 1 : kAutomaticAttempts;
         CString cloudResult = L"未知请求异常";
         bool serviceFailure = false;
+        bool accountBanned = false;
+        long long bannedUntil = -1;
 
         for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
             long long cloudExpTime = 0;
@@ -4528,9 +4587,10 @@ bool CDNFGameCaptureDlg::BeginLicenseCloudCheck(const CString& inputKey, bool ma
             if (useServerAuthV2) {
                 const bool ok = DnfCheckServerV2Binding(endpoint, manifestUrl,
                     normalized, hwid, duration, cloudExpTime, cloudServerUrl,
-                    sessionToken, cloudResult, networkFailure);
+                    sessionToken, cloudResult, networkFailure, bannedUntil);
                 if (ok) cloudResult = L"OK";
                 serviceFailure = networkFailure;
+                accountBanned = !ok && cloudResult.Find(L"account_banned") >= 0;
             }
             else {
                 cloudResult = CheckCloudBinding(normalized, hwid, duration,
@@ -4557,6 +4617,7 @@ bool CDNFGameCaptureDlg::BeginLicenseCloudCheck(const CString& inputKey, bool ma
                 return;
             }
 
+            if (accountBanned) attempt = maxAttempts;
             if (attempt < maxAttempts && ::IsWindow(hWnd)) {
                 CString retryLog;
                 retryLog.Format(L"⏳ [云端验证] 请求未成功（第%d次），1秒后自动重试。",
@@ -4570,6 +4631,8 @@ bool CDNFGameCaptureDlg::BeginLicenseCloudCheck(const CString& inputKey, bool ma
             auto* failure = new DnfCloudAuthFailure{
                 cloudResult, manualCheck, requestGeneration };
             failure->serviceFailure = serviceFailure;
+            failure->accountBanned = accountBanned;
+            failure->bannedUntil = bannedUntil;
             if (!::PostMessage(hWnd, WM_CLOUD_AUTH_FAIL,
                 0, reinterpret_cast<LPARAM>(failure))) {
                 delete failure;
@@ -4996,13 +5059,15 @@ static bool DnfFetchServerEndpointManifest(const CString& manifestUrl,
 static bool DnfCheckServerV2Binding(const CString& endpoint,
     const CString& manifestUrl, const CString& key, const CString& deviceId,
     long long duration, long long& outExpTime, CString& outCloudServerUrl,
-    std::string& outSessionToken, CString& errorMsg, bool& networkFailure)
+    std::string& outSessionToken, CString& errorMsg, bool& networkFailure,
+    long long& outBannedUntil)
 {
     outExpTime = 0;
     outCloudServerUrl.Empty();
     outSessionToken.clear();
     errorMsg.Empty();
     networkFailure = false;
+    outBannedUntil = -1;
 
     CString activeEndpoint(endpoint);
     activeEndpoint.Trim();
@@ -5059,7 +5124,22 @@ static bool DnfCheckServerV2Binding(const CString& endpoint,
             const std::string message = reply.is_object() && reply.contains("code") && reply["code"].is_string() ?
                 reply["code"].get<std::string>() : "授权服务暂时不可用或响应格式无效";
             const CString messageText = CA2W(message.c_str(), CP_UTF8);
-            errorMsg.Format(L"服务器验证未完成（HTTP %lu）：%s", status, messageText.GetString());
+            if (message == "account_banned") {
+                const auto bannedUntil = reply.find("bannedUntil");
+                if (bannedUntil != reply.end()) {
+                    if (bannedUntil->is_null()) outBannedUntil = 0;
+                    else if (bannedUntil->is_number_integer()) {
+                        const long long value = bannedUntil->get<long long>();
+                        if (value > 0 && value <= 253402300799LL) {
+                            outBannedUntil = value;
+                        }
+                    }
+                }
+                errorMsg = L"account_banned：客户端已被封禁，请联系管理员解封。";
+            }
+            else {
+                errorMsg.Format(L"服务器验证未完成（HTTP %lu）：%s", status, messageText.GetString());
+            }
             networkFailure = status >= 500 || status == 429 || !validReply;
             return false;
         }
@@ -5956,6 +6036,9 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
 
     m_configPath = appDir + L"players_config.txt";
     m_iniPath = appDir + L"config.ini";
+    m_matchHistoryMaxSteps = GetPrivateProfileInt(
+        L"Settings", L"MatchHistoryMaxSteps", 30, m_iniPath);
+    m_matchHistoryMaxSteps = (std::max)(1, (std::min)(200, m_matchHistoryMaxSteps));
     m_webFrontDir = appDir + L"web前端";
     wchar_t webThemeBuffer[32] = {};
     ::GetPrivateProfileString(L"Settings", L"WebTheme", L"dark-esports",
@@ -5975,6 +6058,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     LoadKeyMappingLanSettings();
     LoadKeyMappingSettings();
     m_bOutputSeatLabelToKillFile = GetPrivateProfileInt(L"Settings", L"OutputSeatLabelToKillFile", 0, m_iniPath) != 0;
+    m_bPreferLocalAliasesOnSync = GetPrivateProfileInt(L"Settings", L"PreferLocalAliases", 0, m_iniPath) != 0;
     m_bRedPickFirst = GetPrivateProfileInt(L"Settings", L"RedPickFirst", 0, m_iniPath) != 0;
     wchar_t lastTargetBuf[512];
     ::GetPrivateProfileString(L"Settings", L"LastTargetWindowName", L"", lastTargetBuf, 512, m_iniPath);
@@ -6019,16 +6103,32 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     CreateEx(0, cls, title, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
         100, 100, (int)(750 * WINDOW_SCALE), (int)(760 * WINDOW_SCALE), NULL, NULL);
 
-    // Web 计分窗口必须在重型本地初始化之前创建。构造函数返回后消息泵
-    // 才会开始处理 WebView2 回调，因此这里只创建并显示首屏，后续工作
-    // 通过 WM_STARTUP_STAGE 分段执行，避免启动阶段把 WebView 卡在白屏。
+    // 直播伴侣可能在进程启动后立刻捕获第一个可见窗口。先启动本地展示
+    // 服务并显示击杀窗口，主 Web 必须等击杀 WebView 首次导航完成后再显示。
+    m_bKillDisplayHttpReady = DnfStartKillDisplayHttpServer(
+        this, m_webFrontDir, m_killDisplayHttpError);
+    if (m_bKillDisplayHttpReady) {
+        OpenKillDisplayWindow();
+    }
+    else if (!m_killDisplayHttpError.IsEmpty()) {
+        WriteMatchLog(L"[击杀展示页] " + m_killDisplayHttpError);
+    }
+
+    // Web 计分窗口仍在重型本地初始化之前创建，让隐藏的 WebView2 可以并行
+    // 加载；只有击杀窗口就绪消息或有限超时才会放行它成为可见窗口。
     m_pWebDlg = new CWebScoreDlg(nullptr);
     if (!m_pWebDlg->Create(IDD_WEB_SCORE_DIALOG, GetDesktopWindow())) {
         delete m_pWebDlg;
         m_pWebDlg = nullptr;
     }
     else {
-        m_pWebDlg->ShowWindow(SW_SHOW);
+        m_pWebDlg->ShowWindow(SW_HIDE);
+        if (m_bKillDisplayHttpReady) {
+            SetTimer(kStartupMainWebRevealTimeoutTimerId, 3000, nullptr);
+        }
+        else {
+            RevealMainWebWindow();
+        }
     }
     ShowWindow(SW_HIDE);
 
@@ -6165,6 +6265,17 @@ void CDNFGameCaptureDlg::StartStartupBootstrap()
     PostMessage(WM_STARTUP_STAGE, 0, 0);
 }
 
+void CDNFGameCaptureDlg::RevealMainWebWindow()
+{
+    if (m_mainWebWindowRevealed) return;
+    KillTimer(kStartupMainWebRevealTimeoutTimerId);
+    if (!m_pWebDlg || !::IsWindow(m_pWebDlg->GetSafeHwnd())) return;
+
+    m_mainWebWindowRevealed = true;
+    m_pWebDlg->ShowWindow(SW_SHOW);
+    WriteMatchLog(L"[启动] 击杀展示已先行显示，现已放行主 Web 计分窗口。");
+}
+
 void CDNFGameCaptureDlg::RunStartupStage(int stage)
 {
     switch (stage) {
@@ -6197,6 +6308,10 @@ void CDNFGameCaptureDlg::RunStartupStage(int stage)
         runTimedStartupStep(L"WriteScoreToFile", [&]() {
             WriteScoreToFile();
         });
+        // SQLite 选手库是异步加载的；启动失败时才在这里使用已有配置建立基线。
+        if (!m_playerLibraryStore) {
+            InitializeMatchHistory();
+        }
         m_startupStage.store(1, std::memory_order_release);
         PostMessage(WM_STARTUP_STAGE, 1, 0);
         return;
@@ -6204,11 +6319,8 @@ void CDNFGameCaptureDlg::RunStartupStage(int stage)
 
     case 1:
         SendStartupProgress(34, L"正在准备展示服务", L"本地服务");
-        // 展示页服务和窗口在主 Web 首屏之后创建；它们的 WebView2
-        // 初始化是异步的，不再阻塞首个计分页面。窗口本身要等主页面
-        // 完成 page_ready，避免多个 WebView2 环境同时争用用户数据目录。
-        m_bKillDisplayHttpReady = DnfStartKillDisplayHttpServer(
-            this, m_webFrontDir, m_killDisplayHttpError);
+        // 击杀服务和窗口已在主 Web 创建前启动。主页面就绪后这里只补开
+        // 用户上次保留的按键展示窗口，不再重复启动服务。
         if (m_bKillDisplayHttpReady) {
             m_deferredDisplayWindowsPending = true;
             TryOpenDeferredDisplayWindows();
@@ -7881,7 +7993,7 @@ bool CDNFGameCaptureDlg::ToggleReviewEvent(int eventId)
         if (ev.readOnly) return false;
 
         if (!ev.undone && ev.statsApplied) {
-            MarkMatchMutation();
+            MarkMatchMutation(L"撤销识别战绩", L"复盘");
             if (ev.killerIdx >= 0 && ev.killerIdx < 8 && m_players[ev.killerIdx].kills > 0) {
                 m_players[ev.killerIdx].kills--;
                 if (ev.akDelta > 0 && m_players[ev.killerIdx].akCount > 0) {
@@ -7902,7 +8014,7 @@ bool CDNFGameCaptureDlg::ToggleReviewEvent(int eventId)
         }
 
         if (ev.undone && !ev.statsApplied) {
-            MarkMatchMutation();
+            MarkMatchMutation(L"恢复识别战绩", L"复盘");
             if (ev.killerIdx >= 0 && ev.killerIdx < 8) {
                 m_players[ev.killerIdx].kills++;
                 if (ev.akDelta > 0) {
@@ -10466,6 +10578,33 @@ void CDNFGameCaptureDlg::DoRealExit() {
 // ============================================================================
 // UI 事件响应与授权软拦截
 // ============================================================================
+void CDNFGameCaptureDlg::ApplyRealtimeEditingLock()
+{
+    const BOOL editingEnabled = m_cloudRealtimeFollowing ? FALSE : TRUE;
+    if (m_chkFlip.GetSafeHwnd()) m_chkFlip.EnableWindow(editingEnabled);
+    if (m_btnApply.GetSafeHwnd()) m_btnApply.EnableWindow(editingEnabled);
+    if (m_btnReset.GetSafeHwnd()) m_btnReset.EnableWindow(editingEnabled);
+    if (m_editQuickAdd.GetSafeHwnd()) m_editQuickAdd.EnableWindow(editingEnabled);
+    if (m_btnQuickAdd.GetSafeHwnd()) m_btnQuickAdd.EnableWindow(editingEnabled);
+    if (m_cmbTeamSelect.GetSafeHwnd()) m_cmbTeamSelect.EnableWindow(editingEnabled);
+    if (m_treePlayers.GetSafeHwnd()) m_treePlayers.EnableWindow(editingEnabled);
+    if (m_listRecentPlayers.GetSafeHwnd()) m_listRecentPlayers.EnableWindow(editingEnabled);
+
+    if (!m_btnStart.GetSafeHwnd()) return;
+    if (m_cloudRealtimeFollowing) {
+        m_btnStart.EnableWindow(FALSE);
+        m_btnStart.SetWindowText(L"实时同步中");
+    }
+    else if (m_bOcrStartPending.load(std::memory_order_acquire)) {
+        m_btnStart.EnableWindow(FALSE);
+        m_btnStart.SetWindowText(L"启动中...");
+    }
+    else {
+        m_btnStart.EnableWindow(TRUE);
+        m_btnStart.SetWindowText(m_bIsRunning ? L"停止监控" : L"开始监控");
+    }
+}
+
 bool CDNFGameCaptureDlg::RejectLocalMatchEditWhileRealtime()
 {
     if (!m_cloudRealtimeFollowing) return false;
@@ -10773,7 +10912,8 @@ void CDNFGameCaptureDlg::OnBnClickedApply() {
 }
 
 void CDNFGameCaptureDlg::OnBnClickedFlip() {
-    MarkMatchMutation();
+    if (RejectLocalMatchEditWhileRealtime()) return;
+    MarkMatchMutation(L"翻转红蓝显示", L"本机");
     const bool flipSides = (m_chkFlip.GetCheck() == BST_CHECKED);
     {
         std::lock_guard<std::mutex> dataLock(m_dataMutex);
@@ -10825,7 +10965,7 @@ void CDNFGameCaptureDlg::OnBnClickedReset() {
 #endif
 
     if (MessageBox(L"确定要将战绩全部归零吗？", L"确认", MB_ICONQUESTION | MB_YESNO) == IDYES) {
-        MarkMatchMutation();
+        MarkMatchMutation(L"手动重置战绩", L"本机");
         {
             std::lock_guard<std::mutex> dataLock(m_dataMutex);
             m_totalScoreRed = 0;
@@ -12388,6 +12528,12 @@ void CDNFGameCaptureDlg::OnBnClickedHelp() {
 
 
 void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
+    if (nID == kStartupMainWebRevealTimeoutTimerId) {
+        KillTimer(kStartupMainWebRevealTimeoutTimerId);
+        WriteMatchLog(L"[启动] 等待击杀展示页就绪超时，按兜底策略显示主 Web 窗口。");
+        RevealMainWebWindow();
+        return;
+    }
     if (nID == 10) {
         PollPlayerLibrary();
         return;
@@ -12499,6 +12645,12 @@ void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
     else if (nID == 8) {
         PollKeyMappingState();
         PollCloudMatch();
+        const ULONGLONG now = ::GetTickCount64();
+        if (m_matchHistoryLastObserveTick == 0 ||
+            now - m_matchHistoryLastObserveTick >= 100) {
+            m_matchHistoryLastObserveTick = now;
+            ObserveMatchHistoryState();
+        }
     }
     else if (nID == 9) {
         MaybeStartAliasDbAutoSync(false);
@@ -13818,6 +13970,8 @@ void CDNFGameCaptureDlg::StartPlayerLibrary()
         else {
             WriteMatchLog(L"[选手库] 数据库加载失败，保留旧库只读使用：" + m_playerLibraryError);
         }
+        // PollPlayerLibrary 已经发布完首次快照，此时的场上状态才是启动基线。
+        InitializeMatchHistory();
     };
     SetTimer(10, 100, nullptr);
     WriteMatchLog(L"[选手库] 正在后台加载与建立索引，主界面可继续操作。");
@@ -13938,9 +14092,10 @@ void CDNFGameCaptureDlg::PollPlayerLibrary()
         }
         // Sync already applied the selected match IDs and statistics. Library unions
         // refresh candidates, not the match's selected ID set or its wire-size limits.
-        const bool rosterChanged = result.ok && result.requestId != m_matchLibraryRequestId && ApplyPlayerLibraryDelta(
-            std::atomic_load(&m_playerLibrarySnapshot), result.snapshot, result.command);
-        if (rosterChanged) MarkMatchMutation();
+        const bool rosterChanged = result.ok &&
+            result.requestId != m_matchLibraryRequestId && ApplyPlayerLibraryDelta(
+                std::atomic_load(&m_playerLibrarySnapshot), result.snapshot, result.command);
+        if (rosterChanged) MarkMatchMutation(L"更新场上选手信息", L"选手库");
         if (result.snapshot) PublishPlayerLibrary(result.snapshot);
         try {
             if (completed) completed(result);
@@ -13994,7 +14149,7 @@ void CDNFGameCaptureDlg::ClearActivePlayersAfterLibraryReset()
     m_ocrStartRequestId.fetch_add(1);
     m_bOcrRecoveryPending = false;
     m_ocrRecoveryRequestId.fetch_add(1);
-    MarkMatchMutation();
+    MarkMatchMutation(L"手动清空选手", L"本机");
     {
         std::lock_guard<std::mutex> lock(m_dataMutex);
         for (int i = 0; i < 8; ++i) {
@@ -14299,8 +14454,11 @@ bool CDNFGameCaptureDlg::SaveAliasDB()
     return SaveAliasDB(true);
 }
 
-bool CDNFGameCaptureDlg::SaveAliasDB(bool mergeActivePlayers) {
-    if (m_playerLibraryStore) return QueuePlayerLibrarySave(mergeActivePlayers);
+bool CDNFGameCaptureDlg::SaveAliasDB(bool mergeActivePlayers)
+{
+    if (m_playerLibraryStore) {
+        return QueuePlayerLibrarySave(mergeActivePlayers);
+    }
     if (mergeActivePlayers) {
         for (int i = 0; i < 8; i++) {
             CString mName = m_players[i].name;
@@ -15892,7 +16050,7 @@ void CDNFGameCaptureDlg::OnBnClickedQuickAdd()
     }
 
     if (addMainCount > 0 || addAliasCount > 0) {
-        MarkMatchMutation();
+        MarkMatchMutation(L"添加选手或游戏ID", L"本机");
         SaveAliasDB();
         SyncDataToTree();
         RefreshDisplay();
@@ -15994,7 +16152,8 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 CString applyError;
                 const json snapshot = m_cloudPreviewSnapshot.value("snapshot", json::object());
                 std::uint64_t appliedEpoch = 0;
-                const bool applied = ApplyTeamSyncSnapshot(snapshot, true, applyError, false, false, &appliedEpoch);
+                const bool applied = ApplyTeamSyncSnapshot(snapshot, true, applyError,
+                    false, false, &appliedEpoch, false, L"手动同步", L"云端");
                 if (!applied) {
                     m_cloudMatchLastError = applyError.IsEmpty() ? L"合并同步失败，本地数据未修改。" : applyError;
                 }
@@ -16067,6 +16226,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                         RGB(210, 145, 255));
                 }
             }
+            BroadcastStateToWeb();
         }
         else if (action == "cmd_cloud_realtime_stop") {
             m_cloudRealtimeRequestId = "realtime-stop-" +
@@ -16084,6 +16244,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             m_cloudRealtimeFollowing = false;
             m_cloudRealtimeTargetDeviceId.clear();
             m_cloudRealtimeHeartbeatDueTick = 0;
+            BroadcastStateToWeb();
         }
         else if (action == "cmd_cloud_rename_broadcaster") {
             CString requested = CA2W(j.value("name", std::string()).c_str(), CP_UTF8);
@@ -16186,7 +16347,8 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                     const std::string serverUrl = std::string(CW2A(
                         m_cloudMatchServerUrl, CP_UTF8));
                     clientReady = m_cloudMatchClient.Configure(serverUrl,
-                        m_cloudMatchDeviceId, m_cloudMatchDeviceToken) &&
+                        m_cloudMatchDeviceId, m_cloudMatchDeviceToken,
+                        std::string(CW2A(GetMachineID(), CP_UTF8)), m_cloudServerSessionToken) &&
                         m_cloudMatchClient.Start();
                 }
 
@@ -16349,7 +16511,8 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                     m_teamSyncPendingSnapshot = m_cloudMatchSyncPendingSnapshot;
                     m_teamSyncLocalBaselineSnapshot = m_cloudMatchSyncLocalBaseline;
                     if (!ValidateTeamSyncSnapshot(m_cloudMatchSyncPendingSnapshot, error) ||
-                        !ApplyTeamSyncSnapshot(m_cloudMatchSyncPendingSnapshot, true, error)) {
+                        !ApplyTeamSyncSnapshot(m_cloudMatchSyncPendingSnapshot, true, error,
+                            false, false, nullptr, false, L"手动同步", L"云端")) {
                         ClearTeamSyncState();
                         m_cloudMatchSyncBusy = false;
                         m_cloudMatchSyncError = error.IsEmpty() ?
@@ -16379,7 +16542,8 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                             const bool rolledBack = ValidateTeamSyncSnapshot(
                                 preApplyBackup, rollbackError) &&
                                 ApplyTeamSyncSnapshot(preApplyBackup, false,
-                                    rollbackError);
+                                    rollbackError, false, false, nullptr, false,
+                                    L"恢复同步", L"云端");
                             const bool rollbackPersisted = rolledBack &&
                                 RefreshAfterTeamSyncApply();
                             ClearTeamSyncState();
@@ -16453,7 +16617,8 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 m_teamSyncBackupAvailable = true;
                 m_teamSyncBackupEventBoundaryId = m_cloudMatchSyncUndoEventBoundaryId;
                 if (!ValidateTeamSyncSnapshot(m_cloudMatchSyncUndoBackup, error) ||
-                    !ApplyTeamSyncSnapshot(m_cloudMatchSyncUndoBackup, false, error)) {
+                    !ApplyTeamSyncSnapshot(m_cloudMatchSyncUndoBackup, false, error,
+                        false, false, nullptr, false, L"恢复同步", L"云端")) {
                     ClearTeamSyncState();
                     m_cloudMatchSyncBusy = false;
                     m_cloudMatchSyncError = error.IsEmpty() ?
@@ -16463,7 +16628,8 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                     if (!RefreshAfterTeamSyncApply()) {
                         CString restoreError;
                         const bool restoredRemote = ApplyTeamSyncSnapshot(
-                            m_cloudMatchSyncUndoApplied, false, restoreError, true);
+                            m_cloudMatchSyncUndoApplied, false, restoreError, true,
+                            true, nullptr, false, L"恢复同步", L"云端");
                         const bool restoredPersisted = restoredRemote &&
                             RefreshAfterTeamSyncApply();
                         ClearTeamSyncState();
@@ -16601,9 +16767,55 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             }
         }
         else if (action == "update_state") {
-            MarkMatchMutation();
             std::lock_guard<std::mutex> lock(m_dataMutex);
             auto& data = j["data"];
+
+            bool scoreChanged =
+                data.value("blueScore", m_totalScoreBlue) != m_totalScoreBlue ||
+                data.value("redScore", m_totalScoreRed) != m_totalScoreRed;
+            bool namesChanged = false;
+            bool aliasesChanged = false;
+            bool killsChanged = false;
+            bool deathsChanged = false;
+            bool akChanged = false;
+            if (data.contains("players") && data["players"].is_array() &&
+                data["players"].size() == 8) {
+                for (size_t index = 0; index < 8; ++index) {
+                    const auto& incoming = data["players"][index];
+                    if (incoming.value("name", std::string()) !=
+                        DnfJsonUtf8(m_players[index].name)) namesChanged = true;
+                    json currentAliases = json::array();
+                    for (const auto& alias : m_players[index].aliases) {
+                        currentAliases.push_back(DnfJsonUtf8(alias.name));
+                    }
+                    if (incoming.value("aliases", json::array()) != currentAliases) {
+                        aliasesChanged = true;
+                    }
+                    if (incoming.value("kills", m_players[index].kills) !=
+                        m_players[index].kills) killsChanged = true;
+                    if (incoming.value("deaths", m_players[index].deaths) !=
+                        m_players[index].deaths) deathsChanged = true;
+                    if (incoming.value("akCount", m_players[index].akCount) !=
+                        m_players[index].akCount) akChanged = true;
+                }
+            }
+            const std::string currentPickMode = m_bRedPickFirst ? "first" : "second";
+            const bool pickModeChanged = data.value("redPickMode", currentPickMode) != currentPickMode;
+            const bool statsChanged = killsChanged || deathsChanged || akChanged;
+            const wchar_t* historyLabel = L"手动修改场上状态";
+            if (namesChanged && statsChanged) historyLabel = L"手动修改人名和战绩";
+            else if (namesChanged) historyLabel = L"手动修改人名";
+            else if (killsChanged && !deathsChanged && !akChanged) historyLabel = L"手动修改击杀";
+            else if (deathsChanged && !killsChanged && !akChanged) historyLabel = L"手动修改死亡";
+            else if (akChanged && !killsChanged && !deathsChanged) historyLabel = L"手动修改AK";
+            else if (statsChanged) historyLabel = L"手动修改战绩";
+            else if (aliasesChanged) historyLabel = L"手动修改游戏ID";
+            else if (scoreChanged) historyLabel = L"手动修改比分";
+            else if (pickModeChanged) historyLabel = L"手动修改选人顺序";
+            if (scoreChanged || namesChanged || aliasesChanged || statsChanged ||
+                pickModeChanged) {
+                MarkMatchMutation(historyLabel, L"本机");
+            }
 
             m_totalScoreBlue = data["blueScore"].get<int>();
             m_totalScoreRed = data["redScore"].get<int>();
@@ -16738,7 +16950,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             BroadcastStateToWeb();
         }
         else if (action == "cmd_set_output_seat_label") {
-            MarkMatchMutation();
+            MarkMatchMutation(L"修改选人顺序输出", L"Web");
             m_bOutputSeatLabelToKillFile = j.value("enabled", false);
             ::WritePrivateProfileString(L"Settings", L"OutputSeatLabelToKillFile", m_bOutputSeatLabelToKillFile ? L"1" : L"0", m_iniPath);
             WriteScoreToFile();
@@ -16754,8 +16966,18 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 RGB(255, 210, 106));
             BroadcastStateToWeb();
         }
+        else if (action == "cmd_set_prefer_local_aliases") {
+            m_bPreferLocalAliasesOnSync = j.value("enabled", false);
+            ::WritePrivateProfileString(L"Settings", L"PreferLocalAliases",
+                m_bPreferLocalAliasesOnSync ? L"1" : L"0", m_iniPath);
+            AppLog(m_bPreferLocalAliasesOnSync
+                ? L"📝 [比赛同步] 已开启本地别名优先。"
+                : L"📝 [比赛同步] 已关闭本地别名优先。",
+                RGB(105, 226, 170));
+            BroadcastStateToWeb();
+        }
         else if (action == "cmd_set_red_pick_mode") {
-            MarkMatchMutation();
+            MarkMatchMutation(L"修改选人顺序", L"Web");
             std::string mode = j.value("mode", "first");
             const bool redPickFirst = (mode != "second");
             {
@@ -17059,7 +17281,8 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             }
             else {
                 CString error;
-                if (!ApplyTeamSyncSnapshot(m_teamSyncPendingSnapshot, true, error)) {
+                if (!ApplyTeamSyncSnapshot(m_teamSyncPendingSnapshot, true, error,
+                    false, false, nullptr, false, L"手动同步", L"局域网")) {
                     DnfSendWebToast(m_pWebDlg, L"team_sync_error", error);
                 }
                 else {
@@ -17085,7 +17308,8 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             else {
                 const json backup = m_teamSyncBackupSnapshot;
                 CString error;
-                if (!ApplyTeamSyncSnapshot(backup, false, error)) {
+                if (!ApplyTeamSyncSnapshot(backup, false, error,
+                    false, false, nullptr, false, L"恢复同步", L"局域网")) {
                     DnfSendWebToast(m_pWebDlg, L"team_sync_error", error);
                 }
                 else {
@@ -17140,6 +17364,11 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             logMsg += msg;
             AppLog(logMsg, ok ? RGB(0, 255, 100) : RGB(255, 180, 0));
             if (m_pWebDlg) DnfSendWebToast(m_pWebDlg, L"kill_obs_url_result", msg);
+        }
+        else if (action == "cmd_set_alias_popover_expanded") {
+            if (m_pWebDlg && j.contains("expanded") && j["expanded"].is_boolean()) {
+                m_pWebDlg->SetAliasPopoverExpanded(j["expanded"].get<bool>());
+            }
         }
         else if (action == "cmd_resize_web") {
             // 旧前端可能还会上报内容高度；当前版本固定 Web 窗口尺寸，忽略动态 resize。
@@ -17479,7 +17708,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             QueuePlayerIdentityCommand(std::move(command));
         }
         else if (action == "cmd_delete_alias") {
-            MarkMatchMutation();
+            MarkMatchMutation(L"删除游戏ID", L"Web");
             std::string mNameStr = j["mainName"].get<std::string>();
             std::string aNameStr = j["aliasName"].get<std::string>();
             CString mainName = CA2W(mNameStr.c_str(), CP_UTF8);
@@ -17537,9 +17766,51 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             }
             PostMessage(WM_UPDATE_ALL_UI, 0, 0);
         }
+        else if (action == "cmd_match_history_undo") {
+            CString error;
+            if (!UndoMatchHistory(error)) {
+                DnfSendWebToast(m_pWebDlg, L"match_history_error",
+                    error.IsEmpty() ? L"没有可以撤销的场上操作。" : error);
+            }
+            else {
+                AppLog(L"↩️ [操作历史] 已撤销上一条场上操作。", RGB(255, 210, 80));
+            }
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_match_history_redo") {
+            CString error;
+            if (!RedoMatchHistory(error)) {
+                DnfSendWebToast(m_pWebDlg, L"match_history_error",
+                    error.IsEmpty() ? L"没有可以重做的场上操作。" : error);
+            }
+            else {
+                AppLog(L"↪️ [操作历史] 已重做下一条场上操作。", RGB(0, 220, 255));
+            }
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_match_history_restore") {
+            const std::uint64_t entryId = j.value("id", std::uint64_t{ 0 });
+            CString error;
+            if (entryId == 0 || !RestoreMatchHistoryToEntry(entryId, error)) {
+                DnfSendWebToast(m_pWebDlg, L"match_history_error",
+                    error.IsEmpty() ? L"选中的操作记录已不存在。" : error);
+            }
+            else {
+                AppLog(L"↩️ [操作历史] 已回溯到选中的操作。", RGB(105, 226, 170));
+            }
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_set_match_history_max_steps") {
+            CString error;
+            const int maxSteps = j.value("maxSteps", m_matchHistoryMaxSteps);
+            if (!SetMatchHistoryMaxSteps(maxSteps, error)) {
+                DnfSendWebToast(m_pWebDlg, L"match_history_error", error);
+            }
+            BroadcastStateToWeb();
+        }
         else if (action == "cmd_reset_stats") {
-            MarkMatchMutation();
             const bool clearPlayers = j.value("clearPlayers", false);
+            MarkMatchMutation(clearPlayers ? L"手动清空选手" : L"手动重置战绩", L"本机");
             {
                 std::lock_guard<std::mutex> dataLock(m_dataMutex);
                 m_totalScoreRed = 0;
@@ -17680,6 +17951,7 @@ json CDNFGameCaptureDlg::DnfBuildSharedWebStateJson()
     data["isMfcVisible"] = (IsWindowVisible() == TRUE);
     data["deathXAlgorithm"] = m_nDeathAlgorithmChoice;
     data["outputSeatLabelToKillFile"] = m_bOutputSeatLabelToKillFile;
+    data["preferLocalAliases"] = m_bPreferLocalAliasesOnSync;
     data["redPickMode"] = m_bRedPickFirst ? "first" : "second";
     data["redPickFirst"] = m_bRedPickFirst;
     data["webTheme"] = DnfJsonUtf8(m_webTheme);
@@ -17852,6 +18124,7 @@ json CDNFGameCaptureDlg::DnfBuildSharedWebStateJson()
 
     data["players"] = std::move(matchSnapshot["players"]);
     data["recentEvents"] = std::move(matchSnapshot["recentEvents"]);
+    data["matchHistory"] = BuildMatchHistoryStateJson();
     if (matchSnapshot.contains("fullAliasDB")) data["fullAliasDB"] = std::move(matchSnapshot["fullAliasDB"]);
 
     return data;
@@ -17939,6 +18212,8 @@ bool CDNFGameCaptureDlg::SaveKillDisplaySettingsPayload(const std::string& reque
 
 void CDNFGameCaptureDlg::BroadcastStateToWeb()
 {
+    ApplyRealtimeEditingLock();
+    ObserveMatchHistoryState();
     try {
         m_keyMappingLanService.SetTeamSyncSnapshot(BuildTeamSyncSnapshotPayload());
     }
@@ -18033,8 +18308,8 @@ void CDNFGameCaptureDlg::OpenKillDisplayWindow()
     }
 
     if (m_pKillDisplayDlg == nullptr) {
-        m_pKillDisplayDlg = new CKillDisplayDlg(nullptr);
-        m_pKillDisplayDlg->Create(IDD_WEB_SCORE_DIALOG, nullptr);
+        m_pKillDisplayDlg = new CKillDisplayDlg(m_iniPath, this);
+        m_pKillDisplayDlg->Create(IDD_WEB_SCORE_DIALOG, this);
     }
 
     if (m_pKillDisplayDlg) {
@@ -18054,7 +18329,7 @@ void CDNFGameCaptureDlg::TryOpenDeferredDisplayWindows()
 
     m_deferredDisplayWindowsPending = false;
     WriteMatchLog(L"[展示页] 主计分页面已就绪，开始创建击杀和按键展示窗口。");
-    OpenKillDisplayWindow();
+    if (!IsKillDisplayWindowVisible()) OpenKillDisplayWindow();
     if (GetPrivateProfileInt(L"KeyDisplayWindow", L"Visible", 0,
         m_iniPath) != 0) {
         OpenKeyDisplayWindow();
@@ -18572,7 +18847,8 @@ bool CDNFGameCaptureDlg::BeginCloudRoomRestore(const CString& reason)
 
     const std::string serverUrl = std::string(CW2A(m_cloudMatchServerUrl, CP_UTF8));
     const bool configured = m_cloudMatchClient.Configure(serverUrl,
-        m_cloudMatchDeviceId, m_cloudMatchDeviceToken);
+        m_cloudMatchDeviceId, m_cloudMatchDeviceToken,
+        std::string(CW2A(GetMachineID(), CP_UTF8)), m_cloudServerSessionToken);
     const bool started = configured && m_cloudMatchClient.Start();
     const bool joined = started && m_cloudMatchClient.JoinUnifiedPool(
         std::string(CW2A(m_cloudMatchBroadcasterName, CP_UTF8)));
@@ -18649,7 +18925,8 @@ void CDNFGameCaptureDlg::BeginCloudRoomJoin(const std::string& roomId,
 
     const std::string serverUrl = std::string(CW2A(m_cloudMatchServerUrl, CP_UTF8));
     if (!m_cloudMatchClient.Configure(serverUrl, m_cloudMatchDeviceId,
-        m_cloudMatchDeviceToken) || !m_cloudMatchClient.Start()) {
+        m_cloudMatchDeviceToken, std::string(CW2A(GetMachineID(), CP_UTF8)),
+        m_cloudServerSessionToken) || !m_cloudMatchClient.Start()) {
         CancelCloudRoomJoin(L"新房间连接初始化失败，已取消本次切换。");
         BroadcastStateToWeb();
         return;
@@ -18676,7 +18953,8 @@ void CDNFGameCaptureDlg::CancelCloudRoomJoin(const CString& reason)
 
     const std::string serverUrl = std::string(CW2A(m_cloudMatchServerUrl, CP_UTF8));
     const bool configured = m_cloudMatchClient.Configure(serverUrl,
-        m_cloudMatchDeviceId, m_cloudMatchDeviceToken);
+        m_cloudMatchDeviceId, m_cloudMatchDeviceToken,
+        std::string(CW2A(GetMachineID(), CP_UTF8)), m_cloudServerSessionToken);
     if (configured) m_cloudMatchClient.Start();
 
     m_cloudMatchJoining = false;
@@ -19364,7 +19642,8 @@ void CDNFGameCaptureDlg::HandleUnifiedCloudSnapshot(const json& event, bool real
     CString applyError;
     m_cloudCloudStateApplying = true;
     std::uint64_t appliedEpoch = 0;
-    const bool applied = ApplyTeamSyncSnapshot(teamSnapshot, false, applyError, true, true, &appliedEpoch);
+    const bool applied = ApplyTeamSyncSnapshot(teamSnapshot, false, applyError,
+        true, true, &appliedEpoch, false, L"实时同步", L"实时");
     m_cloudCloudStateApplying = false;
     if (!applied) {
         m_cloudMatchLastError = applyError.IsEmpty() ?
@@ -19591,7 +19870,8 @@ void CDNFGameCaptureDlg::HandleCloudMatchMessage(std::string message)
 
             const std::string serverUrl = std::string(CW2A(m_cloudMatchServerUrl, CP_UTF8));
             const bool started = m_cloudMatchClient.Configure(serverUrl,
-                m_cloudMatchDeviceId, m_cloudMatchDeviceToken) &&
+                m_cloudMatchDeviceId, m_cloudMatchDeviceToken,
+                std::string(CW2A(GetMachineID(), CP_UTF8)), m_cloudServerSessionToken) &&
                 m_cloudMatchClient.Start();
             const bool joinQueued = started &&
                 m_cloudMatchClient.JoinUnifiedPool(
@@ -19787,8 +20067,18 @@ void CDNFGameCaptureDlg::HandleCloudMatchMessage(std::string message)
         }
     }
     else if (type == "cloud_error") {
-        const bool authenticationFailed = code == "authentication_failed" ||
-            code == "invalid_auth";
+        if (code == "account_banned") {
+            const long long bannedUntil = DnfReadClientBanUntil(event);
+            m_bIsAuthValid = false;
+            m_cloudExpireTime = 0;
+            DnfClearProtectedLicenseLease();
+            DisableCloudMatchForAuthorization(DnfCloudMatchErrorText(code));
+            if (m_bIsRunning) OnBnClickedStart();
+            m_cloudMatchLastError = DnfCloudMatchErrorText(code);
+            ShowClientBanNotice(bannedUntil);
+        }
+        else {
+        const bool authenticationFailed = code == "authentication_failed";
         const bool pendingIdentityReady =
             DnfIsCloudMatchRoomId(m_cloudMatchPendingRoomId) &&
             !m_cloudMatchPendingBroadcasterName.IsEmpty();
@@ -19820,6 +20110,7 @@ void CDNFGameCaptureDlg::HandleCloudMatchMessage(std::string message)
         }
         else {
             m_cloudMatchLastError = DnfCloudMatchErrorText(code);
+        }
         }
         AppLog(L"❌ [云端连接] " + m_cloudMatchLastError,
             RGB(255, 105, 105));
@@ -19990,11 +20281,112 @@ std::string CDNFGameCaptureDlg::BuildCloudMatchSnapshotPayload(
     return serialized;
 }
 
+void CDNFGameCaptureDlg::InitializeMatchHistory()
+{
+    m_matchHistory.clear();
+    m_matchHistoryCursor = 0;
+    m_matchHistoryNextId = 1;
+    m_matchHistoryMutationPending = false;
+    m_matchHistoryPendingLabel.Empty();
+    m_matchHistoryPendingSource.Empty();
+    m_matchHistoryApplying = false;
+    m_matchHistoryReady = true;
+    try {
+        m_matchHistoryObservedSnapshot = BuildMatchHistorySnapshotPayload();
+    }
+    catch (...) {
+        m_matchHistoryObservedSnapshot.clear();
+    }
+}
+
+std::string CDNFGameCaptureDlg::BuildMatchHistorySnapshotPayload()
+{
+    std::lock_guard<std::mutex> lock(m_dataMutex);
+    return BuildMatchHistorySnapshotPayloadUnlocked();
+}
+
+std::string CDNFGameCaptureDlg::BuildMatchHistorySnapshotPayloadUnlocked()
+{
+    json snapshot = json::parse(BuildTeamSyncSnapshotPayloadUnlocked(),
+        nullptr, false);
+    if (snapshot.is_discarded() || !snapshot.is_object()) return {};
+
+    snapshot["historyVersion"] = 1;
+    snapshot["historyPendingTeamScoreWin"] = m_bPendingTeamScoreWin;
+    snapshot["historyTeamSyncEventBoundaryId"] = m_teamSyncEventBoundaryId;
+    snapshot["historyRecentEvents"] = json::array();
+
+    // 历史恢复只需要事件的可操作字段，不复制 OCR 长文本和截图文件。
+    const size_t maxEvents = 100;
+    const size_t first = m_recentEvents.size() > maxEvents
+        ? m_recentEvents.size() - maxEvents : 0;
+    for (size_t index = first; index < m_recentEvents.size(); ++index) {
+        const RecentEvent& event = m_recentEvents[index];
+        snapshot["historyRecentEvents"].push_back({
+            { "id", event.id },
+            { "killer", DnfJsonUtf8(event.killer) },
+            { "dead", DnfJsonUtf8(event.dead) },
+            { "time", static_cast<unsigned int>(event.time) },
+            { "timeText", DnfJsonUtf8(event.timeText) },
+            { "triggerSide", event.triggerSide },
+            { "killerIdx", event.killerIdx },
+            { "deadIdx", event.deadIdx },
+            { "killerTeam", event.killerTeam },
+            { "deadTeam", event.deadTeam },
+            { "redScoreDelta", event.redScoreDelta },
+            { "blueScoreDelta", event.blueScoreDelta },
+            { "akDelta", event.akDelta },
+            { "statsApplied", event.statsApplied },
+            { "undone", event.undone },
+            { "status", DnfJsonUtf8(event.status) },
+            { "ocrSummary", DnfJsonUtf8(event.ocrSummary) },
+            { "candidateSummary", DnfJsonUtf8(event.candidateSummary) },
+            { "algorithmName", DnfJsonUtf8(event.algorithmName) },
+            { "snapshotPath", DnfJsonUtf8(event.snapshotPath) },
+            { "cloudSynced", event.cloudSynced },
+            { "readOnly", event.readOnly }
+        });
+    }
+    return snapshot.dump();
+}
+
+nlohmann::json CDNFGameCaptureDlg::BuildMatchHistoryStateJson() const
+{
+    json state;
+    state["maxSteps"] = m_matchHistoryMaxSteps;
+    state["cursor"] = static_cast<std::uint64_t>(m_matchHistoryCursor);
+    state["canUndo"] = m_matchHistoryCursor > 0;
+    state["canRedo"] = m_matchHistoryCursor < m_matchHistory.size();
+    state["entries"] = json::array();
+    for (size_t index = 0; index < m_matchHistory.size(); ++index) {
+        const auto& entry = m_matchHistory[index];
+        state["entries"].push_back({
+            { "id", entry.id },
+            { "step", static_cast<std::uint64_t>(index + 1) },
+            { "label", DnfJsonUtf8(entry.label) },
+            { "source", DnfJsonUtf8(entry.source) },
+            { "time", DnfJsonUtf8(entry.timeText) },
+            { "detail", DnfJsonUtf8(entry.detail) },
+            { "applied", index < m_matchHistoryCursor },
+            { "current", index + 1 == m_matchHistoryCursor },
+            { "redo", index >= m_matchHistoryCursor }
+        });
+    }
+    return state;
+}
+
 void CDNFGameCaptureDlg::OnMatchStateChanged(std::string matchPayload,
     const char* source)
 {
     if (matchPayload.empty() || matchPayload == m_cloudMatchLastObservedPayload) return;
-    MarkMatchMutation();
+    const bool fromOcr = source && strcmp(source, "ocr") == 0;
+    const bool fromRealtime = source && strcmp(source, "realtime") == 0;
+    const bool fromManualSync = source && strcmp(source, "manual_sync") == 0;
+    MarkMatchMutation(fromOcr ? L"自动识别" :
+        (fromRealtime ? L"实时同步" :
+            (fromManualSync ? L"手动同步" : L"本地状态更新")),
+        fromOcr ? L"OCR" : (fromRealtime ? L"实时" :
+            (fromManualSync ? L"同步" : L"本机")));
     m_cloudMatchLastObservedPayload = matchPayload;
     m_cloudMatchPendingPayload = std::move(matchPayload);
     m_cloudMatchPendingChangeSource = source && *source ? source : "manual";
@@ -20004,18 +20396,405 @@ void CDNFGameCaptureDlg::OnMatchStateChanged(std::string matchPayload,
     m_cloudMatchUploadDueTick = ::GetTickCount64() + 400;
 }
 
-void CDNFGameCaptureDlg::MarkMatchMutation()
+void CDNFGameCaptureDlg::RecordMatchHistoryTransition(
+    const std::string& beforeSnapshot, const std::string& afterSnapshot,
+    const wchar_t* label, const wchar_t* source)
+{
+    if (!m_matchHistoryReady || m_matchHistoryApplying ||
+        beforeSnapshot.empty() || afterSnapshot.empty() ||
+        beforeSnapshot == afterSnapshot) {
+        return;
+    }
+
+    MatchHistoryEntry entry;
+    entry.id = m_matchHistoryNextId++;
+    if (entry.id == 0) entry.id = m_matchHistoryNextId++;
+    entry.label = label && *label ? label : L"比赛状态变更";
+    entry.source = source && *source ? source : L"本机";
+    entry.timeText = DnfFormatClockNow();
+    entry.beforeSnapshot = beforeSnapshot;
+    entry.afterSnapshot = afterSnapshot;
+
+    json before = json::parse(beforeSnapshot, nullptr, false);
+    json after = json::parse(afterSnapshot, nullptr, false);
+    CString detail;
+    std::vector<CString> detailParts;
+    const auto addDetail = [&](const CString& text) {
+        if (!text.IsEmpty()) detailParts.push_back(text);
+    };
+    if (!before.is_object() || !after.is_object()) {
+        addDetail(L"比赛状态");
+    }
+    else {
+        const int beforeRedScore = before.value("redScore", 0);
+        const int beforeBlueScore = before.value("blueScore", 0);
+        const int afterRedScore = after.value("redScore", 0);
+        const int afterBlueScore = after.value("blueScore", 0);
+        if (beforeRedScore != afterRedScore || beforeBlueScore != afterBlueScore) {
+            CString text;
+            text.Format(L"比分 %d:%d→%d:%d", beforeRedScore, beforeBlueScore,
+                afterRedScore, afterBlueScore);
+            addDetail(text);
+        }
+        if (before.value("redPickMode", std::string()) !=
+            after.value("redPickMode", std::string())) {
+            addDetail(L"选人顺序");
+        }
+        if (before.value("isFlipped", false) != after.value("isFlipped", false)) {
+            addDetail(L"红蓝显示");
+        }
+        const auto beforePlayers = before.value("players", json::array());
+        const auto afterPlayers = after.value("players", json::array());
+        if (beforePlayers.is_array() && afterPlayers.is_array() &&
+            beforePlayers.size() == 8 && afterPlayers.size() == 8) {
+            for (size_t index = 0; index < 8; ++index) {
+                const auto& beforePlayer = beforePlayers[index];
+                const auto& afterPlayer = afterPlayers[index];
+                const std::string beforeNameUtf8 =
+                    beforePlayer.value("name", std::string());
+                const std::string afterNameUtf8 =
+                    afterPlayer.value("name", std::string());
+                CString beforeName = CA2W(beforeNameUtf8.c_str(), CP_UTF8);
+                CString afterName = CA2W(afterNameUtf8.c_str(), CP_UTF8);
+                CString displayName = afterName.IsEmpty() ? beforeName : afterName;
+                if (displayName.IsEmpty()) displayName.Format(L"%u号", static_cast<unsigned int>(index + 1));
+
+                if (beforeName != afterName) {
+                    CString oldDisplay = beforeName.IsEmpty() ? CString(L"空位") : beforeName;
+                    CString newDisplay = afterName.IsEmpty() ? CString(L"空位") : afterName;
+                    CString text;
+                    text.Format(L"%u号名称 %s→%s",
+                        static_cast<unsigned int>(index + 1),
+                        oldDisplay.GetString(), newDisplay.GetString());
+                    addDetail(text);
+                }
+                if (beforePlayer.value("aliases", json::array()) !=
+                    afterPlayer.value("aliases", json::array())) {
+                    addDetail(displayName + L" 游戏ID更新");
+                }
+                if (beforePlayer.value("team", -1) !=
+                    afterPlayer.value("team", -1)) {
+                    addDetail(displayName + L" 队伍调整");
+                }
+
+                const auto addCounterChange = [&](const char* field,
+                    const wchar_t* fieldName) {
+                    const int oldValue = beforePlayer.value(field, 0);
+                    const int newValue = afterPlayer.value(field, 0);
+                    if (oldValue == newValue) return;
+                    CString text;
+                    text.Format(L"%s %s %d→%d", displayName.GetString(), fieldName,
+                        oldValue, newValue);
+                    addDetail(text);
+                };
+                addCounterChange("kills", L"击杀");
+                addCounterChange("deaths", L"死亡");
+                addCounterChange("akCount", L"AK");
+                addCounterChange("currentStreak", L"连胜");
+            }
+        }
+        if (before.value("historyRecentEvents", json::array()) !=
+            after.value("historyRecentEvents", json::array())) {
+            addDetail(L"识别记录");
+        }
+        if (detailParts.empty()) addDetail(L"场上状态");
+    }
+    const size_t visiblePartCount = (std::min)(detailParts.size(), size_t(4));
+    for (size_t index = 0; index < visiblePartCount; ++index) {
+        if (!detail.IsEmpty()) detail += L"、";
+        detail += detailParts[index];
+    }
+    if (detailParts.size() > visiblePartCount) {
+        CString remainder;
+        remainder.Format(L"、另%u项",
+            static_cast<unsigned int>(detailParts.size() - visiblePartCount));
+        detail += remainder;
+    }
+    entry.detail = detail;
+
+    if (m_matchHistoryCursor < m_matchHistory.size()) {
+        m_matchHistory.erase(m_matchHistory.begin() +
+            static_cast<std::ptrdiff_t>(m_matchHistoryCursor), m_matchHistory.end());
+    }
+    m_matchHistory.push_back(std::move(entry));
+    m_matchHistoryCursor = m_matchHistory.size();
+    while (m_matchHistory.size() > static_cast<size_t>(m_matchHistoryMaxSteps)) {
+        m_matchHistory.pop_front();
+        if (m_matchHistoryCursor > 0) --m_matchHistoryCursor;
+    }
+    m_matchHistoryMutationPending = false;
+    m_matchHistoryPendingLabel.Empty();
+    m_matchHistoryPendingSource.Empty();
+}
+
+void CDNFGameCaptureDlg::ObserveMatchHistoryState()
+{
+    if (!m_matchHistoryReady) return;
+    std::string currentSnapshot;
+    try {
+        currentSnapshot = BuildMatchHistorySnapshotPayload();
+    }
+    catch (...) {
+        return;
+    }
+    if (currentSnapshot.empty()) return;
+
+    if (m_matchHistoryApplying) {
+        m_matchHistoryObservedSnapshot = std::move(currentSnapshot);
+        m_matchHistoryMutationPending = false;
+        m_matchHistoryPendingLabel.Empty();
+        m_matchHistoryPendingSource.Empty();
+        return;
+    }
+    if (m_matchHistoryObservedSnapshot.empty()) {
+        m_matchHistoryObservedSnapshot = std::move(currentSnapshot);
+        m_matchHistoryMutationPending = false;
+        return;
+    }
+    if (currentSnapshot == m_matchHistoryObservedSnapshot) {
+        m_matchHistoryMutationPending = false;
+        m_matchHistoryPendingLabel.Empty();
+        m_matchHistoryPendingSource.Empty();
+        return;
+    }
+
+    const CString label = m_matchHistoryMutationPending &&
+        !m_matchHistoryPendingLabel.IsEmpty()
+        ? m_matchHistoryPendingLabel : CString(L"比赛状态变更");
+    const CString source = m_matchHistoryMutationPending &&
+        !m_matchHistoryPendingSource.IsEmpty()
+        ? m_matchHistoryPendingSource : CString(L"本机");
+    const std::string previous = m_matchHistoryObservedSnapshot;
+    RecordMatchHistoryTransition(previous, currentSnapshot,
+        label.GetString(), source.GetString());
+    m_matchHistoryObservedSnapshot = std::move(currentSnapshot);
+    m_matchHistoryMutationPending = false;
+    m_matchHistoryPendingLabel.Empty();
+    m_matchHistoryPendingSource.Empty();
+}
+
+bool CDNFGameCaptureDlg::ApplyMatchHistorySnapshot(
+    const std::string& snapshotPayload, CString& errorMessage)
+{
+    errorMessage.Empty();
+    if (snapshotPayload.empty() || snapshotPayload.size() > 512 * 1024) {
+        errorMessage = L"历史快照为空或过大。";
+        return false;
+    }
+
+    json fullSnapshot = json::parse(snapshotPayload, nullptr, false);
+    if (fullSnapshot.is_discarded() || !fullSnapshot.is_object() ||
+        fullSnapshot.value("historyVersion", 0) != 1) {
+        errorMessage = L"历史快照版本无效。";
+        return false;
+    }
+
+    std::vector<RecentEvent> restoredEvents;
+    const json events = fullSnapshot.value("historyRecentEvents", json::array());
+    if (!events.is_array() || events.size() > 100) {
+        errorMessage = L"历史识别记录无效。";
+        return false;
+    }
+    try {
+        for (const auto& value : events) {
+            if (!value.is_object()) {
+                errorMessage = L"历史识别记录格式无效。";
+                return false;
+            }
+            const auto readText = [&](const char* key, CString& output,
+                size_t maxBytes = 4096) -> bool {
+                if (!value.contains(key) || !value[key].is_string()) return false;
+                const std::string text = value[key].get<std::string>();
+                if (text.size() > maxBytes || text.find('\r') != std::string::npos ||
+                    text.find('\n') != std::string::npos) return false;
+                output = CA2W(text.c_str(), CP_UTF8);
+                return true;
+            };
+            RecentEvent event;
+            if (!readText("killer", event.killer) || !readText("dead", event.dead) ||
+                !readText("timeText", event.timeText) || !readText("status", event.status) ||
+                !readText("ocrSummary", event.ocrSummary, 8192) ||
+                !readText("candidateSummary", event.candidateSummary, 8192) ||
+                !readText("algorithmName", event.algorithmName, 1024) ||
+                !readText("snapshotPath", event.snapshotPath, 4096)) {
+                errorMessage = L"历史识别记录文本无效。";
+                return false;
+            }
+            event.id = value.value("id", 0);
+            event.time = value.value("time", 0u);
+            event.triggerSide = value.value("triggerSide", -1);
+            event.killerIdx = value.value("killerIdx", -1);
+            event.deadIdx = value.value("deadIdx", -1);
+            event.killerTeam = value.value("killerTeam", -1);
+            event.deadTeam = value.value("deadTeam", -1);
+            event.redScoreDelta = value.value("redScoreDelta", 0);
+            event.blueScoreDelta = value.value("blueScoreDelta", 0);
+            event.akDelta = value.value("akDelta", 0);
+            event.statsApplied = value.value("statsApplied", false);
+            event.undone = value.value("undone", false);
+            event.cloudSynced = value.value("cloudSynced", false);
+            event.readOnly = value.value("readOnly", false);
+            restoredEvents.push_back(std::move(event));
+        }
+    }
+    catch (...) {
+        errorMessage = L"历史识别记录解析失败。";
+        return false;
+    }
+
+    json coreSnapshot = fullSnapshot;
+    coreSnapshot.erase("historyVersion");
+    coreSnapshot.erase("historyPendingTeamScoreWin");
+    coreSnapshot.erase("historyTeamSyncEventBoundaryId");
+    coreSnapshot.erase("historyRecentEvents");
+
+    struct MatchHistoryApplyGuard {
+        bool& flag;
+        explicit MatchHistoryApplyGuard(bool& applying) : flag(applying)
+        {
+            flag = true;
+        }
+        ~MatchHistoryApplyGuard()
+        {
+            flag = false;
+        }
+    };
+    MatchHistoryApplyGuard applyGuard(m_matchHistoryApplying);
+    const bool applied = ApplyTeamSyncSnapshot(coreSnapshot, false, errorMessage,
+        false, false, nullptr, true);
+    if (applied) {
+        std::lock_guard<std::mutex> lock(m_dataMutex);
+        m_recentEvents = std::move(restoredEvents);
+        m_bPendingTeamScoreWin = fullSnapshot.value(
+            "historyPendingTeamScoreWin", false);
+        m_teamSyncEventBoundaryId = fullSnapshot.value(
+            "historyTeamSyncEventBoundaryId", 0);
+    }
+    return applied;
+}
+
+bool CDNFGameCaptureDlg::UndoMatchHistory(CString& errorMessage)
+{
+    errorMessage.Empty();
+    ObserveMatchHistoryState();
+    if (m_matchHistoryCursor == 0) {
+        errorMessage = L"没有可以撤销的场上操作。";
+        return false;
+    }
+    const MatchHistoryEntry entry = m_matchHistory[m_matchHistoryCursor - 1];
+    if (!ApplyMatchHistorySnapshot(entry.beforeSnapshot, errorMessage)) return false;
+    const bool saved = RefreshAfterMatchHistoryApply();
+    --m_matchHistoryCursor;
+    try {
+        m_matchHistoryObservedSnapshot = BuildMatchHistorySnapshotPayload();
+    }
+    catch (...) {
+        m_matchHistoryObservedSnapshot.clear();
+    }
+    if (!saved) {
+        errorMessage = L"已撤销，但本地配置或输出文件保存失败。";
+        return false;
+    }
+    return true;
+}
+
+bool CDNFGameCaptureDlg::RedoMatchHistory(CString& errorMessage)
+{
+    errorMessage.Empty();
+    ObserveMatchHistoryState();
+    if (m_matchHistoryCursor >= m_matchHistory.size()) {
+        errorMessage = L"没有可以重做的场上操作。";
+        return false;
+    }
+    const MatchHistoryEntry entry = m_matchHistory[m_matchHistoryCursor];
+    if (!ApplyMatchHistorySnapshot(entry.afterSnapshot, errorMessage)) return false;
+    const bool saved = RefreshAfterMatchHistoryApply();
+    ++m_matchHistoryCursor;
+    try {
+        m_matchHistoryObservedSnapshot = BuildMatchHistorySnapshotPayload();
+    }
+    catch (...) {
+        m_matchHistoryObservedSnapshot.clear();
+    }
+    if (!saved) {
+        errorMessage = L"已重做，但本地配置或输出文件保存失败。";
+        return false;
+    }
+    return true;
+}
+
+bool CDNFGameCaptureDlg::RestoreMatchHistoryToEntry(std::uint64_t entryId,
+    CString& errorMessage)
+{
+    errorMessage.Empty();
+    ObserveMatchHistoryState();
+
+    size_t index = 0;
+    while (index < m_matchHistory.size() && m_matchHistory[index].id != entryId) {
+        ++index;
+    }
+    if (index >= m_matchHistory.size()) {
+        errorMessage = L"选中的操作记录已不存在。";
+        return false;
+    }
+
+    const size_t targetCursor = index + 1;
+    if (targetCursor == m_matchHistoryCursor) return true;
+
+    const MatchHistoryEntry entry = m_matchHistory[index];
+    if (!ApplyMatchHistorySnapshot(entry.afterSnapshot, errorMessage)) return false;
+    const bool saved = RefreshAfterMatchHistoryApply();
+    m_matchHistoryCursor = index + 1;
+    try {
+        m_matchHistoryObservedSnapshot = BuildMatchHistorySnapshotPayload();
+    }
+    catch (...) {
+        m_matchHistoryObservedSnapshot.clear();
+    }
+    if (!saved) {
+        errorMessage = L"已回溯，但本地配置或输出文件保存失败。";
+        return false;
+    }
+    return true;
+}
+
+bool CDNFGameCaptureDlg::SetMatchHistoryMaxSteps(int maxSteps,
+    CString& errorMessage)
+{
+    errorMessage.Empty();
+    if (maxSteps < 1 || maxSteps > 200) {
+        errorMessage = L"历史步数只能设置为 1 到 200。";
+        return false;
+    }
+    m_matchHistoryMaxSteps = maxSteps;
+    while (m_matchHistory.size() > static_cast<size_t>(m_matchHistoryMaxSteps)) {
+        m_matchHistory.pop_front();
+        if (m_matchHistoryCursor > 0) --m_matchHistoryCursor;
+    }
+    ::WritePrivateProfileString(L"Settings", L"MatchHistoryMaxSteps",
+        std::to_wstring(m_matchHistoryMaxSteps).c_str(), m_iniPath);
+    return true;
+}
+
+void CDNFGameCaptureDlg::MarkMatchMutation(const wchar_t* label,
+    const wchar_t* source)
 {
     std::uint64_t current = m_matchMutationEpoch.load(std::memory_order_acquire);
     while (current != (std::numeric_limits<std::uint64_t>::max)() &&
         !m_matchMutationEpoch.compare_exchange_weak(current, current + 1,
             std::memory_order_acq_rel, std::memory_order_acquire)) {
     }
+    if (m_matchHistoryApplying || !m_matchHistoryReady) return;
+    if (!m_matchHistoryMutationPending) {
+        m_matchHistoryPendingLabel = label && *label ? label : L"比赛状态变更";
+        m_matchHistoryPendingSource = source && *source ? source : L"本机";
+    }
+    m_matchHistoryMutationPending = true;
 }
 
 void CDNFGameCaptureDlg::MarkCloudMatchOcrStateChanged(std::string matchPayload)
 {
-    MarkMatchMutation();
+    MarkMatchMutation(L"自动识别", L"OCR");
     std::lock_guard<std::mutex> lock(m_cloudMatchSourceMutex);
     m_cloudMatchExplicitOcrPayload = std::move(matchPayload);
 }
@@ -20137,6 +20916,7 @@ void CDNFGameCaptureDlg::PollCloudMatch()
         m_cloudRealtimeHeartbeatDueTick = 0;
         m_cloudMatchLastError =
             L"云端连接已断开，实时同步已停止，本地 OCR 保持停止。";
+        BroadcastStateToWeb();
     }
     m_cloudMatchSyncConnectionGeneration = cloudStatus.connectionGeneration;
     m_cloudMatchSyncWasConnected = cloudStatus.connected;
@@ -20180,7 +20960,8 @@ void CDNFGameCaptureDlg::PollCloudMatch()
         const std::string serverUrl = std::string(CW2A(
             m_cloudMatchServerUrl, CP_UTF8));
         if (m_cloudMatchClient.Configure(serverUrl, m_cloudMatchDeviceId,
-            m_cloudMatchDeviceToken)) {
+            m_cloudMatchDeviceToken, std::string(CW2A(GetMachineID(), CP_UTF8)),
+            m_cloudServerSessionToken)) {
             m_cloudMatchClient.Start();
         }
         m_cloudMatchLeaving = false;
@@ -20417,14 +21198,16 @@ bool CDNFGameCaptureDlg::ValidateTeamSyncSnapshot(const json& snapshot, CString&
 }
 
 bool CDNFGameCaptureDlg::ApplyTeamSyncSnapshot(const json& snapshot, bool createBackup,
-    CString& errorMessage, bool automatic, bool preserveLocalFlip, std::uint64_t* appliedEpoch)
+    CString& errorMessage, bool automatic, bool preserveLocalFlip,
+    std::uint64_t* appliedEpoch, bool exactRestore,
+    const wchar_t* historyLabel, const wchar_t* historySource)
 {
     errorMessage.Empty();
     std::lock_guard<std::mutex> lock(m_dataMutex);
     if (!ValidateTeamSyncSnapshot(snapshot, errorMessage)) return false;
 
     json currentSnapshot;
-    if (!automatic) {
+    if (!automatic && !exactRestore) {
         try {
             currentSnapshot = json::parse(BuildTeamSyncSnapshotPayloadUnlocked());
         }
@@ -20456,8 +21239,21 @@ bool CDNFGameCaptureDlg::ApplyTeamSyncSnapshot(const json& snapshot, bool create
         int currentStreak = 0;
     } parsed[8];
 
+    const bool mergeLocalAliasesFirst = m_bPreferLocalAliasesOnSync &&
+        !exactRestore && (createBackup || automatic);
+    const auto localLibrary = mergeLocalAliasesFirst ?
+        std::atomic_load(&m_playerLibrarySnapshot) : dnf::player_library::SnapshotPtr();
+    std::vector<std::wstring> localFieldedNames;
+    if (localLibrary) {
+        localFieldedNames.reserve(8);
+        for (const auto& player : m_players) {
+            CString localName = player.name;
+            localName.Trim();
+            if (!localName.IsEmpty()) localFieldedNames.emplace_back(localName.GetString());
+        }
+    }
     std::map<CString, std::vector<CString>> localAliasesByMainName;
-    if (createBackup && !automatic) {
+    if (mergeLocalAliasesFirst || (createBackup && !automatic)) {
         for (const auto& player : m_players) {
             CString mainName = player.name;
             mainName.Trim();
@@ -20487,8 +21283,38 @@ bool CDNFGameCaptureDlg::ApplyTeamSyncSnapshot(const json& snapshot, bool create
             value.Trim();
             if (!value.IsEmpty()) parsed[i].aliases.push_back(value);
         }
+        if (localLibrary) {
+            std::vector<std::wstring> incomingGameIds;
+            incomingGameIds.reserve(parsed[i].aliases.size());
+            for (const auto& alias : parsed[i].aliases) {
+                incomingGameIds.emplace_back(alias.GetString());
+            }
+            std::vector<std::wstring> preferredNames;
+            preferredNames.reserve(localFieldedNames.size());
+            CString sameSeatName = m_players[i].name;
+            sameSeatName.Trim();
+            if (!sameSeatName.IsEmpty()) preferredNames.emplace_back(sameSeatName.GetString());
+            for (const auto& localName : localFieldedNames) {
+                if (preferredNames.empty() || localName != preferredNames.front()) {
+                    preferredNames.push_back(localName);
+                }
+            }
+            const auto preferredLocalName = dnf::player_library::ResolvePreferredLocalName(
+                *localLibrary, parsed[i].name.GetString(), incomingGameIds, preferredNames);
+            parsed[i].name = preferredLocalName.c_str();
+        }
         const auto localAliases = localAliasesByMainName.find(parsed[i].name);
-        if (localAliases != localAliasesByMainName.end()) {
+        if (mergeLocalAliasesFirst && localAliases != localAliasesByMainName.end()) {
+            std::vector<CString> remoteAliases = std::move(parsed[i].aliases);
+            parsed[i].aliases.clear();
+            for (const auto& alias : localAliases->second) {
+                DnfMergeAliasIntoList(parsed[i].aliases, alias);
+            }
+            for (const auto& alias : remoteAliases) {
+                DnfMergeAliasIntoList(parsed[i].aliases, alias);
+            }
+        }
+        if (!mergeLocalAliasesFirst && localAliases != localAliasesByMainName.end()) {
             for (const auto& alias : localAliases->second) {
                 DnfMergeAliasIntoList(parsed[i].aliases, alias);
             }
@@ -20518,7 +21344,10 @@ bool CDNFGameCaptureDlg::ApplyTeamSyncSnapshot(const json& snapshot, bool create
         m_players[i].currentStreak = parsed[i].currentStreak;
     }
 
-    if (automatic) {
+    if (exactRestore) {
+        // 历史恢复只负责恢复比赛状态，不改变局域网同步的待确认/撤销状态。
+    }
+    else if (automatic) {
         m_teamSyncAppliedSnapshot = json::object();
         m_teamSyncBackupSnapshot = json::object();
         m_teamSyncBackupAvailable = false;
@@ -20549,9 +21378,21 @@ bool CDNFGameCaptureDlg::ApplyTeamSyncSnapshot(const json& snapshot, bool create
         m_teamSyncEventBoundaryId = m_teamSyncBackupEventBoundaryId;
         m_teamSyncBackupEventBoundaryId = 0;
     }
-    m_teamSyncPendingSnapshot = json::object();
-    m_teamSyncLocalBaselineSnapshot = json::object();
-    MarkMatchMutation();
+    if (!exactRestore) {
+        m_teamSyncPendingSnapshot = json::object();
+        m_teamSyncLocalBaselineSnapshot = json::object();
+    }
+    const wchar_t* resolvedHistoryLabel = historyLabel;
+    if (!resolvedHistoryLabel || !*resolvedHistoryLabel) {
+        resolvedHistoryLabel = exactRestore ? L"恢复比赛历史" :
+            (automatic ? L"自动同步" :
+                (createBackup ? L"手动同步" : L"恢复同步"));
+    }
+    const wchar_t* resolvedHistorySource = historySource;
+    if (!resolvedHistorySource || !*resolvedHistorySource) {
+        resolvedHistorySource = exactRestore ? L"操作历史" : L"同步";
+    }
+    MarkMatchMutation(resolvedHistoryLabel, resolvedHistorySource);
     if (appliedEpoch) *appliedEpoch = m_matchMutationEpoch.load(std::memory_order_acquire);
     return true;
 }
@@ -20572,6 +21413,23 @@ bool CDNFGameCaptureDlg::RefreshAfterTeamSyncApply()
     SyncDataToTree();
     RefreshDisplay();
     return redPickSaved && seatLabelSaved && aliasesSaved && configSaved && scoreSaved;
+}
+
+bool CDNFGameCaptureDlg::RefreshAfterMatchHistoryApply()
+{
+    if (m_chkFlip.m_hWnd) {
+        m_chkFlip.SetCheck(m_bFlipSides ? BST_CHECKED : BST_UNCHECKED);
+    }
+    const bool redPickSaved = ::WritePrivateProfileString(L"Settings", L"RedPickFirst",
+        m_bRedPickFirst ? L"1" : L"0", m_iniPath) != FALSE;
+    const bool seatLabelSaved = ::WritePrivateProfileString(L"Settings",
+        L"OutputSeatLabelToKillFile",
+        m_bOutputSeatLabelToKillFile ? L"1" : L"0", m_iniPath) != FALSE;
+    const bool configSaved = SaveConfigToFile();
+    const bool scoreSaved = WriteScoreToFile();
+    SyncDataToTree();
+    RefreshDisplay();
+    return redPickSaved && seatLabelSaved && configSaved && scoreSaved;
 }
 
 void CDNFGameCaptureDlg::ClearTeamSyncState()
@@ -21090,7 +21948,19 @@ void CDNFGameCaptureDlg::OnRClickTree(NMHDR* pNMHDR, LRESULT* pResult) {
                 *pResult = 0;
                 return;
             }
-            if (matchStateMutationCommand) MarkMatchMutation();
+            if (matchStateMutationCommand) {
+                const wchar_t* historyLabel = L"手动修改场上状态";
+                if (cmd == 3 || cmd == 31) historyLabel = L"手动修改击杀";
+                else if (cmd == 4 || cmd == 32) historyLabel = L"手动修改死亡";
+                else if (cmd == 5 || cmd == 33) historyLabel = L"手动修改AK";
+                else if (cmd == 6) historyLabel = L"手动重置选手战绩";
+                else if (cmd == 7 || cmd == 8 || cmd == 9 || cmd == 10) historyLabel = L"手动修改比分";
+                else if (cmd == 11 || cmd == 2) historyLabel = L"手动清空选手";
+                else if (cmd == 12 || cmd == 13) historyLabel = L"手动移动选手";
+                else if (cmd >= 20 && cmd <= 27) historyLabel = L"手动调整选人顺序";
+                else if (cmd == 1 || cmd == 14) historyLabel = L"手动修改游戏ID";
+                MarkMatchMutation(historyLabel, L"本机");
+            }
 
             if (cmd == 7) {
                 if (m_treePlayers.GetItemText(hItem).Find(L"红队") != -1) m_totalScoreRed++;
@@ -21556,7 +22426,7 @@ void CDNFGameCaptureDlg::OnEndLabelEdit(NMHDR* pNMHDR, LRESULT* pResult) {
         }
 
         if (!numStr.IsEmpty()) {
-            MarkMatchMutation();
+            MarkMatchMutation(L"手动修改比分", L"本机");
             newScore = _wtoi(numStr);
             if (oldText.Find(L"红队") != -1) {
                 m_totalScoreRed = newScore;
@@ -21669,7 +22539,46 @@ void CDNFGameCaptureDlg::OnEndLabelEdit(NMHDR* pNMHDR, LRESULT* pResult) {
         return;
     }
 
-    MarkMatchMutation();
+    const bool editingAlias = (data & 0x80000000) != 0;
+    bool nameChanged = false;
+    bool killsChanged = false;
+    bool deathsChanged = false;
+    bool akChanged = false;
+    if (!editingAlias) {
+        nameChanged = m_players[curPIdx].name != newNameOnly;
+        int scoreEquals = line.Find(L'=');
+        if (scoreEquals == -1) scoreEquals = line.Find(L'＝');
+        if (scoreEquals != -1) {
+            CString scorePart = line.Mid(scoreEquals + 1);
+            scorePart.Trim();
+            int nextAk = scorePart.Find(L'A');
+            if (nextAk != -1) {
+                CString akText = scorePart.Mid(nextAk + 1);
+                akText.Trim();
+                int nextAkCount = _wtoi(akText);
+                if (nextAkCount == 0 && !akText.IsEmpty() && akText != L"0") nextAkCount = 1;
+                akChanged = nextAkCount != m_players[curPIdx].akCount;
+                scorePart = scorePart.Left(nextAk);
+            }
+            int slash = scorePart.Find(L'/');
+            if (slash == -1) slash = scorePart.Find(L'-');
+            if (slash != -1) {
+                const int nextKills = _wtoi(scorePart.Left(slash));
+                const int nextDeaths = _wtoi(scorePart.Mid(slash + 1));
+                killsChanged = nextKills != m_players[curPIdx].kills;
+                deathsChanged = nextDeaths != m_players[curPIdx].deaths;
+            }
+        }
+    }
+    const bool statsChanged = killsChanged || deathsChanged || akChanged;
+    const wchar_t* historyLabel = editingAlias ? L"手动修改游戏ID" :
+        (nameChanged && statsChanged ? L"手动修改人名和战绩" :
+            (nameChanged ? L"手动修改人名" :
+                (killsChanged && !deathsChanged && !akChanged ? L"手动修改击杀" :
+                    (deathsChanged && !killsChanged && !akChanged ? L"手动修改死亡" :
+                        (akChanged && !killsChanged && !deathsChanged ? L"手动修改AK" :
+                            (statsChanged ? L"手动修改战绩" : L"手动修改人名"))))));
+    MarkMatchMutation(historyLabel, L"本机");
 
     if (data & 0x80000000) {
         // 防止游戏ID名字带脏字符
@@ -21852,6 +22761,14 @@ LRESULT CDNFGameCaptureDlg::OnKillDisplayVisibilityChanged(WPARAM wParam, LPARAM
     return 0;
 }
 
+LRESULT CDNFGameCaptureDlg::OnKillDisplayReady(WPARAM wParam, LPARAM lParam)
+{
+    (void)wParam;
+    (void)lParam;
+    RevealMainWebWindow();
+    return 0;
+}
+
 LRESULT CDNFGameCaptureDlg::OnKeyDisplayVisibilityChanged(WPARAM wParam, LPARAM lParam)
 {
     WritePrivateProfileString(L"KeyDisplayWindow", L"Visible",
@@ -21992,7 +22909,8 @@ LRESULT CDNFGameCaptureDlg::OnKeyMappingTeamSync(WPARAM wParam, LPARAM lParam)
             }
             else {
                 m_keyMappingLanService.SetRemoteTeamSyncSnapshot(snapshot.dump(), revision);
-                if (!ApplyTeamSyncSnapshot(snapshot, false, error, true)) {
+                if (!ApplyTeamSyncSnapshot(snapshot, false, error, true,
+                    false, nullptr, false, L"自动同步", L"局域网")) {
                     m_teamSyncLastAutoResult = error.IsEmpty()
                         ? L"服务器自动快照无效，本地数据未修改" : error;
                     webMessage["action"] = "team_sync_error";
@@ -22021,7 +22939,8 @@ LRESULT CDNFGameCaptureDlg::OnKeyMappingTeamSync(WPARAM wParam, LPARAM lParam)
                 AppLog(L"⚠️ [比赛同步] 已忽略未授权的客户端比赛状态提交。", RGB(255, 180, 0));
             }
             else if (!ValidateTeamSyncSnapshot(snapshot, error) ||
-                !ApplyTeamSyncSnapshot(snapshot, false, error, true)) {
+                !ApplyTeamSyncSnapshot(snapshot, false, error, true,
+                    false, nullptr, false, L"自动同步", L"局域网")) {
                 m_keyMappingLanService.CompleteTeamSyncProposal(sourceId, proposalId, false,
                     "invalid_snapshot");
                 AppLog(L"⚠️ [比赛同步] 客户端提交无效：" + error, RGB(255, 180, 0));

@@ -14,6 +14,7 @@ let isKillDisplayWindowVisible = false;
 let deathXAlgorithm = 0;
 let deathPatchInstalled = false;
 let outputSeatLabelToKillFile = false;
+let preferLocalAliases = false;
 let redPickMode = 'second';
 let scoreboardTextStyles = {};
 let killDisplaySettings = {};
@@ -40,7 +41,9 @@ let activeKillDisplayStyleKey = 'teamName';
 let scoreboardStyleSyncTimer = null;
 let killDisplaySettingsSyncTimer = null;
 let recentEvents = [];
+let matchHistory = { entries: [], cursor: 0, maxSteps: 30, canUndo: false, canRedo: false };
 let isReviewPanelOpen = false;
+let isOperationHistoryOpen = false;
 let cxxConsoleLogs = [];
 let isConsolePanelOpen = false;
 let cloudRenameRequestPending = false;
@@ -84,7 +87,7 @@ let pendingAliasPopoverName = '';
 let pendingAliasPopoverInput = null;
 let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
-const WEB_LAYOUT_VERSION = '20260912-5.2.2-production';
+const WEB_LAYOUT_VERSION = '20260924-5.4.0-production-3';
 const ALIAS_POPOVER_OFFSET_X = 8;
 const CLOUD_MATCH_WEB_THEMES = new Set([
     'dark-esports', 'frost-broadcast', 'black-gold'
@@ -130,6 +133,62 @@ function getPlayerLibraryResetBlockReason() {
     return '';
 }
 
+function applyRealtimeReadOnlyState() {
+    const locked = cloudMatchState?.realtimeFollowing === true;
+    document.body.classList.toggle('realtime-readonly', locked);
+    const banner = document.getElementById('realtime-readonly-banner');
+    if (banner) banner.hidden = !locked;
+
+    document.querySelectorAll('.team-score-input, .name-input, .stat-kill, .stat-death, .stat-ak').forEach(input => {
+        input.disabled = locked;
+        input.setAttribute('aria-disabled', String(locked));
+    });
+    document.querySelectorAll('#btn-swap, #btn-reset, #btn-clear-teams, #btn-random-apply, .identity-link-button').forEach(button => {
+        button.disabled = locked;
+        button.setAttribute('aria-disabled', String(locked));
+    });
+    document.querySelectorAll('.seat-label-toggle').forEach(button => {
+        button.disabled = locked || button.hidden;
+        button.setAttribute('aria-disabled', String(locked));
+    });
+    document.querySelectorAll('.player-row').forEach(row => {
+        row.draggable = false;
+        row.classList.remove('dragging', 'drag-over', 'drag-source', 'drag-target');
+    });
+    document.querySelectorAll('.drag-handle').forEach(handle => {
+        handle.setAttribute('aria-disabled', String(locked));
+    });
+
+    const monitor = document.querySelector('#btn-monitor');
+    if (locked && monitor) {
+        monitor.disabled = true;
+        monitor.className = 'ctrl-btn btn-monitor-stop btn-monitor-disabled';
+        monitor.innerHTML = '<span aria-hidden="true">&#9940;</span> 实时同步中';
+        monitor.title = '正在实时同步其他主播，停止实时同步后才能编辑或运行本地 OCR。';
+    }
+    const undo = document.querySelector('#btn-match-history-undo');
+    const redo = document.querySelector('#btn-match-history-redo');
+    if (undo) undo.disabled = locked || !matchHistory.canUndo;
+    if (redo) redo.disabled = locked || !matchHistory.canRedo;
+    document.querySelectorAll('.operation-history-item').forEach(item => {
+        item.setAttribute('aria-disabled', String(locked));
+        item.tabIndex = locked ? -1 : 0;
+    });
+    document.querySelectorAll('.btn-review-undo').forEach(button => {
+        if (locked) button.disabled = true;
+    });
+
+    const stopRealtime = document.getElementById('btn-broadcaster-stop-realtime');
+    if (locked && stopRealtime) stopRealtime.disabled = false;
+    if (locked) {
+        document.querySelectorAll('.popover').forEach(popover => popover.classList.remove('active'));
+        draggedRow = null;
+        ctrlSwapState.active = false;
+        ctrlSwapState.sourceRow = null;
+        ctrlSwapState.targetRow = null;
+    }
+}
+
 function updatePlayerLibraryControls() {
     const ready = canEditPlayerLibrary();
     const notice = document.getElementById('identity-library-status');
@@ -141,7 +200,7 @@ function updatePlayerLibraryControls() {
     if (notice && notice.textContent !== status) notice.textContent = status;
     const panel = document.getElementById('identity-overlay');
     panel?.setAttribute('aria-busy', String(!!librarySnapshotJob || playerLibraryState.busy || !!identityCommandPending));
-    document.querySelectorAll('#btn-identity-merge, .identity-id-save, .identity-add-alias, .identity-delete-alias, .identity-name-edit, .identity-unmerge, .identity-game-id-edit, .identity-game-id-delete, .identity-game-id-add, .identity-suggestion-merge, .identity-suggestion-ignore, .identity-suggestion-ignore-all, .btn-edit-alias, .btn-perm-unbind, .add-alias-btn, #btn-sync-alias-db, #btn-push-alias-db').forEach(button => {
+    document.querySelectorAll('#btn-identity-merge, .identity-id-save, .identity-add-alias, .identity-delete-alias, .identity-name-edit, .identity-unmerge, .identity-game-id-edit, .identity-game-id-delete, .identity-game-id-add, .identity-suggestion-merge, .identity-suggestion-ignore, .identity-suggestion-ignore-all, .btn-edit-alias, .btn-perm-unbind, .add-alias-btn, .add-name-alias-btn, .edit-name-alias-btn, .delete-name-alias-btn, #btn-sync-alias-db, #btn-push-alias-db').forEach(button => {
         // aria-disabled keeps the focused save button in place during async commits.
         button.setAttribute('aria-disabled', String(!ready));
     });
@@ -764,7 +823,7 @@ function clampAliasPopoverToViewport(popElement) {
     const normalLeft = popElement.offsetLeft;
     const rightEdge = viewportWidth ? viewportWidth - margin : 0;
     const preferredMaxWidth = rect.width / scale;
-    const minWidth = Math.min(190, preferredMaxWidth);
+    const minWidth = Math.min(420, preferredMaxWidth);
     const rightSpaceWidth = viewportWidth ? (rightEdge - rect.left) / scale : preferredMaxWidth;
 
     if (viewportWidth && rightSpaceWidth < preferredMaxWidth && rightSpaceWidth >= minWidth) {
@@ -802,12 +861,12 @@ function clampAliasPopoverToViewport(popElement) {
     }
 
     if (viewportHeight) {
-        const minimumHeight = Math.min(112 * scale, viewportHeight - margin * 2);
+        const minimumHeight = Math.min(320 * scale, viewportHeight - margin * 2);
         const desiredTop = Math.max(margin, Math.min(rect.top, viewportHeight - margin - minimumHeight));
         popElement.style.top = `${popElement.offsetTop + (desiredTop - rect.top) / scale}px`;
         rect = popElement.getBoundingClientRect();
         const availableHeight = viewportHeight - margin - Math.max(margin, rect.top);
-        popElement.style.maxHeight = `${Math.min(240, Math.max(0, Math.floor(availableHeight / scale)))}px`;
+        popElement.style.maxHeight = `${Math.min(400, Math.max(0, Math.floor(availableHeight / scale)))}px`;
     }
 }
 
@@ -970,6 +1029,9 @@ if (window.chrome && window.chrome.webview) {
                 pendingTeamSyncSnapshot = null;
                 showAlert(msg.message);
             }
+            else if (msg.action === 'match_history_error') {
+                showAlert(msg.message || '比赛操作历史操作失败。');
+            }
             else if (msg.action === 'cloud_broadcaster_prompt' || msg.action === 'cloud_room_prompt') {
                 if (!cloudMatchState) cloudMatchState = normalizeCloudMatchState({ shouldPrompt: true });
                 else cloudMatchState.shouldPrompt = true;
@@ -1046,7 +1108,8 @@ function toggleCloudDirectMode() {
 
 
 function pushStateToServer(libraryEdit = null) {
-    if (!window.chrome || !window.chrome.webview || isSyncingFromServer) return;
+    if (!window.chrome || !window.chrome.webview || isSyncingFromServer ||
+        cloudMatchState?.realtimeFollowing === true) return;
 
     let activeNames = Array.from(document.querySelectorAll('.name-input'))
         .map(inp => inp.value.trim())
@@ -1214,6 +1277,10 @@ function postRedPickModeToServer() {
 }
 
 function setRedPickMode(mode, sync = false) {
+    if (sync && cloudMatchState?.realtimeFollowing === true) {
+        refreshPickLabels();
+        return;
+    }
     const next = normalizeRedPickMode(mode);
     const changed = redPickMode !== next;
     redPickMode = next;
@@ -2582,6 +2649,10 @@ function runRandomToolGrouping(options = {}) {
 }
 
 function applyRandomResultToTeams() {
+    if (cloudMatchState?.realtimeFollowing === true) {
+        showAlert('正在实时同步其他主播，请先停止实时同步再应用分组。');
+        return;
+    }
     if (isMonitoring) {
         showAlert('请先停止监控，再应用随机分组。');
         return;
@@ -4348,6 +4419,10 @@ function applyStateFromServer(state) {
     const outputSeatToggle = document.getElementById('output-seat-label-toggle');
     if (outputSeatToggle) outputSeatToggle.checked = outputSeatLabelToKillFile;
 
+    preferLocalAliases = !!state.preferLocalAliases;
+    const preferLocalAliasesToggle = document.getElementById('prefer-local-aliases-toggle');
+    if (preferLocalAliasesToggle) preferLocalAliasesToggle.checked = preferLocalAliases;
+
     systemFonts = normalizeSystemFonts(state.systemFonts);
     scoreboardTextStyles = normalizeScoreboardTextStyles(state.scoreboardTextStyles);
     killDisplaySettings = normalizeKillDisplaySettings(state.killDisplaySettings);
@@ -4447,10 +4522,12 @@ function applyStateFromServer(state) {
         resetSeatLabelsToDefault();
         isSyncingFromServer = false;
         updateStartButtonGuard();
+        applyRealtimeReadOnlyState();
         return;
     }
 
     recentEvents = Array.isArray(state.recentEvents) ? state.recentEvents : [];
+    matchHistory = normalizeMatchHistoryState(state.matchHistory);
     renderReviewEvents();
 
     document.querySelector('#team-blue .team-score-input').value = state.blueScore;
@@ -4471,6 +4548,7 @@ function applyStateFromServer(state) {
     refreshPickLabels();
     isSyncingFromServer = false;
     updateStartButtonGuard();
+    applyRealtimeReadOnlyState();
 }
 
 const triggerSync = () => {
@@ -4484,6 +4562,7 @@ function getWebContentHeight() {
 
     document.querySelectorAll('body *').forEach(el => {
         if (el.closest('.popover')) return;
+        if (el.closest('.operation-history-overlay, .review-backdrop, .review-panel')) return;
         if (el.id === 'custom-modal' && !el.classList.contains('active')) return;
         if (el.closest('#custom-modal') && !document.getElementById('custom-modal')?.classList.contains('active')) return;
 
@@ -4514,10 +4593,125 @@ function getActivePlayerNames() {
         .filter(Boolean);
 }
 
+function getReviewEventStatus(event = {}) {
+    return event.status || (event.statsApplied ? '已计入' : '未计入');
+}
+
+function normalizeMatchHistoryState(value = {}) {
+    const entries = Array.isArray(value.entries) ? value.entries.map((entry, index) => ({
+        id: entry?.id ?? index + 1,
+        step: Number(entry?.step || index + 1),
+        label: String(entry?.label || '比赛状态变更'),
+        source: String(entry?.source || '本机'),
+        time: String(entry?.time || '--:--:--'),
+        detail: String(entry?.detail || '场上状态'),
+        applied: entry?.applied !== false,
+        current: entry?.current === true,
+        redo: entry?.redo === true
+    })) : [];
+    const maxSteps = Math.max(1, Math.min(200, Number(value.maxSteps || 30)));
+    const cursor = Math.max(0, Math.min(entries.length, Number(value.cursor || 0)));
+    return {
+        entries,
+        cursor,
+        maxSteps,
+        canUndo: value.canUndo === true || cursor > 0,
+        canRedo: value.canRedo === true || cursor < entries.length
+    };
+}
+
+function getReviewEventClass(event = {}) {
+    return event.undone ? 'is-undone' : (event.statsApplied ? 'is-applied' : 'is-pending');
+}
+
+function isReviewEventUndoable(event = {}) {
+    return !!event && !event.readOnly && (!!event.undone || !!event.statsApplied);
+}
+
+function getReviewEventSource(event = {}) {
+    return event.cloudSynced ? '云端同步' : '本机识别';
+}
+
+function getReviewEventMatchText(event = {}) {
+    return `${event.killer || '待定'}击杀${event.dead || '待定'}`;
+}
+
+function getReviewEventDetailText(event = {}) {
+    return [
+        event.algorithm ? `算法：${event.algorithm}` : '',
+        event.triggerSide ? `触发：${event.triggerSide}` : '',
+        event.snapshotPath ? `截图：${event.snapshotPath}` : '',
+        event.ocrSummary ? `OCR：${event.ocrSummary}` : '',
+        event.candidateSummary ? `候选：${event.candidateSummary}` : ''
+    ].filter(Boolean).join('\n');
+}
+
+function getMatchHistoryEntryState(entry, actualIndex) {
+    if (entry?.redo || actualIndex >= matchHistory.cursor) return '待重做';
+    if (actualIndex === matchHistory.cursor - 1) return '当前';
+    return '已执行';
+}
+
+function getMatchHistoryEntryClass(entry, actualIndex) {
+    if (actualIndex >= matchHistory.cursor) return 'is-redo';
+    return actualIndex === matchHistory.cursor - 1 ? 'is-current' : 'is-applied';
+}
+
+function renderOperationHistory() {
+    const list = document.getElementById('operation-history-list');
+    const count = document.getElementById('operation-history-count');
+    const dialogCount = document.getElementById('operation-history-count-dialog');
+    const stepState = document.getElementById('operation-history-step-state');
+    const undoButton = document.getElementById('btn-match-history-undo');
+    const redoButton = document.getElementById('btn-match-history-redo');
+    const maxStepsInput = document.getElementById('match-history-max-steps');
+    const entries = Array.isArray(matchHistory.entries) ? matchHistory.entries : [];
+    const countText = String(entries.length);
+
+    if (count) count.textContent = countText;
+    if (dialogCount) dialogCount.textContent = countText;
+    if (stepState) stepState.textContent = `${matchHistory.cursor}/${matchHistory.maxSteps} 步`;
+    const realtimeLocked = cloudMatchState?.realtimeFollowing === true;
+    if (undoButton) undoButton.disabled = realtimeLocked || !matchHistory.canUndo;
+    if (redoButton) redoButton.disabled = realtimeLocked || !matchHistory.canRedo;
+    if (maxStepsInput && document.activeElement !== maxStepsInput) {
+        maxStepsInput.value = String(matchHistory.maxSteps);
+    }
+    if (!list) {
+        return;
+    }
+
+    if (entries.length === 0) {
+        list.innerHTML = '<div class="operation-history-empty">暂无可查看的操作记录</div>';
+        return;
+    }
+
+    const displayEntries = entries.map((entry, actualIndex) => ({ entry, actualIndex })).reverse();
+    list.innerHTML = displayEntries.map(({ entry, actualIndex }) => {
+        const status = getMatchHistoryEntryState(entry, actualIndex);
+        const detail = entry.detail || '场上状态';
+        const historyId = Number(entry.id) || 0;
+        const isCurrent = actualIndex === matchHistory.cursor - 1;
+        return `
+            <div class="operation-history-item ${getMatchHistoryEntryClass(entry, actualIndex)}" role="button" tabindex="${realtimeLocked ? '-1' : '0'}" data-history-id="${historyId}" aria-disabled="${realtimeLocked ? 'true' : 'false'}" aria-current="${isCurrent ? 'step' : 'false'}" title="${realtimeLocked ? '实时同步期间不能回溯' : '点击回溯到此操作完成后'}" aria-label="${escapeHtml(`${entry.time || ''} ${entry.label || '比赛状态变更'} ${detail} 点击回溯到此步`.trim())}">
+                <div class="operation-history-item-head">
+                    <span class="operation-history-item-time">${escapeHtml(entry.time || '--:--:--')}</span>
+                    <span class="operation-history-item-match">${escapeHtml(entry.label || '比赛状态变更')}</span>
+                    <span class="operation-history-item-source">${escapeHtml(entry.source || '本机')}</span>
+                </div>
+                <div class="operation-history-item-foot">
+                    <span class="operation-history-item-detail" title="${escapeHtml(detail)}">${escapeHtml(detail)}</span>
+                    <span class="operation-history-item-status">${escapeHtml(status)}</span>
+                </div>
+            </div>`;
+    }).join('');
+}
+
 function renderReviewEvents() {
     const list = document.getElementById('review-list');
     const count = document.getElementById('review-count');
     const toggleCount = document.getElementById('review-toggle-count');
+    renderOperationHistory();
     if (!list || !count) return;
 
     count.textContent = String(recentEvents.length);
@@ -4529,18 +4723,12 @@ function renderReviewEvents() {
     }
 
     list.innerHTML = recentEvents.map(ev => {
-        const status = ev.status || (ev.statsApplied ? '已计入' : '未计入');
-        const cls = ev.undone ? 'is-undone' : (ev.statsApplied ? 'is-applied' : 'is-pending');
+        const status = getReviewEventStatus(ev);
+        const cls = getReviewEventClass(ev);
         const killer = ev.killer || '待定';
         const dead = ev.dead || '待定';
-        const matchText = `${killer}击杀${dead}`;
-        const detail = [
-            ev.algorithm ? `算法：${ev.algorithm}` : '',
-            ev.triggerSide ? `触发：${ev.triggerSide}` : '',
-            ev.snapshotPath ? `截图：${ev.snapshotPath}` : '',
-            ev.ocrSummary ? `OCR：${ev.ocrSummary}` : '',
-            ev.candidateSummary ? `候选：${ev.candidateSummary}` : ''
-        ].filter(Boolean).join('\n');
+        const matchText = getReviewEventMatchText(ev);
+        const detail = getReviewEventDetailText(ev);
 
         return `
             <div class="review-item ${cls}" data-id="${ev.id}">
@@ -4559,9 +4747,63 @@ function renderReviewEvents() {
 }
 
 function sendReviewUndo(eventId) {
-    if (!window.chrome?.webview) return;
+    if (!window.chrome?.webview || cloudMatchState?.realtimeFollowing === true) return;
     window.chrome.webview.postMessage({ action: 'cmd_undo_event', id: Number(eventId) });
 }
+
+function sendMatchHistoryCommand(action) {
+    if (!window.chrome?.webview || cloudMatchState?.realtimeFollowing === true) return false;
+    window.chrome.webview.postMessage({ action });
+    return true;
+}
+
+function restoreMatchHistoryEntry(entryId) {
+    if (cloudMatchState?.realtimeFollowing === true) return false;
+    const id = Number(entryId);
+    if (!Number.isSafeInteger(id) || id <= 0) return false;
+    const entries = Array.isArray(matchHistory.entries) ? matchHistory.entries : [];
+    const index = entries.findIndex(entry => Number(entry.id) === id);
+    if (index < 0 || index === matchHistory.cursor - 1) return false;
+    if (!window.chrome?.webview) return false;
+    window.chrome.webview.postMessage({ action: 'cmd_match_history_restore', id });
+    return true;
+}
+
+function sendMatchHistoryMaxSteps(value) {
+    const maxSteps = Math.max(1, Math.min(200, Number.parseInt(value, 10) || 30));
+    const input = document.getElementById('match-history-max-steps');
+    if (input) input.value = String(maxSteps);
+    if (!window.chrome?.webview) return false;
+    window.chrome.webview.postMessage({
+        action: 'cmd_set_match_history_max_steps',
+        maxSteps
+    });
+    return true;
+}
+
+function isMatchHistoryShortcutTarget(target) {
+    if (!target) return false;
+    if (target.isContentEditable) return true;
+    return ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
+}
+
+// 比赛历史快捷键只作用于主界面，文本输入框保留浏览器自己的撤销行为。
+document.addEventListener('keydown', (event) => {
+    if (!event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+    if (cloudMatchState?.realtimeFollowing === true) return;
+    if (isMatchHistoryShortcutTarget(event.target)) return;
+    if (document.getElementById('custom-modal')?.classList.contains('active')) return;
+
+    if (event.key && event.key.toLowerCase() === 'z') {
+        event.preventDefault();
+        event.stopPropagation();
+        sendMatchHistoryCommand('cmd_match_history_undo');
+    } else if (event.key && event.key.toLowerCase() === 'y') {
+        event.preventDefault();
+        event.stopPropagation();
+        sendMatchHistoryCommand('cmd_match_history_redo');
+    }
+}, true);
 
 function setReviewPanelOpen(open) {
     isReviewPanelOpen = !!open;
@@ -4576,6 +4818,25 @@ function setReviewPanelOpen(open) {
 
 function toggleReviewPanel() {
     setReviewPanelOpen(!isReviewPanelOpen);
+}
+
+function setOperationHistoryOpen(open) {
+    isOperationHistoryOpen = !!open;
+    if (isOperationHistoryOpen) {
+        setReviewPanelOpen(false);
+        renderOperationHistory();
+    }
+    const overlay = document.getElementById('operation-history-overlay');
+    const toggle = document.getElementById('btn-operation-history');
+    overlay?.classList.toggle('is-open', isOperationHistoryOpen);
+    overlay?.setAttribute('aria-hidden', isOperationHistoryOpen ? 'false' : 'true');
+    toggle?.classList.toggle('is-open', isOperationHistoryOpen);
+    toggle?.setAttribute('aria-expanded', isOperationHistoryOpen ? 'true' : 'false');
+    document.body.classList.toggle('operation-history-open', isOperationHistoryOpen);
+}
+
+function toggleOperationHistory() {
+    setOperationHistoryOpen(!isOperationHistoryOpen);
 }
 
 function syncKillDisplayToggle(state = {}) {
@@ -4808,6 +5069,13 @@ function getActiveSameJobShortWarnings() {
 function updateStartButtonGuard() {
     const btnMonitor = document.getElementById('btn-monitor');
     if (!btnMonitor) return [];
+    if (cloudMatchState?.realtimeFollowing === true) {
+        btnMonitor.disabled = true;
+        btnMonitor.className = 'ctrl-btn btn-monitor-stop btn-monitor-disabled';
+        btnMonitor.innerHTML = '<span aria-hidden="true">&#9940;</span> 实时同步中';
+        btnMonitor.title = '正在实时同步其他主播，请先停止实时同步。';
+        return [];
+    }
 
     document.querySelectorAll('.player-row.short-id-block-row, .player-row.short-id-warn-row, .player-row.same-job-warn-row, .player-row.no-alias-block-row').forEach(row => {
         row.classList.remove('short-id-block-row', 'short-id-warn-row', 'same-job-warn-row', 'no-alias-block-row');
@@ -5846,11 +6114,18 @@ function createPlayerRow(seatNumber = '') {
     // ==========================================
     // 🚨 2. 精确拖拽控制 (只在按住柄时开启)
     // ==========================================
-    dragHandle.addEventListener('mousedown', () => row.draggable = true);
+    dragHandle.addEventListener('mousedown', () => {
+        if (!cloudMatchState?.realtimeFollowing) row.draggable = true;
+    });
     dragHandle.addEventListener('mouseup', () => row.draggable = false);
     dragHandle.addEventListener('mouseleave', () => row.draggable = false);
 
     row.addEventListener('dragstart', function (e) {
+        if (cloudMatchState?.realtimeFollowing === true) {
+            e.preventDefault();
+            this.draggable = false;
+            return;
+        }
         document.querySelectorAll('.popover').forEach(p => p.classList.remove('active'));
         clearPendingAliasPopoverLock();
         draggedRow = this;
@@ -5867,6 +6142,7 @@ function createPlayerRow(seatNumber = '') {
     });
 
     row.addEventListener('dragover', function (e) {
+        if (cloudMatchState?.realtimeFollowing === true) return false;
         e.preventDefault();
         if (draggedRow !== this) this.classList.add('drag-over');
         return false;
@@ -5877,6 +6153,7 @@ function createPlayerRow(seatNumber = '') {
     });
 
     row.addEventListener('drop', function (e) {
+        if (cloudMatchState?.realtimeFollowing === true) return false;
         e.stopPropagation();
         this.classList.remove('drag-over');
         if (draggedRow !== this && draggedRow) {
@@ -5897,6 +6174,14 @@ function createPlayerRow(seatNumber = '') {
     nameInput.addEventListener('keydown', function (e) {
         // 对话框激活时，禁止任何名字输入框的键盘行为
         if (customModal.classList.contains('active')) return;
+
+        if (cloudMatchState?.realtimeFollowing === true && e.ctrlKey &&
+            (e.key === 'ArrowUp' || e.key === 'ArrowDown' ||
+                e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+        }
 
          // ========== Ctrl 选择互换模式 ==========
         if (e.ctrlKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
@@ -5936,6 +6221,28 @@ function createPlayerRow(seatNumber = '') {
                 ctrlSwapState.targetRow.classList.add('drag-target');
             }
             return;
+        }
+
+        if (!e.ctrlKey && !e.altKey && !autoPopover.classList.contains('active') &&
+            aliasPopover.classList.contains('active')) {
+            const items = [...aliasPopover.querySelectorAll('.alias-name-item')];
+            const index = items.findIndex(item => item.classList.contains('keyboard-focus'));
+            if (items.length && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                e.preventDefault();
+                e.stopPropagation();
+                const next = index < 0 ? (e.key === 'ArrowDown' ? 0 : items.length - 1) :
+                    (index + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+                items.forEach(item => item.classList.remove('keyboard-focus'));
+                items[next].classList.add('keyboard-focus');
+                items[next].scrollIntoView({ block: 'nearest' });
+                return;
+            }
+            if (e.key === 'Enter' && index >= 0) {
+                e.preventDefault();
+                e.stopPropagation();
+                this.dispatchEvent(new CustomEvent('select-name-alias', { detail: items[index].dataset.name }));
+                return;
+            }
         }
 
         if (e.key === 'Enter') {
@@ -6071,7 +6378,28 @@ function createPlayerRow(seatNumber = '') {
         }
     });
 
-    nameInput.addEventListener('click', (e) => e.stopPropagation());
+    nameInput.addEventListener('select-name-alias', function (event) {
+        const selectedName = event.detail;
+        const currentName = this.value.trim();
+        if (!getIdentityGroupForName(currentName)?.names.includes(selectedName)) return;
+        const conflict = getFieldConflict(selectedName, this);
+        if (conflict) {
+            showAlert(`无法选择【${selectedName}】：${conflict.reason}`);
+            return;
+        }
+        playerDB[selectedName] = uniqueAliasArray(getCleanAliases(currentName));
+        this.value = selectedName;
+        this.dataset.previousMainName = selectedName;
+        this.focus();
+        processInputLogic(this, false);
+        openAliasPopover(this, selectedName);
+        triggerSync();
+    });
+
+    nameInput.addEventListener('click', function (e) {
+        e.stopPropagation();
+        if (this.value.trim() && !aliasPopover.classList.contains('active')) openAliasPopover(this, this.value.trim());
+    });
 
     // 🌟 核心改动点：判断当前输入框有没有值
     nameInput.addEventListener('focus', function () {
@@ -6262,6 +6590,7 @@ function createPlayerRow(seatNumber = '') {
 
 // 🚨 拖拽数据安全交换函数 (直接在底层互换整个 DOM 节点，解决一切幽灵状态)
 function swapDOMNodes(node1, node2) {
+    if (cloudMatchState?.realtimeFollowing === true) return;
     // 创建一个临时占位符
     const marker = document.createElement('div');
 
@@ -6345,7 +6674,19 @@ function reopenAliasPopoverFromMenu(popElement, playerName) {
 }
 
 function renderAliasMenu(playerName, popElement) {
+    const focusedName = popElement.dataset.playerName === playerName ?
+        popElement.querySelector('.alias-name-item.keyboard-focus')?.dataset.name : '';
     const scrollTop = popElement.dataset.playerName === playerName ? popElement.querySelector('.alias-id-list')?.scrollTop || 0 : 0;
+    const nameScrollTop = popElement.dataset.playerName === playerName ? popElement.querySelector('.alias-name-list')?.scrollTop || 0 : 0;
+    const group = getIdentityGroupForName(playerName);
+    const names = group ? group.names.filter(name => name !== playerName) : [];
+    const nameHtml = names.map(name => `<div class="popover-item alias-name-item" tabindex="0" data-name="${escapeHtml(name)}" aria-label="选择名称 ${escapeHtml(name)}">
+        <span class="alias-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+        <div class="alias-actions">
+            <button type="button" class="edit-name-alias-btn" title="修改名称别名" aria-label="修改名称别名">&#9998;</button>
+            <button type="button" class="delete-name-alias-btn" title="删除名称别名" aria-label="删除名称别名">&#215;</button>
+        </div>
+    </div>`).join('');
     popElement.dataset.playerName = playerName;
     const gameHtml = getCleanAliases(playerName).map((a, i) => {
         const legacyShort = isLegacyShortAliasWithoutMeta(a);
@@ -6362,16 +6703,58 @@ function renderAliasMenu(playerName, popElement) {
             </div>
         </div>`;
     }).join('');
-    popElement.innerHTML = `<div class="alias-id-list">${gameHtml}</div>
-        <div class="alias-add-actions" role="group" aria-label="添加ID">
-            <button type="button" class="add-alias-btn">+ 添加游戏ID</button>
+    popElement.innerHTML = `<div class="alias-id-column">
+            <div class="alias-section-title alias-ids-title">游戏ID</div>
+            <div class="alias-id-list">${gameHtml}</div>
+            <div class="alias-add-actions" role="group" aria-label="添加ID">
+                <button type="button" class="add-alias-btn">+ 添加游戏ID</button>
+            </div>
+        </div>
+        <div class="alias-name-column">
+            <div class="alias-section-title alias-names-title">名称别名</div>
+            <div class="alias-name-list" aria-label="名称别名">${nameHtml || '<div class="alias-empty">暂无别名</div>'}</div>
+            <div class="alias-name-actions"><button type="button" class="add-name-alias-btn">+ 添加名称别名</button></div>
         </div>`;
     popElement.querySelector('.alias-id-list').scrollTop = scrollTop;
+    popElement.querySelector('.alias-name-list').scrollTop = nameScrollTop;
+    if (focusedName) [...popElement.querySelectorAll('.alias-name-item')]
+        .find(item => item.dataset.name === focusedName)?.classList.add('keyboard-focus');
     updatePlayerLibraryControls();
     scheduleAliasPopoverLayout(popElement);
 
     popElement.querySelectorAll('button').forEach(button => {
         button.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
+    });
+    popElement.querySelector('.add-name-alias-btn').addEventListener('click', event => {
+        event.preventDefault(); event.stopPropagation();
+        promptIdentityAlias(group?.groupId || '', playerName);
+    });
+    popElement.querySelectorAll('.alias-name-item').forEach(item => {
+        const select = () => popElement.closest('.player-row')?.querySelector('.name-input')
+            ?.dispatchEvent(new CustomEvent('select-name-alias', { detail: item.dataset.name }));
+        item.addEventListener('mousedown', event => {
+            if (event.target.closest('button') || event.button !== 0) return;
+            event.preventDefault(); event.stopPropagation();
+            select();
+        });
+        item.addEventListener('keydown', event => {
+            if (event.target !== item) return;
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault(); event.stopPropagation(); select();
+            } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                event.preventDefault(); event.stopPropagation();
+                const items = [...popElement.querySelectorAll('.alias-name-item')];
+                items[(items.indexOf(item) + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length].focus();
+            }
+        });
+        item.querySelector('.edit-name-alias-btn').addEventListener('click', event => {
+            event.preventDefault(); event.stopPropagation();
+            promptIdentityNameChange(item.dataset.name);
+        });
+        item.querySelector('.delete-name-alias-btn').addEventListener('click', event => {
+            event.preventDefault(); event.stopPropagation();
+            confirmIdentityAliasDeletion(group.groupId, item.dataset.name);
+        });
     });
     // ==========================================
     // 1. 绑定新游戏ID逻辑
@@ -6516,6 +6899,7 @@ for (let i = 0; i < 4; i++) {
     blueTeam.querySelector('.rows-container').appendChild(createPlayerRow(i + 5));
 }
 refreshPickLabels();
+applyRealtimeReadOnlyState();
 
 document.querySelectorAll('.team-score-input').forEach(input => { input.type = 'text'; bindProNumberControls(input); });
 updateStartButtonGuard();
@@ -6543,7 +6927,10 @@ document.addEventListener('input', (e) => {
     }
 });
 
-document.getElementById('btn-swap').addEventListener('click', () => window.chrome.webview.postMessage({ action: "cmd_swap" }));
+document.getElementById('btn-swap').addEventListener('click', () => {
+    if (cloudMatchState?.realtimeFollowing === true) return;
+    window.chrome.webview.postMessage({ action: "cmd_swap" });
+});
 document.getElementById('btn-random-teams')?.addEventListener('click', openRandomTool);
 document.getElementById('btn-key-mapping')?.addEventListener('click', openKeyMappingPanel);
 document.getElementById('btn-key-lan')?.addEventListener('click', openKeyLanPanel);
@@ -6557,6 +6944,10 @@ document.getElementById('more-controls-menu')?.addEventListener('click', (e) => 
     if (actionButton) setMoreControlsOpen(false);
 });
 document.getElementById('btn-monitor').addEventListener('click', () => {
+    if (cloudMatchState?.realtimeFollowing === true) {
+        applyRealtimeReadOnlyState();
+        return;
+    }
     if (isStartPending && !isMonitoring) {
         showAlert('OCR 服务正在启动中，请稍候...');
         return;
@@ -6879,6 +7270,15 @@ document.getElementById('output-seat-label-toggle')?.addEventListener('change', 
         window.chrome.webview.postMessage({ action: 'cmd_set_output_seat_label', enabled: outputSeatLabelToKillFile });
     }
 });
+document.getElementById('prefer-local-aliases-toggle')?.addEventListener('change', function () {
+    preferLocalAliases = !!this.checked;
+    if (window.chrome?.webview) {
+        window.chrome.webview.postMessage({
+            action: 'cmd_set_prefer_local_aliases',
+            enabled: preferLocalAliases
+        });
+    }
+});
 
 function normalizeFunctionKey(e) {
     if (e.key === 'F1' || e.code === 'F1') return 'F1';
@@ -6926,19 +7326,53 @@ document.getElementById('dir-display').addEventListener('click', () => {
     if (window.chrome?.webview) window.chrome.webview.postMessage({ action: "cmd_browse_dir" });
 });
 
+function confirmReviewEventAction(button) {
+    if (!button) return;
+    if (cloudMatchState?.realtimeFollowing === true) return;
+    const eventId = button.getAttribute('data-id');
+    const actionText = button.textContent.trim().startsWith('恢复') ? '恢复' : '撤销';
+    showConfirm(`确定${actionText}这条自动识别战绩吗？`, (ok) => {
+        if (ok) sendReviewUndo(eventId);
+    });
+}
+
 document.getElementById('review-list')?.addEventListener('click', (e) => {
-    const undoBtn = e.target.closest('.btn-review-undo');
-    if (undoBtn) {
-        const eventId = undoBtn.getAttribute('data-id');
-        const actionText = undoBtn.textContent.trim() === '恢复' ? '恢复' : '撤销';
-        showConfirm(`确定${actionText}这条自动识别战绩吗？`, (ok) => {
-            if (ok) sendReviewUndo(eventId);
-        });
-    }
+    confirmReviewEventAction(e.target.closest('.btn-review-undo'));
 });
 document.getElementById('btn-review-toggle')?.addEventListener('click', toggleReviewPanel);
 document.getElementById('btn-review-close')?.addEventListener('click', () => setReviewPanelOpen(false));
 document.getElementById('review-backdrop')?.addEventListener('click', () => setReviewPanelOpen(false));
+document.getElementById('btn-operation-history')?.addEventListener('click', toggleOperationHistory);
+document.getElementById('btn-operation-history-close')?.addEventListener('click', () => setOperationHistoryOpen(false));
+document.getElementById('btn-match-history-undo')?.addEventListener('click', () => {
+    sendMatchHistoryCommand('cmd_match_history_undo');
+});
+document.getElementById('btn-match-history-redo')?.addEventListener('click', () => {
+    sendMatchHistoryCommand('cmd_match_history_redo');
+});
+document.getElementById('operation-history-list')?.addEventListener('click', (event) => {
+    const item = event.target.closest('.operation-history-item[data-history-id]');
+    if (item) restoreMatchHistoryEntry(item.dataset.historyId);
+});
+document.getElementById('operation-history-list')?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    const item = event.target.closest('.operation-history-item[data-history-id]');
+    if (!item) return;
+    event.preventDefault();
+    restoreMatchHistoryEntry(item.dataset.historyId);
+});
+document.getElementById('match-history-max-steps')?.addEventListener('change', (event) => {
+    sendMatchHistoryMaxSteps(event.target.value);
+});
+document.getElementById('match-history-max-steps')?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    sendMatchHistoryMaxSteps(event.target.value);
+    event.target.blur();
+});
+document.getElementById('operation-history-overlay')?.addEventListener('click', (e) => {
+    if (e.target?.id === 'operation-history-overlay') setOperationHistoryOpen(false);
+});
 document.getElementById('btn-console-clear')?.addEventListener('click', () => {
     cxxConsoleLogs = [];
     renderConsoleLogs();
@@ -6982,6 +7416,10 @@ function resetSeatNumbers() {
 }
 
 function clearAllTeamsData() {
+    if (cloudMatchState?.realtimeFollowing === true) {
+        showAlert('正在实时同步其他主播，请先停止实时同步再清空场上数据。');
+        return;
+    }
     if (isMonitoring) {
         showAlert('请先停止监控，再清空场上数据。');
         return;
@@ -7015,11 +7453,13 @@ function clearAllTeamsData() {
     showAlert('清空成功：场上座位、战绩、大比分、最近识别和冷却已清空。');
 }
 document.getElementById('btn-clear-teams')?.addEventListener('click', () => {
+    if (cloudMatchState?.realtimeFollowing === true) return;
     showConfirm('⚠️ 确定清空当前场上 8 个座位、战绩、大比分、最近识别和冷却吗？', (res) => {
         if (res) clearAllTeamsData();
     });
 });
 document.getElementById('btn-reset').addEventListener('click', () => {
+    if (cloudMatchState?.realtimeFollowing === true) return;
     showConfirm('确定重置所有战绩吗？', (res) => {
         if (res) {
             document.querySelectorAll('.stat-kill, .stat-death').forEach(i => i.value = '0');
@@ -7113,6 +7553,11 @@ document.addEventListener('keydown', function (e) {
             closeKeyLanPanel();
             return;
         }
+        if (isOperationHistoryOpen) {
+            e.preventDefault();
+            setOperationHistoryOpen(false);
+            return;
+        }
         if (isReviewPanelOpen) {
             e.preventDefault();
             setReviewPanelOpen(false);
@@ -7158,6 +7603,15 @@ document.addEventListener('keydown', function (e) {
 
 document.addEventListener('keyup', function (e) {
     if (isAppearancePanelOpen()) return;
+    if (cloudMatchState?.realtimeFollowing === true) {
+        if (ctrlSwapState.sourceRow) ctrlSwapState.sourceRow.classList.remove('drag-source');
+        if (ctrlSwapState.targetRow) ctrlSwapState.targetRow.classList.remove('drag-target');
+        ctrlSwapState.active = false;
+        ctrlSwapState.sourceRow = null;
+        ctrlSwapState.targetRow = null;
+        ctrlSwapState.currentIndex = -1;
+        return;
+    }
     if (e.key === 'Control' && ctrlSwapState.active) {
         // 执行交换
         if (ctrlSwapState.targetRow && ctrlSwapState.sourceRow !== ctrlSwapState.targetRow) {

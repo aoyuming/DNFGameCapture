@@ -26,7 +26,7 @@ export function buildBroadcasterAdminPage(csrfToken: string): string {
       <div id="detail-content" hidden>
         <header class="detail-header">
           <div><h1 id="detail-name"></h1><p id="detail-meta"></p></div>
-          <div class="actions"><button id="disconnect-button">强制断开</button><button class="danger" id="delete-button">删除离线数据</button></div>
+          <div class="actions"><button class="danger" id="delete-button">删除离线数据</button></div>
         </header>
         <section class="attribution-panel" aria-label="主播网络与授权">
           <div class="attribution-grid">
@@ -41,6 +41,15 @@ export function buildBroadcasterAdminPage(csrfToken: string): string {
           <p id="license-meta" class="license-meta">未关联密钥</p>
           <label class="license-key"><span>完整卡密</span><input id="license-key-value" readonly autocomplete="off" spellcheck="false" value="未关联密钥"></label>
         </section>
+        <section class="ban-panel" aria-label="封号管理">
+          <div class="ban-summary"><span>客户端状态</span><strong id="ban-status">正常</strong></div>
+          <div class="ban-controls">
+            <label><span>封禁时长</span><select id="ban-duration"><option value="day">1 天</option><option value="week">1 周</option><option value="month">1 个月</option><option value="year">1 年</option><option value="permanent">永久</option><option value="custom">自定义</option></select></label>
+            <label id="ban-custom-field" hidden><span>封禁截止时间</span><input id="ban-custom-until" type="datetime-local"></label>
+            <div class="ban-actions"><button class="danger" id="ban-button" type="button">封号并断开</button><button id="unban-button" type="button">解封</button></div>
+          </div>
+          <p>封号后，这台客户端的授权登录、云端连接和 OCR 均不可用。</p>
+        </section>
         <div id="score-line" class="score-line"></div>
         <div id="teams" class="teams"></div>
       </div>
@@ -52,10 +61,6 @@ export function buildBroadcasterAdminPage(csrfToken: string): string {
         <div class="section-heading"><span>维护</span></div>
         <button id="cleanup-expired">清理过期记录</button>
         <button class="danger" id="cleanup-offline">清空离线/测试数据</button>
-      </section>
-      <section class="management">
-        <div class="section-heading"><span>主播 OCR 管控</span></div>
-        <div class="management-form"><label>设备 ID<input id="ocr-device-id" maxlength="128" placeholder="设备 ID"></label><label>禁用截止 Unix 秒<input id="ocr-until" type="number" min="0" placeholder="禁用截止 Unix 秒"></label><button id="set-ocr-policy">应用策略</button><button id="clear-ocr-policy">解除禁用</button></div>
       </section>
     </aside>
   </main>
@@ -72,8 +77,9 @@ export const BROADCASTER_ADMIN_CSS = `
 
 *{letter-spacing:0}body{min-width:0}button,input{min-width:0}a,button,input{touch-action:manipulation}a:focus-visible,button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .topbar{min-height:58px;height:auto;gap:12px;padding:14px 22px;flex-wrap:wrap}.topbar>div{min-width:0}.workspace{min-width:0;grid-template-columns:minmax(220px,.8fr) minmax(0,1.8fr) minmax(260px,1fr)}.detail-header{flex-wrap:wrap}.detail-header>div{min-width:0}.detail-header h1{font-size:22px}.detail-header p,.score-line,.activity-item{overflow-wrap:anywhere}.actions{flex-wrap:wrap}.management-form label{color:var(--muted);font-size:12px;display:grid;gap:6px}.toast{max-width:min(420px,calc(100vw - 36px));overflow-wrap:anywhere}.player>div{min-width:0}
+.broadcaster-row.banned{box-shadow:inset 3px 0 0 var(--red)}.broadcaster-row.banned .presence{background:var(--red);box-shadow:0 0 9px #ff6e7f66}.ban-panel{margin:16px 0;border:1px solid var(--line);background:var(--surface)}.ban-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 13px;border-bottom:1px solid var(--line);color:var(--muted);font-size:12px}.ban-summary strong{color:#8be0ba;font-size:13px}.ban-panel.is-banned{border-color:#713441}.ban-panel.is-banned .ban-summary strong{color:#ff9aa6}.ban-controls{display:grid;grid-template-columns:minmax(130px,.7fr) minmax(190px,1fr) auto;align-items:end;gap:10px;padding:12px 13px}.ban-controls label{display:grid;gap:6px;color:var(--muted);font-size:11px}.ban-controls select,.ban-controls input{width:100%;height:36px;padding:0 9px;border:1px solid var(--line);border-radius:4px;color:var(--text);background:var(--bg);outline:0}.ban-controls select:focus,.ban-controls input:focus{border-color:var(--accent)}#ban-custom-field[hidden]{display:none}.ban-actions{display:flex;gap:8px}.ban-panel>p{margin:0;padding:0 13px 12px;color:var(--muted);font-size:11px;line-height:1.5}
 @media(max-width:1100px){.workspace{height:auto;grid-template-columns:240px minmax(0,1fr)}.directory{max-height:680px}.detail{min-height:420px}.activity{grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr;border-top:1px solid var(--line)}.teams{grid-template-columns:1fr}}
-@media(max-width:680px){.topbar{padding:14px 12px}.topbar strong{display:block;margin-bottom:8px}.library-link{margin-left:0}.workspace{grid-template-columns:minmax(0,1fr)}.directory{max-height:320px;border-bottom:1px solid var(--line)}.detail{padding:18px 12px}.activity{grid-template-columns:minmax(0,1fr)}.detail-header{gap:12px}.actions button{flex:1}.attribution-grid{grid-template-columns:minmax(0,1fr)}.license-binding{grid-template-columns:minmax(0,1fr)}.license-binding button{width:100%;min-height:44px}.score-line{font-size:16px}.health i{box-shadow:none}}
+@media(max-width:680px){.topbar{padding:14px 12px}.topbar strong{display:block;margin-bottom:8px}.library-link{margin-left:0}.workspace{grid-template-columns:minmax(0,1fr)}.directory{max-height:320px;border-bottom:1px solid var(--line)}.detail{padding:18px 12px}.activity{grid-template-columns:minmax(0,1fr)}.detail-header{gap:12px}.actions button{flex:1}.attribution-grid{grid-template-columns:minmax(0,1fr)}.license-binding,.ban-controls{grid-template-columns:minmax(0,1fr)}.license-binding button,.ban-actions button{width:100%;min-height:44px}.score-line{font-size:16px}.health i{box-shadow:none}}
 `;
 
 export const BROADCASTER_ADMIN_JS = `
@@ -91,6 +97,8 @@ export const BROADCASTER_ADMIN_JS = `
   let refreshPending = false;
   const text = (node, value) => { if (node) node.textContent = String(value ?? ''); };
   const formatTime = seconds => seconds ? new Date(seconds * 1000).toLocaleString('zh-CN', { hour12: false }) : '暂无';
+  const formatLocalInput = date => new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  const formatBanStatus = ban => !ban ? '正常' : ban.expiresAt ? '已封禁至 ' + formatTime(ban.expiresAt) : '永久封禁';
   const toast = message => { const node = byId('toast'); text(node, message); node?.classList.add('show'); setTimeout(() => node?.classList.remove('show'), 2200); };
   const request = async (url, options = {}) => {
     const response = await fetch(url, { ...options, headers: { 'content-type': 'application/json', 'x-dnf-admin-csrf': csrf, ...(options.headers || {}) } });
@@ -104,13 +112,13 @@ export const BROADCASTER_ADMIN_JS = `
     const list = byId('broadcaster-list'); if (!list) return; list.replaceChildren();
     text(byId('broadcaster-count'), state.broadcasters.length);
     for (const item of state.broadcasters) {
-      const button = document.createElement('button'); button.className = 'broadcaster-row ' + (item.online ? 'online' : 'offline') + (item.deviceId === selectedId ? ' active' : '');
+      const button = document.createElement('button'); button.className = 'broadcaster-row ' + (item.online ? 'online' : 'offline') + (item.ban ? ' banned' : '') + (item.deviceId === selectedId ? ' active' : '');
       const dot = document.createElement('i'); dot.className = 'presence';
       const copy = document.createElement('span'); copy.className = 'broadcaster-copy';
       const name = document.createElement('strong'); text(name, item.broadcasterName);
-      const meta = document.createElement('small'); text(meta, (item.online ? '在线' : '离线') + ' · ' + (item.currentIp || item.lastIp || 'IP 未知') + ' · ' + (item.region || '未知地区')); copy.append(name, meta);
-      const revision = document.createElement('span'); revision.className = 'revision'; text(revision, 'r' + (item.snapshotRevision || 0));
-      button.append(dot, copy, revision); button.addEventListener('click', () => { selectedId = item.deviceId; byId('ocr-device-id').value = selectedId; render(); }); list.append(button);
+      const meta = document.createElement('small'); text(meta, (item.ban ? '已封禁 · ' : '') + (item.online ? '在线' : '离线') + ' · ' + (item.currentIp || item.lastIp || 'IP 未知') + ' · ' + (item.region || '未知地区')); copy.append(name, meta);
+      const revision = document.createElement('span'); revision.className = 'revision'; text(revision, item.ban ? '封' : 'r' + (item.snapshotRevision || 0));
+      button.append(dot, copy, revision); button.addEventListener('click', () => { selectedId = item.deviceId; render(); }); list.append(button);
     }
   }
   function playerRow(player) {
@@ -137,7 +145,7 @@ export const BROADCASTER_ADMIN_JS = `
     }
     if (item.license && available.some(license => license.id === item.license.id)) select.value = String(item.license.id);
     text(byId('license-meta'), item.license
-      ? (item.license.source === 'manual' ? '人工绑定' : '自动关联') + ' · #' + item.license.id + ' · ' + (item.license.label || '未备注') + ' · 授权设备 ' + item.license.deviceId
+      ? (item.license.source === 'authenticated' ? '登录会话关联' : item.license.source === 'manual' ? '人工绑定' : '自动关联') + ' · #' + item.license.id + ' · ' + (item.license.label || '未备注') + ' · 授权设备 ' + item.license.deviceId
       : '未关联密钥');
     const key = byId('license-key-value');
     key.value = !item.license ? '未关联密钥'
@@ -162,13 +170,20 @@ export const BROADCASTER_ADMIN_JS = `
       if (current?.license?.id === licenseId) renderAttribution(current);
     }
   }
+  function renderBan(item) {
+    const panel = byId('ban-status')?.closest('.ban-panel');
+    panel?.classList.toggle('is-banned', !!item.ban);
+    text(byId('ban-status'), formatBanStatus(item.ban));
+    text(byId('ban-button'), item.ban ? '更新封禁并断开' : '封号并断开');
+    byId('unban-button').disabled = !item.ban;
+  }
   function renderDetail() {
     const item = broadcasterById(selectedId); byId('empty-state').hidden = !!item; byId('detail-content').hidden = !item; if (!item) return;
     text(byId('detail-name'), item.broadcasterName); text(byId('detail-meta'), (item.online ? '在线' : '离线') + ' · ' + item.deviceId + ' · 快照 ' + formatTime(item.receivedAt));
-    renderAttribution(item); void revealSelectedKey(item);
+    renderAttribution(item); renderBan(item); void revealSelectedKey(item);
     const snap = item.snapshot; text(byId('score-line'), snap ? '比分 ' + snap.redScore + ' : ' + snap.blueScore + ' · 红方' + (snap.redPickFirst ? '先手' : '后手') + '' : '暂无有效比赛快照');
     const teams = byId('teams'); teams.replaceChildren(); if (snap) teams.append(team('红队', snap.redPlayers || [], 'red'), team('蓝队', snap.bluePlayers || [], 'blue'));
-    byId('disconnect-button').disabled = !item.online; byId('delete-button').disabled = item.online;
+    byId('delete-button').disabled = item.online;
   }
   function renderActivity() {
     const relations = byId('relation-list'); relations.replaceChildren(); text(byId('relation-count'), state.relations.length);
@@ -202,7 +217,6 @@ export const BROADCASTER_ADMIN_JS = `
   async function mutate(url, method = 'POST', body = {}) { try { await request(url, { method, body: JSON.stringify(body) }); toast('操作完成'); await refresh(); } catch (error) { toast('操作失败：' + error.message); } }
   byId('search-input')?.addEventListener('input', event => { query = event.target.value.trim(); refresh(); });
   byId('refresh-broadcasters').addEventListener('click', refresh);
-  byId('disconnect-button')?.addEventListener('click', () => { const item = broadcasterById(selectedId); if (item && window.confirm('确认强制断开 ' + item.broadcasterName + '？')) mutate('/admin/api/broadcasters/' + encodeURIComponent(item.deviceId) + '/disconnect'); });
   byId('delete-button')?.addEventListener('click', () => { const item = broadcasterById(selectedId); if (item && confirmDanger('将删除 ' + item.broadcasterName + ' 的离线大厅数据。', '此操作保留设备身份，但比赛快照和同步记录无法恢复。')) mutate('/admin/api/broadcasters/' + encodeURIComponent(item.deviceId) + '/data', 'DELETE'); });
   byId('bind-license')?.addEventListener('click', () => {
     const item = broadcasterById(selectedId), licenseId = Number(byId('license-select')?.value || 0);
@@ -211,10 +225,33 @@ export const BROADCASTER_ADMIN_JS = `
       mutate('/admin/api/broadcasters/' + encodeURIComponent(item.deviceId) + '/license', 'PUT', { licenseId });
     }
   });
+  byId('ban-duration')?.addEventListener('change', event => {
+    const custom = event.target.value === 'custom';
+    byId('ban-custom-field').hidden = !custom;
+    const input = byId('ban-custom-until');
+    if (custom && !input.value) input.value = formatLocalInput(new Date(Date.now() + 24 * 60 * 60 * 1000));
+  });
+  byId('ban-button')?.addEventListener('click', () => {
+    const item = broadcasterById(selectedId), duration = byId('ban-duration')?.value || '';
+    if (!item || !duration) return;
+    const payload = { duration };
+    if (duration === 'custom') {
+      const timestamp = new Date(byId('ban-custom-until')?.value || '').getTime();
+      if (!Number.isFinite(timestamp) || timestamp <= Date.now()) { toast('请选择将来的封禁截止时间'); return; }
+      payload.expiresAt = Math.floor(timestamp / 1000);
+    }
+    if (window.confirm('确认封禁 ' + item.broadcasterName + '？客户端会立即断开，授权登录、云端连接和 OCR 都将停用。')) {
+      mutate('/admin/api/broadcasters/' + encodeURIComponent(item.deviceId) + '/ban', 'PUT', payload);
+    }
+  });
+  byId('unban-button')?.addEventListener('click', () => {
+    const item = broadcasterById(selectedId);
+    if (item?.ban && window.confirm('确认解封 ' + item.broadcasterName + '？')) {
+      mutate('/admin/api/broadcasters/' + encodeURIComponent(item.deviceId) + '/ban', 'DELETE');
+    }
+  });
   byId('cleanup-expired')?.addEventListener('click', () => { if (window.confirm('立即清理已过期记录？')) mutate('/admin/api/cleanup/expired'); });
   byId('cleanup-offline')?.addEventListener('click', () => { if (confirmDanger('将清空全部离线主播和临时多开测试数据。', '在线正式主播不会被删除。')) mutate('/admin/api/cleanup/offline'); });
-  byId('set-ocr-policy')?.addEventListener('click', () => { const deviceId = byId('ocr-device-id')?.value.trim() || ''; const rawUntil = byId('ocr-until')?.value.trim() || ''; if (!deviceId || !rawUntil) { toast('请填写设备 ID 和截止时间'); return; } mutate('/admin/api/broadcasters/' + encodeURIComponent(deviceId) + '/ocr-policy', 'PUT', { disabledUntil: Number(rawUntil) }); });
-  byId('clear-ocr-policy')?.addEventListener('click', () => { const deviceId = byId('ocr-device-id').value.trim(); if (!deviceId) { toast('请填写设备 ID'); return; } mutate('/admin/api/broadcasters/' + encodeURIComponent(deviceId) + '/ocr-policy', 'PUT', { disabledUntil: null }); });
   refresh(); setInterval(refresh, 3000);
 })();
 `;

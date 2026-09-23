@@ -10,6 +10,7 @@ import type Database from 'better-sqlite3';
 import { z } from 'zod';
 
 import type { BroadcasterAttributionService } from './broadcaster-attribution.js';
+import { getActiveClientBan, type ClientBan } from './client-ban.js';
 import {
   hashSessionToken,
   isLicenseUsable,
@@ -78,7 +79,7 @@ export interface SubmittedPlayerEntity {
 
 export interface PublicPlayerEntity extends PlayerEntity {}
 
-interface SessionContext {
+export interface SessionContext {
   deviceId: string;
   license: LicenseRecord;
 }
@@ -87,9 +88,16 @@ class V2RequestError extends Error {
   constructor(
     public readonly status: number,
     public readonly code: string,
+    public readonly details: Record<string, unknown> = {},
   ) {
     super(code);
   }
+}
+
+function clientBanError(ban: ClientBan): V2RequestError {
+  return new V2RequestError(403, 'account_banned', {
+    bannedUntil: ban.expiresAt,
+  });
 }
 
 function jsonByteLength(value: unknown): number {
@@ -192,12 +200,13 @@ export function createPlayerLibraryEntity(
   return { revision: result.revision, entity: result.entity! };
 }
 
-function loadSession(
+export function loadSession(
   db: Database.Database,
   token: string,
   deviceId: string,
   nowSec: number,
 ): SessionContext | null {
+  if (getActiveClientBan(db, [deviceId], nowSec)) return null;
   const row = db.prepare(
     `SELECT s.device_id, s.expires_at, l.id, l.key_hash, l.expires_at AS license_expires_at,
             l.disabled_at, l.bound_device_id
@@ -258,6 +267,13 @@ function requireSession(options: V2ApiOptions) {
       : '';
     const token = bearerToken(request);
     const parsedDevice = deviceIdSchema.safeParse(deviceId);
+    const ban = parsedDevice.success
+      ? getActiveClientBan(options.db, [parsedDevice.data], options.now())
+      : null;
+    if (ban) {
+      next(clientBanError(ban));
+      return;
+    }
     const session = parsedDevice.success && token
       ? loadSession(options.db, token, parsedDevice.data, options.now())
       : null;
@@ -308,7 +324,8 @@ function handleError(
   _next: NextFunction,
 ): void {
   if (error instanceof V2RequestError || error instanceof LicenseError) {
-    response.status(error.status).json({ ok: false, code: error.code });
+    response.status(error.status).json({ ok: false, code: error.code,
+      ...(error instanceof V2RequestError ? error.details : {}) });
     return;
   }
   response.status(500).json({ ok: false, code: 'internal_error' });
@@ -330,6 +347,8 @@ export function createV2Api(options: V2ApiOptions): Router {
       const parsed = activateSchema.safeParse(request.body);
       if (!parsed.success) throw new V2RequestError(400, 'invalid_request');
       const { key, deviceId } = parsed.data;
+      const ban = getActiveClientBan(options.db, [deviceId], options.now());
+      if (ban) throw clientBanError(ban);
       const { token, license } = activateStoredLicense(options.db, key, deviceId, options.now(), sessionTtlSeconds,
         options.allowLegacyPermanentKeys);
       observeLicenseRequest(options, request, deviceId, license);
@@ -343,6 +362,8 @@ export function createV2Api(options: V2ApiOptions): Router {
     try {
       const parsed = validateSchema.safeParse(request.body);
       if (!parsed.success) throw new V2RequestError(400, 'invalid_request');
+      const ban = getActiveClientBan(options.db, [parsed.data.deviceId], options.now());
+      if (ban) throw clientBanError(ban);
       const session = loadSession(options.db, parsed.data.sessionToken, parsed.data.deviceId, options.now());
       if (!session) throw new V2RequestError(401, 'invalid_session');
       observeLicenseRequest(options, request, parsed.data.deviceId, session.license);

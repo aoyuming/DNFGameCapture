@@ -1,5 +1,5 @@
 #define AppTitle "DNF点将计分器"
-#define AppVersion "5.2.2"
+#define AppVersion "5.4.0"
 #define ReleaseDir "C:\Users\BRO\source\repos\DNFGameCapture\x64\Release"
 #define PackageDir "C:\Users\BRO\source\repos\DNFGameCapture\DNFGameCapture\deployment-packages"
 

@@ -35,9 +35,11 @@ public:
     CloudMatchClient& operator=(const CloudMatchClient&) = delete;
 
     bool Configure(const std::string& serverUrl, const std::string& deviceId,
-        const std::string& deviceToken);
+        const std::string& deviceToken, const std::string& licenseDeviceId = {},
+        const std::string& licenseSessionToken = {});
     bool Configure(const std::wstring& serverUrl, const std::string& deviceId,
-        const std::string& deviceToken);
+        const std::string& deviceToken, const std::string& licenseDeviceId = {},
+        const std::string& licenseSessionToken = {});
     bool Start();
     void Stop();
 

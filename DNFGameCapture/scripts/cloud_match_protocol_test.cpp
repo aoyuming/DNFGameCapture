@@ -49,6 +49,14 @@ void TestSocketIoPackets()
         { "protocolVersion", 1 }
     }), "Socket.IO connect auth should preserve semantic JSON");
 
+    const json licensedAuth = json::parse(EncodeSocketIoConnectPacket(
+        "device-a", "token-b", 1, "license-machine", "session-token").substr(2));
+    Require(licensedAuth["licenseDeviceId"] == "license-machine" &&
+        licensedAuth["licenseSessionToken"] == "session-token",
+        "Socket.IO auth should carry the activated machine session");
+    Require(EncodeSocketIoConnectPacket("device-a", "token-b", 1, "license-machine", "") == connect,
+        "Incomplete optional license credentials should preserve legacy auth");
+
     SocketIoNamespaceConnected connected;
     Require(ParseSocketIoNamespaceConnected(R"(40{"sid":"namespace-sid"})", connected),
         "Socket.IO namespace connected packet should parse");
@@ -60,6 +68,17 @@ void TestSocketIoPackets()
         "Socket.IO connect error should parse");
     Require(connectError.message == "denied", "connect error message should parse");
     Require(connectError.code == "invalid_token", "connect error code should parse");
+
+    Require(ParseSocketIoConnectError(
+        R"(44{"message":"banned","data":{"code":"account_banned","bannedUntil":1700003600}})", connectError),
+        "Socket.IO timed ban error should parse");
+    Require(connectError.hasBannedUntil && connectError.bannedUntil == 1700003600,
+        "timed ban expiration should be preserved");
+    Require(ParseSocketIoConnectError(
+        R"(44{"message":"banned","data":{"code":"account_banned","bannedUntil":null}})", connectError),
+        "Socket.IO permanent ban error should parse");
+    Require(connectError.hasBannedUntil && connectError.bannedUntil == 0,
+        "null ban expiration should represent a permanent ban");
 
     Require(EncodeSocketEvent("room:list", json::object()) ==
         R"(42["room:list",{}])", "Socket.IO event encoding without an ACK should be exact");

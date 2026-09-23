@@ -65,6 +65,7 @@ void CWebScoreDlg::DoDataExchange(CDataExchange* pDX)
 
 BEGIN_MESSAGE_MAP(CWebScoreDlg, CDialogEx)
 	ON_WM_SIZE()
+    ON_WM_SHOWWINDOW()
     ON_WM_TIMER()
     ON_WM_ERASEBKGND()
     ON_WM_CTLCOLOR()
@@ -213,6 +214,19 @@ void CWebScoreDlg::OnClose() {
     ShowWindow(SW_HIDE); // 点 X 只是隐藏
 }
 
+void CWebScoreDlg::OnShowWindow(BOOL bShow, UINT nStatus)
+{
+    CDialogEx::OnShowWindow(bShow, nStatus);
+    if (!m_webviewController) return;
+
+    m_webviewController->put_IsVisible(bShow ? TRUE : FALSE);
+    if (bShow) {
+        CRect bounds;
+        GetClientRect(&bounds);
+        m_webviewController->put_Bounds(bounds);
+    }
+}
+
 void CWebScoreDlg::OnCancel() {
     ShowWindow(SW_HIDE); // 按 Esc 只是隐藏
 }
@@ -309,6 +323,8 @@ void CWebScoreDlg::InitWebView2()
                             }
 
                             m_webviewController = controller;
+                            m_webviewController->put_IsVisible(
+                                ::IsWindowVisible(m_hWnd) ? TRUE : FALSE);
                             m_webview.Reset();
                             const HRESULT coreWebViewResult =
                                 m_webviewController->get_CoreWebView2(&m_webview);
@@ -765,7 +781,7 @@ void CWebScoreDlg::ApplyFixedWindowHeight()
 
 void CWebScoreDlg::ApplyExpandedWindowSize()
 {
-    int targetClientHeight = kReferenceClientHeight;
+    int targetClientHeight = m_aliasPopoverExpanded ? 680 : kReferenceClientHeight;
     if (m_appearanceExpanded) {
         targetClientHeight = max(targetClientHeight,
             kReferenceClientHeight + kAppearanceExtraClientHeight);
@@ -824,4 +840,11 @@ void CWebScoreDlg::SetPlayerIdentityPanelExpanded(bool expanded)
     ApplyExpandedWindowSize();
     WriteWebHostDiagnostics(m_playerIdentityExpanded ?
         L"选手身份面板打开扩高" : L"选手身份面板关闭还原");
+}
+
+void CWebScoreDlg::SetAliasPopoverExpanded(bool expanded)
+{
+    if (m_aliasPopoverExpanded == expanded) return;
+    m_aliasPopoverExpanded = expanded;
+    ApplyExpandedWindowSize();
 }

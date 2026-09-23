@@ -30,6 +30,8 @@ struct SocketIoConnectError
 {
     std::string message;
     std::string code;
+    bool hasBannedUntil = false;
+    std::int64_t bannedUntil = 0;
 };
 
 struct SocketIoEvent
@@ -49,7 +51,8 @@ bool IsEngineIoPingPacket(std::string_view packet) noexcept;
 std::string MakeEngineIoPongPacket();
 
 std::string EncodeSocketIoConnectPacket(std::string_view deviceId,
-    std::string_view deviceToken, int protocolVersion) noexcept;
+    std::string_view deviceToken, int protocolVersion,
+    std::string_view licenseDeviceId = {}, std::string_view licenseSessionToken = {}) noexcept;
 bool ParseSocketIoNamespaceConnected(std::string_view packet,
     SocketIoNamespaceConnected& result) noexcept;
 bool ParseSocketIoConnectError(std::string_view packet,

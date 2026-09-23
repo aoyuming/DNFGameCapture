@@ -1531,6 +1531,23 @@ int main(int argc, char** argv) {
         CHECK(ParseIds(L"(Hero#Job)( Other )") == std::vector<std::wstring>({L"Hero#Job", L"Other"}));
         CHECK(IdentityFingerprint({L"Beta", L"Alpha"}) == IdentityFingerprint({L"Alpha", L"Beta"}));
         CHECK(IdentityFingerprint({L"Alpha", L"Beta"}) == "B97B32ECEE5B46A9");
+        {
+            Snapshot names;
+            names.identifiers = {
+                {11, IdentifierKind::Game, CanonicalKey(L"同一游戏ID", IdentifierKind::Game), L"同一游戏ID", {}}
+            };
+            names.entities = {
+                {1, {}, {L"远端名称", L"本地别名"}, {11}},
+                {2, {}, {L"其他选手"}, {}}
+            };
+            BuildSnapshotViews(names);
+            CHECK(ResolvePreferredLocalName(names, L"远端名称", {},
+                {L"本地别名", L"其他选手"}) == L"本地别名");
+            CHECK(ResolvePreferredLocalName(names, L"远端名称", {},
+                {L"其他选手"}) == L"远端名称");
+            CHECK(ResolvePreferredLocalName(names, L"尚未入库的远端名称", {L"同一游戏ID"},
+                {L"本地别名"}) == L"本地别名");
+        }
         Options o{dir / "library.db", dir / "alias_db.ini", dir / "groups.json", true};
         const std::string ini = "Alpha=(Hero#Job)(Shared)\r\nBeta=(Hero#Job)(Other)\r\nCase=(hero#Job)\r\nEmpty=\r\n";
         Write(o.legacyPath, ini);

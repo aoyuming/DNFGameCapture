@@ -20,6 +20,7 @@ import {
   createBroadcasterAttributionService,
   type BroadcasterAttributionService,
 } from './broadcaster-attribution.js';
+import { clearClientBan, setClientBan } from './client-ban.js';
 import {
   ADMIN_PAGE_CSS,
   ADMIN_PAGE_JS,
@@ -43,7 +44,7 @@ import {
 
 export interface AdminSocketController {
   getActiveDeviceIds(): ReadonlySet<string>;
-  disconnectDevice(deviceId: string): boolean;
+  disconnectDevice(deviceId: string, error?: { code: string; bannedUntil?: number | null }): boolean;
   stopRealtimeViewer(viewerDeviceId: string): boolean;
   notifyDirectoryChanged(reason: string): void;
 }
@@ -60,6 +61,21 @@ export interface CreateCloudMatchAdminAppOptions {
 const manualLicenseLinkSchema = z.object({
   licenseId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
 }).strict();
+
+const clientBanSchema = z.discriminatedUnion('duration', [
+  z.object({ duration: z.enum(['day', 'week', 'month', 'year', 'permanent']) }).strict(),
+  z.object({
+    duration: z.literal('custom'),
+    expiresAt: z.number().int().positive().max(253_402_300_799),
+  }).strict(),
+]);
+
+const CLIENT_BAN_DURATION_SECONDS = {
+  day: 24 * 60 * 60,
+  week: 7 * 24 * 60 * 60,
+  month: 30 * 24 * 60 * 60,
+  year: 365 * 24 * 60 * 60,
+} as const;
 
 function safeDeviceId(value: unknown): string | null {
   const parsed = deviceIdSchema.safeParse(value);
@@ -273,6 +289,54 @@ export function createCloudMatchAdminApp(
     } catch (error) {
       next(error);
     }
+  });
+
+  app.put('/admin/api/broadcasters/:deviceId/ban', (request, response) => {
+    const deviceId = safeDeviceId(request.params.deviceId);
+    const parsed = clientBanSchema.safeParse(request.body);
+    if (!deviceId || !parsed.success) {
+      response.status(400).json({ ok: false, code: 'invalid_request' });
+      return;
+    }
+    const nowSec = now();
+    const expiresAt = parsed.data.duration === 'permanent'
+      ? null
+      : parsed.data.duration === 'custom'
+        ? parsed.data.expiresAt
+        : nowSec + CLIENT_BAN_DURATION_SECONDS[parsed.data.duration];
+    if (expiresAt !== null && expiresAt <= nowSec) {
+      response.status(400).json({ ok: false, code: 'invalid_request' });
+      return;
+    }
+    const link = attribution.getBroadcasterAttribution(deviceId);
+    const ban = setClientBan(db, {
+      broadcasterDeviceId: deviceId,
+      licenseDeviceId: link?.licenseDeviceId,
+      bannedAt: nowSec,
+      expiresAt,
+    });
+    if (ban.licenseDeviceId) {
+      db.prepare('DELETE FROM auth_sessions WHERE device_id=?').run(ban.licenseDeviceId);
+    }
+    socketController.stopRealtimeViewer(deviceId);
+    socketController.disconnectDevice(deviceId, {
+      code: 'account_banned',
+      bannedUntil: ban.expiresAt,
+    });
+    socketController.notifyDirectoryChanged('admin_ban');
+    response.json({ ok: true, ban });
+  });
+
+  app.delete('/admin/api/broadcasters/:deviceId/ban', (request, response) => {
+    const deviceId = safeDeviceId(request.params.deviceId);
+    if (!deviceId) {
+      response.status(400).json({ ok: false, code: 'invalid_request' });
+      return;
+    }
+    const link = attribution.getBroadcasterAttribution(deviceId);
+    clearClientBan(db, [deviceId, link?.licenseDeviceId]);
+    socketController.notifyDirectoryChanged('admin_unban');
+    response.json({ ok: true, ban: null });
   });
 
   app.post('/admin/api/broadcasters/:deviceId/disconnect', (request, response) => {

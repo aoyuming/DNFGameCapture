@@ -3,9 +3,11 @@ import type { Server as SocketIoServer, Socket } from 'socket.io';
 import { z } from 'zod';
 
 import type { BroadcasterAttributionService } from './broadcaster-attribution.js';
+import { getActiveClientBan } from './client-ban.js';
 import { compareRoomSnapshots, type RoomComparison } from './comparison.js';
 import { ALL_BROADCASTERS_ROOM_ID, openDatabase } from './db.js';
 import { authenticateDevice, touchLastSeen } from './identity.js';
+import { loadSession } from './v2-api.js';
 import type { CloudMatchRateLimitService } from './rate-limits.js';
 import type {
   BoundedRoomMembers,
@@ -212,7 +214,7 @@ export interface RegisterCloudMatchSocketHandlersContext {
 
 export interface CloudMatchSocketHandlerRegistration {
   getActiveDeviceIds(): ReadonlySet<string>;
-  disconnectDevice(deviceId: string): boolean;
+  disconnectDevice(deviceId: string, error?: { code: string; bannedUntil?: number | null }): boolean;
   stopRealtimeViewer(viewerDeviceId: string): boolean;
   notifyDirectoryChanged(reason: string): void;
   close(): void;
@@ -220,6 +222,7 @@ export interface CloudMatchSocketHandlerRegistration {
 
 interface AuthenticatedSocketData {
   deviceId: string;
+  licenseSession?: { deviceId: string; token: string };
 }
 
 function isTemporaryCloudDeviceId(deviceId: string): boolean {
@@ -285,11 +288,16 @@ type MaterializeComparisonResult =
   | { ok: true; comparison: MaterializedComparison }
   | { ok: false; code: 'comparison_changed' | 'rate_limited' };
 
-function createSocketError(code: string): Error & { data: { code: string } } {
+function createSocketError(
+  code: string,
+  details: Record<string, unknown> = {},
+): Error & { data: { code: string } & Record<string, unknown> } {
   const message =
     code === 'unsupported_protocol' ? 'Unsupported protocol' : 'Authentication failed';
-  const error = new Error(message) as Error & { data: { code: string } };
-  error.data = { code };
+  const error = new Error(message) as Error & {
+    data: { code: string } & Record<string, unknown>;
+  };
+  error.data = { code, ...details };
   return error;
 }
 
@@ -801,12 +809,34 @@ export function registerCloudMatchSocketHandlers(
       return;
     }
 
+    const ban = getActiveClientBan(db, [
+      parsed.data.deviceId,
+      parsed.data.licenseDeviceId,
+    ], now());
+    if (ban) {
+      next(createSocketError('account_banned', { bannedUntil: ban.expiresAt }));
+      return;
+    }
+
     if (!authenticateDevice(db, parsed.data.deviceId, parsed.data.deviceToken)) {
       next(createSocketError('authentication_failed'));
       return;
     }
 
     (socket.data as AuthenticatedSocketData).deviceId = parsed.data.deviceId;
+    if (parsed.data.licenseDeviceId && parsed.data.licenseSessionToken) {
+      try {
+        const session = loadSession(db, parsed.data.licenseSessionToken, parsed.data.licenseDeviceId, now());
+        if (session) {
+          (socket.data as AuthenticatedSocketData).licenseSession = {
+            deviceId: session.deviceId, token: parsed.data.licenseSessionToken,
+          };
+        }
+      } catch {
+        // Optional attribution must not block a valid legacy broadcaster connection.
+      }
+    }
+    delete socket.handshake.auth.licenseSessionToken;
     next();
   });
 
@@ -816,6 +846,23 @@ export function registerCloudMatchSocketHandlers(
     let restoredRoomId: string | null = null;
     let pendingSerializedOperations = 0;
     let comparisonSession: ComparisonSession | null = null;
+    const connectAttribution = (broadcasterName: string): void => {
+      if (!attribution) return;
+      const observedAt = now();
+      attribution.connectBroadcaster({ deviceId, broadcasterName, ipAddress: socketIpAddress, observedAt });
+      const credentials = (socket.data as AuthenticatedSocketData).licenseSession;
+      if (!credentials) return;
+      try {
+        // Revalidate on join, which may occur after the handshake session has expired or been revoked.
+        const session = loadSession(db, credentials.token, credentials.deviceId, observedAt);
+        if (session) attribution.linkAuthenticatedBroadcaster({
+          broadcasterDeviceId: deviceId, broadcasterName, licenseId: session.license.id,
+          licenseDeviceId: session.deviceId, nowSec: observedAt,
+        });
+      } catch {
+        // Attribution cannot prevent room membership.
+      }
+    };
 
     const initialization = enqueueDeviceOperation(deviceId, async () => {
       if (!socket.connected) {
@@ -842,12 +889,7 @@ export function registerCloudMatchSocketHandlers(
         previousSocket.disconnect(true);
       }
       if (membership) {
-        attribution?.connectBroadcaster({
-          deviceId,
-          broadcasterName: membership.broadcasterName,
-          ipAddress: socketIpAddress,
-          observedAt: now(),
-        });
+        connectAttribution(membership.broadcasterName);
       }
       if (restoredRoomId) {
         scheduleRoomPresence(restoredRoomId, deviceId, true);
@@ -982,12 +1024,7 @@ export function registerCloudMatchSocketHandlers(
             throw new Error('Membership persistence did not match the requested room');
           }
           persisted = true;
-          attribution?.connectBroadcaster({
-            deviceId,
-            broadcasterName: membership.broadcasterName,
-            ipAddress: socketIpAddress,
-            observedAt: now(),
-          });
+          connectAttribution(membership.broadcasterName);
 
           const roomChanged =
             previousRoomId !== membership.room.id ||
@@ -1197,12 +1234,7 @@ export function registerCloudMatchSocketHandlers(
           return { ok: false, code: 'invalid_broadcaster_name', ...(requestId ? { requestId } : {}) };
         }
         await socketRoomAdapter.join(socket, UNIFIED_POOL_NAMESPACE);
-        attribution?.connectBroadcaster({
-          deviceId,
-          broadcasterName: membership.broadcasterName,
-          ipAddress: socketIpAddress,
-          observedAt: now(),
-        });
+        connectAttribution(membership.broadcasterName);
         emitUnifiedChanged('joined');
         return {
           ok: true,
@@ -1656,6 +1688,7 @@ export function registerCloudMatchSocketHandlers(
     );
 
     socket.on('disconnect', () => {
+      delete (socket.data as AuthenticatedSocketData).licenseSession;
       comparisonSession = null;
       const wasActive = activeSockets.get(deviceId) === socket;
       if (wasActive) {
@@ -1693,9 +1726,13 @@ export function registerCloudMatchSocketHandlers(
     getActiveDeviceIds(): ReadonlySet<string> {
       return new Set(activeSockets.keys());
     },
-    disconnectDevice(deviceId: string): boolean {
+    disconnectDevice(
+      deviceId: string,
+      error?: { code: string; bannedUntil?: number | null },
+    ): boolean {
       const activeSocket = activeSockets.get(deviceId);
       if (!activeSocket?.connected) return false;
+      if (error) activeSocket.emit('session:error', error);
       activeSocket.disconnect(true);
       return true;
     },

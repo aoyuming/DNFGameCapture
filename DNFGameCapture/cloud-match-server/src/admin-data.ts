@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 
 import type { BroadcasterAttributionService } from './broadcaster-attribution.js';
+import { getActiveClientBan, type ClientBan } from './client-ban.js';
 import type { MatchSnapshot } from './schemas.js';
 import { getSnapshot } from './snapshots.js';
 import {
@@ -31,8 +32,9 @@ export interface AdminBroadcasterState {
     label: string;
     deviceId: string;
     hasKey: boolean;
-    source: 'automatic' | 'manual';
+    source: 'automatic' | 'manual' | 'authenticated';
   } | null;
+  ban: ClientBan | null;
 }
 
 export interface AdminState {
@@ -59,6 +61,7 @@ export function buildAdminState(
     .map((item) => {
       const network = attribution.getBroadcasterNetwork(item.deviceId);
       const link = attribution.getBroadcasterAttribution(item.deviceId);
+      const ban = getActiveClientBan(db, [item.deviceId, link?.licenseDeviceId], nowSec);
       return {
         ...item,
         currentIp: network.currentIp,
@@ -72,6 +75,7 @@ export function buildAdminState(
           hasKey: link.hasKey,
           source: link.source,
         } : null,
+        ban,
       };
     })
     .filter((item) => {

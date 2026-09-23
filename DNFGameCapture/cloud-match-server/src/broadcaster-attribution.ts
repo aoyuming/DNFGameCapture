@@ -25,7 +25,7 @@ export interface BroadcasterLicenseLink {
   licenseLabel: string;
   licenseDeviceId: string;
   hasKey: boolean;
-  source: 'automatic' | 'manual';
+  source: 'automatic' | 'manual' | 'authenticated';
   linkedAt: number;
   updatedAt: number;
 }
@@ -46,6 +46,13 @@ export class BroadcasterAttributionError extends Error {
 export interface BroadcasterAttributionService {
   observeLicense(input: LicenseObservation): void;
   connectBroadcaster(input: BroadcasterObservation): void;
+  linkAuthenticatedBroadcaster(input: {
+    broadcasterDeviceId: string;
+    broadcasterName: string;
+    licenseId: number;
+    licenseDeviceId: string;
+    nowSec: number;
+  }): BroadcasterLicenseLink | null;
   renameBroadcaster(deviceId: string, broadcasterName: string, observedAt: number): void;
   disconnectBroadcaster(deviceId: string): void;
   manualLink(deviceId: string, licenseId: number, nowSec: number): BroadcasterLicenseLink;
@@ -81,13 +88,18 @@ export function initializeBroadcasterAttributionSchema(db: Database.Database): v
       broadcaster_name TEXT NOT NULL,
       source TEXT NOT NULL CHECK(source IN ('automatic','manual')),
       linked_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
+      updated_at INTEGER NOT NULL,
+      authenticated_at INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_broadcaster_license_links_license
       ON broadcaster_license_links(license_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_broadcaster_license_links_device
       ON broadcaster_license_links(license_device_id, updated_at DESC);
   `);
+  const columns = db.pragma('table_info(broadcaster_license_links)') as Array<{ name: string }>;
+  if (!columns.some(column => column.name === 'authenticated_at')) {
+    db.exec('ALTER TABLE broadcaster_license_links ADD COLUMN authenticated_at INTEGER');
+  }
 }
 
 function rowToLink(row: {
@@ -98,6 +110,7 @@ function rowToLink(row: {
   license_device_id: string;
   has_key: number;
   source: 'automatic' | 'manual';
+  authenticated_at: number | null;
   linked_at: number;
   updated_at: number;
 }): BroadcasterLicenseLink {
@@ -108,7 +121,7 @@ function rowToLink(row: {
     licenseLabel: row.license_label,
     licenseDeviceId: row.license_device_id,
     hasKey: row.has_key === 1,
-    source: row.source,
+    source: row.authenticated_at !== null ? 'authenticated' : row.source,
     linkedAt: row.linked_at,
     updatedAt: row.updated_at,
   };
@@ -127,7 +140,7 @@ export function createBroadcasterAttributionService(
       SELECT link.broadcaster_device_id, link.broadcaster_name, link.license_id,
              license.label AS license_label, link.license_device_id,
              CASE WHEN license.key_ciphertext IS NULL THEN 0 ELSE 1 END AS has_key,
-             link.source, link.linked_at, link.updated_at
+             link.source, link.linked_at, link.updated_at, link.authenticated_at
       FROM broadcaster_license_links AS link
       JOIN licenses AS license ON license.id=link.license_id
         AND license.bound_device_id=link.license_device_id
@@ -230,6 +243,35 @@ export function createBroadcasterAttributionService(
       }
     },
 
+    linkAuthenticatedBroadcaster(input): BroadcasterLicenseLink | null {
+      try {
+        return db.transaction(() => {
+          const broadcaster = db.prepare('SELECT broadcaster_name FROM memberships WHERE device_id=?')
+            .get(input.broadcasterDeviceId) as { broadcaster_name: string } | undefined;
+          const license = db.prepare(`SELECT id FROM licenses WHERE id=? AND bound_device_id=?
+            AND activated_at IS NOT NULL AND disabled_at IS NULL
+            AND (expires_at IS NULL OR expires_at>?)`)
+            .get(input.licenseId, input.licenseDeviceId, input.nowSec);
+          if (!broadcaster || !license) return null;
+          db.prepare('DELETE FROM broadcaster_license_links WHERE license_id=? AND broadcaster_device_id<>?')
+            .run(input.licenseId, input.broadcasterDeviceId);
+          // Retain the legacy CHECK constraint while protecting verified links from IP inference.
+          db.prepare(`INSERT INTO broadcaster_license_links(
+              broadcaster_device_id,license_id,license_device_id,broadcaster_name,source,linked_at,updated_at,authenticated_at
+            ) VALUES(?,?,?,?,'manual',?,?,?)
+            ON CONFLICT(broadcaster_device_id) DO UPDATE SET
+              license_id=excluded.license_id,license_device_id=excluded.license_device_id,
+              broadcaster_name=excluded.broadcaster_name,source='manual',
+              updated_at=excluded.updated_at,authenticated_at=excluded.authenticated_at`)
+            .run(input.broadcasterDeviceId, input.licenseId, input.licenseDeviceId,
+              broadcaster.broadcaster_name, input.nowSec, input.nowSec, input.nowSec);
+          return getBroadcasterAttribution(input.broadcasterDeviceId);
+        }).immediate();
+      } catch {
+        return null;
+      }
+    },
+
     renameBroadcaster(deviceId, broadcasterName, observedAt): void {
       const active = activeBroadcasters.get(deviceId);
       if (active) active.broadcasterName = broadcasterName;
@@ -268,6 +310,7 @@ export function createBroadcasterAttributionService(
             license_device_id=excluded.license_device_id,
             broadcaster_name=excluded.broadcaster_name,
             source='manual',
+            authenticated_at=NULL,
             updated_at=excluded.updated_at
         `).run(deviceId, licenseId, license.bound_device_id, broadcaster.broadcaster_name, nowSec, nowSec);
         return getBroadcasterAttribution(deviceId)!;

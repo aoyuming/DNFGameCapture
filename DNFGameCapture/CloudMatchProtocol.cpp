@@ -180,7 +180,8 @@ std::string MakeEngineIoPongPacket()
 }
 
 std::string EncodeSocketIoConnectPacket(std::string_view deviceId,
-    std::string_view deviceToken, int protocolVersion) noexcept
+    std::string_view deviceToken, int protocolVersion,
+    std::string_view licenseDeviceId, std::string_view licenseSessionToken) noexcept
 {
     if (deviceId.empty() || deviceToken.empty() || protocolVersion <= 0) return {};
     json auth;
@@ -190,12 +191,18 @@ std::string EncodeSocketIoConnectPacket(std::string_view deviceId,
             { "deviceToken", std::string(deviceToken) },
             { "protocolVersion", protocolVersion }
         };
+        if (!licenseDeviceId.empty() && !licenseSessionToken.empty()) {
+            auth["licenseDeviceId"] = std::string(licenseDeviceId);
+            auth["licenseSessionToken"] = std::string(licenseSessionToken);
+        }
         std::string packet = EncodeWithPrefix("40", auth);
+        SecureWipeJsonString(auth, "licenseSessionToken");
         SecureWipeJsonString(auth, "deviceToken");
         auth.clear();
         return packet;
     }
     catch (...) {
+        SecureWipeJsonString(auth, "licenseSessionToken");
         SecureWipeJsonString(auth, "deviceToken");
         auth.clear();
         return {};
@@ -240,6 +247,22 @@ bool ParseSocketIoConnectError(std::string_view packet,
         SocketIoConnectError parsed;
         parsed.message = message->get<std::string>();
         parsed.code = code->get<std::string>();
+        const auto bannedUntil = data->find("bannedUntil");
+        if (bannedUntil != data->end()) {
+            if (bannedUntil->is_null()) {
+                parsed.hasBannedUntil = true;
+                parsed.bannedUntil = 0;
+            }
+            else if (bannedUntil->is_number_integer()) {
+                const std::int64_t banTimestamp = bannedUntil->get<std::int64_t>();
+                if (banTimestamp <= 0 || banTimestamp > 253402300799LL) return false;
+                parsed.hasBannedUntil = true;
+                parsed.bannedUntil = banTimestamp;
+            }
+            else {
+                return false;
+            }
+        }
         result = std::move(parsed);
         return true;
     }

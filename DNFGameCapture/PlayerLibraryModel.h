@@ -71,6 +71,10 @@ std::string SerializeLegacy(const LegacyLibrary& library);
 std::vector<std::wstring> ParseIds(const std::wstring& text);
 std::wstring FormatIds(const std::vector<std::wstring>& ids);
 std::string IdentityFingerprint(std::vector<std::wstring> names);
+std::wstring ResolvePreferredLocalName(const Snapshot& snapshot,
+    const std::wstring& incomingName,
+    const std::vector<std::wstring>& incomingGameIds,
+    const std::vector<std::wstring>& localFieldedNames);
 // Compatibility boundary: discard retired fields without reinterpreting their values.
 void PurgeRetiredIdentityFields(nlohmann::json& value);
 // Worker/database only: rebuilds projections and reverse indexes from normalized objects.

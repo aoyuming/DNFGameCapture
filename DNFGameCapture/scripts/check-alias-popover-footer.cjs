@@ -36,7 +36,7 @@ async function openMenu(page, rowIndex = 4) {
         const input = row.querySelector('.name-input');
         const name = playerIdentityState.groups[0].names[0];
         input.value = name;
-        playerDB[name] = Array.from({ length: 36 }, (_, i) => `TestGame${i}#Profession`);
+        playerDB[name] = Array.from({ length: 36 }, (_, i) => '\u6e38'.repeat(10) + String.fromCharCode(0x4e00 + i));
         openAliasPopover(input, name);
     }, rowIndex);
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
@@ -51,9 +51,11 @@ async function layout(page) {
         };
         const list = popover.querySelector('.alias-id-list');
         const footer = popover.querySelector('.alias-add-actions');
+        const names = popover.querySelector('.alias-name-list');
         return {
+            names: box(names), namesScrollable: names.scrollHeight > names.clientHeight,
             popover: box(popover), list: box(list), footer: box(footer),
-            buttons: [...footer.querySelectorAll('button')].map(button => ({
+            buttons: [...popover.querySelectorAll('.alias-add-actions button, .alias-name-actions button')].map(button => ({
                 ...box(button), fits: button.scrollWidth <= button.clientWidth + 1,
                 hit: button.contains(document.elementFromPoint(
                     (button.getBoundingClientRect().left + button.getBoundingClientRect().right) / 2,
@@ -77,6 +79,26 @@ async function layout(page) {
         await page.waitForTimeout(650); // Allow both initial fixture state broadcasts to finish.
         await page.waitForFunction(() => canEditPlayerLibrary());
         let menu = await openMenu(page);
+        assert.equal(await menu.locator('.alias-name-item').count(), 2);
+        assert.equal(await menu.locator('.add-name-alias-btn').count(), 1);
+        assert.equal(await menu.locator('.edit-name-alias-btn').count(), 2);
+        assert.equal(await menu.locator('.delete-name-alias-btn').count(), 2);
+        assert.notEqual(await menu.locator('.alias-name-item .alias-name').first().evaluate(node => getComputedStyle(node).color),
+            await menu.locator('.alias-id-list .alias-name').first().evaluate(node => getComputedStyle(node).color));
+        const compact = await menu.evaluate(popover => ({
+            width: popover.offsetWidth,
+            idWidth: popover.querySelector('.alias-id-column').offsetWidth,
+            nameWidth: popover.querySelector('.alias-name-column').offsetWidth,
+        }));
+        assert.ok(compact.width <= 406, `Compact popover: ${JSON.stringify(compact)}`);
+        assert.ok(compact.idWidth <= 244 && compact.nameWidth <= 160,
+            `Columns fit 11-character IDs and 6-character aliases: ${JSON.stringify(compact)}`);
+        await page.evaluate(() => {
+            window.originalAliasNames = [...playerIdentityState.groups[0].names];
+            playerIdentityState.groups[0].names.push(...Array.from({ length: 24 }, (_, i) => '\u540d'.repeat(5) + String.fromCharCode(0x4e00 + i)));
+            window.popoverCommands = [];
+            window.chrome.webview.postMessage = command => window.popoverCommands.push(command);
+        });
         assert.equal(await menu.locator('.alias-add-actions').count(), 1, 'Add actions need a fixed footer outside the scrolling IDs');
         assert.equal(await menu.locator('.alias-add-actions button').count(), 1);
         assert.equal(await menu.locator('.add-alias-btn').textContent(), '+ \u6dfb\u52a0\u6e38\u620fID');
@@ -88,11 +110,19 @@ async function layout(page) {
                 await menu.locator('.alias-id-list').evaluate(list => { list.scrollTop = 0; });
                 const before = await layout(page);
                 assert.ok(before.scrollable);
+                assert.ok(before.namesScrollable, 'Many name aliases must scroll');
+                assert.ok(before.names.left >= before.list.right, 'Name aliases belong to the right of game IDs');
+                assert.ok(Math.abs(before.names.top - before.list.top) < 1, 'Both lists start at the same height');
                 assert.ok(before.list.bottom <= before.footer.top + 1, 'IDs must not overlap footer');
                 assert.ok(before.popover.left >= 7 && before.popover.right <= width - 7, `Horizontal fit: ${JSON.stringify(before)}`);
                 assert.ok(before.popover.top >= 7 && before.popover.bottom <= height - 7, `Vertical fit: ${JSON.stringify(before)}`);
                 for (const button of before.buttons) {
                     assert.ok(button.fits && button.hit, `Footer button must fit and be clickable: ${JSON.stringify(before)}`);
+                }
+                if (width >= 820) {
+                    const textFits = await menu.locator('.alias-name').evaluateAll(items => items.every(item =>
+                        item.scrollWidth <= item.clientWidth + 1 && getComputedStyle(item).fontSize === '12px'));
+                    assert.ok(textFits, '11-character game IDs and 6-character aliases fit at normal font size');
                 }
                 const list = menu.locator('.alias-id-list');
                 await list.hover();
@@ -115,6 +145,49 @@ async function layout(page) {
             assert.ok(bounds.buttons.every(button => button.fits && button.hit), `Scale ${scale}: ${JSON.stringify(bounds)}`);
         }
         await page.evaluate(() => { document.querySelector('.app-shell').style.transform = ''; });
+        await page.evaluate(() => {
+            playerIdentityState.groups[0].names = window.originalAliasNames;
+            document.querySelectorAll('.name-input').forEach(input => { input.value = ''; });
+        });
+        menu = await openMenu(page, 0);
+        const input = page.locator('.name-input').first();
+        const selected = await menu.locator('.alias-name-item').first().getAttribute('data-name');
+        await menu.locator('.alias-name-item').first().click();
+        assert.equal(await input.inputValue(), selected, 'Mouse selection replaces the current name');
+        await input.focus();
+        await input.press('ArrowDown');
+        const highlighted = await menu.locator('.alias-name-item.keyboard-focus').getAttribute('data-name');
+        await page.evaluate(() => restorePendingAliasPopover());
+        assert.equal(await menu.locator('.alias-name-item.keyboard-focus').getAttribute('data-name'), highlighted,
+            'Scoreboard refresh must preserve the keyboard selection');
+        await input.press('Enter');
+        assert.equal(await input.inputValue(), highlighted, 'Arrow keys and Enter select a name alias');
+        await menu.locator('.alias-name-item').first().focus();
+        await page.keyboard.press('Enter');
+        assert.equal(await input.inputValue(), selected, 'Focused name aliases support Enter');
+        const finishFailedCommand = async action => {
+            const command = await page.evaluate(action => popoverCommands.filter(c => c.action === action).at(-1), action);
+            assert.ok(command, `Expected ${action}`);
+            await page.evaluate(requestId => handlePlayerLibraryResult({ requestId, ok: false, message: 'Fixture failure' }), command.requestId);
+            return command;
+        };
+        await menu.locator('.add-name-alias-btn').click();
+        await page.locator('#modal-input').fill('NewNameAlias');
+        await page.locator('#modal-ok').click();
+        assert.equal((await finishFailedCommand('cmd_identity_add_alias')).newName, 'NewNameAlias');
+        const editName = await menu.locator('.alias-name-item').first().getAttribute('data-name');
+        await menu.locator('.edit-name-alias-btn').first().click();
+        await page.locator('#modal-input').fill('RenamedAlias');
+        await page.locator('#modal-ok').click();
+        const renamed = await finishFailedCommand('cmd_identity_rename_name');
+        assert.equal(renamed.name, editName);
+        assert.equal(renamed.newName, 'RenamedAlias');
+        await menu.locator('.delete-name-alias-btn').first().click();
+        await page.locator('#modal-ok').click();
+        assert.equal((await finishFailedCommand('cmd_identity_delete_alias')).name, editName);
+        await page.evaluate(() => closeAliasPopovers());
+        assert.equal(await page.evaluate(() => popoverCommands.some(c => c.action === 'cmd_set_alias_popover_expanded')), false,
+            'Opening, selecting, editing, and closing aliases must not resize the host window');
         menu = await openMenu(page);
         await page.evaluate(() => {
             window.popoverCommands = [];
@@ -179,7 +252,7 @@ async function layout(page) {
         assert.equal(await menu.locator('.alias-row').count(), 0, 'Adding the first game ID waits for acknowledgement');
         assert.doesNotMatch(await menu.textContent(), /冒险团/);
         assert.deepEqual(errors, []);
-        console.log(`Alias popover checks passed: fixed footer, wheel scrolling, viewport fit, game-only actions, busy/cancel/failure/refresh. Screenshots: ${screenshots}`);
+        console.log(`Alias popover checks passed: compact columns, 11/6-character text fit, no host resize, name selection by mouse/keyboard, name CRUD commands, scrolling, viewport fit, ID actions, busy/cancel/failure/refresh. Screenshots: ${screenshots}`);
     } finally {
         if (browser) await browser.close();
         const stopped = once(fixture.server, 'exit');

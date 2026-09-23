@@ -177,6 +177,8 @@ export const socketAuthSchema = z
     deviceId: deviceIdSchema,
     deviceToken: deviceTokenSchema,
     protocolVersion: z.literal(1),
+    licenseDeviceId: deviceIdSchema.optional().catch(undefined),
+    licenseSessionToken: z.string().min(32).max(256).optional().catch(undefined),
   })
   .strict();
 

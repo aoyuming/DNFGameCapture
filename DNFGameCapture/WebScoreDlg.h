@@ -23,6 +23,7 @@ public:
 	void SetBroadcasterPreviewExpanded(bool expanded);
 	void SetConsolePanelExpanded(bool expanded);
 	void SetPlayerIdentityPanelExpanded(bool expanded);
+	void SetAliasPopoverExpanded(bool expanded);
 	void ResizeWindowToSize(int targetWindowW, int targetWindowH);
 	void ResizeWindowForClientSize(int targetClientW, int targetClientH);
 	void WriteWebHostDiagnostics(const CString& reason);
@@ -39,6 +40,7 @@ protected:
 	virtual void DoDataExchange(CDataExchange* pDX);    // DDX/DDV 支持
 	virtual BOOL OnInitDialog();
 	afx_msg void OnSize(UINT nType, int cx, int cy);
+	afx_msg void OnShowWindow(BOOL bShow, UINT nStatus);
 	afx_msg void OnTimer(UINT_PTR nIDEvent);
 	afx_msg BOOL OnEraseBkgnd(CDC* pDC);
 	afx_msg HBRUSH OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor);
@@ -60,6 +62,7 @@ private:
 	bool m_broadcasterPreviewExpanded = false;
 	bool m_consolePanelExpanded = false;
 	bool m_playerIdentityExpanded = false;
+	bool m_aliasPopoverExpanded = false;
 	bool m_initialWindowSizeApplied = false;
 	double m_currentWebZoom = 0.0;
 	bool m_webZoomCalibrated = false;

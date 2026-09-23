@@ -102,7 +102,7 @@ test('sync origin check and payload capture share the data lock', () => {
   assert(lock >= 0 && guard > lock && build > guard);
   assert.doesNotMatch(queue, /BuildTeamSyncSnapshotPayload\(\)/);
   const apply = section('bool CDNFGameCaptureDlg::ApplyTeamSyncSnapshot(', 'bool CDNFGameCaptureDlg::RefreshAfterTeamSyncApply()');
-  assert.match(apply, /MarkMatchMutation\(\);\s*if \(appliedEpoch\) \*appliedEpoch = m_matchMutationEpoch\.load/);
+  assert.match(apply, /MarkMatchMutation\(resolvedHistoryLabel, resolvedHistorySource\);\s*if \(appliedEpoch\) \*appliedEpoch = m_matchMutationEpoch\.load/);
   const once = section('else if (action == "cmd_cloud_sync_broadcaster")', 'else if (action == "cmd_cloud_realtime_start")');
   assert.match(once, /QueueCloudMatchSyncedUpload\(targetDeviceId, revision, &appliedEpoch\)/);
   assert.match(once, /QueueSyncedPlayerLibrary\(snapshot, targetDeviceId, revision, true, appliedEpoch\)/);

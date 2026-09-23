@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 
 import { hashLicenseKey } from '../src/auth.js';
 import { createBroadcasterAttributionService } from '../src/broadcaster-attribution.js';
+import { setClientBan } from '../src/client-ban.js';
 import { openDatabase } from '../src/db.js';
 import { mergePublicLibrary, mutatePublicLibrary } from '../src/library-admin-data.js';
 import {
@@ -55,6 +56,45 @@ afterEach(() => {
 });
 
 describe('test-server v2 API', () => {
+  test('blocks activation, validation, and protected APIs while a client ban is active', async () => {
+    const { app, db } = createFixture();
+    const activated = await request(app).post('/api/v2/auth/activate').send({
+      key: 'CDK-TEST-ONE', deviceId: 'device-test-0001',
+    }).expect(200);
+
+    setClientBan(db, {
+      broadcasterDeviceId: 'socket-device-0001',
+      licenseDeviceId: 'device-test-0001',
+      bannedAt: now,
+      expiresAt: null,
+    });
+
+    await request(app).post('/api/v2/auth/activate').send({
+      key: 'CDK-TEST-ONE', deviceId: 'device-test-0001',
+    }).expect(403, { ok: false, code: 'account_banned', bannedUntil: null });
+    await request(app).post('/api/v2/auth/validate').send({
+      sessionToken: activated.body.sessionToken, deviceId: 'device-test-0001',
+    }).expect(403, { ok: false, code: 'account_banned', bannedUntil: null });
+    await request(app).get('/api/v2/player-library')
+      .set('Authorization', `Bearer ${activated.body.sessionToken}`)
+      .set('X-DNF-Device-Id', 'device-test-0001')
+      .expect(403, { ok: false, code: 'account_banned', bannedUntil: null });
+  });
+
+  test('automatically allows authorization after a timed client ban expires', async () => {
+    const { app, db } = createFixture();
+    setClientBan(db, {
+      broadcasterDeviceId: 'socket-device-0001',
+      licenseDeviceId: 'device-test-0001',
+      bannedAt: now - 120,
+      expiresAt: now,
+    });
+
+    await request(app).post('/api/v2/auth/activate').send({
+      key: 'CDK-TEST-ONE', deviceId: 'device-test-0001',
+    }).expect(200);
+  });
+
   test('records authorization activity with the server-resolved client IP', async () => {
     const { app, db } = createFixture();
 

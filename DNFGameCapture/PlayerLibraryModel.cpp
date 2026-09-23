@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cwctype>
 #include <iomanip>
+#include <iterator>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -113,6 +114,47 @@ std::string IdentityFingerprint(std::vector<std::wstring> names) {
     std::ostringstream out;
     out << std::uppercase << std::hex << std::setw(16) << std::setfill('0') << hash;
     return out.str();
+}
+std::wstring ResolvePreferredLocalName(const Snapshot& snapshot,
+    const std::wstring& incomingName,
+    const std::vector<std::wstring>& incomingGameIds,
+    const std::vector<std::wstring>& localFieldedNames)
+{
+    const auto normalizedIncoming = Trim(incomingName);
+    EntityId targetEntity = 0;
+    if (const auto* incoming = snapshot.FindName(normalizedIncoming)) {
+        targetEntity = incoming->entityId;
+    }
+    else {
+        std::vector<EntityId> candidates;
+        bool hasEvidence = false;
+        for (const auto& gameId : incomingGameIds) {
+            auto lookup = snapshot.Lookup(gameId).candidates;
+            if (lookup.empty()) continue;
+            std::sort(lookup.begin(), lookup.end());
+            lookup.erase(std::unique(lookup.begin(), lookup.end()), lookup.end());
+            if (!hasEvidence) {
+                candidates = std::move(lookup);
+                hasEvidence = true;
+            }
+            else {
+                std::vector<EntityId> intersection;
+                std::set_intersection(candidates.begin(), candidates.end(),
+                    lookup.begin(), lookup.end(), std::back_inserter(intersection));
+                candidates = std::move(intersection);
+            }
+            if (candidates.empty()) break;
+        }
+        if (hasEvidence && candidates.size() == 1) targetEntity = candidates.front();
+    }
+    if (!targetEntity) return normalizedIncoming;
+
+    for (const auto& localName : localFieldedNames) {
+        const auto normalizedLocal = Trim(localName);
+        const auto* local = snapshot.FindName(normalizedLocal);
+        if (local && local->entityId == targetEntity) return normalizedLocal;
+    }
+    return normalizedIncoming;
 }
 const PlayerEntity* Snapshot::FindName(const std::wstring& name) const {
     const auto it = nameIndex.find(Trim(name));

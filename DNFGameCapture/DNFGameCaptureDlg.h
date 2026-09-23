@@ -53,7 +53,7 @@ struct PlayerIdentityGroupRecord {
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"5.2.2"    //当前版本号
+#define CURRENT_VERSION L"5.4.0"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -89,6 +89,7 @@ struct PlayerIdentityGroupRecord {
 #define WM_OCR_START_RESULT     (WM_USER + 109) // 【新增】：Umi-OCR 启动流程完成
 #define WM_OCR_RECOVER_RESULT   (WM_USER + 110) // 【新增】：Umi-OCR 运行中恢复完成
 #define WM_KILL_DISPLAY_VISIBILITY_CHANGED (WM_USER + 111) // 击杀展示窗口显示/隐藏后同步 Web 按钮状态
+#define WM_KILL_DISPLAY_READY   (WM_USER + 112) // 击杀展示 WebView 已完成首次导航
 #define WM_KEY_DISPLAY_VISIBILITY_CHANGED (WM_USER + 113)
 #define WM_KEY_MAPPING_LAN_CHANGED (WM_USER + 114)
 #define WM_KEY_MAPPING_TEAM_SYNC (WM_USER + 115)
@@ -147,6 +148,17 @@ struct RecentEvent {
     CString snapshotPath;
     bool cloudSynced = false;
     bool readOnly = false;
+};
+
+// 一条比赛状态历史：前后快照都保存在原生层，Web 只显示摘要并发送撤销/重做命令。
+struct MatchHistoryEntry {
+    std::uint64_t id = 0;
+    CString label;
+    CString source;
+    CString timeText;
+    CString detail;
+    std::string beforeSnapshot;
+    std::string afterSnapshot;
 };
 
 struct OcrResultData {
@@ -251,6 +263,7 @@ protected:
     afx_msg LRESULT OnOcrStartResult(WPARAM wParam, LPARAM lParam); // 【新增】：OCR 启动完成回调
     afx_msg LRESULT OnOcrRecoverResult(WPARAM wParam, LPARAM lParam); // 【新增】：OCR 运行中恢复完成回调
     afx_msg LRESULT OnKillDisplayVisibilityChanged(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnKillDisplayReady(WPARAM wParam, LPARAM lParam);
     afx_msg LRESULT OnKeyDisplayVisibilityChanged(WPARAM wParam, LPARAM lParam);
     afx_msg LRESULT OnKeyMappingLanChanged(WPARAM wParam, LPARAM lParam);
     afx_msg LRESULT OnKeyMappingTeamSync(WPARAM wParam, LPARAM lParam);
@@ -261,6 +274,7 @@ protected:
 
     void RunStartupStage(int stage);
     void StartStartupBootstrap();
+    void RevealMainWebWindow();
     void SendStartupProgress(int progress, const CString& message,
         const CString& phase = CString());
     void SendCloudProgress(const CString& task, const CString& phase,
@@ -358,6 +372,7 @@ private:
     void CancelCloudRoomJoin(const CString& reason);
     void HandleCloudMatchSnapshotUploadResult(const nlohmann::json& event);
     void HandleCloudMatchMessage(std::string message);
+    void ApplyRealtimeEditingLock();
     bool RejectLocalMatchEditWhileRealtime();
     bool IsCloudReverseSyncBlocked(const std::string& targetDeviceId) const;
     void InvalidateCloudMatchSyncPreview(bool clearMembers = true);
@@ -375,7 +390,23 @@ private:
     void RefreshCloudMatchStatusDisplay(
         const CloudMatchStatusSnapshot& cloudStatus);
     void OnMatchStateChanged(std::string matchPayload, const char* source);
-    void MarkMatchMutation();
+    void InitializeMatchHistory();
+    void ObserveMatchHistoryState();
+    std::string BuildMatchHistorySnapshotPayload();
+    std::string BuildMatchHistorySnapshotPayloadUnlocked();
+    nlohmann::json BuildMatchHistoryStateJson() const;
+    void RecordMatchHistoryTransition(const std::string& beforeSnapshot,
+        const std::string& afterSnapshot, const wchar_t* label,
+        const wchar_t* source);
+    bool ApplyMatchHistorySnapshot(const std::string& snapshotPayload,
+        CString& errorMessage);
+    bool UndoMatchHistory(CString& errorMessage);
+    bool RedoMatchHistory(CString& errorMessage);
+    bool RestoreMatchHistoryToEntry(std::uint64_t entryId,
+        CString& errorMessage);
+    bool SetMatchHistoryMaxSteps(int maxSteps, CString& errorMessage);
+    void MarkMatchMutation(const wchar_t* label = L"比赛状态变更",
+        const wchar_t* source = L"本机");
     void MarkCloudMatchOcrStateChanged(std::string matchPayload);
     std::string BuildCloudMatchSnapshotPayload(const std::string& matchPayload,
         std::uint64_t clientRevision, const std::string& changeSource,
@@ -384,8 +415,11 @@ private:
     bool ValidateTeamSyncSnapshot(const nlohmann::json& snapshot, CString& errorMessage) const;
     bool ApplyTeamSyncSnapshot(const nlohmann::json& snapshot, bool createBackup,
         CString& errorMessage, bool automatic = false, bool preserveLocalFlip = false,
-        std::uint64_t* appliedEpoch = nullptr);
+        std::uint64_t* appliedEpoch = nullptr, bool exactRestore = false,
+        const wchar_t* historyLabel = nullptr,
+        const wchar_t* historySource = nullptr);
     bool RefreshAfterTeamSyncApply();
+    bool RefreshAfterMatchHistoryApply();
     void ClearTeamSyncState();
     void OpenKeyDisplayWindow();
     void HideKeyDisplayWindow();
@@ -558,6 +592,7 @@ private:
     CString m_webFrontDir;
     bool m_bKillDisplayHttpReady = false;
     bool m_deferredDisplayWindowsPending = false;
+    bool m_mainWebWindowRevealed = false;
     CString m_killDisplayHttpError;
 
 
@@ -765,6 +800,17 @@ private:
     std::uint64_t m_cloudMatchSyncUndoPostApplyEpoch = 0;
     int m_cloudMatchSyncUndoEventBoundaryId = 0;
     std::atomic<std::uint64_t> m_matchMutationEpoch{ 1 };
+    std::deque<MatchHistoryEntry> m_matchHistory;
+    std::size_t m_matchHistoryCursor = 0;
+    int m_matchHistoryMaxSteps = 30;
+    std::uint64_t m_matchHistoryNextId = 1;
+    bool m_matchHistoryReady = false;
+    bool m_matchHistoryApplying = false;
+    bool m_matchHistoryMutationPending = false;
+    CString m_matchHistoryPendingLabel;
+    CString m_matchHistoryPendingSource;
+    std::string m_matchHistoryObservedSnapshot;
+    ULONGLONG m_matchHistoryLastObserveTick = 0;
     CString m_cloudMatchSyncError;
     CString m_cloudMatchSyncLastResult;
 
@@ -841,6 +887,7 @@ private:
     CString m_outputDir;
     CString m_webTheme = L"dark-esports";
     bool m_bOutputSeatLabelToKillFile = false;
+    bool m_bPreferLocalAliasesOnSync = false;
     bool m_bRedPickFirst = false;
 
     ULONG_PTR m_gdiplusToken;
@@ -860,6 +907,8 @@ private:
     // 🚨 【新增】：标记是否是用户手动点击的授权验证
     bool m_bIsManualAuthCheck = false;
     std::uint64_t m_cloudAuthRequestGeneration = 0;
+    bool m_clientBanNoticeShown = false;
+    long long m_clientBanNoticeUntil = -1;
 
     // 【新增】：云端授权回调变量与消息
     long long m_keyDuration = 0;     // 存放解析出的时长
@@ -870,6 +919,7 @@ private:
     static CString CheckCloudBinding(CString key, CString hwid, long long duration,
         long long& outExpTime, CString& outCloudServerUrl);
     bool BeginLicenseCloudCheck(const CString& inputKey, bool manualCheck);
+    void ShowClientBanNotice(long long bannedUntil);
     bool TryActivateFromLicenseLease(const CString& normalizedKey,
         const CString& machineId, long long cardDuration);
     bool BeginLicenseLeaseEndpointRefresh();
