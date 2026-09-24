@@ -229,6 +229,7 @@
     <ClInclude Include="PlayerIdentityOcrCache.h" />
     <ClInclude Include="PreviewLayout.h" />
     <ClInclude Include="OcrServiceHealth.h" />
+    <ClInclude Include="MutualDeathTriggerPolicy.h" />
     <ClInclude Include="third_party\sqlite\sqlite3.h" />
     <ClInclude Include="KillDisplayDlg.h" />
     <ClInclude Include="KeyDisplayDlg.h" />

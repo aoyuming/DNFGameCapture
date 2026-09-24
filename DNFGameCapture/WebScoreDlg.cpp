@@ -11,6 +11,8 @@ namespace {
     constexpr int kCompactClientWidth = 1140;
     constexpr int kExpandedClientWidth = 1400;
     constexpr int kReferenceClientHeight = 480;
+    // The sync banner occupies 54 CSS px; leave 10 px of breathing room.
+    constexpr int kRealtimeSyncExtraClientHeight = 64;
     constexpr int kAppearanceExtraClientHeight = 300;
     constexpr int kBroadcasterPreviewClientHeight = 760;
     constexpr int kPlayerIdentityClientHeight = 720;
@@ -92,7 +94,7 @@ BOOL CWebScoreDlg::OnInitDialog()
 
     // 🚨 动态读取版本号并设置窗口标题
     CString title;
-    title.Format(L"DNF点将计分器 - v%s", CURRENT_VERSION);
+    title.Format(L"DNF点将工具 - v%s", CURRENT_VERSION);
     SetWindowText(title);
 
     InitWebView2();
@@ -793,6 +795,11 @@ void CWebScoreDlg::ApplyExpandedWindowSize()
         targetClientHeight = max(targetClientHeight, kPlayerIdentityClientHeight);
     }
 
+    // Add after panel sizing so opening/closing a panel cannot lose banner space.
+    if (m_realtimeSyncExpanded) {
+        targetClientHeight += kRealtimeSyncExtraClientHeight;
+    }
+
     ResizeWindowForClientSize(
         ScaleCssSizeToNativePixels(GetReferenceClientWidth(), kTargetVisualScale),
         ScaleCssSizeToNativePixels(targetClientHeight, kTargetVisualScale));
@@ -847,4 +854,13 @@ void CWebScoreDlg::SetAliasPopoverExpanded(bool expanded)
     if (m_aliasPopoverExpanded == expanded) return;
     m_aliasPopoverExpanded = expanded;
     ApplyExpandedWindowSize();
+}
+
+void CWebScoreDlg::SetRealtimeSyncExpanded(bool expanded)
+{
+    if (m_realtimeSyncExpanded == expanded) return;
+    m_realtimeSyncExpanded = expanded;
+    ApplyExpandedWindowSize();
+    WriteWebHostDiagnostics(expanded ?
+        L"实时同步提示显示扩高" : L"实时同步提示隐藏还原");
 }

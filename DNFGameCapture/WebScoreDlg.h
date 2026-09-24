@@ -24,6 +24,7 @@ public:
 	void SetConsolePanelExpanded(bool expanded);
 	void SetPlayerIdentityPanelExpanded(bool expanded);
 	void SetAliasPopoverExpanded(bool expanded);
+	void SetRealtimeSyncExpanded(bool expanded);
 	void ResizeWindowToSize(int targetWindowW, int targetWindowH);
 	void ResizeWindowForClientSize(int targetClientW, int targetClientH);
 	void WriteWebHostDiagnostics(const CString& reason);
@@ -63,6 +64,7 @@ private:
 	bool m_consolePanelExpanded = false;
 	bool m_playerIdentityExpanded = false;
 	bool m_aliasPopoverExpanded = false;
+	bool m_realtimeSyncExpanded = false;
 	bool m_initialWindowSizeApplied = false;
 	double m_currentWebZoom = 0.0;
 	bool m_webZoomCalibrated = false;

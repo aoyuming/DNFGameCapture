@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "DNFGameCaptureDlg.h"
 #include "PreviewLayout.h"
+#include "MutualDeathTriggerPolicy.h"
 #include <shellapi.h>
 #include <Gdiplus.h>
 #include <string>
@@ -2874,6 +2875,8 @@ static int g_pendingActiveDeathSide = -1; // 0=左侧，1=右侧，-1=无
 static DWORD g_pendingActiveDeathTick = 0;
 static CString g_pendingActiveDeathReason;
 static DWORD g_lastDeathXBlockedLogTick = 0;
+// Accessed only by the UI detection/reset path, never by OCR workers.
+static dnf::ocr::MutualDeathTriggerWindow g_mutualDeathWindow;
 
 static const wchar_t* GetDeathPointName(int idx)
 {
@@ -2892,6 +2895,7 @@ static const wchar_t* GetDeathPointName(int idx)
 
 void CDNFGameCaptureDlg::ResetDeathXStableState()
 {
+    g_mutualDeathWindow.Reset();
     memset(m_deathXStableState, 0, sizeof(m_deathXStableState));
     memset(m_deathXStableOn, 0, sizeof(m_deathXStableOn));
     memset(m_deathXStableOff, 0, sizeof(m_deathXStableOff));
@@ -9519,7 +9523,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
         }
         else {
             CString logMsg;
-            logMsg.Format(L"⏳ [冷却拦截] 玩家 [%s] 在 %d 秒内已产生过战绩，本次忽略！", (LPCTSTR)conflictName, DUP_KILL_LIMIT_TIME / 1000);
+            logMsg.Format(L"⏳ [冷却拦截] [%s]：%s（%d秒去重窗口），本次忽略。", (LPCTSTR)conflictName, (LPCTSTR)conflictReason, DUP_KILL_LIMIT_TIME / 1000);
             PushVisualLog(logMsg, RGB(255, 165, 0));
 
             RecentEvent review;
@@ -10304,6 +10308,7 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
     // 4. 状态机：跟踪【左侧/右侧】正在打的选手的生死，触发单局击杀
     // ========================================================
     DWORD nowTick = GetTickCount();
+    g_mutualDeathWindow.Observe(leftActiveDead, rightActiveDead);
 
     // 普通击杀冷却期间出现的新 X，不能直接吃掉边沿；
     // 记录为“待触发 X”，等普通击杀冷却结束后，如果 X 仍存在，再补触发一次。
@@ -10342,16 +10347,31 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
         WriteMatchLog(line);
     };
 
-    auto fireActiveXTrigger = [&](int deadSide, const CString& sourceReason) {
+    auto fireActiveXTrigger = [&](int deadSide, const CString& sourceReason, bool reciprocal = false) {
         CString line;
         line.Format(L"[X触发诊断] %s侧大X进入OCR匹配：来源=%s；当前是否翻转红蓝=%s；物理死亡侧=%s；物理杀手侧=%s；说明=翻转红蓝只影响界面/OBS左右显示，不改变OCR区域、X检测位置和物理侧候选队伍。",
             deadSide == 0 ? L"左" : L"右", sourceReason.GetString(), m_bFlipSides ? L"是" : L"否",
             deadSide == 0 ? L"左边" : L"右边", deadSide == 0 ? L"右边" : L"左边");
         WriteMatchLog(line);
         m_bCanTrigger = FALSE;
+        if (!reciprocal) {
+            g_mutualDeathWindow.Begin(deadSide, nowTick);
+            g_triggerCooldownKind = 1;
+            SetTimer(2, COOLDOWN_KILL_TRIGGER, NULL);
+        }
+        // Publish cooldown before the worker starts; reciprocal admission must
+        // never overwrite/shorten a ROUND_END timer already in progress.
         StartOcrMatchingTask(deadSide);
-        g_triggerCooldownKind = 1;
-        SetTimer(2, COOLDOWN_KILL_TRIGGER, NULL);
+    };
+
+    auto tryFireMutualX = [&](int deadSide) {
+        if (!g_mutualDeathWindow.ConsumeReciprocal(
+            deadSide, nowTick, leftActiveDead, rightActiveDead)) return false;
+        if (g_pendingActiveDeathSide == deadSide)
+            clearPendingActiveX(L"同归于尽另一侧已立即触发，不再冷却后重复补触发");
+        WriteMatchLog(L"[同归于尽] 两侧稳定死亡X在1500毫秒内形成新边沿；另一侧立即进入OCR，保留原有死亡/击杀去重与局间冷却。");
+        fireActiveXTrigger(deadSide, L"同归于尽双侧死亡边沿，立即识别另一侧", true);
+        return true;
     };
 
     // 如果普通冷却期间吞过一次 X 边沿，冷却结束后在这里补触发。
@@ -10414,7 +10434,7 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
         if (m_bCanTrigger) {
             fireActiveXTrigger(0, L"左侧大X产生新的死亡边沿，允许触发");
         }
-        else {
+        else if (!tryFireMutualX(0)) {
             rememberPendingActiveX(0, L"左侧大X产生新的死亡边沿，但当时正在防抖冷却");
         }
     }
@@ -10429,7 +10449,7 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
         if (m_bCanTrigger) {
             fireActiveXTrigger(1, L"右侧大X产生新的死亡边沿，允许触发");
         }
-        else {
+        else if (!tryFireMutualX(1)) {
             rememberPendingActiveX(1, L"右侧大X产生新的死亡边沿，但当时正在防抖冷却");
         }
     }
@@ -18224,6 +18244,10 @@ void CDNFGameCaptureDlg::BroadcastStateToWeb()
     if (m_pWebDlg == nullptr) return;
     if (!m_cloudMatchWebReady) return;
 
+    // Use the same authoritative state as the Web read-only banner.
+    // The setter is idempotent: normal state ticks must not keep resizing.
+    m_pWebDlg->SetRealtimeSyncExpanded(m_cloudRealtimeFollowing);
+
     json webMessage;
     try {
         webMessage["action"] = "sync_state";
@@ -21595,7 +21619,7 @@ CString CDNFGameCaptureDlg::GetKeyMappingLanDeviceName() const
     wchar_t name[MAX_COMPUTERNAME_LENGTH + 1] = {};
     DWORD length = static_cast<DWORD>(std::size(name));
     if (::GetComputerNameW(name, &length) && length > 0) return CString(name, static_cast<int>(length));
-    return L"DNF点将计分器";
+    return L"DNF点将工具";
 }
 
 void CDNFGameCaptureDlg::LoadKeyMappingSettings()

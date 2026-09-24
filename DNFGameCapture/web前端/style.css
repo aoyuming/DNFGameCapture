@@ -137,6 +137,17 @@ body {
     box-sizing: border-box;
 }
 
+
+/* Sync banner adds height on the left: stretch the broadcaster list to match.
+   Size containment keeps long lists from dictating the outer window height. */
+@media (min-width: 761px) {
+    body.realtime-readonly .broadcaster-sidebar {
+        contain: size;
+        max-height: none;
+        align-self: stretch;
+    }
+}
+
 .console-sidebar {
     border-color: var(--console-border, rgba(255, 204, 102, 0.28));
     background: var(--console-surface, rgba(12, 14, 20, 0.98));
