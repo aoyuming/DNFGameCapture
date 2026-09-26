@@ -69,12 +69,12 @@ int main() {
   w.SetRealtimeSyncExpanded(false); check(w.height==base && w.width==width);
   const int stopped=w.calls; w.SetRealtimeSyncExpanded(false); check(w.calls==stopped);
  }
- CWebScoreDlg w; w.SetRealtimeSyncExpanded(true); check(w.height==680 && w.width==1425);
- w.m_appearanceExpanded=true; w.ApplyExpandedWindowSize(); check(w.height==1055);
- w.m_appearanceExpanded=false; w.ApplyExpandedWindowSize(); check(w.height==680);
+ CWebScoreDlg w; w.SetRealtimeSyncExpanded(true); check(w.height==955 && w.width==1425);
+ w.m_appearanceExpanded=true; w.ApplyExpandedWindowSize(); check(w.height==1330);
+ w.m_appearanceExpanded=false; w.ApplyExpandedWindowSize(); check(w.height==955);
  w.m_broadcasterPreviewExpanded=true; w.ApplyExpandedWindowSize(); check(w.height==1030);
- w.m_broadcasterPreviewExpanded=false; w.ApplyExpandedWindowSize(); check(w.height==680);
- w.SetRealtimeSyncExpanded(false); check(w.height==600);
+ w.m_broadcasterPreviewExpanded=false; w.ApplyExpandedWindowSize(); check(w.height==955);
+ w.SetRealtimeSyncExpanded(false); check(w.height==875);
  std::puts("Realtime height: 32 panel combinations, repeated states and panel transitions passed.");
 }
 `;

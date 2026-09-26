@@ -4,10 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DNF 击杀展示页</title>
-    <link rel="stylesheet" href="kill.css?v=20260617-kill-display">
+    <link rel="stylesheet" href="kill.css?v=20260927-kill-fx">
 </head>
 <body>
-    <main id="kill-display-root" class="kill-display-root" aria-live="polite">
+    <main id="kill-display-root" class="kill-display-root" data-skin="dnf" aria-live="polite">
+        <button class="kill-window-skin" id="kill-window-skin" type="button" title="切换界面风格 / 自定义背景" aria-label="切换界面风格"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 3a9 9 0 0 0 0 18c.83 0 1.5-.67 1.5-1.5 0-.39-.15-.74-.39-1.01-.23-.26-.38-.61-.38-.99 0-.83.67-1.5 1.5-1.5H16a5 5 0 0 0 5-5c0-4.42-4.03-8-9-8zm-5.5 9a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm3-4a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm3 4a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z"/></svg></button>
         <button class="kill-window-settings" id="kill-window-settings" type="button" title="打开外观设置" aria-label="打开外观设置">⚙</button>
         <button class="kill-window-close" id="kill-window-close" type="button" title="关闭展示窗口" aria-label="关闭展示窗口">×</button>
         <div class="kill-board" id="kill-board">
@@ -41,6 +42,28 @@
                 <div class="kill-rows" id="kill-blue-rows"></div>
             </section>
         </div>
+        <section class="kill-skin-panel" id="kill-skin-panel" hidden aria-label="界面风格">
+            <div class="kill-skin-panel-head">
+                <strong>界面风格</strong>
+                <button class="kill-skin-panel-close" id="kill-skin-panel-close" type="button" title="关闭 (Esc)" aria-label="关闭">×</button>
+            </div>
+            <div class="kill-skin-grid" id="kill-skin-grid"></div>
+            <label class="kill-skin-apply"><input id="kill-skin-apply-colors" type="checkbox" checked><span>切换时套用推荐文字配色</span></label>
+            <label class="kill-skin-apply"><input id="kill-fx-enabled" type="checkbox" checked><span>击杀特效（多杀 / AK / 一血 / 终结 / 复仇）</span></label>
+            <div class="kill-bg-section">
+                <div class="kill-bg-head"><strong>自定义背景</strong><span id="kill-bg-state">未设置</span></div>
+                <div class="kill-bg-actions">
+                    <button id="kill-bg-pick" type="button">选择图片</button>
+                    <button id="kill-bg-reset" type="button" title="缩放 100%（铺满）并居中">复位</button>
+                    <button id="kill-bg-clear" type="button" class="danger">移除</button>
+                </div>
+                <input id="kill-bg-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" hidden>
+                <label class="kill-bg-range"><span>缩放</span><input id="kill-bg-scale" type="range" min="10" max="400" step="1"><b id="kill-bg-scale-val">100%</b></label>
+                <label class="kill-bg-range"><span>图片透明</span><input id="kill-bg-opacity" type="range" min="0" max="100" step="1"><b id="kill-bg-opacity-val">100%</b></label>
+                <label class="kill-bg-range"><span>面板透明</span><input id="kill-bg-panel" type="range" min="0" max="100" step="1"><b id="kill-bg-panel-val">49%</b></label>
+                <p class="kill-bg-hint">面板打开时：在画面上<b>拖动</b>移动背景，<b>滚轮</b>缩放；也可把图片直接拖进窗口。</p>
+            </div>
+        </section>
         <div class="kill-status" id="kill-status">等待数据...</div>
         <section class="kill-edit-toolbar" id="kill-edit-toolbar" hidden aria-label="kill display appearance editor">
             <div class="kill-edit-head">
@@ -61,6 +84,13 @@
                     <option value="akCountBadge">AK次数</option>
                 </select>
             </label>
+            <div class="kill-edit-skin-row">
+                <label>
+                    <span>风格</span>
+                    <select id="kill-edit-skin"></select>
+                </label>
+                <button class="kill-edit-skin-colors" id="kill-edit-skin-colors" type="button" title="把当前风格的推荐文字颜色套用到所有文字（保留字体和字号）">套用配色</button>
+            </div>
             <label class="kill-edit-check">
                 <span>死亡</span>
                 <input id="kill-edit-show-death" type="checkbox" checked>
@@ -81,6 +111,6 @@
         </section>
         <div class="kill-resize-grip" id="kill-resize-grip" aria-hidden="true"></div>
     </main>
-    <script src="kill.js?v=20260617-kill-display" defer></script>
+    <script src="kill.js?v=20260927-kill-fx" defer></script>
 </body>
 </html>

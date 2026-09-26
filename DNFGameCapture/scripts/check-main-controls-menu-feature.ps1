@@ -69,12 +69,16 @@ foreach ($item in $required) {
     }
 }
 
-if ($text["index.html"] -notmatch '<div class="control-row control-row-match">[\s\S]*btn-swap[\s\S]*btn-monitor[\s\S]*btn-reset[\s\S]*btn-kill-display-toggle[\s\S]*btn-pro[\s\S]*</div>\s*<div class="control-row control-row-aux">') {
-    $errors.Add("First control row must contain swap, run, reset, display page, and professional mode in order.")
+if ($text["index.html"] -notmatch '<header class="rd-topbar"[^>]*>[\s\S]*btn-review-toggle[\s\S]*btn-operation-history[\s\S]*btn-appearance[\s\S]*btn-auth[\s\S]*</header>') {
+    $errors.Add("Top bar must contain recent review, operation history, appearance, and auth in order.")
 }
 
-if ($text["index.html"] -notmatch '<div class="control-row control-row-aux">[\s\S]*btn-review-toggle[\s\S]*btn-auth[\s\S]*btn-appearance[\s\S]*output-seat-label-toggle[\s\S]*kill-show-death-toggle-main[\s\S]*btn-more-controls') {
-    $errors.Add("Second control row must contain recent review, auth, appearance, pick order, show death, and more in order.")
+if ($text["index.html"] -notmatch '<div class="control-row control-row-match">[\s\S]*btn-monitor[\s\S]*btn-swap[\s\S]*btn-reset[\s\S]*btn-kill-display-toggle[\s\S]*btn-pro[\s\S]*</div>\s*<div class="control-row control-row-aux">') {
+    $errors.Add("Match controls must contain run, swap, reset, display page, and professional mode in order.")
+}
+
+if ($text["index.html"] -notmatch '<div class="control-row control-row-aux">[\s\S]*prefer-local-aliases-toggle[\s\S]*kill-show-death-toggle-main[\s\S]*btn-more-controls') {
+    $errors.Add("Aux controls must contain prefer local aliases, show death, and more in order.")
 }
 
 if ($text["index.html"] -notmatch '<div class="more-controls-menu"[\s\S]*btn-random-teams[\s\S]*btn-sync-alias-db[\s\S]*btn-push-alias-db[\s\S]*death-algo-select[\s\S]*btn-clear-teams') {

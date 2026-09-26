@@ -10,7 +10,7 @@ namespace {
     // 参考图1的紧凑 CSS 视口尺寸。窗口外框会按当前系统边框自动反推。
     constexpr int kCompactClientWidth = 1140;
     constexpr int kExpandedClientWidth = 1400;
-    constexpr int kReferenceClientHeight = 480;
+    constexpr int kReferenceClientHeight = 700;
     // The sync banner occupies 54 CSS px; leave 10 px of breathing room.
     constexpr int kRealtimeSyncExtraClientHeight = 64;
     constexpr int kAppearanceExtraClientHeight = 300;
@@ -96,6 +96,9 @@ BOOL CWebScoreDlg::OnInitDialog()
     CString title;
     title.Format(L"DNF点将工具 - v%s", CURRENT_VERSION);
     SetWindowText(title);
+
+    // 去掉系统白色标题栏：拖动 / 最小化 / 关闭由网页顶栏发消息给本窗口处理。
+    ApplyBorderlessWindowStyle();
 
     InitWebView2();
     ApplyFixedWindowHeight();
@@ -214,6 +217,49 @@ void CWebScoreDlg::ScheduleWebViewRetry(const CString& reason)
 // ==========================================
 void CWebScoreDlg::OnClose() {
     ShowWindow(SW_HIDE); // 点 X 只是隐藏
+}
+
+void CWebScoreDlg::ApplyBorderlessWindowStyle()
+{
+    ModifyStyle(WS_CAPTION | WS_MAXIMIZEBOX | WS_BORDER | WS_DLGFRAME | WS_THICKFRAME,
+        WS_POPUP | WS_MINIMIZEBOX | WS_SYSMENU, 0);
+    ModifyStyleEx(WS_EX_DLGMODALFRAME | WS_EX_CLIENTEDGE | WS_EX_WINDOWEDGE | WS_EX_STATICEDGE,
+        WS_EX_APPWINDOW, SWP_FRAMECHANGED);
+
+    // Windows 11：无边框窗口也保留圆角（DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2）。
+    HMODULE dwm = ::LoadLibraryW(L"dwmapi.dll");
+    if (dwm) {
+        using DwmSetWindowAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+        auto setAttribute = reinterpret_cast<DwmSetWindowAttributeFn>(
+            ::GetProcAddress(dwm, "DwmSetWindowAttribute"));
+        if (setAttribute) {
+            const int cornerPreference = 2;
+            setAttribute(GetSafeHwnd(), 33, &cornerPreference, sizeof(cornerPreference));
+        }
+        ::FreeLibrary(dwm);
+    }
+}
+
+bool CWebScoreDlg::HandleWindowChromeMessage(const CString& json)
+{
+    if (json.Find(L"\"cmd_web_window_") < 0) return false;
+
+    if (json.Find(L"\"cmd_web_window_drag\"") >= 0) {
+        if (!IsZoomed()) {
+            ::ReleaseCapture();
+            SendMessage(WM_NCLBUTTONDOWN, HTCAPTION, 0);
+        }
+        return true;
+    }
+    if (json.Find(L"\"cmd_web_window_minimize\"") >= 0) {
+        ShowWindow(SW_MINIMIZE);
+        return true;
+    }
+    if (json.Find(L"\"cmd_web_window_close\"") >= 0) {
+        OnClose();
+        return true;
+    }
+    return false;
 }
 
 void CWebScoreDlg::OnShowWindow(BOOL bShow, UINT nStatus)
@@ -378,6 +424,11 @@ void CWebScoreDlg::InitWebView2()
 
                                     LPWSTR message;
                                     args->get_WebMessageAsJson(&message);
+
+                                    if (HandleWindowChromeMessage(CString(message))) {
+                                        CoTaskMemFree(message);
+                                        return S_OK;
+                                    }
 
                                     CString* pJsonStr = new CString(message);
 
@@ -783,7 +834,7 @@ void CWebScoreDlg::ApplyFixedWindowHeight()
 
 void CWebScoreDlg::ApplyExpandedWindowSize()
 {
-    int targetClientHeight = m_aliasPopoverExpanded ? 680 : kReferenceClientHeight;
+    int targetClientHeight = m_aliasPopoverExpanded ? max(680, kReferenceClientHeight) : kReferenceClientHeight;
     if (m_appearanceExpanded) {
         targetClientHeight = max(targetClientHeight,
             kReferenceClientHeight + kAppearanceExtraClientHeight);

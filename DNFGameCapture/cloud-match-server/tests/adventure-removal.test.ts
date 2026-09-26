@@ -125,7 +125,9 @@ test('versioned migration purges only removed evidence, preserves identities and
       .map(table => [table, fixture.raw.prepare(`SELECT * FROM ${table}`).all()] as const);
     fixture.raw.close();
     migrated = openDatabase(fixture.path);
-    for (const [table, rows] of preserved) expect(migrated.prepare(`SELECT * FROM ${table}`).all()).toEqual(rows);
+    // devices.client_version is a later additive nullable column; everything else must be preserved verbatim.
+    for (const [table, rows] of preserved) expect(migrated.prepare(`SELECT * FROM ${table}`).all()).toEqual(
+      table === 'devices' ? rows.map(row => ({ ...(row as Record<string, unknown>), client_version: null })) : rows);
     expect(migrated.prepare('SELECT key_hash,bound_device_id FROM licenses').get()).toEqual({ key_hash: 'preserved-key', bound_device_id: 'old-device' });
     expect(listPlayerLibrary(migrated)).toEqual({ revision: 43, entityRedirects: [], entities: [
       { entityId: 'a', names: ['Alias', 'Alpha'], gameIds: ['Same'] }, { entityId: 'b', names: ['Beta'], gameIds: [] },

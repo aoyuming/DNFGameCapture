@@ -14,7 +14,7 @@ assert.match(main, /function applyRealtimeReadOnlyState\(/,
     'Web 必须集中应用实时同步只读状态');
 for (const selector of [
     '.team-score-input', '.name-input', '.stat-kill', '.stat-death', '.stat-ak',
-    '#btn-swap', '#btn-monitor', '#btn-reset', '#btn-clear-teams',
+    '#btn-monitor', '#btn-reset', '#btn-clear-teams',
     '#btn-match-history-undo', '#btn-match-history-redo', '.operation-history-item'
 ]) {
     assert.ok(main.includes(selector), `实时同步只读范围缺少 ${selector}`);
@@ -27,8 +27,10 @@ assert.match(main, /cmd_cloud_realtime_stop/,
     '实时同步只读状态必须保留停止同步入口');
 assert.match(main, /function clearAllTeamsData\(\)\s*{\s*if \(cloudMatchState\?\.realtimeFollowing === true\)/,
     '清空场上数据必须在入口处拦截实时同步状态');
-assert.match(main, /getElementById\('btn-swap'\)[\s\S]*?realtimeFollowing[\s\S]*?cmd_swap/,
-    '交换按钮必须在发送命令前拦截实时同步状态');
+assert.doesNotMatch(main, /querySelectorAll\('[^']*#btn-swap[^']*'\)\.forEach\(button => \{\s*button\.disabled = locked/,
+    '翻转红蓝按钮在实时同步期间必须保持可用');
+assert.match(main, /getElementById\('btn-swap'\)\.addEventListener\('click', \(\) => \{\s*(?:\/\/[^\n]*\n\s*)*window\.chrome\.webview\.postMessage\(\{ action: "cmd_swap" \}\)/,
+    '翻转红蓝按钮在实时同步期间必须直接发送 cmd_swap');
 assert.match(main, /getElementById\('btn-monitor'\)[\s\S]*?realtimeFollowing[\s\S]*?cmd_monitor/,
     '运行按钮必须在发送命令前拦截实时同步状态');
 assert.match(css, /\.realtime-readonly-banner[\s\S]*?#[0-9a-fA-F]{6}|\.realtime-readonly-banner[\s\S]*?rgb/,
@@ -50,20 +52,28 @@ assert.doesNotMatch(readonlyInputRule, /(?:background|border-color):\s*(?:rgba?\
 assert.doesNotMatch(readonlyInputRule, /(?:^|\n)\s*color:\s*(?:rgba?\(|#[0-9a-fA-F])/,
     '实时同步禁用的编辑框不得覆盖正常状态文字颜色');
 for (const action of [
-    'update_state', 'cmd_swap', 'cmd_reset_stats', 'cmd_match_history_undo',
+    'update_state', 'cmd_reset_stats', 'cmd_match_history_undo',
     'cmd_match_history_redo', 'cmd_match_history_restore'
 ]) {
     assert.ok(native.includes(`action == "${action}"`), `原生实时同步拦截缺少 ${action}`);
 }
+const realtimeBlockedList = native.match(
+    /static bool DnfIsCloudRealtimeBlockedWebAction\([\s\S]*?static bool DnfIsCloudMatchWebAction\(/
+)?.[0] ?? '';
+assert.ok(realtimeBlockedList, '必须能找到原生实时同步拦截列表');
+assert.ok(!realtimeBlockedList.includes('"cmd_swap"'),
+    '翻转红蓝只影响本机显示，原生实时同步拦截不得包含 cmd_swap');
 assert.match(native, /ApplyRealtimeEditingLock\(/,
     '专业模式控件必须同步进入只读状态');
 for (const control of [
-    'm_chkFlip', 'm_btnStart', 'm_btnApply', 'm_btnReset',
+    'm_btnStart', 'm_btnApply', 'm_btnReset',
     'm_editQuickAdd', 'm_btnQuickAdd', 'm_cmbTeamSelect', 'm_treePlayers'
 ]) {
     assert.match(native, new RegExp(`ApplyRealtimeEditingLock\\([\\s\\S]*?${control}\\.EnableWindow`),
         `专业模式实时同步锁定缺少 ${control}`);
 }
+assert.match(native, /ApplyRealtimeEditingLock\(\)\s*\{[\s\S]*?m_chkFlip\.EnableWindow\(TRUE\)/,
+    '专业模式翻转红蓝勾选框在实时同步期间必须保持可用');
 assert.match(native, /ApplyRealtimeEditingLock\([\s\S]*?实时同步中/,
     '专业模式运行按钮必须显示“实时同步中”');
 assert.match(native, /void CDNFGameCaptureDlg::BroadcastStateToWeb\(\)\s*{\s*ApplyRealtimeEditingLock\(\);/,

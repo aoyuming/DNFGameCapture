@@ -18,7 +18,7 @@ export function buildBroadcasterAdminPage(csrfToken: string): string {
   <main class="workspace">
     <aside class="directory">
       <div class="section-heading"><span>主播大厅</span><b id="broadcaster-count">0</b></div>
-      <label class="search"><span>搜索</span><input id="search-input" type="search" placeholder="主播 / IP / 地区 / 密钥备注" autocomplete="off"></label>
+      <label class="search"><span>搜索</span><input id="search-input" type="search" placeholder="主播 / IP / 地区 / 密钥备注 / 版本" autocomplete="off"></label>
       <div id="broadcaster-list" class="broadcaster-list"></div>
     </aside>
     <section class="detail">
@@ -80,6 +80,7 @@ export const BROADCASTER_ADMIN_CSS = `
 .broadcaster-row.banned{box-shadow:inset 3px 0 0 var(--red)}.broadcaster-row.banned .presence{background:var(--red);box-shadow:0 0 9px #ff6e7f66}.ban-panel{margin:16px 0;border:1px solid var(--line);background:var(--surface)}.ban-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 13px;border-bottom:1px solid var(--line);color:var(--muted);font-size:12px}.ban-summary strong{color:#8be0ba;font-size:13px}.ban-panel.is-banned{border-color:#713441}.ban-panel.is-banned .ban-summary strong{color:#ff9aa6}.ban-controls{display:grid;grid-template-columns:minmax(130px,.7fr) minmax(190px,1fr) auto;align-items:end;gap:10px;padding:12px 13px}.ban-controls label{display:grid;gap:6px;color:var(--muted);font-size:11px}.ban-controls select,.ban-controls input{width:100%;height:36px;padding:0 9px;border:1px solid var(--line);border-radius:4px;color:var(--text);background:var(--bg);outline:0}.ban-controls select:focus,.ban-controls input:focus{border-color:var(--accent)}#ban-custom-field[hidden]{display:none}.ban-actions{display:flex;gap:8px}.ban-panel>p{margin:0;padding:0 13px 12px;color:var(--muted);font-size:11px;line-height:1.5}
 @media(max-width:1100px){.workspace{height:auto;grid-template-columns:240px minmax(0,1fr)}.directory{max-height:680px}.detail{min-height:420px}.activity{grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr;border-top:1px solid var(--line)}.teams{grid-template-columns:1fr}}
 @media(max-width:680px){.topbar{padding:14px 12px}.topbar strong{display:block;margin-bottom:8px}.library-link{margin-left:0}.workspace{grid-template-columns:minmax(0,1fr)}.directory{max-height:320px;border-bottom:1px solid var(--line)}.detail{padding:18px 12px}.activity{grid-template-columns:minmax(0,1fr)}.detail-header{gap:12px}.actions button{flex:1}.attribution-grid{grid-template-columns:minmax(0,1fr)}.license-binding,.ban-controls{grid-template-columns:minmax(0,1fr)}.license-binding button,.ban-actions button{width:100%;min-height:44px}.score-line{font-size:16px}.health i{box-shadow:none}}
+.broadcaster-row .version{margin-left:6px;padding:0 5px;border:1px solid var(--line);border-radius:4px;color:var(--muted);font-size:11px;font-style:normal;font-weight:600;vertical-align:1px}.broadcaster-row.unregistered strong{color:var(--muted);font-weight:600}.broadcaster-row.unregistered .revision{color:var(--warn);font-size:11px}
 `;
 
 export const BROADCASTER_ADMIN_JS = `
@@ -87,7 +88,16 @@ export const BROADCASTER_ADMIN_JS = `
   'use strict';
   const csrf = document.querySelector('meta[name="dnf-admin-csrf"]')?.content || '';
   const byId = id => document.getElementById(id);
-  let state = { broadcasters: [], relations: [], history: [] };
+  let state = { broadcasters: [], unregisteredDevices: [], relations: [], history: [] };
+  const versionText = item => item && item.clientVersion ? 'v' + String(item.clientVersion).replace(/^v/i, '') : '版本未知';
+  // 已填写名称的主播 + 仅连接过、尚未填写名称的客户端（显示为“未注册名称 · 设备尾号”）
+  function allItems() {
+    const unregistered = (state.unregisteredDevices || []).map(item => ({
+      ...item, registered: false, broadcasterName: '未注册名称 · ' + (item.deviceSuffix || ''),
+      snapshotRevision: 0, receivedAt: null, snapshot: null, lastIp: null,
+    }));
+    return state.broadcasters.map(item => ({ ...item, registered: true })).concat(unregistered);
+  }
   let licenses = [];
   const revealedKeys = new Map();
   const keyErrors = new Map();
@@ -107,17 +117,19 @@ export const BROADCASTER_ADMIN_JS = `
     return payload;
   };
   const confirmDanger = (first, second) => window.confirm(first) && window.prompt(second + '\\n请输入“确认”继续：') === '确认';
-  function broadcasterById(id) { return state.broadcasters.find(item => item.deviceId === id); }
+  function broadcasterById(id) { return allItems().find(item => item.deviceId === id); }
   function renderDirectory() {
     const list = byId('broadcaster-list'); if (!list) return; list.replaceChildren();
-    text(byId('broadcaster-count'), state.broadcasters.length);
-    for (const item of state.broadcasters) {
-      const button = document.createElement('button'); button.className = 'broadcaster-row ' + (item.online ? 'online' : 'offline') + (item.ban ? ' banned' : '') + (item.deviceId === selectedId ? ' active' : '');
+    const items = allItems(); const unregisteredCount = items.filter(item => !item.registered).length;
+    text(byId('broadcaster-count'), unregisteredCount ? (items.length - unregisteredCount) + ' + ' + unregisteredCount + ' 未注册' : items.length);
+    for (const item of items) {
+      const button = document.createElement('button'); button.className = 'broadcaster-row ' + (item.online ? 'online' : 'offline') + (item.ban ? ' banned' : '') + (item.registered ? '' : ' unregistered') + (item.deviceId === selectedId ? ' active' : '');
       const dot = document.createElement('i'); dot.className = 'presence';
       const copy = document.createElement('span'); copy.className = 'broadcaster-copy';
       const name = document.createElement('strong'); text(name, item.broadcasterName);
+      const version = document.createElement('em'); version.className = 'version'; text(version, versionText(item)); name.append(version);
       const meta = document.createElement('small'); text(meta, (item.ban ? '已封禁 · ' : '') + (item.online ? '在线' : '离线') + ' · ' + (item.currentIp || item.lastIp || 'IP 未知') + ' · ' + (item.region || '未知地区')); copy.append(name, meta);
-      const revision = document.createElement('span'); revision.className = 'revision'; text(revision, item.ban ? '封' : 'r' + (item.snapshotRevision || 0));
+      const revision = document.createElement('span'); revision.className = 'revision'; text(revision, item.ban ? '封' : !item.registered ? '未注册' : 'r' + (item.snapshotRevision || 0));
       button.append(dot, copy, revision); button.addEventListener('click', () => { selectedId = item.deviceId; render(); }); list.append(button);
     }
   }
@@ -151,8 +163,14 @@ export const BROADCASTER_ADMIN_JS = `
     key.value = !item.license ? '未关联密钥'
       : !item.license.hasKey ? '该旧卡暂无可显示密钥'
       : revealedKeys.get(item.license.id) || keyErrors.get(item.license.id) || '正在读取完整卡密...';
-    select.disabled = !available.length;
-    byId('bind-license').disabled = !available.length;
+    select.disabled = !available.length || !item.registered;
+    byId('bind-license').disabled = !available.length || !item.registered;
+    if (!item.registered) {
+      text(byId('license-meta'), item.license
+        ? '登录会话 · #' + item.license.id + ' · ' + (item.license.label || '未备注') + ' · 授权设备 ' + item.license.deviceId + '（填写主播名称后可人工绑定）'
+        : (item.licenseDeviceId ? '授权设备 ' + item.licenseDeviceId + '（未找到对应密钥）' : '未关联密钥（填写主播名称后可绑定）'));
+      key.value = item.license ? '填写主播名称并关联后可查看完整卡密' : '未关联密钥';
+    }
   }
   async function revealSelectedKey(item) {
     const licenseId = item?.license?.id;
@@ -179,11 +197,14 @@ export const BROADCASTER_ADMIN_JS = `
   }
   function renderDetail() {
     const item = broadcasterById(selectedId); byId('empty-state').hidden = !!item; byId('detail-content').hidden = !item; if (!item) return;
-    text(byId('detail-name'), item.broadcasterName); text(byId('detail-meta'), (item.online ? '在线' : '离线') + ' · ' + item.deviceId + ' · 快照 ' + formatTime(item.receivedAt));
-    renderAttribution(item); renderBan(item); void revealSelectedKey(item);
+    text(byId('detail-name'), item.broadcasterName);
+    text(byId('detail-meta'), item.registered
+      ? (item.online ? '在线' : '离线') + ' · ' + versionText(item) + ' · ' + item.deviceId + ' · 快照 ' + formatTime(item.receivedAt)
+      : (item.online ? '在线' : '离线') + ' · ' + versionText(item) + ' · ' + item.deviceId + ' · 尚未填写主播名称 · 首次连接 ' + formatTime(item.createdAt) + ' · 最后活动 ' + formatTime(item.lastSeenAt));
+    renderAttribution(item); renderBan(item); if (item.registered) void revealSelectedKey(item);
     const snap = item.snapshot; text(byId('score-line'), snap ? '比分 ' + snap.redScore + ' : ' + snap.blueScore + ' · 红方' + (snap.redPickFirst ? '先手' : '后手') + '' : '暂无有效比赛快照');
     const teams = byId('teams'); teams.replaceChildren(); if (snap) teams.append(team('红队', snap.redPlayers || [], 'red'), team('蓝队', snap.bluePlayers || [], 'blue'));
-    byId('delete-button').disabled = item.online;
+    byId('delete-button').disabled = item.online || !item.registered;
   }
   function renderActivity() {
     const relations = byId('relation-list'); relations.replaceChildren(); text(byId('relation-count'), state.relations.length);
@@ -205,7 +226,7 @@ export const BROADCASTER_ADMIN_JS = `
         request('/admin/api/broadcasters/state' + suffix),
         request('/admin/api/licenses'),
       ]);
-      state = result[0]; licenses = Array.isArray(result[1].licenses) ? result[1].licenses : [];
+      state = result[0]; if (!Array.isArray(state.unregisteredDevices)) state.unregisteredDevices = []; licenses = Array.isArray(result[1].licenses) ? result[1].licenses : [];
       if (selectedId && !broadcasterById(selectedId)) selectedId = '';
       text(byId('refresh-status'), '已更新 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false })); render();
     } catch (error) { text(byId('refresh-status'), '读取失败'); toast('后台读取失败：' + error.message); }

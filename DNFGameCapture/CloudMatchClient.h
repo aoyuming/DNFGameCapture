@@ -43,6 +43,9 @@ public:
     bool Start();
     void Stop();
 
+    // 进程级：云端连接成功后以 client:info 事件上报的软件版本号（旧服务端会忽略该事件）。
+    static void SetClientVersion(const std::string& version);
+
     bool RegisterDevice(const std::string& deviceId);
     bool JoinRoom(const std::string& roomId, const std::string& broadcasterName);
     bool JoinUnifiedPool(const std::string& broadcasterName);

@@ -44,11 +44,14 @@ import {
   pruneStaleRealtimeSync,
 } from './sync-relations.js';
 import {
+  CLIENT_VERSION_PATTERN,
   isUnifiedBroadcasterNameTaken,
   joinUnifiedPool,
   listUnifiedBroadcasters,
   pruneExpiredBroadcasters,
+  recordDeviceClientVersion,
   renameUnifiedBroadcaster,
+  type ActiveClientInfo,
 } from './unified.js';
 
 type DatabaseConnection = ReturnType<typeof openDatabase>;
@@ -70,6 +73,10 @@ const TEMPORARY_DEVICE_DISCONNECT_GRACE_MS = 2_000;
 const requestIdSchema = z.string().min(1).max(128);
 const FIXED_ROOM_IDS = ['59', 'li-yong', 'wen-rou'] as const;
 const UNIFIED_POOL_NAMESPACE = 'broadcasters:all';
+const MAX_CLIENT_INFO_EVENTS_PER_CONNECTION = 5;
+const clientInfoSchema = z.object({
+  clientVersion: z.string().trim().regex(CLIENT_VERSION_PATTERN),
+}).passthrough();
 const unifiedNameSchema = z.object({
   broadcasterName: z.string().min(1).max(512),
   requestId: requestIdSchema.optional(),
@@ -214,6 +221,7 @@ export interface RegisterCloudMatchSocketHandlersContext {
 
 export interface CloudMatchSocketHandlerRegistration {
   getActiveDeviceIds(): ReadonlySet<string>;
+  getActiveClientInfo(): ReadonlyMap<string, ActiveClientInfo>;
   disconnectDevice(deviceId: string, error?: { code: string; bannedUntil?: number | null }): boolean;
   stopRealtimeViewer(viewerDeviceId: string): boolean;
   notifyDirectoryChanged(reason: string): void;
@@ -223,6 +231,9 @@ export interface CloudMatchSocketHandlerRegistration {
 interface AuthenticatedSocketData {
   deviceId: string;
   licenseSession?: { deviceId: string; token: string };
+  licenseDeviceId?: string;
+  clientVersion?: string;
+  clientIp?: string;
 }
 
 function isTemporaryCloudDeviceId(deviceId: string): boolean {
@@ -831,6 +842,7 @@ export function registerCloudMatchSocketHandlers(
           (socket.data as AuthenticatedSocketData).licenseSession = {
             deviceId: session.deviceId, token: parsed.data.licenseSessionToken,
           };
+          (socket.data as AuthenticatedSocketData).licenseDeviceId = session.deviceId;
         }
       } catch {
         // Optional attribution must not block a valid legacy broadcaster connection.
@@ -843,6 +855,24 @@ export function registerCloudMatchSocketHandlers(
   io.on('connection', (socket) => {
     const deviceId = (socket.data as AuthenticatedSocketData).deviceId;
     const socketIpAddress = resolveClientIp(socket.handshake.address || 'unknown');
+    (socket.data as AuthenticatedSocketData).clientIp = socketIpAddress;
+    let clientInfoEvents = 0;
+    // 客户端连接后上报软件版本（无 ack）。旧客户端不会发送；旧服务端会忽略该事件。
+    socket.on('client:info', (payload: unknown) => {
+      clientInfoEvents += 1;
+      if (clientInfoEvents > MAX_CLIENT_INFO_EVENTS_PER_CONNECTION) return;
+      const parsed = clientInfoSchema.safeParse(payload);
+      if (!parsed.success) return;
+      const data = socket.data as AuthenticatedSocketData;
+      const clientVersion = parsed.data.clientVersion;
+      if (data.clientVersion === clientVersion) return;
+      data.clientVersion = clientVersion;
+      try {
+        if (recordDeviceClientVersion(db, deviceId, clientVersion)) emitUnifiedChanged('client_info');
+      } catch {
+        // Version reporting is diagnostic and must never affect the connection.
+      }
+    });
     let restoredRoomId: string | null = null;
     let pendingSerializedOperations = 0;
     let comparisonSession: ComparisonSession | null = null;
@@ -1725,6 +1755,18 @@ export function registerCloudMatchSocketHandlers(
   return {
     getActiveDeviceIds(): ReadonlySet<string> {
       return new Set(activeSockets.keys());
+    },
+    getActiveClientInfo(): ReadonlyMap<string, ActiveClientInfo> {
+      const result = new Map<string, ActiveClientInfo>();
+      for (const [activeDeviceId, activeSocket] of activeSockets) {
+        const data = activeSocket.data as AuthenticatedSocketData;
+        result.set(activeDeviceId, {
+          clientVersion: data.clientVersion ?? null,
+          ipAddress: data.clientIp ?? null,
+          licenseDeviceId: data.licenseDeviceId ?? null,
+        });
+      }
+      return result;
     },
     disconnectDevice(
       deviceId: string,

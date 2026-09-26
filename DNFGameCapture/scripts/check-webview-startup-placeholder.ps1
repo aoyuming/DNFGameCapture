@@ -81,7 +81,7 @@ Require-Text $source 'appassets.example' `
 if ($source -notmatch 'add_NavigationCompleted[\s\S]*?if\s*\(\s*!m_webViewPageReady\s*\)\s*\{\s*SetWebViewLoadingState\(false\);') {
     throw 'Successful navigation must hide the native placeholder even if page_ready is delayed.'
 }
-Require-Text $source 'constexpr int kReferenceClientHeight = 480;' `
+Require-Text $source 'constexpr int kReferenceClientHeight = 700;' `
     'The compact Web height must remain the default height.'
 Require-Text $source 'controller2->put_DefaultBackgroundColor' `
     'WebView2 default background color is not set.'

@@ -89,5 +89,7 @@ private:
 	void LayoutWebViewLoadingLabel(int cx, int cy);
 	void ApplyDpiNormalizedZoom();
 	void ApplyExpandedWindowSize();
+	void ApplyBorderlessWindowStyle();
+	bool HandleWindowChromeMessage(const CString& json);
 	int GetReferenceClientWidth() const;
 };

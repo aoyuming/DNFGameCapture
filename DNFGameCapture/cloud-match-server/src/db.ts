@@ -297,6 +297,12 @@ function initializeSchema(db: Database.Database): void {
       );
     }
 
+    const deviceColumns = db.pragma('table_info(devices)') as Array<{ name: string }>;
+    if (!deviceColumns.some((column) => column.name === 'client_version')) {
+      // 客户端连接后通过 client:info 上报的软件版本号（主播列表 / 后台展示用）
+      db.exec('ALTER TABLE devices ADD COLUMN client_version TEXT');
+    }
+
     const insertRoom = db.prepare(
       'INSERT OR IGNORE INTO rooms (id, display_name) VALUES (?, ?)',
     );

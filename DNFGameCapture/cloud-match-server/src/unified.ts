@@ -13,7 +13,17 @@ export interface UnifiedBroadcaster {
   snapshotRevision: number | null;
   receivedAt: number | null;
   offlineExpiresAt: number | null;
+  clientVersion: string | null;
 }
+
+/** 在线连接的诊断信息（socket 层维护，仅供后台展示）。 */
+export interface ActiveClientInfo {
+  clientVersion: string | null;
+  ipAddress: string | null;
+  licenseDeviceId: string | null;
+}
+
+export const CLIENT_VERSION_PATTERN = /^[0-9A-Za-z._+-]{1,32}$/;
 
 interface UnifiedBroadcasterRow {
   device_id: string;
@@ -21,6 +31,21 @@ interface UnifiedBroadcasterRow {
   last_seen_at: number;
   client_revision: number | null;
   received_at: number | null;
+  client_version: string | null;
+}
+
+/** 记录设备上报的软件版本；返回值表示数据库中的版本是否发生了变化。 */
+export function recordDeviceClientVersion(
+  db: Database.Database,
+  deviceId: string,
+  clientVersion: string,
+): boolean {
+  if (!CLIENT_VERSION_PATTERN.test(clientVersion)) return false;
+  const row = db.prepare('SELECT client_version FROM devices WHERE id = ?').get(deviceId) as
+    { client_version: string | null } | undefined;
+  if (!row || row.client_version === clientVersion) return false;
+  db.prepare('UPDATE devices SET client_version = ? WHERE id = ?').run(clientVersion, deviceId);
+  return true;
 }
 
 export function pruneExpiredBroadcasters(
@@ -123,7 +148,7 @@ export function listUnifiedBroadcasters(
   pruneExpiredBroadcasters(db, nowSec);
   const rows = db.prepare(
     `SELECT m.device_id, m.broadcaster_name, d.last_seen_at,
-            s.client_revision, s.received_at
+            s.client_revision, s.received_at, d.client_version
      FROM memberships AS m
      JOIN devices AS d ON d.id = m.device_id
      LEFT JOIN snapshots AS s ON s.device_id = m.device_id
@@ -141,6 +166,7 @@ export function listUnifiedBroadcasters(
       snapshotRevision: row.client_revision,
       receivedAt: row.received_at,
       offlineExpiresAt: online ? null : row.last_seen_at + BROADCASTER_RETENTION_SECONDS,
+      clientVersion: row.client_version ?? null,
     };
   });
 }

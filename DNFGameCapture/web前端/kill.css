@@ -41,10 +41,10 @@
     --kill-team-name-stroke-width: 4px;
     --kill-team-name-glow: 0px;
     --kill-team-name-letter-spacing: 0px;
-    --kill-team-name-red-color: #ff1264;
-    --kill-team-name-blue-color: #00e6ff;
-    --kill-team-name-red-glow-rgb: 255, 18, 100;
-    --kill-team-name-blue-glow-rgb: 0, 230, 255;
+    --kill-team-name-red-color: #ff4646;
+    --kill-team-name-blue-color: #38b6ff;
+    --kill-team-name-red-glow-rgb: 255, 70, 70;
+    --kill-team-name-blue-glow-rgb: 56, 182, 255;
 
     --kill-score-font-family: "Arial Black", "Microsoft YaHei", sans-serif;
     --kill-score-font-size: 70px;
@@ -52,21 +52,21 @@
     --kill-score-stroke-width: 3px;
     --kill-score-glow: 2px;
     --kill-score-letter-spacing: 0px;
-    --kill-score-red-color: #ff1264;
-    --kill-score-blue-color: #00e6ff;
-    --kill-score-red-glow-rgb: 255, 18, 100;
-    --kill-score-blue-glow-rgb: 0, 230, 255;
+    --kill-score-red-color: #ff4646;
+    --kill-score-blue-color: #38b6ff;
+    --kill-score-red-glow-rgb: 255, 70, 70;
+    --kill-score-blue-glow-rgb: 56, 182, 255;
 
-    --kill-header-font-family: "Microsoft YaHei", sans-serif;
+    --kill-header-font-family: "FZXS24", "Microsoft YaHei", sans-serif;
     --kill-header-font-size: 31px;
-    --kill-header-color: #a9abb9;
+    --kill-header-color: #c9a86a;
     --kill-header-stroke-color: #000000;
     --kill-header-stroke-width: 2px;
     --kill-header-glow: 0px;
     --kill-header-letter-spacing: 0px;
-    --kill-header-glow-rgb: 169, 171, 185;
+    --kill-header-glow-rgb: 201, 168, 106;
 
-    --kill-pick-label-font-family: "Arial Black", "Microsoft YaHei", sans-serif;
+    --kill-pick-label-font-family: "FZXS24", "Microsoft YaHei", sans-serif;
     --kill-pick-label-font-size: 27px;
     --kill-pick-label-color: #6fc8b9;
     --kill-pick-label-stroke-color: #000000;
@@ -206,7 +206,7 @@ body {
 .kill-window-close:hover,
 .kill-window-close:focus-visible {
     border-color: rgba(255, 255, 255, 0.72);
-    background: rgba(255, 18, 100, 0.82);
+    background: rgba(255, 70, 70, 0.82);
 }
 
 .kill-window-settings:hover,
@@ -252,11 +252,11 @@ body {
 }
 
 .kill-team-red {
-    border-left: 4px solid #ff1264;
+    border-left: 4px solid #ff4646;
 }
 
 .kill-team-blue {
-    border-left: 4px solid #00e6ff;
+    border-left: 4px solid #38b6ff;
 }
 
 .kill-team-header {
@@ -567,7 +567,7 @@ body {
     user-select: none;
     overflow: hidden;
     display: grid;
-    grid-template-columns: 142px minmax(138px, 190px) 92px minmax(150px, 210px) minmax(260px, 1fr);
+    grid-template-columns: 142px minmax(138px, 190px) minmax(196px, 250px) 92px minmax(150px, 210px) minmax(200px, 1fr);
     align-items: center;
     gap: 4px 10px;
 }
@@ -674,3 +674,1366 @@ body {
         grid-template-rows: 1fr 1fr;
     }
 }
+
+/* 外观编辑：风格选择 + 套用推荐配色 */
+.kill-edit-skin-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.kill-edit-skin-colors {
+    height: 26px;
+    padding: 0 9px;
+    border: 1px solid rgba(255, 211, 106, 0.52);
+    border-radius: 5px;
+    background: rgba(255, 211, 106, 0.12);
+    color: #ffe3a3;
+    font: inherit;
+    font-weight: 800;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.kill-edit-skin-colors:hover,
+.kill-edit-skin-colors:focus-visible {
+    background: rgba(255, 211, 106, 0.24);
+    box-shadow: 0 0 12px rgba(255, 211, 106, 0.18);
+}
+
+/* ==========================================================================
+   DNF 风格皮肤（只加背景/边框/装饰，不改布局与字号）
+   - 所有装饰层都是绝对定位的伪元素，不参与网格排版；
+   - 装饰整体透明度跟随「面板透明度」设置（--kill-panel-alpha），设为 0 时装饰也会淡出。
+   ========================================================================== */
+
+:root {
+    --dnf-gold: #e9c77b;
+    --dnf-gold-deep: #9a7338;
+    --dnf-bronze: #5b4020;
+    --dnf-ink: #0d0b09;
+    --dnf-red: #ff4646;
+    --dnf-blue: #38b6ff;
+    --dnf-skin-opacity: calc(var(--kill-panel-alpha) * 2.05);
+}
+
+.kill-display-root[data-skin="dnf"] .kill-team {
+    position: relative;
+    isolation: isolate;
+    background: transparent;
+    border-left: 0;
+}
+
+.kill-display-root[data-skin="dnf"] .kill-team-red,
+.kill-display-root[data-skin="dnf"] .kill-team-blue {
+    border-left: 0;
+}
+
+.kill-display-root[data-skin="dnf"] .kill-team > * {
+    position: relative;
+    z-index: 2;
+}
+
+/* 底板：暗铁色金属 + 细密纹理 + 队伍色晕光 */
+.kill-display-root[data-skin="dnf"] .kill-team::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    opacity: var(--dnf-skin-opacity);
+    border-radius: var(--kill-panel-radius);
+    background:
+        radial-gradient(120% 70% at 0% 0%, var(--dnf-team-glow, rgba(255, 70, 70, 0.30)), transparent 58%),
+        radial-gradient(90% 60% at 100% 100%, rgba(233, 199, 123, 0.10), transparent 62%),
+        repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.022) 0 2px, transparent 2px 5px),
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .9 0 0 0 0 .75 0 0 0 0 .5 0 0 0 .09 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"),
+        linear-gradient(180deg, rgba(30, 24, 18, 0.96) 0%, rgba(12, 10, 9, 0.97) 55%, rgba(6, 5, 5, 0.98) 100%);
+}
+
+.kill-display-root[data-skin="dnf"] .kill-team-blue::before,
+.kill-display-root[data-skin="dnf"] .kill-team[data-team-color="blue"]::before {
+    --dnf-team-glow: rgba(56, 182, 255, 0.28);
+}
+
+.kill-display-root[data-skin="dnf"] .kill-team[data-team-color="red"]::before {
+    --dnf-team-glow: rgba(255, 70, 70, 0.30);
+}
+
+/* 外框：DNF 经典的双层金边 + 四角金色菱形饰件 */
+.kill-display-root[data-skin="dnf"] .kill-team::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    opacity: var(--dnf-skin-opacity);
+    border-radius: var(--kill-panel-radius);
+    box-shadow:
+        inset 0 0 0 1px rgba(0, 0, 0, 0.95),
+        inset 0 0 0 2px rgba(201, 158, 86, 0.95),
+        inset 0 0 0 3px rgba(60, 40, 18, 0.95),
+        inset 0 0 0 4px rgba(233, 199, 123, 0.28),
+        inset 0 0 26px rgba(0, 0, 0, 0.75);
+    background:
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22'%3E%3Cpath d='M1 1h13L1 14z' fill='%23140e07'/%3E%3Cpath d='M2 2h10L2 12z' fill='%23c99e56'/%3E%3Cpath d='M2 2h6L2 8z' fill='%23f5dc9c'/%3E%3Crect x='5' y='5' width='5' height='5' transform='rotate(45 7.5 7.5)' fill='%23140e07'/%3E%3C/svg%3E") left top / 22px 22px no-repeat,
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22'%3E%3Cg transform='translate(22 0) scale(-1 1)'%3E%3Cpath d='M1 1h13L1 14z' fill='%23140e07'/%3E%3Cpath d='M2 2h10L2 12z' fill='%23c99e56'/%3E%3Cpath d='M2 2h6L2 8z' fill='%23f5dc9c'/%3E%3Crect x='5' y='5' width='5' height='5' transform='rotate(45 7.5 7.5)' fill='%23140e07'/%3E%3C/g%3E%3C/svg%3E") right top / 22px 22px no-repeat,
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22'%3E%3Cg transform='translate(0 22) scale(1 -1)'%3E%3Cpath d='M1 1h13L1 14z' fill='%23140e07'/%3E%3Cpath d='M2 2h10L2 12z' fill='%23c99e56'/%3E%3Cpath d='M2 2h6L2 8z' fill='%23f5dc9c'/%3E%3Crect x='5' y='5' width='5' height='5' transform='rotate(45 7.5 7.5)' fill='%23140e07'/%3E%3C/g%3E%3C/svg%3E") left bottom / 22px 22px no-repeat,
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22'%3E%3Cg transform='translate(22 22) scale(-1 -1)'%3E%3Cpath d='M1 1h13L1 14z' fill='%23140e07'/%3E%3Cpath d='M2 2h10L2 12z' fill='%23c99e56'/%3E%3Cpath d='M2 2h6L2 8z' fill='%23f5dc9c'/%3E%3Crect x='5' y='5' width='5' height='5' transform='rotate(45 7.5 7.5)' fill='%23140e07'/%3E%3C/g%3E%3C/svg%3E") right bottom / 22px 22px no-repeat;
+}
+
+/* 标题栏：队伍色渐变横幅 + 底部金色分隔线（中间带菱形） */
+.kill-display-root[data-skin="dnf"] .kill-team-header::before {
+    content: "";
+    position: absolute;
+    z-index: -1;
+    left: calc(-1 * var(--kill-panel-padding) + 4px);
+    right: calc(-1 * var(--kill-panel-padding) + 4px);
+    top: calc(-1 * var(--kill-panel-padding) + 4px);
+    bottom: -3px;
+    pointer-events: none;
+    opacity: var(--dnf-skin-opacity);
+    background:
+        linear-gradient(90deg, var(--dnf-banner, rgba(190, 28, 36, 0.78)) 0%, var(--dnf-banner-mid, rgba(120, 16, 22, 0.42)) 42%, transparent 78%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.10) 0%, transparent 45%, rgba(0, 0, 0, 0.35) 100%);
+}
+
+.kill-display-root[data-skin="dnf"] .kill-team-header::after {
+    content: "";
+    position: absolute;
+    z-index: -1;
+    left: calc(-1 * var(--kill-panel-padding) + 6px);
+    right: calc(-1 * var(--kill-panel-padding) + 6px);
+    bottom: -4px;
+    height: 9px;
+    pointer-events: none;
+    opacity: var(--dnf-skin-opacity);
+    background:
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='9'%3E%3Crect x='5' y='-1.5' width='8' height='8' transform='rotate(45 9 4.5)' fill='%23140e07'/%3E%3Crect x='6.2' y='-.3' width='5.6' height='5.6' transform='rotate(45 9 4.5)' fill='%23e9c77b'/%3E%3C/svg%3E") center / 18px 9px no-repeat,
+        linear-gradient(90deg, transparent 0%, rgba(154, 115, 56, 0.9) 12%, rgba(245, 220, 156, 1) 50%, rgba(154, 115, 56, 0.9) 88%, transparent 100%) center / 100% 2px no-repeat;
+}
+
+.kill-display-root[data-skin="dnf"] .kill-team[data-team-color="blue"] .kill-team-header::before {
+    --dnf-banner: rgba(22, 104, 196, 0.80);
+    --dnf-banner-mid: rgba(14, 60, 120, 0.42);
+}
+
+.kill-display-root[data-skin="dnf"] .kill-team[data-team-color="red"] .kill-team-header::before {
+    --dnf-banner: rgba(190, 28, 36, 0.78);
+    --dnf-banner-mid: rgba(120, 16, 22, 0.42);
+}
+
+/* 队名/比分：金属高光（不改字号、字体设置仍然有效） */
+.kill-display-root[data-skin="dnf"] .kill-team-name,
+.kill-display-root[data-skin="dnf"] .kill-team-score {
+    filter: drop-shadow(0 2px 0 rgba(0, 0, 0, 0.85)) drop-shadow(0 0 6px rgba(0, 0, 0, 0.55));
+}
+
+/* 表头：DNF 风格的暗金色小字 */
+.kill-display-root[data-skin="dnf"] .kill-stat-header {
+    text-shadow: 0 0 var(--kill-header-glow) rgba(var(--kill-header-glow-rgb), 0.72), 0 1px 0 rgba(0, 0, 0, 0.9);
+}
+
+/* 行：斑马纹 + 金色渐隐分隔线 */
+.kill-display-root[data-skin="dnf"] .kill-row {
+    position: relative;
+    isolation: isolate;
+    background: rgba(255, 255, 255, var(--kill-row-alpha));
+}
+
+.kill-display-root[data-skin="dnf"] .kill-row::before {
+    content: "";
+    position: absolute;
+    inset: 1px 2px;
+    z-index: -1;
+    pointer-events: none;
+    opacity: var(--dnf-skin-opacity);
+    border-radius: var(--kill-row-radius);
+    background: linear-gradient(90deg, rgba(233, 199, 123, 0.10), rgba(233, 199, 123, 0.03) 55%, transparent);
+}
+
+.kill-display-root[data-skin="dnf"] .kill-row:nth-child(even)::before {
+    background: linear-gradient(90deg, rgba(0, 0, 0, 0.30), rgba(0, 0, 0, 0.12) 60%, transparent);
+}
+
+.kill-display-root[data-skin="dnf"] .kill-row::after {
+    content: "";
+    position: absolute;
+    left: 2px;
+    right: 2px;
+    bottom: 0;
+    height: 1px;
+    z-index: -1;
+    pointer-events: none;
+    opacity: var(--dnf-skin-opacity);
+    background: linear-gradient(90deg, rgba(154, 115, 56, 0.75), rgba(233, 199, 123, 0.35) 45%, transparent 92%);
+}
+
+.kill-display-root[data-skin="dnf"] .kill-row:last-child::after {
+    display: none;
+}
+
+/* AK 标记加一点金色辉光，更像 DNF 的稀有物品字 */
+.kill-display-root[data-skin="dnf"] .kill-ak-symbol {
+    filter: drop-shadow(0 0 3px rgba(255, 196, 64, 0.35));
+}
+
+/* ==========================================================================
+   展示页风格（皮肤）
+   - 由 kill.js 根据 layout.skin 在 #kill-display-root 上设置 data-skin；
+   - 所有皮肤只加背景/边框/装饰，不改布局、字体、字号和文字颜色；
+   - 装饰全部是绝对定位的伪元素，不参与网格排版；
+   - 装饰整体透明度跟随「面板透明度」（--kill-panel-alpha），设为 0 时装饰淡出；
+   - classic（经典简洁）= 不加任何装饰的原始样式。
+   ========================================================================== */
+.kill-display-root {
+    --kill-skin-opacity: min(1, calc(var(--kill-panel-alpha) * 2.05));
+}
+
+.kill-team[data-team-color="red"] {
+    --team-rgb: 255, 70, 70;
+    --team-deep-rgb: 150, 18, 26;
+}
+
+.kill-team[data-team-color="blue"] {
+    --team-rgb: 56, 182, 255;
+    --team-deep-rgb: 14, 70, 150;
+}
+
+.kill-display-root:not([data-skin="classic"]) .kill-team {
+    position: relative;
+    isolation: isolate;
+    background: transparent;
+    border-left: 0;
+}
+
+.kill-display-root:not([data-skin="classic"]) .kill-team > * {
+    position: relative;
+    z-index: 2;
+}
+
+.kill-display-root:not([data-skin="classic"]) .kill-row {
+    position: relative;
+    isolation: isolate;
+}
+
+.kill-display-root:not([data-skin="classic"]):not([data-skin="dnf"]) .kill-team::before,
+.kill-display-root:not([data-skin="classic"]):not([data-skin="dnf"]) .kill-team::after,
+.kill-display-root:not([data-skin="classic"]):not([data-skin="dnf"]) .kill-team-header::before,
+.kill-display-root:not([data-skin="classic"]):not([data-skin="dnf"]) .kill-team-header::after,
+.kill-display-root:not([data-skin="classic"]):not([data-skin="dnf"]) .kill-row::before,
+.kill-display-root:not([data-skin="classic"]):not([data-skin="dnf"]) .kill-row::after {
+    content: "";
+    position: absolute;
+    pointer-events: none;
+    opacity: var(--kill-skin-opacity);
+}
+
+.kill-display-root:not([data-skin="classic"]):not([data-skin="dnf"]) .kill-team::before {
+    inset: 0;
+    z-index: 0;
+    border-radius: var(--kill-panel-radius);
+}
+
+.kill-display-root:not([data-skin="classic"]):not([data-skin="dnf"]) .kill-team::after {
+    inset: 0;
+    z-index: 1;
+    border-radius: var(--kill-panel-radius);
+}
+
+.kill-display-root:not([data-skin="classic"]):not([data-skin="dnf"]) .kill-team-header::before,
+.kill-display-root:not([data-skin="classic"]):not([data-skin="dnf"]) .kill-team-header::after,
+.kill-display-root:not([data-skin="classic"]):not([data-skin="dnf"]) .kill-row::before,
+.kill-display-root:not([data-skin="classic"]):not([data-skin="dnf"]) .kill-row::after {
+    z-index: -1;
+}
+
+.kill-display-root:not([data-skin="classic"]):not([data-skin="dnf"]) .kill-row:last-child::after {
+    display: none;
+}
+
+/* ---------- 电竞霓虹 neon：切角面板 + 网格扫描线 + 队伍色霓虹边 ---------- */
+.kill-display-root[data-skin="neon"] .kill-team::before {
+    clip-path: polygon(18px 0, 100% 0, 100% calc(100% - 18px), calc(100% - 18px) 100%, 0 100%, 0 18px);
+    background:
+        radial-gradient(90% 80% at 0% 0%, rgba(var(--team-rgb), 0.26), transparent 60%),
+        radial-gradient(70% 90% at 100% 100%, rgba(0, 229, 255, 0.14), transparent 60%),
+        repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.03) 0 1px, transparent 1px 3px),
+        linear-gradient(rgba(0, 229, 255, 0.06) 1px, transparent 1px) 0 0 / 28px 28px,
+        linear-gradient(90deg, rgba(0, 229, 255, 0.06) 1px, transparent 1px) 0 0 / 28px 28px,
+        linear-gradient(160deg, rgba(10, 12, 30, 0.94), rgba(4, 6, 16, 0.97));
+}
+
+.kill-display-root[data-skin="neon"] .kill-team::after {
+    clip-path: polygon(18px 0, 100% 0, 100% calc(100% - 18px), calc(100% - 18px) 100%, 0 100%, 0 18px);
+    background:
+        linear-gradient(135deg, transparent 11.7px, rgb(var(--team-rgb)) 11.7px 13.7px, transparent 13.7px) left top / 20px 20px no-repeat,
+        linear-gradient(315deg, transparent 11.7px, #00e5ff 11.7px 13.7px, transparent 13.7px) right bottom / 20px 20px no-repeat,
+        linear-gradient(90deg, rgb(var(--team-rgb)), rgba(var(--team-rgb), 0) 70%) 18px 0 / 100% 2px no-repeat,
+        linear-gradient(180deg, rgb(var(--team-rgb)), rgba(var(--team-rgb), 0)) 0 18px / 2px 70% no-repeat,
+        linear-gradient(270deg, #00e5ff, rgba(0, 229, 255, 0) 60%) right 18px bottom 0 / 100% 2px no-repeat,
+        linear-gradient(0deg, #00e5ff, rgba(0, 229, 255, 0)) right 0 bottom 18px / 2px 70% no-repeat,
+        repeating-linear-gradient(115deg, rgba(var(--team-rgb), 0.85) 0 4px, transparent 4px 9px) right 16px top 10px / 46px 7px no-repeat;
+}
+
+.kill-display-root[data-skin="neon"] .kill-team-header::before {
+    left: calc(-1 * var(--kill-panel-padding));
+    top: calc(-1 * var(--kill-panel-padding));
+    bottom: 0;
+    width: calc(62% + var(--kill-panel-padding));
+    clip-path: polygon(18px 0, 100% 0, calc(100% - 26px) 100%, 0 100%, 0 18px);
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.14), transparent 40%),
+        linear-gradient(90deg, rgba(var(--team-rgb), 0.58), rgba(var(--team-rgb), 0.2) 70%, rgba(var(--team-rgb), 0.06));
+}
+
+.kill-display-root[data-skin="neon"] .kill-team-header::after {
+    left: calc(-1 * var(--kill-panel-padding) + 2px);
+    right: calc(-1 * var(--kill-panel-padding) + 2px);
+    bottom: -3px;
+    height: 2px;
+    background: linear-gradient(90deg, rgb(var(--team-rgb)), rgba(0, 229, 255, 0.85) 50%, transparent);
+    box-shadow: 0 0 8px rgba(0, 229, 255, 0.55);
+}
+
+.kill-display-root[data-skin="neon"] .kill-row::before {
+    inset: 2px 0;
+    background: linear-gradient(90deg, rgba(var(--team-rgb), 0.12), transparent 70%);
+}
+
+.kill-display-root[data-skin="neon"] .kill-row:nth-child(even)::before {
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.kill-display-root[data-skin="neon"] .kill-row::after {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 1px;
+    background: repeating-linear-gradient(90deg, rgba(0, 229, 255, 0.3) 0 6px, transparent 6px 10px);
+}
+
+.kill-display-root[data-skin="neon"] .kill-team-name,
+.kill-display-root[data-skin="neon"] .kill-team-score {
+    filter: drop-shadow(0 0 10px rgba(var(--team-rgb), 0.7));
+}
+
+/* ---------- 水墨国风 ink：宣纸墨色 + 远山 + 毛笔笔触横幅 + 朱砂印章 ---------- */
+.kill-display-root[data-skin="ink"] .kill-team[data-team-color="red"] {
+    --ink-rgb: 196, 43, 32;
+    --ink-deep-rgb: 120, 20, 14;
+}
+
+.kill-display-root[data-skin="ink"] .kill-team[data-team-color="blue"] {
+    --ink-rgb: 44, 92, 168;
+    --ink-deep-rgb: 20, 44, 96;
+}
+
+.kill-display-root[data-skin="ink"] .kill-team::before {
+    background:
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 100' preserveAspectRatio='none'%3E %3Cpath d='M0 100 L0 66 C 30 56, 50 40, 80 34 C 100 30, 118 52, 140 56 C 170 60, 196 24, 232 20 C 262 18, 280 50, 306 54 C 336 58, 364 38, 400 46 L400 100 Z' fill='%23ffffff' fill-opacity='.07'/%3E %3Cpath d='M0 100 L0 84 C 50 74, 90 90, 140 80 C 190 70, 230 88, 280 82 C 330 76, 360 88, 400 80 L400 100 Z' fill='%23ffffff' fill-opacity='.06'/%3E %3C/svg%3E") left bottom / 100% 58% no-repeat,
+        radial-gradient(40% 55% at 84% 22%, rgba(236, 226, 204, 0.07), transparent 70%),
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.75' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .85 0 0 0 0 .8 0 0 0 0 .7 0 0 0 .08 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"),
+        radial-gradient(120% 90% at 50% 120%, rgba(0, 0, 0, 0.55), transparent 60%),
+        linear-gradient(180deg, rgba(30, 29, 27, 0.95), rgba(14, 13, 12, 0.97));
+}
+
+.kill-display-root[data-skin="ink"] .kill-team::after {
+    inset: 5px;
+    border: 1px solid rgba(214, 196, 160, 0.30);
+    outline: 1px solid rgba(214, 196, 160, 0.18);
+    outline-offset: 3px;
+    background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E %3Cg transform='rotate(-6 16 16)'%3E%3Crect x='2' y='2' width='28' height='28' rx='3' fill='%23b8261c'/%3E %3Crect x='4.5' y='4.5' width='23' height='23' rx='1.5' fill='none' stroke='%23f3e3c8' stroke-width='1.3'/%3E %3Cpath d='M9 10h14M9 16h14M9 22h14M16 8v16' stroke='%23f3e3c8' stroke-width='2' stroke-linecap='square'/%3E%3C/g%3E %3C/svg%3E") right 10px top 8px / 28px 28px no-repeat;
+}
+
+.kill-display-root[data-skin="ink"] .kill-team-header::before {
+    left: calc(-1 * var(--kill-panel-padding) + 2px);
+    top: calc(-1 * var(--kill-panel-padding) + 2px);
+    bottom: -8px;
+    width: 66%;
+    background: linear-gradient(90deg, rgba(var(--ink-rgb), 0.95), rgba(var(--ink-deep-rgb), 0.8));
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 60' preserveAspectRatio='none'%3E %3Cpath d='M8 31 C 18 13, 70 9, 140 10 C 220 11, 300 6, 366 12 C 384 14, 398 22, 392 31 C 386 41, 356 45, 296 47 C 216 51, 120 53, 42 50 C 16 49, 3 43, 8 31 Z'/%3E %3Cpath d='M300 15 L399 17 L395 20 L300 19 Z' fill-opacity='.8'/%3E %3Cpath d='M320 42 L398 37 L392 41 L318 46 Z' fill-opacity='.7'/%3E %3Cpath d='M350 25 L400 26 L400 29 L348 30 Z' fill-opacity='.55'/%3E %3Cpath d='M4 36 L30 20 L22 44 Z' fill-opacity='.8'/%3E %3C/svg%3E") 0 0 / 100% 100% no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 60' preserveAspectRatio='none'%3E %3Cpath d='M8 31 C 18 13, 70 9, 140 10 C 220 11, 300 6, 366 12 C 384 14, 398 22, 392 31 C 386 41, 356 45, 296 47 C 216 51, 120 53, 42 50 C 16 49, 3 43, 8 31 Z'/%3E %3Cpath d='M300 15 L399 17 L395 20 L300 19 Z' fill-opacity='.8'/%3E %3Cpath d='M320 42 L398 37 L392 41 L318 46 Z' fill-opacity='.7'/%3E %3Cpath d='M350 25 L400 26 L400 29 L348 30 Z' fill-opacity='.55'/%3E %3Cpath d='M4 36 L30 20 L22 44 Z' fill-opacity='.8'/%3E %3C/svg%3E") 0 0 / 100% 100% no-repeat;
+}
+
+.kill-display-root[data-skin="ink"] .kill-team-header::after {
+    left: calc(-1 * var(--kill-panel-padding) + 10px);
+    right: calc(-1 * var(--kill-panel-padding) + 10px);
+    bottom: -3px;
+    height: 2px;
+    background: linear-gradient(90deg, rgba(214, 196, 160, 0), rgba(214, 196, 160, 0.6) 8%, rgba(214, 196, 160, 0.22) 65%, transparent);
+}
+
+.kill-display-root[data-skin="ink"] .kill-row:nth-child(even)::before {
+    inset: 1px 0;
+    background: linear-gradient(90deg, rgba(0, 0, 0, 0.28), rgba(0, 0, 0, 0.1) 70%, transparent);
+}
+
+.kill-display-root[data-skin="ink"] .kill-row::after {
+    left: 4px;
+    right: 4px;
+    bottom: 0;
+    height: 1px;
+    background: linear-gradient(90deg, rgba(214, 196, 160, 0.32), rgba(214, 196, 160, 0.1) 70%, transparent);
+}
+
+/* ---------- 玻璃极简 glass：半透明磨砂卡片 + 队伍色柔光 + 圆角行 ---------- */
+.kill-display-root[data-skin="glass"] .kill-team::before {
+    border-radius: max(var(--kill-panel-radius), 16px);
+    background:
+        radial-gradient(70% 90% at 0% 0%, rgba(var(--team-rgb), 0.42), transparent 62%),
+        radial-gradient(60% 70% at 100% 100%, rgba(var(--team-rgb), 0.18), transparent 70%),
+        linear-gradient(160deg, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.06) 45%, rgba(255, 255, 255, 0.03)),
+        rgba(16, 20, 32, 0.7);
+}
+
+.kill-display-root[data-skin="glass"] .kill-team::after {
+    border-radius: max(var(--kill-panel-radius), 16px);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45), inset 0 -1px 0 rgba(0, 0, 0, 0.25), inset 0 0 0 3px rgba(255, 255, 255, 0.04);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), transparent 38%);
+}
+
+.kill-display-root[data-skin="glass"] .kill-team-header::before {
+    left: 2px;
+    bottom: -2px;
+    width: 64px;
+    height: 4px;
+    border-radius: 4px;
+    background: rgb(var(--team-rgb));
+    box-shadow: 0 0 12px rgba(var(--team-rgb), 0.85);
+}
+
+.kill-display-root[data-skin="glass"] .kill-team-header::after {
+    left: 76px;
+    right: 0;
+    bottom: -1px;
+    height: 1px;
+    background: linear-gradient(90deg, rgba(255, 255, 255, 0.24), rgba(255, 255, 255, 0.04));
+}
+
+.kill-display-root[data-skin="glass"] .kill-row::before {
+    inset: 3px 0;
+    border-radius: max(var(--kill-row-radius), 10px);
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.kill-display-root[data-skin="glass"] .kill-row:nth-child(even)::before {
+    background: rgba(255, 255, 255, 0.025);
+}
+
+/* ---------- 像素街机 pixel：8-bit 阶梯切角 + 像素描边 + 抖动网点 + CRT 扫描线 ---------- */
+.kill-display-root[data-skin="pixel"] .kill-team::before {
+    clip-path: polygon(0 6px, 3px 6px, 3px 3px, 6px 3px, 6px 0, calc(100% - 6px) 0, calc(100% - 6px) 3px, calc(100% - 3px) 3px, calc(100% - 3px) 6px, 100% 6px, 100% calc(100% - 6px), calc(100% - 3px) calc(100% - 6px), calc(100% - 3px) calc(100% - 3px), calc(100% - 6px) calc(100% - 3px), calc(100% - 6px) 100%, 6px 100%, 6px calc(100% - 3px), 3px calc(100% - 3px), 3px calc(100% - 6px), 0 calc(100% - 6px));
+    background:
+        conic-gradient(rgba(255, 255, 255, 0.04) 25%, transparent 0 50%, rgba(255, 255, 255, 0.04) 0 75%, transparent 0) 0 0 / 4px 4px,
+        linear-gradient(180deg, rgba(var(--team-deep-rgb), 0.4), transparent 50%),
+        rgba(20, 20, 42, 0.95);
+}
+
+.kill-display-root[data-skin="pixel"] .kill-team::after {
+    clip-path: polygon(0 6px, 3px 6px, 3px 3px, 6px 3px, 6px 0, calc(100% - 6px) 0, calc(100% - 6px) 3px, calc(100% - 3px) 3px, calc(100% - 3px) 6px, 100% 6px, 100% calc(100% - 6px), calc(100% - 3px) calc(100% - 6px), calc(100% - 3px) calc(100% - 3px), calc(100% - 6px) calc(100% - 3px), calc(100% - 6px) 100%, 6px 100%, 6px calc(100% - 3px), 3px calc(100% - 3px), 3px calc(100% - 6px), 0 calc(100% - 6px));
+    box-shadow: inset 0 0 0 3px rgb(222, 222, 238), inset 0 0 0 6px rgb(var(--team-rgb)), inset 0 0 0 9px rgba(0, 0, 0, 0.55);
+    background:
+        linear-gradient(rgb(222, 222, 238), rgb(222, 222, 238)) 3px 3px / 3px 3px no-repeat,
+        linear-gradient(rgb(222, 222, 238), rgb(222, 222, 238)) right 3px top 3px / 3px 3px no-repeat,
+        linear-gradient(rgb(222, 222, 238), rgb(222, 222, 238)) 3px calc(100% - 3px) / 3px 3px no-repeat,
+        linear-gradient(rgb(222, 222, 238), rgb(222, 222, 238)) right 3px bottom 3px / 3px 3px no-repeat,
+        repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.2) 0 1px, transparent 1px 3px);
+}
+
+.kill-display-root[data-skin="pixel"] .kill-team-header::before {
+    left: calc(-1 * var(--kill-panel-padding) + 9px);
+    right: calc(-1 * var(--kill-panel-padding) + 9px);
+    top: calc(-1 * var(--kill-panel-padding) + 9px);
+    bottom: 0;
+    background:
+        linear-gradient(rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0.3)) top / 100% 3px no-repeat,
+        linear-gradient(rgba(0, 0, 0, 0.4), rgba(0, 0, 0, 0.4)) bottom / 100% 3px no-repeat,
+        linear-gradient(90deg, rgba(var(--team-rgb), 0.85) 0 55%, rgba(var(--team-deep-rgb), 0.8) 55% 75%, rgba(var(--team-deep-rgb), 0.45) 75% 88%, rgba(var(--team-deep-rgb), 0.2) 88%);
+}
+
+.kill-display-root[data-skin="pixel"] .kill-team-header::after {
+    left: calc(-1 * var(--kill-panel-padding) + 9px);
+    right: calc(-1 * var(--kill-panel-padding) + 9px);
+    bottom: -6px;
+    height: 3px;
+    background: repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.4) 0 3px, transparent 3px 6px);
+}
+
+.kill-display-root[data-skin="pixel"] .kill-row:nth-child(even)::before {
+    inset: 0 -2px;
+    background: rgba(0, 0, 0, 0.28);
+}
+
+.kill-display-root[data-skin="pixel"] .kill-row::after {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 2px;
+    background: repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.16) 0 3px, transparent 3px 6px);
+}
+
+.kill-display-root[data-skin="pixel"] .kill-team-name,
+.kill-display-root[data-skin="pixel"] .kill-team-score {
+    filter: drop-shadow(3px 3px 0 rgba(0, 0, 0, 0.9));
+}
+
+/* ---------- 烈焰熔岩 inferno：焦黑底 + 队伍色火焰（红队橙焰 / 蓝队蓝焰）+ 上升火星 ---------- */
+.kill-display-root[data-skin="inferno"] .kill-team[data-team-color="red"] {
+    --fire-a: 255, 118, 24;
+    --fire-b: 255, 214, 96;
+    --fire-deep: 110, 16, 0;
+}
+
+.kill-display-root[data-skin="inferno"] .kill-team[data-team-color="blue"] {
+    --fire-a: 44, 146, 255;
+    --fire-b: 160, 232, 255;
+    --fire-deep: 0, 28, 104;
+}
+
+.kill-display-root[data-skin="inferno"] .kill-team::before {
+    background:
+        radial-gradient(ellipse 22px 30px at 50% 100%, rgba(var(--fire-a), 0.5), transparent 72%) left -6px bottom 0 / 44px 34px repeat-x,
+        radial-gradient(ellipse 14px 22px at 50% 100%, rgba(var(--fire-b), 0.45), transparent 72%) left 10px bottom 0 / 30px 22px repeat-x,
+        radial-gradient(120% 60% at 50% 115%, rgba(var(--fire-a), 0.42), transparent 62%),
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='turbulence' baseFrequency='.018 .06' numOctaves='3' seed='7' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 .9 0 0 0 0 .75 0 0 0 -2.2 1.05'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.10'/%3E%3C/svg%3E"),
+        linear-gradient(180deg, rgba(14, 9, 7, 0.96) 40%, rgba(var(--fire-deep), 0.92) 100%);
+}
+
+.kill-display-root[data-skin="inferno"] .kill-team::after {
+    box-shadow:
+        inset 0 0 0 1px rgba(var(--fire-b), 0.5),
+        inset 0 0 0 2px rgba(0, 0, 0, 0.85),
+        inset 0 -22px 30px -14px rgba(var(--fire-a), 0.5);
+    background: linear-gradient(90deg, transparent, rgba(var(--fire-b), 0.95) 30%, rgba(var(--fire-a), 0.9) 70%, transparent) top / 100% 2px no-repeat;
+}
+
+.kill-display-root[data-skin="inferno"] .kill-team-header::before {
+    left: calc(-1 * var(--kill-panel-padding) + 2px);
+    right: calc(-1 * var(--kill-panel-padding) + 2px);
+    top: calc(-1 * var(--kill-panel-padding) + 2px);
+    bottom: -3px;
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent 45%, rgba(0, 0, 0, 0.3)),
+        linear-gradient(90deg, rgba(var(--fire-a), 0.6), rgba(var(--fire-deep), 0.55) 45%, transparent 80%);
+}
+
+.kill-display-root[data-skin="inferno"] .kill-team-header::after {
+    left: calc(-1 * var(--kill-panel-padding) + 4px);
+    right: calc(-1 * var(--kill-panel-padding) + 4px);
+    bottom: -4px;
+    height: 2px;
+    background: linear-gradient(90deg, rgb(var(--fire-b)), rgba(var(--fire-a), 0.85) 40%, transparent);
+    box-shadow: 0 0 10px rgba(var(--fire-a), 0.8);
+}
+
+.kill-display-root[data-skin="inferno"] .kill-row:nth-child(even)::before {
+    inset: 1px 0;
+    background: linear-gradient(90deg, rgba(0, 0, 0, 0.3), rgba(0, 0, 0, 0.1) 70%, transparent);
+}
+
+.kill-display-root[data-skin="inferno"] .kill-row::after {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 1px;
+    background: linear-gradient(90deg, rgba(var(--fire-a), 0.5), transparent 85%);
+}
+
+.kill-display-root[data-skin="inferno"] .kill-rows::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    opacity: var(--kill-skin-opacity);
+    background:
+        radial-gradient(circle at 20% 70%, rgba(var(--fire-b), 0.9) 0 1.2px, transparent 2.2px) 0 0 / 70px 140px,
+        radial-gradient(circle at 65% 30%, rgba(var(--fire-a), 0.8) 0 1px, transparent 2px) 0 0 / 90px 160px,
+        radial-gradient(circle at 40% 50%, rgba(var(--fire-b), 0.6) 0 1.6px, transparent 2.6px) 0 0 / 110px 210px;
+    animation: kill-ember-rise 7s linear infinite;
+}
+
+@keyframes kill-ember-rise {
+    from { background-position: 0 0, 0 0, 0 0; }
+    to { background-position: 10px -140px, -12px -160px, 6px -210px; }
+}
+
+.kill-display-root[data-skin="inferno"] .kill-team-name,
+.kill-display-root[data-skin="inferno"] .kill-team-score {
+    filter: drop-shadow(0 0 8px rgba(var(--fire-a), 0.75));
+}
+
+/* ---------- 赛事转播 broadcast：扁平深色底 + 队伍色斜切铭牌 + 左侧色标 ---------- */
+.kill-display-root[data-skin="broadcast"] .kill-team::before {
+    background:
+        repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.018) 0 1px, transparent 1px 7px),
+        rgba(14, 18, 26, 0.94);
+}
+
+.kill-display-root[data-skin="broadcast"] .kill-team::after {
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
+    background: linear-gradient(rgb(var(--team-rgb)), rgb(var(--team-rgb))) top / 100% 4px no-repeat;
+}
+
+.kill-display-root[data-skin="broadcast"] .kill-team-header::before {
+    left: calc(-1 * var(--kill-panel-padding));
+    top: calc(-1 * var(--kill-panel-padding) + 4px);
+    bottom: 0;
+    width: calc(58% + var(--kill-panel-padding));
+    clip-path: polygon(0 0, 100% 0, calc(100% - 22px) 100%, 0 100%);
+    background: linear-gradient(180deg, rgba(var(--team-rgb), 0.95), rgba(var(--team-deep-rgb), 0.95));
+}
+
+.kill-display-root[data-skin="broadcast"] .kill-team-header::after {
+    left: calc(58% + 6px);
+    top: calc(-1 * var(--kill-panel-padding) + 4px);
+    bottom: 0;
+    width: 8px;
+    transform: skewX(-17deg);
+    transform-origin: left bottom;
+    background: rgba(255, 255, 255, 0.85);
+}
+
+.kill-display-root[data-skin="broadcast"] .kill-row::before {
+    top: 1px;
+    bottom: 1px;
+    left: calc(-1 * min(var(--kill-panel-padding), 10px));
+    right: 0;
+    background:
+        linear-gradient(rgb(var(--team-rgb)), rgb(var(--team-rgb))) left / 4px 100% no-repeat,
+        rgba(255, 255, 255, 0.06);
+}
+
+.kill-display-root[data-skin="broadcast"] .kill-row:nth-child(even)::before {
+    background:
+        linear-gradient(rgba(var(--team-rgb), 0.55), rgba(var(--team-rgb), 0.55)) left / 4px 100% no-repeat,
+        rgba(255, 255, 255, 0.02);
+}
+
+/* ---------- 寒冰水晶 frost：冰蓝底 + 雪花晶纹 + 银色斜面边框 + 冰晶角饰 ---------- */
+.kill-display-root[data-skin="frost"] .kill-team::before {
+    background:
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cg fill='none' stroke='%23e8f8ff' stroke-opacity='.13' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath transform='rotate(0 50 50)' d='M50 6V94M50 18l-7-7M50 18l7-7M50 82l-7 7M50 82l7 7M50 32l-10-8M50 32l10-8M50 68l-10 8M50 68l10 8'/%3E%3Cpath transform='rotate(60 50 50)' d='M50 6V94M50 18l-7-7M50 18l7-7M50 82l-7 7M50 82l7 7M50 32l-10-8M50 32l10-8M50 68l-10 8M50 68l10 8'/%3E%3Cpath transform='rotate(120 50 50)' d='M50 6V94M50 18l-7-7M50 18l7-7M50 82l-7 7M50 82l7 7M50 32l-10-8M50 32l10-8M50 68l-10 8M50 68l10 8'/%3E%3C/g%3E%3C/svg%3E") right -18px top -22px / 130px 130px no-repeat,
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cg fill='none' stroke='%23e8f8ff' stroke-opacity='.10' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath transform='rotate(0 50 50)' d='M50 6V94M50 18l-7-7M50 18l7-7M50 82l-7 7M50 82l7 7M50 32l-10-8M50 32l10-8M50 68l-10 8M50 68l10 8'/%3E%3Cpath transform='rotate(60 50 50)' d='M50 6V94M50 18l-7-7M50 18l7-7M50 82l-7 7M50 82l7 7M50 32l-10-8M50 32l10-8M50 68l-10 8M50 68l10 8'/%3E%3Cpath transform='rotate(120 50 50)' d='M50 6V94M50 18l-7-7M50 18l7-7M50 82l-7 7M50 82l7 7M50 32l-10-8M50 32l10-8M50 68l-10 8M50 68l10 8'/%3E%3C/g%3E%3C/svg%3E") left 38% bottom -26px / 70px 70px no-repeat,
+        radial-gradient(100% 70% at 0 0, rgba(var(--team-rgb), 0.22), transparent 60%),
+        radial-gradient(80% 60% at 100% 100%, rgba(150, 220, 255, 0.12), transparent 65%),
+        linear-gradient(170deg, rgba(22, 42, 62, 0.94), rgba(8, 16, 28, 0.97));
+}
+
+.kill-display-root[data-skin="frost"] .kill-team::after {
+    box-shadow:
+        inset 1px 1px 0 rgba(220, 245, 255, 0.6),
+        inset -1px -1px 0 rgba(0, 0, 0, 0.6),
+        inset 0 0 0 3px rgba(120, 190, 230, 0.18),
+        inset 0 0 24px rgba(160, 220, 255, 0.14);
+    background:
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23ffffff' stop-opacity='.95'/%3E%3Cstop offset='1' stop-color='%237fd8ff' stop-opacity='.25'/%3E%3C/linearGradient%3E%3C/defs%3E %3Cpath d='M0 0 L22 0 L9 6 Z' fill='url(%23g)'/%3E%3Cpath d='M0 0 L6 9 L0 24 Z' fill='url(%23g)'/%3E%3Cpath d='M0 0 L16 5 L5 16 Z' fill='%23dff6ff' fill-opacity='.55'/%3E%3C/svg%3E") left top / 34px 34px no-repeat,
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='1' y1='1' x2='0' y2='0'%3E%3Cstop offset='0' stop-color='%23ffffff' stop-opacity='.95'/%3E%3Cstop offset='1' stop-color='%237fd8ff' stop-opacity='.25'/%3E%3C/linearGradient%3E%3C/defs%3E %3Cpath d='M40 40 L18 40 L31 34 Z' fill='url(%23g)'/%3E%3Cpath d='M40 40 L34 31 L40 16 Z' fill='url(%23g)'/%3E%3Cpath d='M40 40 L24 35 L35 24 Z' fill='%23dff6ff' fill-opacity='.55'/%3E%3C/svg%3E") right bottom / 34px 34px no-repeat;
+}
+
+.kill-display-root[data-skin="frost"] .kill-team-header::before {
+    left: calc(-1 * var(--kill-panel-padding) + 3px);
+    right: calc(-1 * var(--kill-panel-padding) + 3px);
+    top: calc(-1 * var(--kill-panel-padding) + 3px);
+    bottom: -3px;
+    background:
+        linear-gradient(180deg, rgba(220, 245, 255, 0.16), transparent 42%),
+        linear-gradient(90deg, rgba(var(--team-rgb), 0.55), rgba(var(--team-rgb), 0.12) 60%, transparent);
+}
+
+.kill-display-root[data-skin="frost"] .kill-team-header::after {
+    left: calc(-1 * var(--kill-panel-padding) + 6px);
+    right: calc(-1 * var(--kill-panel-padding) + 6px);
+    bottom: -4px;
+    height: 10px;
+    background:
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='10'%3E%3Cpath d='M9 0 L14 5 L9 10 L4 5 Z' fill='%230a1826'/%3E%3Cpath d='M9 1.6 L12.4 5 L9 8.4 L5.6 5 Z' fill='%23cdf3ff'/%3E%3Cpath d='M9 1.6 L12.4 5 L9 5 Z' fill='%23ffffff'/%3E%3C/svg%3E") center / 18px 10px no-repeat,
+        linear-gradient(90deg, rgba(200, 240, 255, 0), rgba(200, 240, 255, 0.85) 20%, rgba(200, 240, 255, 0.85) 80%, rgba(200, 240, 255, 0)) center / 100% 1px no-repeat;
+}
+
+.kill-display-root[data-skin="frost"] .kill-row:nth-child(even)::before {
+    inset: 1px 0;
+    background: linear-gradient(90deg, rgba(255, 255, 255, 0.04), transparent 80%);
+}
+
+.kill-display-root[data-skin="frost"] .kill-row::after {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 1px;
+    background: linear-gradient(90deg, rgba(180, 230, 255, 0.34), transparent 85%);
+}
+
+.kill-display-root[data-skin="frost"] .kill-team-name,
+.kill-display-root[data-skin="frost"] .kill-team-score {
+    filter: drop-shadow(0 0 6px rgba(190, 240, 255, 0.45)) drop-shadow(0 2px 0 rgba(0, 0, 0, 0.8));
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .kill-display-root[data-skin="inferno"] .kill-rows::before {
+        animation: none;
+    }
+}
+
+
+/* ==========================================================================
+   右上角「界面风格」按钮 + 弹出面板 + 自定义背景层
+   ========================================================================== */
+.kill-window-skin {
+    position: fixed;
+    top: 10px;
+    right: 86px;
+    z-index: 30;
+    width: 32px;
+    height: 32px;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    border-radius: 7px;
+    background: rgba(12, 14, 24, 0.72);
+    color: #ffd98a;
+    cursor: pointer;
+    opacity: 0;
+    transform: translateY(-3px);
+    transition: opacity 0.16s ease, transform 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+}
+
+.kill-display-root.shell-window .kill-window-skin { display: inline-flex; }
+
+.kill-display-root.shell-window:hover .kill-window-skin,
+.kill-display-root.skin-panel-open .kill-window-skin,
+.kill-display-root.skin-panel-open .kill-window-close,
+.kill-display-root.skin-panel-open .kill-window-settings,
+.kill-window-skin:focus-visible {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.kill-window-skin:hover,
+.kill-window-skin:focus-visible,
+.kill-window-skin.active {
+    border-color: rgba(255, 211, 106, 0.8);
+    background: rgba(120, 84, 20, 0.86);
+    box-shadow: 0 0 14px rgba(255, 211, 106, 0.28);
+}
+
+.kill-skin-panel {
+    position: fixed;
+    top: 48px;
+    right: 10px;
+    z-index: 40;
+    width: 272px;
+    max-height: calc(100vh - 56px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    box-sizing: border-box;
+    padding: 10px 10px 8px;
+    border: 1px solid rgba(255, 211, 106, 0.38);
+    border-radius: 9px;
+    background: rgba(14, 16, 26, 0.96);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+    color: #e9edf6;
+    font: 12px/1.35 "Microsoft YaHei", "Segoe UI", sans-serif;
+    cursor: default;
+    user-select: none;
+}
+
+.kill-skin-panel[hidden] { display: none; }
+.kill-skin-panel::-webkit-scrollbar { width: 6px; }
+.kill-skin-panel::-webkit-scrollbar-thumb { border-radius: 3px; background: rgba(255, 255, 255, 0.22); }
+
+.kill-skin-panel-head,
+.kill-bg-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 7px;
+}
+
+.kill-skin-panel-head strong,
+.kill-bg-head strong {
+    color: #ffe3a3;
+    font-size: 13px;
+    font-weight: 800;
+}
+
+.kill-bg-head span {
+    color: #8e97aa;
+    font-size: 11px;
+}
+
+.kill-skin-panel.has-bg .kill-bg-head span { color: #7fe0a8; }
+
+.kill-skin-panel-close {
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: #aab2c4;
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.kill-skin-panel-close:hover { background: rgba(255, 255, 255, 0.1); color: #ffffff; }
+
+.kill-skin-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 5px;
+}
+
+.kill-skin-option {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 3px;
+    padding: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.04);
+    color: #d5dbe8;
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.kill-skin-option i {
+    display: block;
+    height: 18px;
+    border-radius: 3px;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+}
+
+.kill-skin-option span {
+    overflow: hidden;
+    text-overflow: clip;
+    white-space: nowrap;
+    text-align: center;
+}
+
+.kill-skin-option:hover { border-color: rgba(255, 255, 255, 0.36); background: rgba(255, 255, 255, 0.08); }
+
+.kill-skin-option.active {
+    border-color: #ffd36a;
+    background: rgba(255, 211, 106, 0.14);
+    color: #ffe9b8;
+    box-shadow: 0 0 0 1px rgba(255, 211, 106, 0.45);
+}
+
+.kill-skin-apply {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 7px 0 2px;
+    color: #aab2c4;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.kill-skin-apply input { margin: 0; accent-color: #ffd36a; }
+
+.kill-bg-section {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.kill-bg-actions {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr 1fr;
+    gap: 5px;
+    margin-bottom: 6px;
+}
+
+.kill-bg-actions button {
+    height: 26px;
+    padding: 0 6px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.07);
+    color: #e9edf6;
+    font: inherit;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.kill-bg-actions #kill-bg-pick {
+    border-color: rgba(255, 211, 106, 0.55);
+    background: rgba(255, 211, 106, 0.16);
+    color: #ffe3a3;
+}
+
+.kill-bg-actions button.danger { color: #ff9a9a; }
+.kill-bg-actions button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.14); }
+.kill-bg-actions button:disabled { opacity: 0.4; cursor: default; }
+
+.kill-bg-range {
+    display: grid;
+    grid-template-columns: 52px minmax(0, 1fr) 38px;
+    align-items: center;
+    gap: 6px;
+    height: 22px;
+    color: #aab2c4;
+    font-size: 11px;
+}
+
+.kill-bg-range input { width: 100%; margin: 0; accent-color: #ffd36a; }
+.kill-bg-range input:disabled { opacity: 0.4; }
+.kill-bg-range b { color: #e9edf6; font-weight: 700; text-align: right; }
+
+.kill-bg-hint {
+    margin: 5px 0 0;
+    color: #7d8699;
+    font-size: 10.5px;
+    line-height: 1.45;
+}
+
+.kill-bg-hint b { color: #ffd98a; font-weight: 700; }
+
+/* 自定义背景层：位于面板内容之下，随整页缩放；只在有背景时启用层级修正 */
+.kill-board { position: relative; }
+
+.kill-custom-bg {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    overflow: hidden;
+    border-radius: inherit;
+    pointer-events: none;
+}
+
+.kill-custom-bg[hidden] { display: none; }
+
+.kill-custom-bg img {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    max-width: none;
+    max-height: none;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    user-select: none;
+    -webkit-user-drag: none;
+}
+
+.kill-custom-bg.ready img { opacity: 1; }
+
+.kill-board.has-custom-bg > .kill-team {
+    position: relative;
+    z-index: 1;
+}
+
+.kill-display-root.skin-panel-open .kill-board.has-custom-bg { cursor: grab; }
+.kill-display-root.bg-dragging,
+.kill-display-root.bg-dragging .kill-board { cursor: grabbing !important; }
+.kill-display-root.skin-panel-open .kill-board.has-custom-bg {
+    outline: 1px dashed rgba(255, 211, 106, 0.55);
+    outline-offset: -1px;
+}
+
+
+/* ================= 击杀特效层（演示，按 9 种界面风格自动换装） ================= */
+.fx-layer {
+    position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 35;
+    /* ---- 默认 = DNF 金边 ---- */
+    --fx-accent: 255, 196, 80;
+    --fx-row-edge: rgba(255, 214, 120, 0.9);
+    --fx-sweep: rgba(255, 230, 160, 0.6);
+    --fx-slash: linear-gradient(90deg, transparent, rgba(255, 245, 210, .95) 30%, #fff 60%, rgba(255, 200, 90, .9) 85%, transparent);
+    --fx-slash-glow: 0 0 10px #ffd46b, 0 0 22px rgba(255, 150, 40, .8);
+    --fx-slash-h: 4px;
+    --fx-shape: polygon(0 50%, 26px 0, calc(100% - 26px) 0, 100% 50%, calc(100% - 26px) 100%, 26px 100%);
+    --fx-plate: radial-gradient(80% 120% at 50% 0%, rgba(var(--fx-team), .55), transparent 70%), linear-gradient(180deg, #2a1f14, #0c0907 60%, #1a120a);
+    --fx-edge: linear-gradient(90deg, #6d4d20, #f5dc9c 30%, #fff3cf 50%, #f5dc9c 70%, #6d4d20);
+    --fx-title-font: 900 60px/1 "FZXS24", "Microsoft YaHei", "SimHei", sans-serif;
+    --fx-title-grad: linear-gradient(180deg, #fffbe8 0%, #ffe39a 38%, #e9a93b 55%, #fff0b8 72%, #b8741d 100%);
+    --fx-title-stroke: 1.5px rgba(40, 18, 0, .9);
+    --fx-title-filter: drop-shadow(0 3px 0 #2a1204) drop-shadow(0 0 12px rgba(255, 170, 50, .65));
+    --fx-sub: #e9c77b;
+    --fx-plus: #ffe08a;
+    --fx-hot: 255, 120, 20;
+    --fx-ak-font: italic 900 132px/.9 "Arial Black", "Impact", sans-serif;
+    --fx-ak-grad: linear-gradient(180deg, #fffdf0 0%, #ffe28a 35%, #f0a02a 52%, #fff2bd 66%, #b3561a 100%);
+    --fx-ak-stroke: 3px #3b0d00;
+    --fx-ak-filter: drop-shadow(0 5px 0 #2a0800) drop-shadow(0 0 22px rgba(255, 120, 20, .95));
+    --fx-ak-subbg: linear-gradient(90deg, transparent, rgba(150, 20, 10, .92) 15%, rgba(190, 40, 20, .95) 50%, rgba(150, 20, 10, .92) 85%, transparent);
+    --fx-dim: radial-gradient(circle at 50% 50%, rgba(20, 8, 0, .35), rgba(0, 0, 0, .82) 70%);
+}
+.fx-layer canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+/* ---------- 9 种风格的配色 / 字体 / 形状 ---------- */
+.fx-layer[data-skin="classic"] {
+    --fx-accent: 255, 255, 255; --fx-row-edge: rgba(255, 255, 255, .75); --fx-sweep: rgba(255, 255, 255, .45);
+    --fx-slash: linear-gradient(90deg, transparent, rgba(255, 255, 255, .95) 40%, #fff 60%, transparent);
+    --fx-slash-glow: 0 0 6px rgba(255, 255, 255, .8); --fx-slash-h: 2px;
+    --fx-shape: polygon(0 0, 100% 0, 100% 100%, 0 100%);
+    --fx-plate: linear-gradient(90deg, rgb(var(--fx-team)) 0 8px, transparent 8px), linear-gradient(180deg, rgba(28, 31, 42, .96), rgba(14, 16, 22, .96));
+    --fx-edge: linear-gradient(90deg, rgba(255, 255, 255, .15), rgba(255, 255, 255, .5), rgba(255, 255, 255, .15));
+    --fx-title-font: 900 54px/1.05 "Microsoft YaHei", sans-serif;
+    --fx-title-grad: linear-gradient(180deg, #ffffff, #dfe3ea);
+    --fx-title-stroke: 0; --fx-title-filter: drop-shadow(0 2px 0 rgba(0, 0, 0, .6));
+    --fx-sub: #9aa0b4; --fx-plus: #ffffff; --fx-hot: 255, 255, 255;
+    --fx-ak-font: 900 120px/.95 "Microsoft YaHei", "Arial Black", sans-serif;
+    --fx-ak-grad: linear-gradient(180deg, #fff, #e6e9f0); --fx-ak-stroke: 0; --fx-ak-filter: drop-shadow(0 4px 0 rgba(0, 0, 0, .55));
+    --fx-ak-subbg: rgb(var(--fx-team)); --fx-dim: rgba(8, 10, 16, .72);
+}
+.fx-layer[data-skin="neon"] {
+    --fx-accent: 0, 229, 255; --fx-row-edge: rgba(0, 229, 255, .95); --fx-sweep: rgba(255, 60, 220, .5);
+    --fx-slash: linear-gradient(90deg, transparent, #00e5ff 30%, #fff 55%, #ff3ce0 80%, transparent);
+    --fx-slash-glow: 0 0 8px #00e5ff, 0 0 18px #ff3ce0; --fx-slash-h: 3px;
+    --fx-shape: polygon(16px 0, 100% 0, calc(100% - 16px) 100%, 0 100%);
+    --fx-plate: repeating-linear-gradient(0deg, rgba(255, 255, 255, .05) 0 1px, transparent 1px 3px), linear-gradient(180deg, rgba(6, 10, 30, .92), rgba(12, 4, 28, .92));
+    --fx-edge: linear-gradient(90deg, #00e5ff, #7a5cff 50%, #ff3ce0);
+    --fx-title-font: italic 900 58px/1 "Microsoft YaHei", sans-serif;
+    --fx-title-grad: linear-gradient(180deg, #f2ffff, #7ff6ff 50%, #ff9aea);
+    --fx-title-stroke: 0; --fx-title-filter: drop-shadow(0 0 8px rgba(0, 229, 255, .9));
+    --fx-sub: #ff7ae8; --fx-plus: #7ff6ff; --fx-hot: 255, 60, 220;
+    --fx-ak-font: italic 900 132px/.9 "Arial Black", sans-serif;
+    --fx-ak-grad: linear-gradient(180deg, #f2ffff, #00e5ff 55%, #ff3ce0); --fx-ak-stroke: 0;
+    --fx-ak-filter: drop-shadow(0 0 16px rgba(0, 229, 255, .95)) drop-shadow(0 0 30px rgba(255, 60, 220, .6));
+    --fx-ak-subbg: linear-gradient(90deg, transparent, rgba(255, 60, 220, .75), rgba(0, 229, 255, .75), transparent);
+    --fx-dim: radial-gradient(circle, rgba(10, 0, 30, .45), rgba(0, 0, 10, .88) 70%);
+}
+.fx-layer[data-skin="ink"] {
+    --fx-accent: 242, 234, 216; --fx-row-edge: rgba(242, 234, 216, .7); --fx-sweep: rgba(0, 0, 0, .45);
+    --fx-slash: linear-gradient(90deg, transparent, rgba(20, 16, 12, .95) 12%, #0b0906 60%, rgba(20, 16, 12, .6) 92%, transparent);
+    --fx-slash-glow: 0 0 5px rgba(242, 234, 216, .5); --fx-slash-h: 7px;
+    --fx-shape: none;
+    --fx-plate: #0b0906; --fx-edge: none;
+    --fx-title-font: 400 66px/1 "STXingkai", "华文行楷", "KaiTi", "楷体", serif;
+    --fx-title-grad: linear-gradient(180deg, #fbf5e6, #e6d9bd);
+    --fx-title-stroke: 0; --fx-title-filter: drop-shadow(0 2px 0 rgba(0, 0, 0, .8));
+    --fx-sub: #c8a86a; --fx-plus: #f2ead8; --fx-hot: 184, 38, 28;
+    --fx-ak-font: 400 120px/1 "STXingkai", "华文行楷", "KaiTi", serif;
+    --fx-ak-grad: linear-gradient(180deg, #fbf5e6, #e0d2b4); --fx-ak-stroke: 0; --fx-ak-filter: drop-shadow(0 3px 0 #000);
+    --fx-ak-subbg: none; --fx-dim: radial-gradient(circle, rgba(30, 26, 20, .4), rgba(8, 6, 4, .86) 70%);
+}
+.fx-layer[data-skin="glass"] {
+    --fx-accent: 200, 225, 255; --fx-row-edge: rgba(255, 255, 255, .7); --fx-sweep: rgba(255, 255, 255, .5);
+    --fx-slash: linear-gradient(90deg, transparent, rgba(255, 255, 255, .85) 50%, transparent);
+    --fx-slash-glow: 0 0 12px rgba(190, 220, 255, .9); --fx-slash-h: 3px;
+    --fx-shape: inset(0 round 16px);
+    --fx-plate: linear-gradient(160deg, rgba(255, 255, 255, .26), rgba(255, 255, 255, .08)), rgba(var(--fx-team), .18);
+    --fx-edge: linear-gradient(160deg, rgba(255, 255, 255, .85), rgba(255, 255, 255, .2) 50%, rgba(255, 255, 255, .6));
+    --fx-title-font: 800 56px/1.05 "Microsoft YaHei", sans-serif;
+    --fx-title-grad: linear-gradient(180deg, #ffffff, #dbe9ff);
+    --fx-title-stroke: 0; --fx-title-filter: drop-shadow(0 0 10px rgba(160, 200, 255, .7));
+    --fx-sub: #e6f0ff; --fx-plus: #ffffff; --fx-hot: 190, 220, 255;
+    --fx-ak-font: 800 124px/.95 "Microsoft YaHei", "Arial Black", sans-serif;
+    --fx-ak-grad: linear-gradient(180deg, #fff, #cfe3ff); --fx-ak-stroke: 0; --fx-ak-filter: drop-shadow(0 0 18px rgba(170, 210, 255, .9));
+    --fx-ak-subbg: rgba(255, 255, 255, .18); --fx-dim: rgba(10, 20, 40, .45);
+}
+.fx-layer[data-skin="pixel"] {
+    --fx-accent: 252, 224, 168; --fx-row-edge: #fce0a8; --fx-sweep: rgba(255, 228, 92, .7);
+    --fx-slash: repeating-linear-gradient(90deg, #ffe45c 0 8px, transparent 8px 11px);
+    --fx-slash-glow: 3px 3px 0 #000; --fx-slash-h: 6px;
+    --fx-shape: polygon(0 6px, 6px 6px, 6px 0, calc(100% - 6px) 0, calc(100% - 6px) 6px, 100% 6px, 100% calc(100% - 6px), calc(100% - 6px) calc(100% - 6px), calc(100% - 6px) 100%, 6px 100%, 6px calc(100% - 6px), 0 calc(100% - 6px));
+    --fx-plate: #1b1b2b; --fx-edge: linear-gradient(#ff7a3c, #ff7a3c);
+    --fx-title-font: 900 58px/1 "FZXS24", "Courier New", monospace;
+    --fx-title-grad: linear-gradient(180deg, #fff6a0 0 45%, #ffb020 45% 100%);
+    --fx-title-stroke: 0; --fx-title-filter: drop-shadow(4px 4px 0 #000);
+    --fx-sub: #80d010; --fx-plus: #ffe45c; --fx-hot: 255, 122, 60;
+    --fx-ak-font: 900 124px/1 "FZXS24", "Courier New", monospace;
+    --fx-ak-grad: linear-gradient(180deg, #fff6a0 0 45%, #ff7a3c 45% 100%); --fx-ak-stroke: 0; --fx-ak-filter: drop-shadow(6px 6px 0 #000);
+    --fx-ak-subbg: #d82800; --fx-dim: rgba(0, 0, 0, .78);
+}
+.fx-layer[data-skin="inferno"] {
+    --fx-accent: 255, 140, 40; --fx-row-edge: rgba(255, 150, 50, .95); --fx-sweep: rgba(255, 120, 20, .6);
+    --fx-slash: linear-gradient(90deg, transparent, rgba(255, 80, 0, .9) 25%, #fff3b0 55%, rgba(255, 60, 0, .9) 85%, transparent);
+    --fx-slash-glow: 0 0 10px #ff7a1a, 0 0 24px rgba(255, 40, 0, .9); --fx-slash-h: 5px;
+    --fx-plate: radial-gradient(90% 90% at 50% 130%, rgba(255, 90, 0, .75), transparent 60%), radial-gradient(60% 80% at 50% -20%, rgba(var(--fx-team), .35), transparent 70%), linear-gradient(180deg, #2a0d05, #0e0503);
+    --fx-edge: linear-gradient(90deg, #5a1a00, #ff8a1f 30%, #ffe08a 50%, #ff8a1f 70%, #5a1a00);
+    --fx-title-font: 900 60px/1 "Microsoft YaHei", "SimHei", sans-serif;
+    --fx-title-grad: linear-gradient(180deg, #fff7c2, #ffd23f 35%, #ff7a1a 62%, #c21f0a 100%);
+    --fx-title-stroke: 1px rgba(60, 10, 0, .9); --fx-title-filter: drop-shadow(0 3px 0 #2a0500) drop-shadow(0 0 14px rgba(255, 80, 0, .9));
+    --fx-sub: #ffb347; --fx-plus: #ffd23f; --fx-hot: 255, 70, 0;
+    --fx-ak-grad: linear-gradient(180deg, #fff8c8, #ffd23f 35%, #ff6a10 60%, #b01005 100%);
+    --fx-ak-stroke: 3px #3a0500; --fx-ak-filter: drop-shadow(0 5px 0 #2a0400) drop-shadow(0 0 26px rgba(255, 70, 0, 1));
+    --fx-dim: radial-gradient(circle, rgba(60, 10, 0, .35), rgba(10, 2, 0, .85) 70%);
+}
+.fx-layer[data-skin="broadcast"] {
+    --fx-accent: 255, 198, 43; --fx-row-edge: rgb(var(--fx-team)); --fx-sweep: rgba(255, 255, 255, .5);
+    --fx-slash: linear-gradient(90deg, transparent, rgb(var(--fx-team)) 20%, #fff 60%, transparent);
+    --fx-slash-glow: none; --fx-slash-h: 4px;
+    --fx-shape: polygon(0 0, 100% 0, calc(100% - 22px) 100%, 0 100%);
+    --fx-plate: linear-gradient(90deg, rgb(var(--fx-team)) 0 14px, #fff 14px 17px, transparent 17px), linear-gradient(180deg, rgba(16, 22, 36, .97), rgba(8, 12, 22, .97));
+    --fx-edge: linear-gradient(90deg, rgb(var(--fx-team)), #ffc62b);
+    --fx-title-font: italic 900 54px/1.05 "Microsoft YaHei", sans-serif;
+    --fx-title-grad: linear-gradient(180deg, #fff, #eef2f8);
+    --fx-title-stroke: 0; --fx-title-filter: drop-shadow(0 2px 0 rgba(0, 0, 0, .55));
+    --fx-sub: #ffc62b; --fx-plus: #ffffff; --fx-hot: 255, 198, 43;
+    --fx-ak-font: italic 900 120px/.95 "Arial Black", "Microsoft YaHei", sans-serif;
+    --fx-ak-grad: linear-gradient(180deg, #fff, #eaeef5); --fx-ak-stroke: 0; --fx-ak-filter: drop-shadow(0 4px 0 rgba(0, 0, 0, .5));
+    --fx-ak-subbg: #ffc62b; --fx-dim: rgba(6, 10, 20, .6);
+}
+.fx-layer[data-skin="frost"] {
+    --fx-accent: 191, 240, 255; --fx-row-edge: rgba(200, 245, 255, .95); --fx-sweep: rgba(220, 250, 255, .6);
+    --fx-slash: linear-gradient(90deg, transparent, rgba(160, 230, 255, .9) 30%, #fff 60%, rgba(120, 200, 255, .9) 85%, transparent);
+    --fx-slash-glow: 0 0 10px #9fe8ff, 0 0 20px rgba(100, 190, 255, .8); --fx-slash-h: 3px;
+    --fx-shape: polygon(0 50%, 20px 0, 38% 0, 42% 7px, 58% 7px, 62% 0, calc(100% - 20px) 0, 100% 50%, calc(100% - 20px) 100%, 62% 100%, 58% calc(100% - 7px), 42% calc(100% - 7px), 38% 100%, 20px 100%);
+    --fx-plate: radial-gradient(80% 120% at 50% 0%, rgba(220, 250, 255, .35), transparent 70%), linear-gradient(180deg, rgba(40, 90, 130, .9), rgba(10, 30, 52, .95));
+    --fx-edge: linear-gradient(90deg, #6fb6d6, #eaffff 50%, #6fb6d6);
+    --fx-title-font: 900 60px/1 "Microsoft YaHei", sans-serif;
+    --fx-title-grad: linear-gradient(180deg, #ffffff, #d6f6ff 40%, #7fd4ff 70%, #eaffff);
+    --fx-title-stroke: 1px rgba(10, 40, 70, .8); --fx-title-filter: drop-shadow(0 2px 0 #0a2238) drop-shadow(0 0 12px rgba(150, 230, 255, .8));
+    --fx-sub: #bff0ff; --fx-plus: #d6f6ff; --fx-hot: 150, 220, 255;
+    --fx-ak-grad: linear-gradient(180deg, #ffffff, #d6f6ff 40%, #6ccaff 65%, #f0fdff);
+    --fx-ak-stroke: 3px #0b2a44; --fx-ak-filter: drop-shadow(0 5px 0 #06182a) drop-shadow(0 0 24px rgba(140, 220, 255, .95));
+    --fx-ak-subbg: linear-gradient(90deg, transparent, rgba(40, 110, 170, .9) 15%, rgba(70, 150, 210, .95) 50%, rgba(40, 110, 170, .9) 85%, transparent);
+    --fx-dim: radial-gradient(circle, rgba(20, 60, 90, .35), rgba(0, 10, 20, .85) 70%);
+}
+
+/* ---------- 行内：击杀者高亮 ---------- */
+.fx-rowglow {
+    position: absolute; border-radius: 3px;
+    background:
+        linear-gradient(90deg, transparent 20%, var(--fx-sweep) 46%, rgba(255, 255, 255, .9) 50%, var(--fx-sweep) 54%, transparent 80%) -100% 0 / 60% 100% no-repeat,
+        linear-gradient(90deg, rgba(var(--fx-team), .55), rgba(var(--fx-team), .18) 60%, transparent);
+    box-shadow: 0 0 0 1px var(--fx-row-edge), 0 0 18px rgba(var(--fx-accent), .5), inset 0 0 12px rgba(var(--fx-accent), .3);
+    animation: fx-rowglow var(--fx-dur, 1.6s) ease-out forwards;
+}
+.fx-layer[data-skin="pixel"] .fx-rowglow { border-radius: 0; box-shadow: 0 0 0 3px var(--fx-row-edge); animation-timing-function: steps(8); }
+.fx-layer[data-skin="ink"] .fx-rowglow { background: linear-gradient(90deg, rgba(0, 0, 0, .7), rgba(0, 0, 0, .25) 70%, transparent); box-shadow: inset 3px 0 0 #b8261c; }
+@keyframes fx-rowglow {
+    0% { opacity: 0; background-position: -60% 0, 0 0; } 10% { opacity: 1; }
+    45% { background-position: 160% 0, 0 0; } 75% { opacity: 1; } 100% { opacity: 0; background-position: 160% 0, 0 0; }
+}
+.fx-pop { animation: fx-pop .62s cubic-bezier(.2, 1.6, .4, 1) both; }
+@keyframes fx-pop {
+    0% { scale: 1; } 30% { scale: 1.9; filter: brightness(2) drop-shadow(0 0 10px rgb(var(--fx-pop, 255, 207, 90))); } 100% { scale: 1; }
+}
+.fx-plus {
+    position: absolute; font: 900 26px/1 "FZXS24", "Microsoft YaHei", sans-serif; color: var(--fx-plus);
+    -webkit-text-stroke: 3px rgba(0, 0, 0, .85); paint-order: stroke fill; text-shadow: 0 0 10px rgba(var(--fx-accent), .9);
+    animation: fx-plus 1.1s ease-out forwards;
+}
+@keyframes fx-plus {
+    0% { opacity: 0; transform: translate(-50%, 6px) scale(.6); } 20% { opacity: 1; transform: translate(-50%, -8px) scale(1.15); }
+    100% { opacity: 0; transform: translate(-50%, -34px) scale(1); }
+}
+.fx-slash {
+    position: absolute; height: var(--fx-slash-h); background: var(--fx-slash); box-shadow: var(--fx-slash-glow); border-radius: 4px;
+    animation: fx-slash .5s cubic-bezier(.1, .8, .2, 1) forwards;
+}
+.fx-layer[data-skin="pixel"] .fx-slash { border-radius: 0; animation-timing-function: steps(6); }
+.fx-layer[data-skin="ink"] .fx-slash { border-radius: 50% 10% 50% 10% / 60% 40% 60% 40%; }
+@keyframes fx-slash { 0% { opacity: 1; clip-path: inset(0 100% 0 0); } 45% { opacity: 1; clip-path: inset(0 0 0 0); } 100% { opacity: 0; clip-path: inset(0 0 0 100%); } }
+
+/* ---------- 行内：阵亡 ---------- */
+.fx-deadflash { position: absolute; border-radius: 3px; background: linear-gradient(90deg, rgba(200, 20, 30, .75), rgba(120, 0, 10, .35) 70%, transparent); animation: fx-dead 1.2s ease-out forwards; }
+.fx-layer[data-skin="frost"] .fx-deadflash { background: linear-gradient(90deg, rgba(160, 230, 255, .7), rgba(80, 160, 220, .3) 70%, transparent); }
+.fx-layer[data-skin="ink"] .fx-deadflash { background: linear-gradient(90deg, rgba(0, 0, 0, .85), rgba(0, 0, 0, .4) 70%, transparent); }
+@keyframes fx-dead { 0% { opacity: 0; } 12% { opacity: 1; } 30% { opacity: .45; } 42% { opacity: .9; } 100% { opacity: 0; } }
+.kill-row.fx-dead .kill-player-name { animation: fx-shake .45s linear both; }
+.kill-row.fx-dead { animation: fx-gray 1.4s ease-out both; }
+@keyframes fx-gray { 0%, 100% { filter: none; } 15%, 60% { filter: grayscale(1) brightness(.75); } }
+@keyframes fx-shake { 0%, 100% { translate: 0 0; } 20% { translate: -5px 0; } 40% { translate: 5px 0; } 60% { translate: -3px 0; } 80% { translate: 3px 0; } }
+.fx-mark { position: absolute; width: 46px; height: 46px; margin: -23px 0 0 -23px; animation: fx-crack .9s ease-out forwards; background: center / contain no-repeat; }
+.fx-mark.crack { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 46 46'%3E%3Cg fill='none' stroke='%23ff4a4a' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='M23 23 L6 9 M23 23 L40 6 M23 23 L42 30 M23 23 L27 44 M23 23 L4 34 M23 23 L15 3'/%3E%3C/g%3E%3Cg fill='none' stroke='%23fff' stroke-width='1' stroke-linecap='round'%3E%3Cpath d='M23 23 L10 12 M23 23 L36 10 M23 23 L37 29'/%3E%3C/g%3E%3C/svg%3E"); filter: drop-shadow(0 0 6px #ff2a2a); }
+.fx-mark.ink { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 46 46'%3E%3Cpath d='M23 6c6 0 9 5 13 6s6 7 3 11 2 9-3 12-8 4-13 3-10 2-13-3-6-8-3-12-1-9 4-12 6-5 12-5z' fill='%23080604'/%3E%3Ccircle cx='40' cy='6' r='2.5' fill='%23080604'/%3E%3Ccircle cx='5' cy='40' r='2' fill='%23080604'/%3E%3C/svg%3E"); }
+.fx-mark.ice { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 46 46'%3E%3Cg stroke='%23dff8ff' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M23 3v40M5.7 13l34.6 20M5.7 33l34.6-20'/%3E%3Cpath d='M23 9l-4-4M23 9l4-4M23 37l-4 4M23 37l4 4' /%3E%3C/g%3E%3C/svg%3E"); filter: drop-shadow(0 0 6px #7fd4ff); }
+.fx-mark.pixel { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 9 9' shape-rendering='crispEdges'%3E%3Cpath d='M0 0h2v1h1v1h1v1h1v-1h1v-1h1v-1h2v2h-1v1h-1v1h-1v1h1v1h1v1h1v2h-2v-1h-1v-1h-1v-1h-1v1h-1v1h-1v1h-2v-2h1v-1h1v-1h1v-1h-1v-1h-1v-1h-1z' fill='%23ff3c3c'/%3E%3C/svg%3E"); image-rendering: pixelated; animation-timing-function: steps(4); }
+@keyframes fx-crack { 0% { opacity: 0; transform: scale(.3) rotate(-20deg); } 20% { opacity: 1; transform: scale(1.1); } 100% { opacity: 0; transform: scale(1.35); } }
+
+/* ---------- 横幅（双杀 / 三杀 / 一血 / 终结 / 复仇） ---------- */
+.fx-banner {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    display: grid; justify-items: center; gap: 2px; min-width: 380px; padding: 14px 52px 12px; isolation: isolate;
+    animation: var(--fx-anim, fx-banner) var(--fx-dur, 2.2s) cubic-bezier(.2, .9, .25, 1) forwards;
+}
+.fx-banner::after { content: ""; position: absolute; inset: 0; z-index: -2; clip-path: var(--fx-shape); background: var(--fx-edge); }
+.fx-banner::before { content: ""; position: absolute; inset: 3px; z-index: -1; clip-path: var(--fx-shape); background: var(--fx-plate); }
+.fx-banner.mini { min-width: 300px; padding: 10px 40px 9px; }
+.fx-banner.mini .fx-banner-title { font-size: 44px; }
+.fx-banner-title {
+    position: relative; font: var(--fx-title-font); letter-spacing: 6px;
+    background: var(--fx-title-grad); -webkit-background-clip: text; background-clip: text; color: transparent;
+    -webkit-text-stroke: var(--fx-title-stroke); filter: var(--fx-title-filter);
+}
+.fx-banner-title::after {
+    content: attr(data-text); position: absolute; inset: 0; color: transparent;
+    background: linear-gradient(100deg, transparent 35%, rgba(255, 255, 255, .95) 50%, transparent 65%) -150% 0 / 60% 100% no-repeat;
+    -webkit-background-clip: text; background-clip: text; -webkit-text-stroke: 0;
+    animation: fx-shine 1.1s .35s ease-out forwards;
+}
+@keyframes fx-shine { to { background-position: 250% 0; } }
+.fx-banner-sub { font: 800 13px/1 "Arial Black", "Microsoft YaHei", sans-serif; letter-spacing: 7px; color: var(--fx-sub); text-shadow: 0 1px 0 #000; }
+.fx-banner-name { margin-top: 3px; font: 900 18px/1.25 "Microsoft YaHei", sans-serif; color: #fff; text-shadow: 0 1px 0 #000; }
+.fx-banner-name b { display: inline-block; padding: 0 7px; margin-right: 6px; border-radius: 2px; font-size: 14px; color: #fff; background: rgba(var(--fx-team), .85); vertical-align: 2px; }
+.fx-banner-name em { font-style: normal; color: var(--fx-sub); font-size: 14px; margin-left: 6px; }
+@keyframes fx-banner {
+    0% { opacity: 0; transform: translate(-50%, -50%) scale(2.4); filter: blur(8px); }
+    12% { opacity: 1; transform: translate(-50%, -50%) scale(.92); filter: blur(0); }
+    18% { transform: translate(-50%, -50%) scale(1.04); } 24% { transform: translate(-50%, -50%) scale(1); }
+    82% { opacity: 1; transform: translate(-50%, -50%) scale(1); } 100% { opacity: 0; transform: translate(-50%, -62%) scale(.96); }
+}
+@keyframes fx-banner-slide {
+    0% { opacity: 0; transform: translate(-90%, -50%); } 12% { opacity: 1; transform: translate(-48%, -50%); } 18% { transform: translate(-50%, -50%); }
+    84% { opacity: 1; transform: translate(-50%, -50%); } 100% { opacity: 0; transform: translate(-10%, -50%); }
+}
+@keyframes fx-banner-wipe {
+    0% { clip-path: inset(0 100% 0 0); transform: translate(-50%, -50%); } 14% { clip-path: inset(0 0 0 0); }
+    84% { clip-path: inset(0 0 0 0); opacity: 1; transform: translate(-50%, -50%); } 100% { clip-path: inset(0 0 0 100%); transform: translate(-50%, -50%); }
+}
+@keyframes fx-banner-soft {
+    0% { opacity: 0; transform: translate(-50%, -38%) scale(.94); filter: blur(6px); } 16% { opacity: 1; transform: translate(-50%, -50%) scale(1); filter: blur(0); }
+    84% { opacity: 1; transform: translate(-50%, -50%); } 100% { opacity: 0; transform: translate(-50%, -56%); filter: blur(4px); }
+}
+@keyframes fx-banner-pixel {
+    0% { opacity: 0; transform: translate(-50%, -50%) scale(.2); } 6% { opacity: 1; transform: translate(-50%, -50%) scale(1.3); } 12% { transform: translate(-50%, -50%) scale(1); }
+    70% { opacity: 1; } 74% { opacity: 0; } 78% { opacity: 1; } 82% { opacity: 0; } 86% { opacity: 1; } 100% { opacity: 1; transform: translate(-50%, -50%); }
+}
+@keyframes fx-banner-brush {
+    0% { clip-path: inset(0 100% 0 0); transform: translate(-50%, -50%); } 20% { clip-path: inset(0 0 0 0); }
+    82% { opacity: 1; } 100% { opacity: 0; clip-path: inset(0 0 0 0); transform: translate(-50%, -50%); }
+}
+.fx-layer[data-skin="classic"] .fx-banner { --fx-anim: fx-banner-slide; }
+.fx-layer[data-skin="broadcast"] .fx-banner { --fx-anim: fx-banner-wipe; }
+.fx-layer[data-skin="glass"] .fx-banner { --fx-anim: fx-banner-soft; }
+.fx-layer[data-skin="glass"] .fx-banner::before { backdrop-filter: blur(10px) saturate(1.3); }
+.fx-layer[data-skin="frost"] .fx-banner::before { backdrop-filter: blur(4px); }
+.fx-layer[data-skin="pixel"] .fx-banner { --fx-anim: fx-banner-pixel; animation-timing-function: steps(1, end); }
+.fx-layer[data-skin="ink"] .fx-banner { --fx-anim: fx-banner-brush; }
+/* 水墨：横幅底是一笔浓墨，队名变成朱红印章 */
+.fx-layer[data-skin="ink"] .fx-banner::before {
+    inset: -8px -24px;
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 100' preserveAspectRatio='none'%3E%3Cpath d='M10 52 C 20 24, 80 16, 160 18 C 240 20, 320 10, 372 20 C 392 24, 400 40, 394 54 C 388 70, 350 80, 290 82 C 210 86, 110 90, 40 84 C 14 82, 2 70, 10 52 Z'/%3E%3Cpath d='M330 18 L400 22 L396 26 L328 24 Z' fill-opacity='.7'/%3E%3Cpath d='M300 80 L398 72 L392 78 L296 86 Z' fill-opacity='.6'/%3E%3Cpath d='M2 60 L30 34 L22 70 Z' fill-opacity='.8'/%3E%3C/svg%3E") 0 0 / 100% 100% no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 100' preserveAspectRatio='none'%3E%3Cpath d='M10 52 C 20 24, 80 16, 160 18 C 240 20, 320 10, 372 20 C 392 24, 400 40, 394 54 C 388 70, 350 80, 290 82 C 210 86, 110 90, 40 84 C 14 82, 2 70, 10 52 Z'/%3E%3Cpath d='M330 18 L400 22 L396 26 L328 24 Z' fill-opacity='.7'/%3E%3Cpath d='M300 80 L398 72 L392 78 L296 86 Z' fill-opacity='.6'/%3E%3Cpath d='M2 60 L30 34 L22 70 Z' fill-opacity='.8'/%3E%3C/svg%3E") 0 0 / 100% 100% no-repeat;
+}
+.fx-layer[data-skin="ink"] .fx-banner::after { display: none; }
+.fx-layer[data-skin="ink"] .fx-banner-name b { background: #b8261c; border-radius: 1px; font-family: "KaiTi", "楷体", serif; box-shadow: inset 0 0 0 1px rgba(243, 227, 200, .7); }
+.fx-layer[data-skin="ink"] .fx-banner-title::after, .fx-layer[data-skin="pixel"] .fx-banner-title::after { display: none; }
+/* 霓虹：标题故障抖动 */
+.fx-layer[data-skin="neon"] .fx-banner-title { animation: fx-glitch 1.8s steps(1) .15s both; }
+@keyframes fx-glitch {
+    0%, 100% { text-shadow: none; transform: none; }
+    4% { text-shadow: 4px 0 #ff3ce0, -4px 0 #00e5ff; transform: translateX(2px) skewX(-8deg); }
+    8% { text-shadow: -3px 0 #ff3ce0, 3px 0 #00e5ff; transform: translateX(-3px); clip-path: inset(10% 0 40% 0); }
+    12% { text-shadow: none; transform: none; clip-path: none; }
+    40% { text-shadow: 2px 0 #ff3ce0, -2px 0 #00e5ff; transform: translateX(1px); }
+    43% { text-shadow: none; transform: none; }
+    70% { text-shadow: -5px 0 #ff3ce0, 5px 0 #00e5ff; clip-path: inset(50% 0 10% 0); transform: translateX(4px); }
+    73% { text-shadow: none; clip-path: none; transform: none; }
+}
+/* 烈焰：标题火苗闪烁 */
+.fx-layer[data-skin="inferno"] .fx-banner-title { animation: fx-flicker .18s steps(2) infinite alternate; }
+@keyframes fx-flicker { from { filter: var(--fx-title-filter) brightness(1); } to { filter: var(--fx-title-filter) brightness(1.25); } }
+/* 两侧剑刃（DNF / 烈焰 / 寒冰） */
+.fx-blade { position: absolute; top: 50%; width: 120px; height: 10px; margin-top: -5px; display: none;
+    background: linear-gradient(90deg, transparent, #7a5a2a 10%, #f5dc9c 60%, #fff 100%); clip-path: polygon(0 40%, 88% 0, 100% 50%, 88% 100%, 0 60%); filter: drop-shadow(0 0 6px rgba(255, 200, 90, .9)); }
+.fx-layer:not([data-skin]) .fx-blade, .fx-layer[data-skin="dnf"] .fx-blade, .fx-layer[data-skin="inferno"] .fx-blade, .fx-layer[data-skin="frost"] .fx-blade { display: block; }
+.fx-layer[data-skin="inferno"] .fx-blade { background: linear-gradient(90deg, transparent, #7a1a00 10%, #ff8a1f 60%, #fff3b0 100%); filter: drop-shadow(0 0 6px rgba(255, 80, 0, .9)); }
+.fx-layer[data-skin="frost"] .fx-blade { background: linear-gradient(90deg, transparent, #2a6f96 10%, #bff0ff 60%, #fff 100%); filter: drop-shadow(0 0 6px rgba(140, 220, 255, .9)); }
+.fx-blade.l { right: 100%; margin-right: -8px; animation: fx-blade-l .5s .05s cubic-bezier(.2, .9, .3, 1) both; }
+.fx-blade.r { left: 100%; margin-left: -8px; transform: scaleX(-1); animation: fx-blade-r .5s .05s cubic-bezier(.2, .9, .3, 1) both; }
+@keyframes fx-blade-l { from { opacity: 0; transform: translateX(-80px); } to { opacity: 1; transform: none; } }
+@keyframes fx-blade-r { from { opacity: 0; transform: scaleX(-1) translateX(-80px); } to { opacity: 1; transform: scaleX(-1); } }
+
+/* 三杀：冲击波 + 边缘光焰 + 震屏 */
+.fx-ring { position: absolute; left: 50%; top: 50%; width: 40px; height: 40px; margin: -20px 0 0 -20px; border-radius: 50%;
+    border: 4px solid rgba(var(--fx-accent), .95); box-shadow: 0 0 20px rgba(var(--fx-hot), .9), inset 0 0 16px rgba(var(--fx-accent), .8); animation: fx-ring .8s ease-out forwards; }
+.fx-layer[data-skin="pixel"] .fx-ring { border-radius: 0; box-shadow: none; animation-timing-function: steps(6); }
+.fx-layer[data-skin="ink"] .fx-ring { border-color: rgba(10, 8, 6, .9); box-shadow: 0 0 0 2px rgba(242, 234, 216, .3); }
+@keyframes fx-ring { from { opacity: 1; transform: scale(.4); } to { opacity: 0; transform: scale(14); border-width: 1px; } }
+.fx-edge { position: absolute; inset: 0; mix-blend-mode: screen; animation: fx-edge 2.4s ease-out forwards;
+    background: radial-gradient(120% 60% at 50% 115%, rgba(var(--fx-team), .75), transparent 60%), radial-gradient(60% 90% at -10% 50%, rgba(var(--fx-hot), .55), transparent 60%), radial-gradient(60% 90% at 110% 50%, rgba(var(--fx-hot), .55), transparent 60%); }
+.fx-layer[data-skin="ink"] .fx-edge { mix-blend-mode: multiply; background: radial-gradient(70% 90% at -5% 50%, rgba(0, 0, 0, .8), transparent 60%), radial-gradient(70% 90% at 105% 50%, rgba(0, 0, 0, .8), transparent 60%); }
+@keyframes fx-edge { 0% { opacity: 0; } 10% { opacity: 1; } 25% { opacity: .6; } 40% { opacity: .95; } 100% { opacity: 0; } }
+.fx-shake { animation: fx-board-shake .5s linear both; }
+@keyframes fx-board-shake { 0%, 100% { translate: 0 0; } 10% { translate: -7px 3px; } 20% { translate: 6px -4px; } 30% { translate: -5px -2px; } 40% { translate: 5px 3px; } 55% { translate: -3px 1px; } 70% { translate: 2px -1px; } 85% { translate: -1px 0; } }
+
+/* ---------- AK ---------- */
+.fx-ak { position: absolute; inset: 0; display: grid; place-items: center; animation: fx-ak-life 4.2s ease forwards; }
+@keyframes fx-ak-life { 0% { opacity: 0; } 5% { opacity: 1; } 88% { opacity: 1; } 100% { opacity: 0; } }
+.fx-ak > * { grid-area: 1 / 1; }
+.fx-ak-dim { position: absolute; inset: 0; background: var(--fx-dim); }
+.fx-ak-band { position: absolute; left: 0; right: 0; height: 46%; background: #000; box-shadow: 0 0 0 2px rgba(var(--fx-accent), .9), 0 0 24px rgba(var(--fx-hot), .6); display: none; }
+.fx-ak.bands .fx-ak-band { display: block; }
+.fx-ak-band.t { top: 0; transform-origin: top; animation: fx-band 4.2s cubic-bezier(.2, .9, .2, 1) forwards; }
+.fx-ak-band.b { bottom: 0; transform-origin: bottom; animation: fx-band 4.2s cubic-bezier(.2, .9, .2, 1) forwards; }
+@keyframes fx-band { 0% { transform: scaleY(0); } 8% { transform: scaleY(.62); } 85% { transform: scaleY(.62); } 100% { transform: scaleY(0); } }
+.fx-ak-core { position: relative; display: grid; justify-items: center; gap: 4px; z-index: 2; }
+.fx-ak-text { position: relative; font: var(--fx-ak-font); letter-spacing: 4px; background: var(--fx-ak-grad); -webkit-background-clip: text; background-clip: text; color: transparent;
+    -webkit-text-stroke: var(--fx-ak-stroke); filter: var(--fx-ak-filter); animation: fx-ak-slam .7s .15s cubic-bezier(.2, 1.5, .35, 1) both; }
+.fx-ak-text::after { content: attr(data-text); position: absolute; inset: 0; color: transparent; -webkit-text-stroke: 0;
+    background: linear-gradient(100deg, transparent 38%, rgba(255, 255, 255, 1) 50%, transparent 62%) -150% 0 / 60% 100% no-repeat; -webkit-background-clip: text; background-clip: text; animation: fx-shine 1.2s .9s ease-out forwards; }
+@keyframes fx-ak-slam { 0% { opacity: 0; transform: scale(4) translateY(-10px); } 60% { opacity: 1; transform: scale(.9); } 100% { transform: scale(1); } }
+.fx-ak-sub { padding: 4px 22px; font: 900 18px/1.2 "Microsoft YaHei", sans-serif; letter-spacing: 6px; color: #fff4d0; background: var(--fx-ak-subbg); text-shadow: 0 1px 0 #000; animation: fx-sub-in .5s .6s ease-out both; }
+.fx-ak-sub b { color: #ffd76a; }
+.fx-ak-en { font: 800 12px/1 "Arial Black", sans-serif; letter-spacing: 12px; color: var(--fx-sub); animation: fx-sub-in .5s .75s ease-out both; }
+@keyframes fx-sub-in { from { opacity: 0; transform: scaleX(.2); } to { opacity: 1; transform: none; } }
+.fx-flash { position: absolute; inset: 0; background: rgb(var(--fx-accent)); animation: fx-flash .45s ease-out forwards; z-index: 3; }
+@keyframes fx-flash { from { opacity: .9; } to { opacity: 0; } }
+@keyframes fx-spin { to { transform: rotate(360deg); } }
+@keyframes fx-fadein { from { opacity: 0; } }
+@keyframes fx-circle-in { from { opacity: 0; transform: scale(.2) rotate(-90deg); } to { opacity: 1; transform: none; } }
+
+/* 各风格的 AK 装饰 */
+.fx-ak-rays { position: absolute; left: 50%; top: 50%; width: 900px; height: 900px; margin: -450px 0 0 -450px;
+    background: repeating-conic-gradient(from 0deg, rgba(var(--fx-accent), .3) 0deg 5deg, transparent 5deg 18deg);
+    -webkit-mask: radial-gradient(circle, #000 0 8%, rgba(0, 0, 0, .8) 20%, transparent 55%); mask: radial-gradient(circle, #000 0 8%, rgba(0, 0, 0, .8) 20%, transparent 55%);
+    animation: fx-spin 9s linear infinite, fx-fadein .6s ease both; }
+.fx-ak-circle { position: absolute; left: 50%; top: 50%; width: 300px; height: 300px; margin: -150px 0 0 -150px; animation: fx-circle-in .7s cubic-bezier(.2, 1.4, .4, 1) both; }
+.fx-ak-circle svg { width: 100%; height: 100%; overflow: visible; filter: drop-shadow(0 0 8px rgba(var(--fx-hot), .9)); }
+.fx-ak-circle .c1 { transform-origin: 150px 150px; animation: fx-spin 7s linear infinite; }
+.fx-ak-circle .c2 { transform-origin: 150px 150px; animation: fx-spin 5s linear infinite reverse; }
+/* 经典：两条队伍色横线扫过 */
+.fx-ak-bars { position: absolute; left: 0; right: 0; top: 50%; height: 150px; margin-top: -75px; }
+.fx-ak-bars i { position: absolute; left: 0; right: 0; height: 3px; background: rgb(var(--fx-team)); animation: fx-bar 3.8s cubic-bezier(.2, .9, .2, 1) both; }
+.fx-ak-bars i:first-child { top: 0; } .fx-ak-bars i:last-child { bottom: 0; animation-delay: .1s; }
+@keyframes fx-bar { 0% { transform: scaleX(0); transform-origin: left; } 15% { transform: scaleX(1); } 88% { transform: scaleX(1); opacity: 1; } 100% { transform: scaleX(1); opacity: 0; } }
+/* 霓虹：脉冲光环 */
+.fx-ak-rings i { position: absolute; left: 50%; top: 50%; width: 120px; height: 120px; margin: -60px 0 0 -60px; border-radius: 50%;
+    border: 3px solid #00e5ff; box-shadow: 0 0 14px #00e5ff, inset 0 0 14px #ff3ce0; animation: fx-neon-ring 1.6s ease-out infinite; }
+.fx-ak-rings i:nth-child(2) { border-color: #ff3ce0; box-shadow: 0 0 14px #ff3ce0; animation-delay: .5s; }
+.fx-ak-rings i:nth-child(3) { animation-delay: 1s; }
+@keyframes fx-neon-ring { from { transform: scale(.6); opacity: 1; } to { transform: scale(4.2); opacity: 0; } }
+.fx-layer[data-skin="neon"] .fx-ak-text { animation: fx-ak-slam .7s .15s cubic-bezier(.2, 1.5, .35, 1) both, fx-glitch 2.4s steps(1) .9s both; }
+/* 水墨：一笔画圆（圆相）+ 朱红印章 */
+.fx-ak-enso { position: absolute; left: 50%; top: 50%; width: 290px; height: 290px; margin: -145px 0 0 -145px; }
+.fx-ak-enso path { fill: none; stroke: #0b0906; stroke-width: 26; stroke-linecap: round; stroke-dasharray: 820; stroke-dashoffset: 820; filter: drop-shadow(0 0 3px rgba(242, 234, 216, .45)); animation: fx-enso 1s .1s cubic-bezier(.6, .1, .3, 1) forwards; }
+@keyframes fx-enso { to { stroke-dashoffset: 60; } }
+.fx-ak-seal { position: absolute; left: calc(50% + 92px); top: calc(50% + 18px); width: 62px; height: 62px; display: grid; place-items: center;
+    background: #b8261c; color: #f6e7cf; font: 900 30px/1 "KaiTi", "楷体", serif; box-shadow: inset 0 0 0 3px #b8261c, inset 0 0 0 5px #f3e3c8; z-index: 3;
+    transform: rotate(-8deg); animation: fx-seal .35s 1.05s cubic-bezier(.3, 1.6, .5, 1) both; }
+@keyframes fx-seal { from { opacity: 0; transform: rotate(-8deg) scale(2.6); } to { opacity: 1; transform: rotate(-8deg) scale(1); } }
+/* 玻璃：磨砂圆角卡片 */
+.fx-ak-glass { position: absolute; left: 50%; top: 50%; width: 420px; height: 230px; margin: -115px 0 0 -210px; border-radius: 22px;
+    background: linear-gradient(160deg, rgba(255, 255, 255, .28), rgba(255, 255, 255, .06)); backdrop-filter: blur(14px) saturate(1.3);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .6), 0 20px 60px rgba(0, 0, 0, .35); animation: fx-banner-soft-ak .6s ease-out both; }
+@keyframes fx-banner-soft-ak { from { opacity: 0; transform: scale(.9); filter: blur(8px); } to { opacity: 1; transform: none; filter: none; } }
+/* 像素：棋盘闪烁 + PERFECT */
+.fx-ak-pixgrid { position: absolute; inset: 0; background: repeating-conic-gradient(rgba(255, 122, 60, .18) 0 25%, transparent 0 50%) 0 0 / 24px 24px; animation: fx-pixblink .4s steps(1) 6; }
+@keyframes fx-pixblink { 50% { opacity: 0; } }
+.fx-layer[data-skin="pixel"] .fx-ak-text { animation: fx-ak-pix .6s steps(3) .1s both; }
+@keyframes fx-ak-pix { from { transform: scale(3); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.fx-layer[data-skin="pixel"] .fx-ak-text::after { display: none; }
+/* 烈焰：熔岩脉冲 */
+.fx-ak-fire { position: absolute; left: 50%; top: 50%; width: 520px; height: 520px; margin: -260px 0 0 -260px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(255, 220, 120, .8) 0 6%, rgba(255, 110, 20, .55) 18%, rgba(200, 30, 0, .25) 38%, transparent 62%);
+    animation: fx-fire-pulse .5s ease-in-out infinite alternate, fx-fadein .4s both; mix-blend-mode: screen; }
+@keyframes fx-fire-pulse { from { transform: scale(.94); } to { transform: scale(1.08); } }
+/* 赛事转播：斜切色块转场 */
+.fx-ak-stinger i { position: absolute; top: -20%; bottom: -20%; width: 60%; transform: skewX(-18deg); animation: fx-sting 4s cubic-bezier(.7, 0, .2, 1) both; }
+.fx-ak-stinger i:nth-child(1) { left: -10%; background: rgb(var(--fx-team)); }
+.fx-ak-stinger i:nth-child(2) { left: 25%; background: #ffc62b; animation-delay: .06s; width: 12%; }
+.fx-ak-stinger i:nth-child(3) { left: 40%; background: #0c1220; animation-delay: .12s; width: 80%; }
+@keyframes fx-sting { 0% { transform: skewX(-18deg) translateX(-160%); } 14% { transform: skewX(-18deg) translateX(0); } 86% { transform: skewX(-18deg) translateX(0); } 100% { transform: skewX(-18deg) translateX(180%); } }
+/* 寒冰：旋转冰晶 + 结霜暗角 */
+.fx-ak-flake { position: absolute; left: 50%; top: 50%; width: 300px; height: 300px; margin: -150px 0 0 -150px; animation: fx-circle-in .7s cubic-bezier(.2, 1.4, .4, 1) both; }
+.fx-ak-flake svg { width: 100%; height: 100%; animation: fx-spin 14s linear infinite; filter: drop-shadow(0 0 8px rgba(140, 220, 255, .9)); }
+.fx-ak-frost { position: absolute; inset: 0; box-shadow: inset 0 0 60px 18px rgba(200, 245, 255, .55); animation: fx-fadein .6s both; }
+
+.kill-ak-mark.fx-ak-glow .kill-ak-symbol { animation: fx-ak-breathe 1.6s ease-in-out infinite; }
+@keyframes fx-ak-breathe { 0%, 100% { filter: drop-shadow(0 0 3px rgba(255, 196, 64, .5)); scale: 1; } 50% { filter: drop-shadow(0 0 12px rgba(255, 170, 30, 1)) brightness(1.4); scale: 1.12; } }

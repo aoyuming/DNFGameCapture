@@ -53,7 +53,7 @@ struct PlayerIdentityGroupRecord {
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"5.5.0"    //当前版本号
+#define CURRENT_VERSION L"5.5.1"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -221,6 +221,10 @@ public:
     std::string BuildKillDisplayStatePayload();
     std::string BuildKeyMappingStatePayload();
     bool SaveKillDisplaySettingsPayload(const std::string& requestBody, std::string& responseBody);
+    bool SaveKillDisplayBackgroundImage(const std::string& data, std::string& responseBody);
+    bool ClearKillDisplayBackgroundImage(std::string& responseBody);
+    bool ReadKillDisplayBackgroundImage(std::string& data, std::string& contentType);
+    CString GetKillDisplayBackgroundPath() const;
 
 protected:
     // 接收新窗口发来的 Web 指令
@@ -885,10 +889,11 @@ private:
     CString m_configPath;
     CString m_iniPath;
     CString m_outputDir;
-    CString m_webTheme = L"dark-esports";
+    CString m_webTheme = L"frost-broadcast";
     bool m_bOutputSeatLabelToKillFile = false;
     bool m_bPreferLocalAliasesOnSync = false;
     bool m_bRedPickFirst = false;
+    bool m_bSamePick45 = false;
 
     ULONG_PTR m_gdiplusToken;
     HINTERNET m_hHttpSession;

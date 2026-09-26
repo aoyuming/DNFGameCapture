@@ -29,8 +29,8 @@ if ($blockedStart -lt 0 -or $blockedEnd -le $blockedStart) {
     throw 'Unable to inspect the realtime Web action block list.'
 }
 $blockedBody = $source.Substring($blockedStart, $blockedEnd - $blockedStart)
-if (-not $blockedBody.Contains('cmd_swap')) {
-    throw 'The Web flip command is not blocked during realtime synchronization.'
+if ($blockedBody.Contains('cmd_swap')) {
+    throw 'The Web flip command must stay available during realtime synchronization.'
 }
 
 $flipStart = $source.IndexOf('void CDNFGameCaptureDlg::OnBnClickedFlip()')
@@ -39,8 +39,19 @@ if ($flipStart -lt 0 -or $flipEnd -le $flipStart) {
     throw 'Unable to inspect the native flip handler.'
 }
 $flipBody = $source.Substring($flipStart, $flipEnd - $flipStart)
-if (-not $flipBody.Contains('RejectLocalMatchEditWhileRealtime()')) {
-    throw 'The native flip handler is not blocked during realtime synchronization.'
+if ($flipBody.Contains('RejectLocalMatchEditWhileRealtime()')) {
+    throw 'The native flip handler must not be blocked during realtime synchronization.'
 }
+Require-Text $flipBody 'if (m_cloudRealtimeFollowing) {' `
+    'The native flip handler must not advance the match mutation epoch during realtime synchronization.'
 
-Write-Host 'Realtime local flip lock static checks passed.'
+$lockStart = $source.IndexOf('void CDNFGameCaptureDlg::ApplyRealtimeEditingLock()')
+$lockEnd = $source.IndexOf('bool CDNFGameCaptureDlg::RejectLocalMatchEditWhileRealtime()', $lockStart)
+if ($lockStart -lt 0 -or $lockEnd -le $lockStart) {
+    throw 'Unable to inspect the realtime editing lock.'
+}
+$lockBody = $source.Substring($lockStart, $lockEnd - $lockStart)
+Require-Text $lockBody 'm_chkFlip.EnableWindow(TRUE)' `
+    'The professional-mode flip checkbox must stay enabled during realtime synchronization.'
+
+Write-Host 'Realtime local flip static checks passed.'

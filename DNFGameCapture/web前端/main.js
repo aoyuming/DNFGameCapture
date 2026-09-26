@@ -15,6 +15,8 @@ let deathXAlgorithm = 0;
 let deathPatchInstalled = false;
 let outputSeatLabelToKillFile = false;
 let preferLocalAliases = false;
+// 红队后选时，红队的 4、5 选可改为“同选”（本机设置，C++ 保存并用于击杀.txt）。
+let samePick45 = false;
 let redPickMode = 'second';
 let scoreboardTextStyles = {};
 let killDisplaySettings = {};
@@ -87,7 +89,7 @@ let pendingAliasPopoverName = '';
 let pendingAliasPopoverInput = null;
 let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
-const WEB_LAYOUT_VERSION = '20260925-5.5.0-sync-sidebar-1';
+const WEB_LAYOUT_VERSION = '20260927-5.5.1-mvp-name-1';
 const ALIAS_POPOVER_OFFSET_X = 8;
 const CLOUD_MATCH_WEB_THEMES = new Set([
     'dark-esports', 'frost-broadcast', 'black-gold'
@@ -143,7 +145,13 @@ function applyRealtimeReadOnlyState() {
         input.disabled = locked;
         input.setAttribute('aria-disabled', String(locked));
     });
-    document.querySelectorAll('#btn-swap, #btn-reset, #btn-clear-teams, #btn-random-apply, .identity-link-button').forEach(button => {
+    // 翻转红蓝只改变本机显示方向，实时同步期间保持可用。
+    const swapButton = document.getElementById('btn-swap');
+    if (swapButton) {
+        swapButton.disabled = false;
+        swapButton.removeAttribute('aria-disabled');
+    }
+    document.querySelectorAll('#btn-reset, #btn-clear-teams, #btn-random-apply, .identity-link-button').forEach(button => {
         button.disabled = locked;
         button.setAttribute('aria-disabled', String(locked));
     });
@@ -787,6 +795,16 @@ function openAliasPopover(inputElem, playerName, options = {}) {
 
 function alignAliasPopoverToAnchor(popElement) {
     const row = popElement?.closest('.player-row');
+    // 游戏ID / 别名列表的左边对齐选手名称输入框的右边
+    const nameInput = row?.querySelector('.name-wrapper .name-input');
+    const parent = popElement?.offsetParent;
+    if (nameInput && parent && nameInput.offsetWidth) {
+        const parentRect = parent.getBoundingClientRect();
+        const scale = parentRect.width / parent.offsetWidth || 1;
+        const inputRight = nameInput.getBoundingClientRect().right;
+        popElement.style.left = `${Math.round((inputRight - parentRect.left) / scale - parent.clientLeft)}px`;
+        return;
+    }
     const identityLink = row?.querySelector('.identity-link-button');
     const dragHandle = row?.querySelector('.drag-handle');
     if (!popElement || (!identityLink && !dragHandle)) return;
@@ -1220,7 +1238,38 @@ function displayPickChoiceLabel(value) {
 function getPickLabelsForTeam(teamId) {
     const mode = normalizeRedPickMode(redPickMode);
     const side = teamId === 0 ? 'red' : 'blue';
-    return PICK_LABEL_SEQUENCES[mode][side];
+    const labels = PICK_LABEL_SEQUENCES[mode][side];
+    if (samePick45 && mode === 'second' && side === 'red') {
+        return labels.map(label => (label === '4选' || label === '5选') ? '同选' : label);
+    }
+    return labels;
+}
+
+function isSamePickSeatRow(row) {
+    return !!row && getSeatTeamId(row) === 0 &&
+        normalizeRedPickMode(redPickMode) === 'second' &&
+        [2, 3].includes(getSeatRowIndex(row));
+}
+
+// 红队后选时，直接点击红队 4 选 / 5 选徽标即可在“4选、5选”和“同选”之间切换。
+function updateSamePick45Toggle() {
+    getTeamRows(0).forEach(row => {
+        const input = getSeatLabelInput(row);
+        if (!input) return;
+        const toggleable = isSamePickSeatRow(row);
+        input.classList.toggle('same-pick-toggleable', toggleable);
+        input.title = toggleable
+            ? (samePick45 ? '点击恢复为 4 选 / 5 选' : '点击把 4 选、5 选改为同选')
+            : '按先后手自动生成';
+    });
+}
+
+function setSamePick45(enabled) {
+    if (cloudMatchState?.realtimeFollowing === true) return;
+    if (normalizeRedPickMode(redPickMode) !== 'second') return;
+    samePick45 = !!enabled;
+    refreshPickLabels();
+    window.chrome?.webview?.postMessage({ action: 'cmd_set_same_pick_45', enabled: samePick45 });
 }
 
 function getPickLabelForRow(row) {
@@ -1268,6 +1317,7 @@ function refreshPickLabels() {
             }
         });
     });
+    updateSamePick45Toggle();
 }
 
 function postRedPickModeToServer() {
@@ -1386,8 +1436,26 @@ const KILL_DISPLAY_LAYOUT_DEFAULTS = {
     akMarkOffsetX: 2,
     akMarkOffsetY: 0,
     akCountBadgeOffsetX: 12,
-    akCountBadgeOffsetY: -26
+    akCountBadgeOffsetY: -26,
+    skin: 0,
+    bgImageRev: 0,
+    bgImageScale: 100,
+    bgImageX: 0,
+    bgImageY: 0,
+    bgImageOpacity: 100,
+    fxEnabled: 1
 };
+
+// 由击杀展示窗口右上角「界面风格」面板维护的字段：主窗口不编辑，但保存时必须原样保留。
+const KILL_DISPLAY_LAYOUT_PASSTHROUGH_FIELDS = [
+    { key: 'skin', min: 0, max: 8 },
+    { key: 'bgImageRev', min: 0, max: 2147483647 },
+    { key: 'bgImageScale', min: 10, max: 400 },
+    { key: 'bgImageX', min: -3000, max: 3000 },
+    { key: 'bgImageY', min: -3000, max: 3000 },
+    { key: 'bgImageOpacity', min: 0, max: 100 },
+    { key: 'fxEnabled', min: 0, max: 1 }
+];
 
 const KILL_DISPLAY_LAYOUT_FIELDS = [
     { key: 'bgAlpha', label: '背景透明度', min: 0, max: 100, unit: '%' },
@@ -1449,14 +1517,14 @@ const KILL_DISPLAY_TEXT_STYLE_TYPES = [
         cssKey: 'header',
         label: '表头',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 31, colorMode: 'custom', color: '#a9abb9', strokeColor: '#000000', strokeWidth: 2, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'FZXS24', fontSize: 31, colorMode: 'custom', color: '#c9a86a', strokeColor: '#000000', strokeWidth: 2, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'pickLabel',
         cssKey: 'pick-label',
         label: '选人顺序',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Arial Black', fontSize: 27, colorMode: 'custom', color: '#6fc8b9', strokeColor: '#000000', strokeWidth: 3, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'FZXS24', fontSize: 27, colorMode: 'custom', color: '#6fc8b9', strokeColor: '#000000', strokeWidth: 3, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'playerName',
@@ -1623,6 +1691,9 @@ function normalizeKillDisplayLayout(layout = {}) {
             : clampNumber(layout?.[field.key], field.min, field.max, KILL_DISPLAY_LAYOUT_DEFAULTS[field.key]);
     });
     normalized.showDeathNumber = clampNumber(layout?.showDeathNumber, 0, 1, KILL_DISPLAY_LAYOUT_DEFAULTS.showDeathNumber) ? 1 : 0;
+    KILL_DISPLAY_LAYOUT_PASSTHROUGH_FIELDS.forEach(field => {
+        normalized[field.key] = clampNumber(layout?.[field.key], field.min, field.max, KILL_DISPLAY_LAYOUT_DEFAULTS[field.key]);
+    });
     return normalized;
 }
 
@@ -3000,45 +3071,84 @@ function appendBroadcasterRelation(container, text, kind = '') {
     container.appendChild(tag);
 }
 
+function cloudBroadcasterVersionText(member) {
+    const raw = String(member?.clientVersion || '').trim();
+    if (!raw) return '';
+    const clean = raw.replace(/[^0-9A-Za-z._+-]/g, '').slice(0, 24);
+    return clean ? (/^v/i.test(clean) ? clean : `v${clean}`) : '';
+}
+
+function setTextIfChanged(node, text) {
+    if (node && node.textContent !== text) node.textContent = text;
+}
+
 function buildBroadcasterCard(member) {
     const button = document.createElement('button');
-    const deviceId = String(member?.deviceId || '');
-    const hasSnapshot = Number(member?.snapshotRevision || 0) > 0;
     button.type = 'button';
-    button.className = `broadcaster-card ${member?.online ? 'online' : 'offline'}`;
-    button.dataset.deviceId = deviceId;
-    button.disabled = !hasSnapshot;
-
     const heading = document.createElement('span');
     heading.className = 'broadcaster-card-heading';
     const dot = document.createElement('span');
     dot.className = 'broadcaster-presence-dot';
     const name = document.createElement('span');
     name.className = 'broadcaster-card-name';
-    name.textContent = String(member?.broadcasterName || '未命名主播');
-    name.title = name.textContent;
-    heading.append(dot, name);
-
+    const version = document.createElement('span');
+    version.className = 'broadcaster-card-version';
+    heading.append(dot, name, version);
     const meta = document.createElement('span');
     meta.className = 'broadcaster-card-meta';
-    meta.textContent = hasSnapshot
-        ? `${member?.online ? '在线' : cloudOfflineElapsed(member?.offlineExpiresAt)} · 更新 ${cloudBroadcasterTime(member?.receivedAt)}`
-        : `${member?.online ? '在线' : cloudOfflineElapsed(member?.offlineExpiresAt)} · 暂无比赛快照`;
-    meta.title = member?.online ? meta.textContent : `${meta.textContent} · 离线数据保留 24 小时`;
-
     const relations = document.createElement('span');
     relations.className = 'broadcaster-card-relations';
-    const summary = cloudRelationSummary(deviceId);
-    if (summary.syncedBy.length) appendBroadcasterRelation(relations,
-        `被 ${summary.syncedBy.join('、')} 同步过`);
-    if (summary.realtimeViewers.length) appendBroadcasterRelation(relations,
-        `正在被 ${summary.realtimeViewers.join('、')} 实时同步`, 'live');
-    if (summary.realtimeTargets.length) appendBroadcasterRelation(relations,
-        `正在实时同步 ${summary.realtimeTargets.join('、')}`, 'following');
-    if (!relations.childElementCount) appendBroadcasterRelation(relations, '暂无同步关系', 'muted');
-
     button.append(heading, meta, relations);
+    updateBroadcasterCard(button, member);
     return button;
+}
+
+// 只修改有变化的属性和文字，保留卡片节点（以及侧栏注入的头像），刷新时不会闪烁。
+function updateBroadcasterCard(button, member) {
+    const deviceId = String(member?.deviceId || '');
+    const hasSnapshot = Number(member?.snapshotRevision || 0) > 0;
+    const online = member?.online === true;
+    button.dataset.deviceId = deviceId;
+    button.classList.add('broadcaster-card');
+    button.classList.toggle('online', online);
+    button.classList.toggle('offline', !online);
+    if (button.disabled !== !hasSnapshot) button.disabled = !hasSnapshot;
+
+    const name = button.querySelector('.broadcaster-card-name');
+    const nameText = String(member?.broadcasterName || '未命名主播');
+    setTextIfChanged(name, nameText);
+    if (name && name.title !== nameText) name.title = nameText;
+
+    const version = button.querySelector('.broadcaster-card-version');
+    const versionText = cloudBroadcasterVersionText(member);
+    setTextIfChanged(version, versionText);
+    if (version) {
+        version.hidden = !versionText;
+        const versionTitle = versionText ? `软件版本 ${versionText}` : '';
+        if (version.title !== versionTitle) version.title = versionTitle;
+    }
+
+    const meta = button.querySelector('.broadcaster-card-meta');
+    const metaText = hasSnapshot
+        ? `${online ? '在线' : cloudOfflineElapsed(member?.offlineExpiresAt)} · 更新 ${cloudBroadcasterTime(member?.receivedAt)}`
+        : `${online ? '在线' : cloudOfflineElapsed(member?.offlineExpiresAt)} · 暂无比赛快照`;
+    setTextIfChanged(meta, metaText);
+    const metaTitle = online ? metaText : `${metaText} · 离线数据保留 24 小时`;
+    if (meta && meta.title !== metaTitle) meta.title = metaTitle;
+
+    const relations = button.querySelector('.broadcaster-card-relations');
+    const summary = cloudRelationSummary(deviceId);
+    const tags = [];
+    if (summary.syncedBy.length) tags.push([`被 ${summary.syncedBy.join('、')} 同步过`, '']);
+    if (summary.realtimeViewers.length) tags.push([`正在被 ${summary.realtimeViewers.join('、')} 实时同步`, 'live']);
+    if (summary.realtimeTargets.length) tags.push([`正在实时同步 ${summary.realtimeTargets.join('、')}`, 'following']);
+    if (!tags.length) tags.push(['暂无同步关系', 'muted']);
+    const signature = JSON.stringify(tags);
+    if (relations && relations.dataset.signature !== signature) {
+        relations.dataset.signature = signature;
+        relations.replaceChildren();
+        tags.forEach(([text, kind]) => appendBroadcasterRelation(relations, text, kind));
+    }
 }
 
 function renderBroadcasterSidebar() {
@@ -3068,16 +3178,41 @@ function renderBroadcasterSidebar() {
     const offlineCount = members.length - onlineCount;
     const list = document.getElementById('broadcaster-list');
     if (list) {
-        list.replaceChildren();
         if (!members.length) {
-            const empty = document.createElement('div');
-            empty.className = 'broadcaster-list-empty';
-            empty.textContent = state.connected
+            const emptyText = state.connected
                 ? '暂无其他在线或最近离线主播'
                 : '连接云端后显示主播列表';
-            list.appendChild(empty);
+            const existingEmpty = list.childElementCount === 1 ? list.querySelector(':scope > .broadcaster-list-empty') : null;
+            if (existingEmpty) {
+                setTextIfChanged(existingEmpty, emptyText);
+            } else {
+                const empty = document.createElement('div');
+                empty.className = 'broadcaster-list-empty';
+                empty.textContent = emptyText;
+                list.replaceChildren(empty);
+            }
         } else {
-            members.forEach(member => list.appendChild(buildBroadcasterCard(member)));
+            // 按 deviceId 复用已有卡片，只在顺序变化时移动节点，避免整表重建造成闪烁
+            const existing = new Map();
+            list.querySelectorAll(':scope > .broadcaster-card').forEach(card => existing.set(card.dataset.deviceId || '', card));
+            list.querySelectorAll(':scope > :not(.broadcaster-card)').forEach(node => node.remove());
+            let cursor = list.firstElementChild;
+            members.forEach(member => {
+                const id = String(member?.deviceId || '');
+                let card = existing.get(id);
+                if (card) {
+                    existing.delete(id);
+                    updateBroadcasterCard(card, member);
+                } else {
+                    card = buildBroadcasterCard(member);
+                }
+                if (card === cursor) {
+                    cursor = cursor.nextElementSibling;
+                } else {
+                    list.insertBefore(card, cursor);
+                }
+            });
+            existing.forEach(card => card.remove());
         }
     }
     const listCount = document.getElementById('broadcaster-list-count');
@@ -4413,6 +4548,7 @@ function applyStateFromServer(state) {
     const teamsWrap = document.getElementById('teams-wrap') || document.getElementById('main-container');
     teamsWrap.style.flexDirection = state.isFlipped ? 'row-reverse' : 'row';
 
+    samePick45 = !!state.samePick45;
     setRedPickMode(state.redPickMode || (state.redPickFirst === false ? 'second' : 'first'), false);
 
     outputSeatLabelToKillFile = !!state.outputSeatLabelToKillFile;
@@ -6106,6 +6242,17 @@ function createPlayerRow(seatNumber = '') {
     seatInput.addEventListener('focus', function () {
         nameInput.focus();
     });
+    const nameWrapper = row.querySelector('.name-wrapper');
+    nameWrapper.addEventListener('mousedown', function (event) {
+        if (event.button !== 0 || nameInput.disabled) return;
+        const target = event.target;
+        if (target === nameInput) return;
+        if (target !== nameWrapper && !target.closest?.('.rd-mvp, .rd-kd')) return;
+        event.preventDefault();
+        nameInput.focus();
+        const end = nameInput.value.length;
+        try { nameInput.setSelectionRange(end, end); } catch (err) { /* ignore */ }
+    });
     const seatToggle = row.querySelector('.seat-label-toggle');
     seatToggle.addEventListener('click', function () {
         togglePickModeForRow(row, true);
@@ -6912,7 +7059,9 @@ document.addEventListener('click', (e) => {
         e.target.closest('.more-controls-wrap') ||
         e.target.closest('.more-controls-menu') ||
         e.target.classList.contains('name-input') ||
-        e.target.classList.contains('gear-btn')
+        e.target.classList.contains('gear-btn') ||
+        // 在名字后面按下、松开时落在名字框外（同一名字区域内）也算点名字，不能把刚打开的游戏ID列表关掉。
+        (e.target.closest('.name-wrapper') && !e.target.closest('button, .drag-handle, .seat-label-input'))
     ) return;
     setMoreControlsOpen(false);
     document.querySelectorAll('.popover').forEach(p => p.classList.remove('active'));
@@ -6928,7 +7077,7 @@ document.addEventListener('input', (e) => {
 });
 
 document.getElementById('btn-swap').addEventListener('click', () => {
-    if (cloudMatchState?.realtimeFollowing === true) return;
+    // 翻转红蓝只改变本机显示方向，实时同步期间也允许点击。
     window.chrome.webview.postMessage({ action: "cmd_swap" });
 });
 document.getElementById('btn-random-teams')?.addEventListener('click', openRandomTool);
@@ -7269,6 +7418,14 @@ document.getElementById('output-seat-label-toggle')?.addEventListener('change', 
     if (window.chrome?.webview) {
         window.chrome.webview.postMessage({ action: 'cmd_set_output_seat_label', enabled: outputSeatLabelToKillFile });
     }
+});
+document.addEventListener('click', event => {
+    const seat = event.target.closest?.('.seat-label-input.same-pick-toggleable, .rd-seat.rd-seat-toggle');
+    if (!seat) return;
+    const row = seat.closest('.player-row');
+    if (!isSamePickSeatRow(row)) return;
+    event.preventDefault();
+    setSamePick45(!samePick45);
 });
 document.getElementById('prefer-local-aliases-toggle')?.addEventListener('change', function () {
     preferLocalAliases = !!this.checked;
@@ -7644,3 +7801,483 @@ window.addEventListener('resize', requestWebWindowResize);
 window.addEventListener('resize', layoutActiveAliasPopovers);
 setInterval(() => renderBroadcasterSidebar(), 30 * 1000);
 setTimeout(() => scheduleLayoutFit(true, 'startup-300ms'), 300);
+
+// ==========================================================================
+// UI 重设计 v2（2026-09-26）
+// 只读取现有 DOM 与全局状态，不修改比赛数据；新增的窗口按钮只发送
+// cmd_web_window_drag / cmd_web_window_minimize / cmd_web_window_close，
+// 由 WebScoreDlg 在本窗口内直接处理。
+// ==========================================================================
+(function initRedesignUi() {
+    const RD_REFRESH_MS = 500;
+    const RD_AVATAR_COLORS = ['#e5484d', '#3b82f6', '#8b5cf6', '#10b981', '#f59e0b', '#ec4899', '#06b6d4', '#6366f1'];
+    let rdRunningSince = 0;
+    let rdLastFeedSignature = '';
+    let rdContrastKey = '';
+
+    function rdText(value) {
+        return String(value ?? '').replace(/[&<>"']/g, ch => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[ch]));
+    }
+
+    function rdIcon(name) {
+        return `<svg class="rd-i" aria-hidden="true"><use href="#rd-i-${name}"/></svg>`;
+    }
+
+    function rdNumber(input) {
+        const n = parseInt(input?.value, 10);
+        return Number.isFinite(n) ? n : 0;
+    }
+
+    function rdPost(action) {
+        try { window.chrome?.webview?.postMessage({ action }); } catch (_) { /* 浏览器预览时无宿主 */ }
+    }
+
+    function rdFormatDuration(ms) {
+        const total = Math.max(0, Math.floor(ms / 1000));
+        const h = String(Math.floor(total / 3600)).padStart(2, '0');
+        const m = String(Math.floor(total / 60) % 60).padStart(2, '0');
+        const s = String(total % 60).padStart(2, '0');
+        return `${h}:${m}:${s}`;
+    }
+
+    // ---------- 按钮图标（main.js 每次刷新状态都会重写这些按钮的内容） ----------
+    function rdDecorateButton(btn, build) {
+        if (!btn) return;
+        const apply = () => {
+            if (btn.dataset.rdSig && btn.innerHTML === btn.dataset.rdSig) return;
+            const html = build(btn.textContent.replace(/\s+/g, ' ').trim(), btn);
+            if (html !== null && html !== undefined) btn.innerHTML = html;
+            btn.dataset.rdSig = btn.innerHTML;
+        };
+        apply();
+        new MutationObserver(apply).observe(btn, { childList: true, characterData: true, subtree: true });
+    }
+
+    rdDecorateButton(document.getElementById('btn-monitor'), text => {
+        if (text.includes('实时同步')) return `${rdIcon('lock')}<span>实时同步中</span>`;
+        if (text.includes('OCR') || text.includes('开启')) return `${rdIcon('wait')}<span>OCR 启动中…</span>`;
+        if (text.includes('停止')) return `${rdIcon('stop')}<span>停止识别</span>`;
+        return `${rdIcon('play')}<span>开始识别</span>`;
+    });
+
+    rdDecorateButton(document.getElementById('btn-pro'), text =>
+        text.includes('隐藏') ? `${rdIcon('eye-off')}<span>隐藏专业</span>` : `${rdIcon('crown')}<span>专业模式</span>`);
+
+    rdDecorateButton(document.getElementById('btn-auth'), (text, btn) => {
+        const color = (btn.style.color || '').replace(/\s/g, '').toLowerCase();
+        const bad = color === '#ff0055' || color === 'rgb(255,0,85)';
+        btn.classList.toggle('rd-auth-bad', bad);
+        let short = btn.querySelector('.auth-short');
+        if (!short) {
+            short = document.createElement('span');
+            short.className = 'auth-short';
+            short.textContent = text.replace(/^🔑\s*/, '') || '授权';
+            btn.textContent = '';
+            btn.appendChild(short);
+        }
+        const value = short.textContent.trim();
+        short.dataset.rdPrefix = (!bad && value && !/授权|激活|试用/.test(value)) ? '已授权 · ' : (bad && value && !/授权|激活/.test(value) ? '授权 · ' : '');
+        btn.querySelector('.rd-auth-icon')?.remove();
+        btn.insertAdjacentHTML('afterbegin', `<svg class="rd-i rd-auth-icon" aria-hidden="true"><use href="#rd-i-${bad ? 'shield-x' : 'shield'}"/></svg>`);
+        return null;
+    });
+
+    // 默认使用晨光简约；C++ 推送已保存的主题后会以保存值为准。
+    if (typeof applyWebTheme === 'function' && document.documentElement.dataset.theme === 'dark-esports') {
+        applyWebTheme('frost-broadcast');
+    }
+
+    // ---------- 顶栏：版本、风格切换、日志、窗口控制与拖动 ----------
+    const version = document.getElementById('rd-version');
+    if (version) {
+        const match = String(typeof WEB_LAYOUT_VERSION !== 'undefined' ? WEB_LAYOUT_VERSION : '').match(/(\d+\.\d+\.\d+)/);
+        version.textContent = match ? `v${match[1]}` : '';
+    }
+
+    // 外观面板里的主题下拉框与顶栏切换使用同一套名称（value 不变）。
+    const rdThemeNames = { 'dark-esports': '夜幕导播台', 'frost-broadcast': '晨光简约', 'black-gold': '阿拉德金纹' };
+    document.querySelectorAll('#web-theme-select option').forEach(option => {
+        if (rdThemeNames[option.value]) option.textContent = rdThemeNames[option.value];
+    });
+
+    document.querySelectorAll('#rd-theme-switch [data-rd-theme]').forEach(button => {
+        button.addEventListener('click', () => {
+            const value = button.dataset.rdTheme;
+            const select = document.getElementById('web-theme-select');
+            if (select) {
+                select.value = value;
+                select.dispatchEvent(new Event('change', { bubbles: true }));
+            } else if (typeof applyWebTheme === 'function') {
+                applyWebTheme(value);
+            }
+            rdRefresh();
+        });
+    });
+
+    // 名字后面的空白、MVP 标签、击杀条都属于“名字区域”：按下时把焦点交给名字框，
+    // 这样点名字后面也能稳定打开游戏ID / 别名列表，而不是一闪而过。
+    document.addEventListener('mousedown', event => {
+        if (event.button !== 0) return;
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+        if (target.closest('button, input, .drag-handle, .popover, .rd-seat')) return;
+        const wrapper = target.closest('.player-row .name-wrapper');
+        if (!wrapper) return;
+        const input = wrapper.querySelector('.name-input');
+        if (!input || input.disabled) return;
+        event.preventDefault();
+        if (document.activeElement !== input) input.focus();
+        else if (input.value.trim()) input.click();
+    }, true);
+
+    document.getElementById('rd-btn-stop-realtime')?.addEventListener('click', () => {
+        rdPost('cmd_cloud_realtime_stop');
+    });
+
+    document.getElementById('rd-btn-console')?.addEventListener('click', () => {
+        document.getElementById('btn-console-open')?.click();
+    });
+
+    document.getElementById('rd-win-min')?.addEventListener('click', () => rdPost('cmd_web_window_minimize'));
+    document.getElementById('rd-win-close')?.addEventListener('click', () => rdPost('cmd_web_window_close'));
+    document.getElementById('rd-topbar')?.addEventListener('mousedown', event => {
+        if (event.button !== 0) return;
+        if (event.target.closest('button, input, select, textarea, a, label, [data-auth-tooltip]')) return;
+        event.preventDefault();
+        rdPost('cmd_web_window_drag');
+    });
+
+    // ---------- 状态 ----------
+    function rdMonitorState() {
+        const monitor = document.getElementById('btn-monitor');
+        if (!monitor) return 'stopped';
+        if (monitor.classList.contains('btn-monitor-disabled')) return 'locked';
+        if (monitor.classList.contains('btn-monitor-pending')) return 'pending';
+        if (monitor.classList.contains('btn-monitor-stop')) return 'running';
+        return 'stopped';
+    }
+
+    function rdUpdateStatus() {
+        const state = rdMonitorState();
+        if (state === 'running') {
+            if (!rdRunningSince) rdRunningSince = Date.now();
+        } else {
+            rdRunningSince = 0;
+        }
+        const text = { running: '识别中', pending: 'OCR 启动中', locked: '实时同步中', stopped: '未运行' }[state];
+        const pill = document.getElementById('rd-status');
+        if (pill) pill.dataset.state = state;
+        const label = document.getElementById('rd-status-text');
+        if (label) label.textContent = text;
+        const extra = document.getElementById('rd-status-extra');
+        if (extra) extra.textContent = state === 'running' ? rdFormatDuration(Date.now() - rdRunningSince) : '';
+
+        const sb = document.getElementById('rd-sb-state');
+        if (sb) sb.dataset.state = state;
+        const sbText = document.getElementById('rd-sb-state-text');
+        if (sbText) sbText.textContent = `识别：${text}`;
+
+        const theme = document.documentElement.dataset.theme;
+        document.querySelectorAll('#rd-theme-switch [data-rd-theme]').forEach(button => {
+            button.classList.toggle('is-active', button.dataset.rdTheme === theme);
+        });
+    }
+
+    // ---------- 选手行 ----------
+    function rdAliasesFor(name) {
+        if (!name || typeof playerDB === 'undefined' || !playerDB) return [];
+        const list = playerDB[name];
+        return Array.isArray(list) ? list.filter(Boolean) : [];
+    }
+
+    function rdEnsure(wrapper, cls, tag, where) {
+        let el = wrapper.querySelector(`:scope > .${cls}`);
+        if (!el) {
+            el = document.createElement(tag);
+            el.className = cls;
+            el.setAttribute('aria-hidden', 'true');
+            if (where) where(el); else wrapper.appendChild(el);
+        }
+        return el;
+    }
+
+    // MVP 角标放到选手名文字的正上方（按实际文字宽度居中）
+    let rdMeasureCtx = null;
+    function rdPlaceMvp(nameInput, mvp) {
+        const cs = getComputedStyle(nameInput);
+        if (!rdMeasureCtx) rdMeasureCtx = document.createElement('canvas').getContext('2d');
+        rdMeasureCtx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+        const padL = parseFloat(cs.paddingLeft) || 0;
+        const padR = parseFloat(cs.paddingRight) || 0;
+        const inner = Math.max(0, nameInput.clientWidth - padL - padR);
+        const textWidth = Math.min(rdMeasureCtx.measureText(nameInput.value || '').width, inner);
+        const left = `${Math.round(nameInput.offsetLeft + nameInput.clientLeft + padL + textWidth / 2)}px`;
+        const top = `${Math.round(nameInput.offsetTop - mvp.offsetHeight - 2)}px`;
+        if (mvp.style.left !== left) mvp.style.left = left;
+        if (mvp.style.top !== top) mvp.style.top = top;
+    }
+
+    function rdSeatLabel(row) {
+        const toggle = row.querySelector('.seat-label-toggle');
+        if (toggle && !toggle.hidden) return (toggle.textContent || '').trim();
+        const input = row.querySelector('.seat-label-input');
+        return (input && !input.hidden ? input.value : '').trim();
+    }
+
+    function rdTeamIsFirst(teamEl) {
+        const top = teamEl?.querySelector('.player-row .seat-label-toggle');
+        return !!top && (top.textContent || '').includes('先');
+    }
+
+    function rdUpdateRows() {
+        const rows = Array.from(document.querySelectorAll('#team-red .player-row, #team-blue .player-row'));
+        let topKills = 0;
+        let topCount = 0;
+        const info = rows.map(row => {
+            const name = (row.querySelector('.name-input')?.value || '').trim();
+            const kills = rdNumber(row.querySelector('.stat-kill'));
+            const deaths = rdNumber(row.querySelector('.stat-death'));
+            if (name && kills > topKills) { topKills = kills; topCount = 1; }
+            else if (name && kills > 0 && kills === topKills) topCount += 1;
+            return { row, name, kills, deaths };
+        });
+        const firstSide = {
+            red: rdTeamIsFirst(document.getElementById('team-red')),
+            blue: rdTeamIsFirst(document.getElementById('team-blue'))
+        };
+
+        info.forEach(({ row, name, kills, deaths }) => {
+            const wrapper = row.querySelector('.name-wrapper');
+            const nameInput = row.querySelector('.name-input');
+            if (!wrapper || !nameInput) return;
+            const side = row.closest('#team-red') ? 'red' : 'blue';
+
+            // 座位徽标
+            const seat = rdEnsure(wrapper, 'rd-seat', 'span', el => wrapper.prepend(el));
+            const label = rdSeatLabel(row);
+            const big = label.replace(/选$/, '') || '-';
+            const seatHtml = `${rdText(big)}<small>选</small>`;
+            if (seat.dataset.rdHtml !== seatHtml) { seat.innerHTML = seatHtml; seat.dataset.rdHtml = seatHtml; }
+            wrapper.classList.toggle('rd-first', firstSide[side]);
+            const seatToggle = typeof isSamePickSeatRow === 'function' && isSamePickSeatRow(row);
+            seat.classList.toggle('rd-seat-toggle', seatToggle);
+            if (seatToggle) seat.title = row.querySelector('.seat-label-input')?.title || '';
+            else seat.removeAttribute('title');
+
+            if (!nameInput.getAttribute('placeholder')) nameInput.setAttribute('placeholder', '输入选手名 / 游戏ID');
+            row.classList.toggle('rd-empty', !name);
+
+            // MVP
+            const mvp = rdEnsure(wrapper, 'rd-mvp', 'span', el => nameInput.insertAdjacentElement('afterend', el));
+            mvp.textContent = 'MVP';
+            mvp.hidden = !(name && topKills > 0 && topCount === 1 && kills === topKills);
+            if (!mvp.hidden) rdPlaceMvp(nameInput, mvp);
+
+            // 游戏ID标签不再显示在名字下方（空间留给选手名称）
+            wrapper.querySelector(':scope > .rd-ids')?.remove();
+
+            // 击杀占比条已取消（名字下方不再显示进度条）
+            wrapper.querySelector(':scope > .rd-kd')?.remove();
+
+            // 击杀高亮
+            const previous = row.dataset.rdKills;
+            row.dataset.rdKills = String(kills);
+            if (previous !== undefined && kills > Number(previous)) {
+                row.classList.remove('rd-hit');
+                void row.offsetWidth;
+                row.classList.add('rd-hit');
+                setTimeout(() => row.classList.remove('rd-hit'), 1700);
+            }
+        });
+
+        // 比分横幅副标题与局数
+        ['red', 'blue'].forEach(side => {
+            const team = document.getElementById(`team-${side}`);
+            const label = team?.querySelector('.team-name-label');
+            if (!label) return;
+            const teamRows = info.filter(item => item.row.closest(`#team-${side}`));
+            const filled = teamRows.filter(item => item.name).length;
+            const kills = teamRows.reduce((sum, item) => sum + item.kills, 0);
+            const sub = `${filled} / ${teamRows.length || 4} 人 · 击杀 ${kills} · ${firstSide[side] ? '先手' : '后手'}`;
+            if (label.dataset.rdSub !== sub) label.dataset.rdSub = sub;
+        });
+        const container = document.getElementById('main-container');
+        if (container) {
+            const red = rdNumber(document.querySelector('#team-red .team-score-input'));
+            const blue = rdNumber(document.querySelector('#team-blue .team-score-input'));
+            const round = `第 ${red + blue + 1} 局`;
+            if (container.dataset.rdRound !== round) container.dataset.rdRound = round;
+        }
+    }
+
+    // ---------- 击杀动态 ----------
+    function rdSideOf(name) {
+        const clean = String(name || '').trim();
+        if (!clean) return '';
+        for (const input of document.querySelectorAll('#team-red .name-input')) if (input.value.trim() === clean) return 'red';
+        for (const input of document.querySelectorAll('#team-blue .name-input')) if (input.value.trim() === clean) return 'blue';
+        return '';
+    }
+
+    function rdUpdateFeed() {
+        const list = document.getElementById('rd-feed-list');
+        if (!list) return;
+        const events = (typeof recentEvents !== 'undefined' && Array.isArray(recentEvents)) ? recentEvents : [];
+        const top = events.slice(0, 60);
+        const count = document.getElementById('rd-feed-count');
+        if (count) count.textContent = events.length ? `${events.length} 条` : '';
+        const signature = JSON.stringify(top.map(ev => [ev.id, ev.killer, ev.dead, ev.undone, ev.time])) + '|' +
+            Array.from(document.querySelectorAll('.name-input')).map(i => i.value).join(',');
+        if (signature === rdLastFeedSignature) return;
+        rdLastFeedSignature = signature;
+        if (!top.length) {
+            list.innerHTML = '<div class="rd-feed-empty">暂无击杀记录</div>';
+            return;
+        }
+        list.innerHTML = top.map(ev => {
+            const killer = ev.killer || '待定';
+            const dead = ev.dead || '待定';
+            const ks = rdSideOf(killer);
+            const ds = rdSideOf(dead);
+            const time = String(ev.time || '--:--').replace(/^(\d{2}):(\d{2}):(\d{2})$/, '$1:$2:$3');
+            return `<div class="rd-feed-item${ev.undone ? ' rd-undone' : ''}">`
+                + `<span class="rd-feed-time">${rdText(time)}</span>`
+                + `<span class="rd-feed-name${ks ? ` rd-side-${ks}` : ''}" title="${rdText(killer)}">${rdText(killer)}</span>`
+                + rdIcon('sword')
+                + `<span class="rd-feed-name${ds ? ` rd-side-${ds}` : ''}" title="${rdText(dead)}">${rdText(dead)}</span>`
+                + '</div>';
+        }).join('');
+    }
+
+    // ---------- 状态栏 / 主播头像 / 对比度 ----------
+    // 选手库统计：savedDB 是完整库，playerDB 是本次会话新增/编辑的部分；两者合并去重。
+    let rdLibStatsCache = { saved: null, sessionSig: '', result: { players: 0, ids: 0 } };
+    function rdLibraryStats() {
+        const saved = (typeof savedDB !== 'undefined' && savedDB && typeof savedDB === 'object') ? savedDB : {};
+        const session = (typeof playerDB !== 'undefined' && playerDB && typeof playerDB === 'object') ? playerDB : {};
+        const sessionKeys = Object.keys(session);
+        const sessionSig = sessionKeys.length + ':' + sessionKeys.reduce((n, k) => n + (Array.isArray(session[k]) ? session[k].length : 0), 0);
+        const members = (typeof identityMembers !== 'undefined' && Array.isArray(identityMembers)) ? identityMembers : [];
+        const source = members.length ? members : saved;
+        if (rdLibStatsCache.saved === source && rdLibStatsCache.sessionSig === sessionSig) return rdLibStatsCache.result;
+        const names = new Set();
+        const ids = new Set();
+        if (members.length) {
+            // 本地选手库（身份库）：每个成员带自己的游戏ID列表；归并组内共享的ID只算一次。
+            members.forEach(member => {
+                const clean = String(member?.name || '').trim();
+                if (!clean) return;
+                names.add(clean);
+                (Array.isArray(member.ids) ? member.ids : []).forEach(id => {
+                    const v = String(id || '').trim().toLowerCase();
+                    if (v) ids.add(v);
+                });
+            });
+        }
+        const collect = (db) => {
+            Object.keys(db).forEach(name => {
+                const clean = String(name || '').trim();
+                if (!clean) return;
+                names.add(clean);
+                const list = Array.isArray(db[name]) ? db[name] : [];
+                list.forEach(id => {
+                    const v = String(id || '').trim().toLowerCase();
+                    if (v) ids.add(v);
+                });
+            });
+        };
+        if (!members.length) collect(saved);
+        collect(session);
+        rdLibStatsCache = { saved: source, sessionSig, result: { players: names.size, ids: ids.size } };
+        return rdLibStatsCache.result;
+    }
+
+    function rdUpdateStatusbar() {
+        const algo = document.getElementById('death-algo-select');
+        const algoText = document.getElementById('rd-sb-algo');
+        if (algo && algoText) {
+            const option = algo.options[algo.selectedIndex];
+            algoText.textContent = `死亡X：${option ? option.text : '-'}`;
+        }
+        const lib = document.getElementById('rd-sb-lib');
+        if (lib) {
+            const stats = rdLibraryStats();
+            lib.textContent = `选手库：${stats.players.toLocaleString()} 人 · ${stats.ids.toLocaleString()} 个游戏ID`;
+            lib.title = `本地选手库共 ${stats.players} 名选手，绑定 ${stats.ids} 个游戏ID（去重）`;
+        }
+        const cloud = document.getElementById('rd-sb-cloud');
+        const cloudStatus = document.getElementById('broadcaster-cloud-status');
+        if (cloud && cloudStatus) cloud.textContent = `云端：${cloudStatus.textContent.trim() || '-'}`;
+    }
+
+    function rdUpdateAvatars() {
+        document.querySelectorAll('#broadcaster-list .broadcaster-card').forEach(card => {
+            const name = card.querySelector('.broadcaster-card-name')?.textContent.trim() || '?';
+            const first = Array.from(name)[0] || '?';
+            let av = card.querySelector(':scope > .rd-av');
+            if (!av) {
+                av = document.createElement('span');
+                av.className = 'rd-av';
+                av.setAttribute('aria-hidden', 'true');
+                card.prepend(av);
+            }
+            if (av.textContent !== first) av.textContent = first;
+            let hash = 0;
+            for (const ch of name) hash = (hash * 31 + ch.codePointAt(0)) >>> 0;
+            av.style.background = card.classList.contains('online') ? RD_AVATAR_COLORS[hash % RD_AVATAR_COLORS.length] : '#64748b';
+        });
+    }
+
+    function rdLuminance(color) {
+        const probe = document.createElement('span');
+        probe.style.color = color;
+        probe.style.display = 'none';
+        document.body.appendChild(probe);
+        const rgb = getComputedStyle(probe).color.match(/\d+(\.\d+)?/g) || [0, 0, 0];
+        probe.remove();
+        const [r, g, b] = rgb.slice(0, 3).map(Number);
+        return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+    }
+
+    function rdUpdateContrast() {
+        const root = document.documentElement;
+        if (root.dataset.theme !== 'frost-broadcast') {
+            if (rdContrastKey) {
+                root.classList.remove('rd-fix-name', 'rd-fix-stat', 'rd-fix-header');
+                rdContrastKey = '';
+            }
+            return;
+        }
+        const styles = getComputedStyle(root);
+        const vars = {
+            'rd-fix-name': styles.getPropertyValue('--sb-player-name-color').trim(),
+            'rd-fix-stat': styles.getPropertyValue('--sb-stat-number-color').trim(),
+            'rd-fix-header': styles.getPropertyValue('--sb-header-color').trim()
+        };
+        const key = JSON.stringify(vars);
+        if (key === rdContrastKey) return;
+        rdContrastKey = key;
+        Object.entries(vars).forEach(([cls, color]) => {
+            root.classList.toggle(cls, !color || rdLuminance(color) > 0.62);
+        });
+    }
+
+    function rdRefresh() {
+        try {
+            rdUpdateStatus();
+            rdUpdateRows();
+            rdUpdateFeed();
+            rdUpdateStatusbar();
+            rdUpdateAvatars();
+            rdUpdateContrast();
+        } catch (err) {
+            console.warn('[UI重设计] 刷新失败', err);
+        }
+    }
+
+    rdRefresh();
+    setInterval(rdRefresh, RD_REFRESH_MS);
+    document.addEventListener('input', () => setTimeout(rdRefresh, 0), true);
+})();

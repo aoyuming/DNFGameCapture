@@ -275,7 +275,7 @@ static bool DnfIsWebTheme(const CString& value)
 static CString DnfNormalizeWebTheme(CString value)
 {
     value.Trim();
-    return DnfIsWebTheme(value) ? value : CString(L"dark-esports");
+    return DnfIsWebTheme(value) ? value : CString(L"frost-broadcast");
 }
 
 struct DnfDefaultKeyMappingSlot {
@@ -490,9 +490,10 @@ static bool DnfIsFatalCloudJoinError(const std::string& code)
 static bool DnfIsCloudRealtimeBlockedWebAction(const std::string& action)
 {
     return action == "update_state" ||
-        action == "cmd_swap" || action == "cmd_monitor" ||
+        action == "cmd_monitor" ||
         action == "cmd_set_output_seat_label" ||
-        action == "cmd_set_red_pick_mode" || action == "cmd_delete_alias" ||
+        action == "cmd_set_red_pick_mode" || action == "cmd_set_same_pick_45" ||
+        action == "cmd_delete_alias" ||
         action == "cmd_undo_event" || action == "cmd_reset_stats" ||
         action == "cmd_match_history_undo" ||
         action == "cmd_match_history_redo" ||
@@ -642,13 +643,21 @@ static const DnfKillDisplayLayoutDefault KILL_DISPLAY_LAYOUT_DEFAULTS[] = {
     { "akMarkOffsetY",    0, -120, 120 },
     { "akCountBadgeOffsetX", 12, -80, 80 },
     { "akCountBadgeOffsetY",-26, -80, 80 },
+    // 展示页风格与自定义背景（kill.js 写入；顺序只能追加）
+    { "skin",             0, 0,     8 },
+    { "bgImageRev",       0, 0, 2147483647 },
+    { "bgImageScale",   100, 10,  400 },
+    { "bgImageX",         0, -3000, 3000 },
+    { "bgImageY",         0, -3000, 3000 },
+    { "bgImageOpacity", 100, 0,   100 },
+    { "fxEnabled",       1, 0,     1 },
 };
 
 static const DnfScoreboardStyleDefault KILL_DISPLAY_TEXT_STYLE_DEFAULTS[] = {
     { "teamName",    L"Microsoft YaHei", 54, L"team",   L"#ffffff", L"#000000", 4, 0, 0, true },
     { "score",       L"Arial Black",     70, L"team",   L"#ffffff", L"#000000", 3, 2, 0, true },
-    { "header",      L"Microsoft YaHei", 31, L"custom", L"#a9abb9", L"#000000", 2, 0, 0, false },
-    { "pickLabel",   L"Arial Black",     27, L"custom", L"#6fc8b9", L"#000000", 3, 0, 0, false },
+    { "header",      L"FZXS24",          31, L"custom", L"#c9a86a", L"#000000", 2, 0, 0, false },
+    { "pickLabel",   L"FZXS24",          27, L"custom", L"#6fc8b9", L"#000000", 3, 0, 0, false },
     { "playerName",  L"Arial",           43, L"custom", L"#f7ca69", L"#000000", 5, 2, 0, false },
     { "killNumber",  L"FZXS24",          50, L"custom", L"#f7ca69", L"#000000", 4, 0, 0, false },
     { "deathNumber", L"FZXS24",          50, L"custom", L"#ab986d", L"#000000", 4, 0, 0, false },
@@ -1175,6 +1184,12 @@ static size_t DnfHttpHeaderEnd(const std::string& request)
     return headerEnd == std::string::npos ? std::string::npos : headerEnd + 4;
 }
 
+// 普通接口请求体上限 1MB；展示页自定义背景图上传单独放宽到 12MB。
+static long long DnfHttpBodyLimitForRequest(const std::string& request)
+{
+    return DnfHttpParsePath(request) == "/api/kill-bg-image" ? 12ll * 1024ll * 1024ll : 1024ll * 1024ll;
+}
+
 static int DnfHttpContentLength(const std::string& request)
 {
     const std::string needle = "\r\nContent-Length:";
@@ -1189,8 +1204,8 @@ static int DnfHttpContentLength(const std::string& request)
     if (pos == std::string::npos) return 0;
     const size_t end = request.find("\r\n", pos);
     const std::string raw = request.substr(pos + 1, end == std::string::npos ? std::string::npos : end - pos - 1);
-    int value = atoi(raw.c_str());
-    return value > 0 && value < 1024 * 1024 ? value : 0;
+    const long long value = _atoi64(raw.c_str());
+    return value > 0 && value < DnfHttpBodyLimitForRequest(request) ? (int)value : 0;
 }
 
 static void DnfHttpReadBodyIfNeeded(SOCKET client, std::string& request)
@@ -1202,7 +1217,7 @@ static void DnfHttpReadBodyIfNeeded(SOCKET client, std::string& request)
     if (contentLength <= 0) return;
 
     while ((int)(request.size() - headerEnd) < contentLength && request.size() < headerEnd + (size_t)contentLength) {
-        char buf[2048] = {};
+        char buf[16384];
         int n = ::recv(client, buf, sizeof(buf), 0);
         if (n <= 0) break;
         request.append(buf, buf + n);
@@ -1310,6 +1325,54 @@ static void DnfHandleKillDisplayHttpClient(SOCKET client)
             return;
         }
         DnfHttpSendResponse(client, 200, "OK", "application/json; charset=utf-8", responseBody);
+        return;
+    }
+
+    if (route == "/api/kill-bg-image" || route == "/api/kill-bg-image-clear" || route == "/kill-bg") {
+        CDNFGameCaptureDlg* host = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_killDisplayHttpServer.mutex);
+            host = g_killDisplayHttpServer.host;
+        }
+        if (!host) {
+            DnfHttpSendResponse(client, 503, "Service Unavailable", "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"host unavailable\"}");
+            return;
+        }
+        if (route == "/kill-bg") {
+            if (method != "GET") {
+                DnfHttpSendResponse(client, 405, "Method Not Allowed", "text/plain; charset=utf-8", "GET only");
+                return;
+            }
+            std::string image;
+            std::string contentType;
+            if (!host->ReadKillDisplayBackgroundImage(image, contentType)) {
+                DnfHttpSendResponse(client, 404, "Not Found", "text/plain; charset=utf-8", "No background image");
+                return;
+            }
+            DnfHttpSendResponse(client, 200, "OK", contentType.c_str(), image);
+            return;
+        }
+        if (method != "POST") {
+            DnfHttpSendResponse(client, 405, "Method Not Allowed", "text/plain; charset=utf-8", "POST only");
+            return;
+        }
+        std::string responseBody;
+        bool ok = false;
+        if (route == "/api/kill-bg-image") {
+            const std::string body = DnfHttpRequestBody(request);
+            const int expected = DnfHttpContentLength(request);
+            if (expected <= 0 || (int)body.size() != expected) {
+                responseBody = "{\"ok\":false,\"error\":\"incomplete upload or image larger than 12MB\"}";
+            }
+            else {
+                ok = host->SaveKillDisplayBackgroundImage(body, responseBody);
+            }
+        }
+        else {
+            ok = host->ClearKillDisplayBackgroundImage(responseBody);
+        }
+        if (responseBody.empty()) responseBody = ok ? "{\"ok\":true}" : "{\"ok\":false}";
+        DnfHttpSendResponse(client, ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json; charset=utf-8", responseBody);
         return;
     }
 
@@ -5998,6 +6061,8 @@ void CDNFGameCaptureDlg::OutputDebugAuthInfo() {
 CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     // 1. 🚨【关键修复】：在第一行初始化 COM 组件！这能直接解决 0x800401f0 闪退报错！
     CoInitialize(NULL);
+    // 云端连接成功后会上报当前软件版本，用于主播列表和后台显示。
+    CloudMatchClient::SetClientVersion(std::string(CW2A(CURRENT_VERSION, CP_UTF8)));
     m_bIsAuthValid = false;
     m_pWebDlg = nullptr;
     m_pKillDisplayDlg = nullptr;
@@ -6045,7 +6110,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_matchHistoryMaxSteps = (std::max)(1, (std::min)(200, m_matchHistoryMaxSteps));
     m_webFrontDir = appDir + L"web前端";
     wchar_t webThemeBuffer[32] = {};
-    ::GetPrivateProfileString(L"Settings", L"WebTheme", L"dark-esports",
+    ::GetPrivateProfileString(L"Settings", L"WebTheme", L"frost-broadcast",
         webThemeBuffer, static_cast<DWORD>(std::size(webThemeBuffer)), m_iniPath);
     m_webTheme = DnfNormalizeWebTheme(webThemeBuffer);
     LoadCloudMatchSettings();
@@ -6064,6 +6129,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_bOutputSeatLabelToKillFile = GetPrivateProfileInt(L"Settings", L"OutputSeatLabelToKillFile", 0, m_iniPath) != 0;
     m_bPreferLocalAliasesOnSync = GetPrivateProfileInt(L"Settings", L"PreferLocalAliases", 0, m_iniPath) != 0;
     m_bRedPickFirst = GetPrivateProfileInt(L"Settings", L"RedPickFirst", 0, m_iniPath) != 0;
+    m_bSamePick45 = GetPrivateProfileInt(L"Settings", L"SamePick45", 0, m_iniPath) != 0;
     wchar_t lastTargetBuf[512];
     ::GetPrivateProfileString(L"Settings", L"LastTargetWindowName", L"", lastTargetBuf, 512, m_iniPath);
     m_lastTargetWindowName = lastTargetBuf;
@@ -10601,7 +10667,8 @@ void CDNFGameCaptureDlg::DoRealExit() {
 void CDNFGameCaptureDlg::ApplyRealtimeEditingLock()
 {
     const BOOL editingEnabled = m_cloudRealtimeFollowing ? FALSE : TRUE;
-    if (m_chkFlip.GetSafeHwnd()) m_chkFlip.EnableWindow(editingEnabled);
+    // 翻转红蓝只影响本机显示方向，实时同步期间仍允许操作。
+    if (m_chkFlip.GetSafeHwnd()) m_chkFlip.EnableWindow(TRUE);
     if (m_btnApply.GetSafeHwnd()) m_btnApply.EnableWindow(editingEnabled);
     if (m_btnReset.GetSafeHwnd()) m_btnReset.EnableWindow(editingEnabled);
     if (m_editQuickAdd.GetSafeHwnd()) m_editQuickAdd.EnableWindow(editingEnabled);
@@ -10932,8 +10999,20 @@ void CDNFGameCaptureDlg::OnBnClickedApply() {
 }
 
 void CDNFGameCaptureDlg::OnBnClickedFlip() {
-    if (RejectLocalMatchEditWhileRealtime()) return;
-    MarkMatchMutation(L"翻转红蓝显示", L"本机");
+    // 翻转红蓝只改变本机界面、网页和 OBS 输出的左右显示，实时同步期间也允许操作；
+    // 远端实时快照以 preserveLocalFlip 方式应用，不会覆盖本机的翻转状态。
+    if (m_cloudRealtimeFollowing) {
+        // 实时同步时不推进比赛变更代次：代次用于判断实时快照应用后是否出现本地改动，
+        // 推进它会让选手库合并完成后的同步上传被误判为过期而跳过。只记录历史标签。
+        if (m_matchHistoryReady && !m_matchHistoryApplying && !m_matchHistoryMutationPending) {
+            m_matchHistoryPendingLabel = L"翻转红蓝显示";
+            m_matchHistoryPendingSource = L"本机";
+            m_matchHistoryMutationPending = true;
+        }
+    }
+    else {
+        MarkMatchMutation(L"翻转红蓝显示", L"本机");
+    }
     const bool flipSides = (m_chkFlip.GetCheck() == BST_CHECKED);
     {
         std::lock_guard<std::mutex> dataLock(m_dataMutex);
@@ -11740,6 +11819,8 @@ CString CDNFGameCaptureDlg::GetPickSeatLabelForIndex(int index) const
     static const wchar_t* redSecondBlue[] = { L"x选", L"1选", L"3选", L"6选" };
     if (index < 0 || index >= 8) return L"";
     const int row = index % 4;
+    // 红队后选时可把红队 4 选、5 选改为“同选”。
+    if (index < 4 && !m_bRedPickFirst && m_bSamePick45 && (row == 2 || row == 3)) return L"同选";
     if (index < 4) return m_bRedPickFirst ? redFirstRed[row] : redSecondRed[row];
     return m_bRedPickFirst ? redFirstBlue[row] : redSecondBlue[row];
 }
@@ -16996,6 +17077,18 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                 RGB(105, 226, 170));
             BroadcastStateToWeb();
         }
+        else if (action == "cmd_set_same_pick_45") {
+            const bool enabled = j.value("enabled", false);
+            {
+                std::lock_guard<std::mutex> dataLock(m_dataMutex);
+                m_bSamePick45 = enabled;
+            }
+            ::WritePrivateProfileString(L"Settings", L"SamePick45", enabled ? L"1" : L"0", m_iniPath);
+            WriteScoreToFile();
+            AppLog(enabled ? L"🎯 [选人顺序] 红队后选时 4、5 选改为同选。" : L"🎯 [选人顺序] 已恢复 4 选、5 选编号。",
+                RGB(255, 210, 106));
+            BroadcastStateToWeb();
+        }
         else if (action == "cmd_set_red_pick_mode") {
             MarkMatchMutation(L"修改选人顺序", L"Web");
             std::string mode = j.value("mode", "first");
@@ -17947,7 +18040,8 @@ json CDNFGameCaptureDlg::DnfBuildKillDisplayStateJson()
                 { "seatLabel", DnfJsonUtf8(GetPickSeatLabelForIndex(i)) },
                 { "kills", m_players[i].kills },
                 { "deaths", m_players[i].deaths },
-                { "akCount", m_players[i].akCount }
+                { "akCount", m_players[i].akCount },
+                { "currentStreak", m_players[i].currentStreak }
             });
         }
     }
@@ -17974,6 +18068,7 @@ json CDNFGameCaptureDlg::DnfBuildSharedWebStateJson()
     data["preferLocalAliases"] = m_bPreferLocalAliasesOnSync;
     data["redPickMode"] = m_bRedPickFirst ? "first" : "second";
     data["redPickFirst"] = m_bRedPickFirst;
+    data["samePick45"] = m_bSamePick45;
     data["webTheme"] = DnfJsonUtf8(m_webTheme);
     data["scoreboardTextStyles"] = DnfBuildScoreboardTextStylesJson(m_iniPath);
     data["killDisplaySettings"] = DnfBuildKillDisplaySettingsJson(m_iniPath);
@@ -18226,6 +18321,122 @@ bool CDNFGameCaptureDlg::SaveKillDisplaySettingsPayload(const std::string& reque
     }
     catch (...) {
         responseBody = "{\"ok\":false,\"error\":\"unknown\"}";
+        return false;
+    }
+}
+
+// ------------------------------------------------------------------
+// 击杀展示页自定义背景图：保存在配置文件同目录的 kill_background.img。
+// 只接受 PNG / JPEG / WEBP / GIF（按文件头识别），上限 12MB。
+// ------------------------------------------------------------------
+static const char* DnfSniffKillBackgroundContentType(const std::string& data)
+{
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(data.data());
+    const size_t n = data.size();
+    if (n >= 8 && p[0] == 0x89 && p[1] == 'P' && p[2] == 'N' && p[3] == 'G' &&
+        p[4] == 0x0D && p[5] == 0x0A && p[6] == 0x1A && p[7] == 0x0A) return "image/png";
+    if (n >= 3 && p[0] == 0xFF && p[1] == 0xD8 && p[2] == 0xFF) return "image/jpeg";
+    if (n >= 12 && memcmp(p, "RIFF", 4) == 0 && memcmp(p + 8, "WEBP", 4) == 0) return "image/webp";
+    if (n >= 6 && (memcmp(p, "GIF87a", 6) == 0 || memcmp(p, "GIF89a", 6) == 0)) return "image/gif";
+    return nullptr;
+}
+
+static const size_t DNF_KILL_BACKGROUND_MAX_BYTES = 12u * 1024u * 1024u;
+
+CString CDNFGameCaptureDlg::GetKillDisplayBackgroundPath() const
+{
+    const int backslash = m_iniPath.ReverseFind(L'\\');
+    const int slash = m_iniPath.ReverseFind(L'/');
+    const int split = backslash > slash ? backslash : slash;
+    if (split <= 0) return CString();
+    return DnfJoinPath(m_iniPath.Left(split), L"kill_background.img");
+}
+
+bool CDNFGameCaptureDlg::SaveKillDisplayBackgroundImage(const std::string& data, std::string& responseBody)
+{
+    static int s_lastBackgroundRev = 0;
+    try {
+        const char* contentType = DnfSniffKillBackgroundContentType(data);
+        if (data.size() < 16 || data.size() > DNF_KILL_BACKGROUND_MAX_BYTES || contentType == nullptr) {
+            responseBody = "{\"ok\":false,\"error\":\"only PNG/JPG/WEBP/GIF up to 12MB\"}";
+            return false;
+        }
+        const CString path = GetKillDisplayBackgroundPath();
+        if (path.IsEmpty()) {
+            responseBody = "{\"ok\":false,\"error\":\"config directory unavailable\"}";
+            return false;
+        }
+        const CString tempPath = path + L".tmp";
+        {
+            CFile file;
+            if (!file.Open(tempPath, CFile::modeCreate | CFile::modeWrite | CFile::shareExclusive)) {
+                responseBody = "{\"ok\":false,\"error\":\"cannot write background file\"}";
+                return false;
+            }
+            file.Write(data.data(), static_cast<UINT>(data.size()));
+            file.Close();
+        }
+        if (!::MoveFileExW(tempPath, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            ::DeleteFileW(tempPath);
+            responseBody = "{\"ok\":false,\"error\":\"cannot replace background file\"}";
+            return false;
+        }
+        int rev = static_cast<int>(static_cast<long long>(time(nullptr)) % 2147483647LL);
+        if (rev <= s_lastBackgroundRev) rev = s_lastBackgroundRev + 1;
+        s_lastBackgroundRev = rev;
+
+        json response;
+        response["ok"] = true;
+        response["rev"] = rev;
+        response["type"] = contentType;
+        response["bytes"] = data.size();
+        responseBody = response.dump();
+        return true;
+    }
+    catch (CException* e) {
+        e->Delete();
+        responseBody = "{\"ok\":false,\"error\":\"file error\"}";
+        return false;
+    }
+    catch (...) {
+        responseBody = "{\"ok\":false,\"error\":\"unknown\"}";
+        return false;
+    }
+}
+
+bool CDNFGameCaptureDlg::ClearKillDisplayBackgroundImage(std::string& responseBody)
+{
+    const CString path = GetKillDisplayBackgroundPath();
+    if (!path.IsEmpty()) {
+        ::DeleteFileW(path);
+        ::DeleteFileW(path + L".tmp");
+    }
+    responseBody = "{\"ok\":true}";
+    return true;
+}
+
+bool CDNFGameCaptureDlg::ReadKillDisplayBackgroundImage(std::string& data, std::string& contentType)
+{
+    try {
+        const CString path = GetKillDisplayBackgroundPath();
+        if (path.IsEmpty()) return false;
+        CFile file;
+        if (!file.Open(path, CFile::modeRead | CFile::shareDenyWrite)) return false;
+        const ULONGLONG length = file.GetLength();
+        if (length < 16 || length > DNF_KILL_BACKGROUND_MAX_BYTES) return false;
+        data.resize(static_cast<size_t>(length));
+        const UINT read = file.Read(&data[0], static_cast<UINT>(length));
+        if (read != static_cast<UINT>(length)) return false;
+        const char* type = DnfSniffKillBackgroundContentType(data);
+        if (type == nullptr) return false;
+        contentType = type;
+        return true;
+    }
+    catch (CException* e) {
+        e->Delete();
+        return false;
+    }
+    catch (...) {
         return false;
     }
 }

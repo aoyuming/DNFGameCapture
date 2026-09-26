@@ -15,6 +15,7 @@ import {
   listAdminTemporaryBroadcasterIds,
   pruneExpiredAdminData,
 } from './admin-data.js';
+import type { ActiveClientInfo } from './unified.js';
 import {
   BroadcasterAttributionError,
   createBroadcasterAttributionService,
@@ -44,6 +45,7 @@ import {
 
 export interface AdminSocketController {
   getActiveDeviceIds(): ReadonlySet<string>;
+  getActiveClientInfo?(): ReadonlyMap<string, ActiveClientInfo>;
   disconnectDevice(deviceId: string, error?: { code: string; bannedUntil?: number | null }): boolean;
   stopRealtimeViewer(viewerDeviceId: string): boolean;
   notifyDirectoryChanged(reason: string): void;
@@ -202,7 +204,8 @@ export function createCloudMatchAdminApp(
       : '';
     response.json({
       ok: true,
-      ...buildAdminState(db, socketController.getActiveDeviceIds(), now(), attribution, query),
+      ...buildAdminState(db, socketController.getActiveDeviceIds(), now(), attribution, query,
+        socketController.getActiveClientInfo?.()),
       licenses: listLicenses(db),
       playerLibrary: listPlayerLibrary(db),
       pendingLibrarySubmissions: listPendingPlayerLibrarySubmissions(db),
@@ -211,7 +214,8 @@ export function createCloudMatchAdminApp(
 
   app.get('/admin/api/broadcasters/state', (request, response) => {
     const query = typeof request.query.q === 'string' ? request.query.q.slice(0, 64) : '';
-    response.json({ ok: true, ...buildAdminState(db, socketController.getActiveDeviceIds(), now(), attribution, query) });
+    response.json({ ok: true, ...buildAdminState(db, socketController.getActiveDeviceIds(), now(), attribution, query,
+      socketController.getActiveClientInfo?.()) });
   });
 
   app.get('/admin/api/player-library', (_request, response) => {

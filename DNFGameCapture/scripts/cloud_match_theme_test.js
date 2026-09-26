@@ -80,8 +80,8 @@ for (const expected of [
 }
 
 for (const expected of [
-    'CString m_webTheme = L"dark-esports";',
-    'GetPrivateProfileString(L"Settings", L"WebTheme", L"dark-esports"',
+    'CString m_webTheme = L"frost-broadcast";',
+    'GetPrivateProfileString(L"Settings", L"WebTheme", L"frost-broadcast"',
     'data["webTheme"] = DnfJsonUtf8(m_webTheme);',
     'action == "cmd_set_web_theme"',
     'WritePrivateProfileString(L"Settings", L"WebTheme", m_webTheme, m_iniPath)'

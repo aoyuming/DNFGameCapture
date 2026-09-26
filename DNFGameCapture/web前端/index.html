@@ -1,13 +1,63 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="dark-esports">
+<html lang="zh-CN" data-theme="frost-broadcast">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DNF点将工具</title>
-    <meta name="dnf-web-layout-version" content="20260925-5.5.0-sync-sidebar-1">
-    <link rel="stylesheet" href="style.css?v=20260925-5.5.0-sync-sidebar-1">
+    <meta name="dnf-web-layout-version" content="20260927-5.5.1-mvp-name-1">
+    <link rel="stylesheet" href="style.css?v=20260927-5.5.1-mvp-name-1">
 </head>
 <body>
+    <svg class="rd-sprite" width="0" height="0" aria-hidden="true" focusable="false">
+        <symbol id="rd-i-play" viewBox="0 0 24 24"><path d="M7 5l12 7-12 7z" fill="currentColor" stroke="none"/></symbol>
+        <symbol id="rd-i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/></symbol>
+        <symbol id="rd-i-wait" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></symbol>
+        <symbol id="rd-i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+        <symbol id="rd-i-swap" viewBox="0 0 24 24"><path d="M7 7h13l-4-4M17 17H4l4 4"/></symbol>
+        <symbol id="rd-i-reset" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></symbol>
+        <symbol id="rd-i-screen" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></symbol>
+        <symbol id="rd-i-crown" viewBox="0 0 24 24"><path d="M3 8l4 4 5-7 5 7 4-4-2 11H5z"/></symbol>
+        <symbol id="rd-i-eye" viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+        <symbol id="rd-i-eye-off" viewBox="0 0 24 24"><path d="M3 3l18 18M10.6 5.1A10 10 0 0 1 12 5c6 0 10 7 10 7a17 17 0 0 1-3.2 3.9M6.6 6.6C3.8 8.3 2 12 2 12s4 7 10 7a10 10 0 0 0 5.4-1.6"/></symbol>
+        <symbol id="rd-i-history" viewBox="0 0 24 24"><path d="M12 8v4l3 2"/><circle cx="12" cy="12" r="9"/></symbol>
+        <symbol id="rd-i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="19" cy="12" r="1.3" fill="currentColor"/></symbol>
+        <symbol id="rd-i-palette" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18c1.5 0 2-1 2-2s-1-2 0-3 3 0 4-1 3-2 3-5a9 9 0 0 0-9-7z"/><circle cx="7.5" cy="11" r="1"/><circle cx="10" cy="7" r="1"/><circle cx="15" cy="7.5" r="1"/></symbol>
+        <symbol id="rd-i-log" viewBox="0 0 24 24"><path d="M4 5h16M4 10h16M4 15h10M4 20h7"/></symbol>
+        <symbol id="rd-i-shield" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></symbol>
+        <symbol id="rd-i-shield-x" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9.5 9.5l5 5M14.5 9.5l-5 5"/></symbol>
+        <symbol id="rd-i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+        <symbol id="rd-i-sword" viewBox="0 0 24 24"><path d="M14.5 17.5L3 6V3h3l11.5 11.5M13 19l6-6M16 16l4 4M19 21l2-2"/></symbol>
+        <symbol id="rd-i-min" viewBox="0 0 24 24"><path d="M6 12h12"/></symbol>
+        <symbol id="rd-i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+    </svg>
+    <header class="rd-topbar" id="rd-topbar">
+        <div class="rd-brand"><span class="rd-logo" aria-hidden="true">DNF</span>点将工具 <small id="rd-version"></small></div>
+        <div class="rd-status" id="rd-status" data-state="stopped" role="status" aria-live="polite"><span class="rd-dot"></span><b id="rd-status-text">未运行</b><span class="rd-status-extra" id="rd-status-extra"></span></div>
+        <div class="rd-top-spacer"></div>
+        <div class="rd-theme-switch" id="rd-theme-switch" role="group" aria-label="界面风格">
+            <button type="button" data-rd-theme="dark-esports">夜幕导播台</button>
+            <button type="button" data-rd-theme="black-gold">阿拉德金纹</button>
+            <button type="button" data-rd-theme="frost-broadcast">晨光简约</button>
+        </div>
+        <div class="rd-top-spacer"></div>
+        <div class="rd-top-actions">
+            <button class="ctrl-btn btn-review-toggle" id="btn-review-toggle" aria-expanded="false">
+                <svg class="rd-i" aria-hidden="true"><use href="#rd-i-eye"/></svg><span>&#26368;&#36817;&#35782;&#21035;</span>
+                <span class="review-toggle-count" id="review-toggle-count">0</span>
+            </button>
+            <button class="ctrl-btn btn-operation-history" id="btn-operation-history" aria-expanded="false" aria-controls="operation-history-overlay" title="查看比赛操作历史">
+                        <svg class="rd-i" aria-hidden="true"><use href="#rd-i-history"/></svg><span>操作历史</span>
+                        <span class="operation-history-count" id="operation-history-count">0</span>
+                    </button>
+            <button class="ctrl-btn btn-appearance" id="btn-appearance" title="外观"><svg class="rd-i" aria-hidden="true"><use href="#rd-i-palette"/></svg><span class="rd-sr">外观</span></button>
+            <button class="ctrl-btn rd-btn-console" id="rd-btn-console" type="button" title="C++ 日志"><svg class="rd-i" aria-hidden="true"><use href="#rd-i-log"/></svg><span class="rd-sr">C++日志</span></button>
+        </div>
+        <button class="ctrl-btn btn-auth" id="btn-auth">🔑 授权</button>
+        <div class="rd-window-controls">
+            <button type="button" class="rd-win-btn" id="rd-win-min" title="最小化" aria-label="最小化"><svg class="rd-i" aria-hidden="true"><use href="#rd-i-min"/></svg></button>
+            <button type="button" class="rd-win-btn rd-win-close" id="rd-win-close" title="关闭（隐藏窗口）" aria-label="关闭"><svg class="rd-i" aria-hidden="true"><use href="#rd-i-x"/></svg></button>
+        </div>
+    </header>
 
     <div class="app-shell">
         <aside class="console-sidebar" id="console-panel" aria-labelledby="console-panel-title" hidden aria-hidden="true">
@@ -25,6 +75,7 @@
                 <span class="realtime-readonly-icon" aria-hidden="true">&#9940;</span>
                 <strong>实时同步中</strong>
                 <span>本地比赛编辑已锁定，请在主播预览中停止实时同步后再修改。</span>
+                <button type="button" class="rd-banner-stop" id="rd-btn-stop-realtime" title="停止实时同步，恢复本地编辑">停止同步</button>
             </div>
             <div class="main-container" id="main-container">
                 <div class="teams-wrap" id="teams-wrap">
@@ -56,33 +107,25 @@
 
             <div class="control-panel">
                 <div class="control-row control-row-match">
-                    <button class="ctrl-btn btn-operation-history" id="btn-operation-history" aria-expanded="false" aria-controls="operation-history-overlay" title="查看比赛操作历史">
-                        <span aria-hidden="true">🧾</span> 操作历史
-                        <span class="operation-history-count" id="operation-history-count">0</span>
-                    </button>
-                    <button class="ctrl-btn btn-swap" id="btn-swap">🔄 翻转红蓝</button>
                     <button class="ctrl-btn btn-monitor-start" id="btn-monitor">▶ 运行</button>
-                    <button class="ctrl-btn btn-reset" id="btn-reset">✨ 重置战绩</button>
-                    <button class="ctrl-btn btn-kill-display-toggle" id="btn-kill-display-toggle" aria-pressed="false">🖥 展示页面</button>
+                    <span class="rd-sep" aria-hidden="true"></span>
+                    <button class="ctrl-btn btn-swap" id="btn-swap"><svg class="rd-i" aria-hidden="true"><use href="#rd-i-swap"/></svg>翻转红蓝</button>
+                    <button class="ctrl-btn btn-reset" id="btn-reset"><svg class="rd-i" aria-hidden="true"><use href="#rd-i-reset"/></svg>重置战绩</button>
+                    <button class="ctrl-btn btn-kill-display-toggle" id="btn-kill-display-toggle" aria-pressed="false"><svg class="rd-i" aria-hidden="true"><use href="#rd-i-screen"/></svg>展示页面</button>
                     <button class="ctrl-btn btn-pro" id="btn-pro">👑 专业模式</button>
                 </div>
                 <div class="control-row control-row-aux">
-                    <button class="ctrl-btn btn-review-toggle" id="btn-review-toggle" aria-expanded="false">
-                        <span>&#26368;&#36817;&#35782;&#21035;</span>
-                        <span class="review-toggle-count" id="review-toggle-count">0</span>
-                    </button>
-                    <button class="ctrl-btn btn-auth" id="btn-auth">🔑 授权</button>
-                    <button class="ctrl-btn btn-appearance" id="btn-appearance">🎨 外观</button>
                     <label class="prefer-local-aliases-toggle" title="同步其他主播比分时，优先保留本地已填写的别名">
                         <input type="checkbox" id="prefer-local-aliases-toggle">
-                        <span>别名以本地优先</span>
+                        <span>别名本地优先</span>
                     </label>
                     <label class="kill-show-death-toggle" title="控制击杀展示页是否显示死亡次数">
                         <input type="checkbox" id="kill-show-death-toggle-main">
                         <span>显示死亡</span>
                     </label>
+                    <span class="rd-sep" aria-hidden="true"></span>
                     <div class="more-controls-wrap" id="more-controls-wrap">
-                        <button class="ctrl-btn btn-more-controls" id="btn-more-controls" aria-expanded="false" aria-controls="more-controls-menu">☰ 更多</button>
+                        <button class="ctrl-btn btn-more-controls" id="btn-more-controls" aria-expanded="false" aria-controls="more-controls-menu"><svg class="rd-i" aria-hidden="true"><use href="#rd-i-more"/></svg>更多</button>
                         <div class="more-controls-menu" id="more-controls-menu" aria-hidden="true">
                             <div class="more-controls-section">
                                 <div class="more-controls-title">工具</div>
@@ -131,8 +174,6 @@
                         </div>
                     </div>
                 </div>
-
-                <div class="dir-bar" id="dir-display" title="点击可更改 TXT 输出目录">📁 战绩输出目录：获取中...</div>
             </div>
         </div>
 
@@ -160,6 +201,10 @@
                 <div class="broadcaster-list" id="broadcaster-list"></div>
             </section>
             <div class="broadcaster-relation-summary" id="broadcaster-relation-summary">同步关系将在连接后显示</div>
+            <section class="rd-feed" aria-label="击杀动态">
+                <div class="rd-feed-title"><span>击杀动态</span><span id="rd-feed-count"></span></div>
+                <div class="rd-feed-list" id="rd-feed-list"><div class="rd-feed-empty">暂无击杀记录</div></div>
+            </section>
         </aside>
 
         <div class="review-backdrop" id="review-backdrop"></div>
@@ -172,6 +217,14 @@
             <div class="review-list" id="review-list"></div>
         </div>
     </div>
+    <footer class="rd-statusbar" aria-label="运行状态">
+        <span class="rd-sb-item" id="rd-sb-state"><span class="rd-dot"></span><span id="rd-sb-state-text">识别：未运行</span></span>
+        <span class="rd-sb-item" id="rd-sb-cloud">云端：未连接</span>
+        <span class="rd-sb-item" id="rd-sb-algo">死亡X：-</span>
+        <span class="rd-sb-item" id="rd-sb-lib">选手库：-</span>
+        <span class="rd-sb-grow"></span>
+        <div class="dir-bar" id="dir-display" title="点击可更改 TXT 输出目录">📁 战绩输出目录：获取中...</div>
+    </footer>
 
     <div class="operation-history-overlay" id="operation-history-overlay" aria-hidden="true">
         <section class="operation-history-dialog" id="operation-history-dialog" role="dialog" aria-modal="false" aria-labelledby="operation-history-title">
@@ -564,6 +617,6 @@
         </section>
     </div>
 
-    <script src="main.js?v=20260925-5.5.0-sync-sidebar-1" defer></script>
+    <script src="main.js?v=20260927-5.5.1-mvp-name-1" defer></script>
 </body>
 </html>

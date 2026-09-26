@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3';
 
 import type { BroadcasterAttributionService } from './broadcaster-attribution.js';
 import { getActiveClientBan, type ClientBan } from './client-ban.js';
+import { resolveIpRegion } from './ip-region.js';
 import type { MatchSnapshot } from './schemas.js';
 import { getSnapshot } from './snapshots.js';
 import {
@@ -10,8 +11,10 @@ import {
   pruneSyncRelationData,
 } from './sync-relations.js';
 import {
+  BROADCASTER_RETENTION_SECONDS,
   listUnifiedBroadcasters,
   pruneExpiredBroadcasters,
+  type ActiveClientInfo,
 } from './unified.js';
 
 export interface AdminBroadcasterState {
@@ -22,6 +25,7 @@ export interface AdminBroadcasterState {
   snapshotRevision: number | null;
   receivedAt: number | null;
   offlineExpiresAt: number | null;
+  clientVersion: string | null;
   snapshot: MatchSnapshot | null;
   currentIp: string | null;
   lastIp: string | null;
@@ -37,9 +41,90 @@ export interface AdminBroadcasterState {
   ban: ClientBan | null;
 }
 
+/** 已连接过但还没有填写主播名称的客户端（24 小时内活跃或当前在线）。 */
+export interface AdminUnregisteredDevice {
+  deviceId: string;
+  deviceSuffix: string;
+  registered: false;
+  online: boolean;
+  clientVersion: string | null;
+  createdAt: number;
+  lastSeenAt: number;
+  currentIp: string | null;
+  region: string;
+  licenseDeviceId: string | null;
+  license: { id: number; label: string; deviceId: string } | null;
+  ban: ClientBan | null;
+}
+
+const MAX_ADMIN_UNREGISTERED_DEVICES = 300;
+
+function listAdminUnregisteredDevices(
+  db: Database.Database,
+  activeDeviceIds: ReadonlySet<string>,
+  nowSec: number,
+  clientInfo: ReadonlyMap<string, ActiveClientInfo> | undefined,
+  normalizedQuery: string,
+): AdminUnregisteredDevice[] {
+  const rows = db.prepare(
+    `SELECT d.id, d.created_at, d.last_seen_at, d.client_version
+     FROM devices AS d
+     LEFT JOIN memberships AS m ON m.device_id = d.id
+     WHERE m.device_id IS NULL AND d.last_seen_at >= ?
+     ORDER BY d.last_seen_at DESC
+     LIMIT ?`,
+  ).all(nowSec - BROADCASTER_RETENTION_SECONDS, MAX_ADMIN_UNREGISTERED_DEVICES) as Array<{
+    id: string; created_at: number; last_seen_at: number; client_version: string | null;
+  }>;
+  const findLicense = db.prepare(
+    'SELECT id, label, bound_device_id FROM licenses WHERE bound_device_id = ? ORDER BY id DESC LIMIT 1',
+  );
+  return rows
+    .map((row) => {
+      const online = activeDeviceIds.has(row.id);
+      const info = online ? clientInfo?.get(row.id) : undefined;
+      const currentIp = info?.ipAddress ?? null;
+      let region = '未知地区';
+      if (currentIp) {
+        try { region = resolveIpRegion(currentIp) || region; } catch { /* diagnostic only */ }
+      }
+      const licenseDeviceId = info?.licenseDeviceId ?? null;
+      const licenseRow = licenseDeviceId
+        ? findLicense.get(licenseDeviceId) as { id: number; label: string; bound_device_id: string } | undefined
+        : undefined;
+      return {
+        deviceId: row.id,
+        deviceSuffix: row.id.slice(-4),
+        registered: false as const,
+        online,
+        clientVersion: info?.clientVersion ?? row.client_version ?? null,
+        createdAt: row.created_at,
+        lastSeenAt: row.last_seen_at,
+        currentIp,
+        region,
+        licenseDeviceId,
+        license: licenseRow
+          ? { id: licenseRow.id, label: licenseRow.label, deviceId: licenseRow.bound_device_id }
+          : null,
+        ban: getActiveClientBan(db, [row.id, licenseDeviceId], nowSec),
+      };
+    })
+    .filter((item) => {
+      if (!normalizedQuery) return true;
+      return item.deviceId.toLocaleLowerCase().includes(normalizedQuery) ||
+        (item.clientVersion ?? '').toLocaleLowerCase().includes(normalizedQuery) ||
+        (item.currentIp ?? '').toLocaleLowerCase().includes(normalizedQuery) ||
+        item.region.toLocaleLowerCase().includes(normalizedQuery) ||
+        (item.license?.label ?? '').toLocaleLowerCase().includes(normalizedQuery) ||
+        '未注册'.includes(normalizedQuery);
+    })
+    .sort((a, b) => Number(b.online) - Number(a.online) || b.lastSeenAt - a.lastSeenAt);
+}
+
 export interface AdminState {
   generatedAt: number;
   broadcasters: AdminBroadcasterState[];
+  unregisteredDevices: AdminUnregisteredDevice[];
   relations: ReturnType<typeof listAllRealtimeSync>;
   history: ReturnType<typeof listAllSyncHistory>;
 }
@@ -55,6 +140,7 @@ export function buildAdminState(
   nowSec: number,
   attribution: BroadcasterAttributionService,
   query = '',
+  clientInfo?: ReadonlyMap<string, ActiveClientInfo>,
 ): AdminState {
   const normalizedQuery = query.normalize('NFC').trim().toLocaleLowerCase();
   const broadcasters = listUnifiedBroadcasters(db, activeDeviceIds, nowSec)
@@ -62,8 +148,10 @@ export function buildAdminState(
       const network = attribution.getBroadcasterNetwork(item.deviceId);
       const link = attribution.getBroadcasterAttribution(item.deviceId);
       const ban = getActiveClientBan(db, [item.deviceId, link?.licenseDeviceId], nowSec);
+      const liveVersion = item.online ? clientInfo?.get(item.deviceId)?.clientVersion : null;
       return {
         ...item,
+        clientVersion: liveVersion ?? item.clientVersion ?? null,
         currentIp: network.currentIp,
         lastIp: network.lastIp,
         region: network.region,
@@ -87,7 +175,8 @@ export function buildAdminState(
         item.lastIp?.toLocaleLowerCase().includes(normalizedQuery) ||
         item.region.toLocaleLowerCase().includes(normalizedQuery) ||
         item.license?.label.toLocaleLowerCase().includes(normalizedQuery) ||
-        item.license?.deviceId.toLocaleLowerCase().includes(normalizedQuery);
+        item.license?.deviceId.toLocaleLowerCase().includes(normalizedQuery) ||
+        (item.clientVersion ?? '').toLocaleLowerCase().includes(normalizedQuery);
     })
     .map((item) => ({
       ...item,
@@ -96,6 +185,7 @@ export function buildAdminState(
   return {
     generatedAt: nowSec,
     broadcasters,
+    unregisteredDevices: listAdminUnregisteredDevices(db, activeDeviceIds, nowSec, clientInfo, normalizedQuery),
     relations: listAllRealtimeSync(db, nowSec),
     history: listAllSyncHistory(db, nowSec),
   };

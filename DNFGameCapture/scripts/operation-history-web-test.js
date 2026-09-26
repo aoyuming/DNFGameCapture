@@ -7,13 +7,13 @@ const html = fs.readFileSync(path.join(root, 'web前端', 'index.html'), 'utf8')
 const main = fs.readFileSync(path.join(root, 'web前端', 'main.js'), 'utf8');
 const css = fs.readFileSync(path.join(root, 'web前端', 'style.css'), 'utf8');
 
-const matchRowStart = html.indexOf('class="control-row control-row-match"');
-const auxRowStart = html.indexOf('class="control-row control-row-aux"');
-assert.ok(matchRowStart >= 0 && auxRowStart > matchRowStart,
-    '主操作行和辅助操作行应存在且顺序正确');
-const matchRow = html.slice(matchRowStart, auxRowStart);
-assert.match(matchRow, /id="btn-operation-history"/,
-    '操作历史按钮必须位于主窗口第一行');
+const topbarStart = html.indexOf('<header class="rd-topbar"');
+const topbarEnd = html.indexOf('</header>', topbarStart);
+assert.ok(topbarStart >= 0 && topbarEnd > topbarStart,
+    '主窗口顶栏应存在');
+const topbar = html.slice(topbarStart, topbarEnd);
+assert.match(topbar, /id="btn-operation-history"/,
+    '操作历史按钮必须位于主窗口顶栏');
 
 assert.match(html, /id="operation-history-overlay"/,
     '操作历史宽对话框遮罩必须存在');

@@ -38,6 +38,24 @@ constexpr std::array<int, 5> kReconnectDelaysSeconds{ 1, 2, 5, 10, 20 };
 constexpr std::uint64_t kSnapshotSizingAckId =
     (std::numeric_limits<std::uint64_t>::max)() - 1;
 
+std::mutex& ClientVersionMutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::string& ClientVersionStorage()
+{
+    static std::string version;
+    return version;
+}
+
+std::string CurrentClientVersion()
+{
+    std::lock_guard<std::mutex> lock(ClientVersionMutex());
+    return ClientVersionStorage();
+}
+
 class WinHttpHandle
 {
 public:
@@ -2407,6 +2425,14 @@ private:
 
             cloud_match::SocketIoNamespaceConnected connected;
             if (sentConnect && cloud_match::ParseSocketIoNamespaceConnected(packet, connected)) {
+                // 连接成功后上报客户端版本；不带 ack，旧服务端没有该事件处理器时直接忽略。
+                const std::string clientVersion = CurrentClientVersion();
+                if (!clientVersion.empty()) {
+                    std::string infoPacket = cloud_match::EncodeSocketEvent("client:info",
+                        json{ { "clientVersion", clientVersion } });
+                    if (!infoPacket.empty() &&
+                        !SendText(connection, infoPacket, activeConfig.generation)) return false;
+                }
                 return true;
             }
             cloud_match::SocketIoConnectError connectError;
@@ -3641,6 +3667,19 @@ bool CloudMatchClient::CancelRequest(const std::string& requestId)
 CloudMatchStatusSnapshot CloudMatchClient::GetStatusSnapshot() const
 {
     return impl_->GetStatusSnapshot();
+}
+
+void CloudMatchClient::SetClientVersion(const std::string& version)
+{
+    std::string clean;
+    for (const char ch : version) {
+        if (clean.size() >= 32) break;
+        const bool allowed = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') ||
+            (ch >= 'A' && ch <= 'Z') || ch == '.' || ch == '-' || ch == '_' || ch == '+';
+        if (allowed) clean.push_back(ch);
+    }
+    std::lock_guard<std::mutex> lock(ClientVersionMutex());
+    ClientVersionStorage() = clean;
 }
 
 void CloudMatchClient::SetMessageCallback(MessageCallback callback)
