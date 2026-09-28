@@ -9,6 +9,8 @@ import express, {
 import { Server as SocketIoServer } from 'socket.io';
 
 import { createCloudMatchAdminApp } from './admin.js';
+import { VoiceStore, type Synthesize } from './voices.js';
+import { createPublicVoiceApi } from './voice-routes.js';
 import { createBroadcasterAttributionService } from './broadcaster-attribution.js';
 import { compareRoomSnapshots } from './comparison.js';
 import { serverConfig } from './config.js';
@@ -45,6 +47,7 @@ export type {
 
 export interface CreateCloudMatchAppOptions {
   databasePath?: string;
+  voiceSynthesize?: Synthesize;
   now?: () => number;
   roomService?: Partial<RoomService>;
   snapshotService?: Partial<SnapshotService>;
@@ -132,6 +135,7 @@ export function createCloudMatchApp(
     };
   const db = openDatabase(options.databasePath ?? serverConfig.databasePath);
   const attribution = createBroadcasterAttributionService(db);
+  const voices = new VoiceStore(db, options.voiceSynthesize);
   initializeSyncRelationSchema(db);
   pruneSyncRelationData(db, now());
   const expressApp = express();
@@ -142,6 +146,7 @@ export function createCloudMatchApp(
   expressApp.get('/health', (_request, response) => {
     response.json({ ok: true });
   });
+  expressApp.use('/api/voice', createPublicVoiceApi(voices));
   expressApp.use('/api/v2', createV2Api({
     db,
     now,
@@ -195,6 +200,7 @@ export function createCloudMatchApp(
     db,
     now,
     csrfToken: adminCsrfToken,
+    voices,
     adminPassword,
     socketController: socketHandlers,
     attribution,
@@ -219,6 +225,7 @@ export function createCloudMatchApp(
             });
           }
         } finally {
+          await voices.close();
           socketHandlers.close();
           if (db.open) {
             db.close();

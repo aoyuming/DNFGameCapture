@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "DNFGameCaptureDlg.h"
 #include "PreviewLayout.h"
+#include "HpBarCalibrationPanel.h"
 #include "MutualDeathTriggerPolicy.h"
 #include <shellapi.h>
 #include <Gdiplus.h>
@@ -27,18 +28,27 @@
 #include <memory>
 #include <random>
 #include <chrono>
+#include <atlbase.h>
+#include <mmsystem.h>
+#include <sapi.h>
+#include <thread>
 
 #pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "Crypt32.lib")
 #pragma comment(lib, "Gdiplus.lib")
 #pragma comment(lib, "Ws2_32.lib")
+#pragma comment(lib, "winmm.lib")
+#pragma comment(lib, "sapi.lib")
 
 #include "json.hpp"
 #include "CloudMatchSync.h"
 #include "CloudMatchStatusDisplay.h"
 #include "LicenseLease.h"
 #include "CloudReleasePolicy.h"
+#include "VoiceCloudCache.h"
+static dnf_voice::Cache g_voiceCloudCache;
+static std::atomic<bool> g_killFxClosedByUser{ false };
 using json = nlohmann::json;
 static CString s_backupAuthCode = L"";
 static CString s_pendingAuthCode = L"";
@@ -175,6 +185,7 @@ const int ID_BTN_DEATH_X_CALIBRATE = 1036;
 const int ID_BTN_DEATH_X_SAVE = 1037;
 const int ID_BTN_DEATH_X_CANCEL = 1038;
 const int ID_BTN_DEATH_X_DEFAULT = 1039;
+const int ID_BTN_HP_CALIBRATE = 1096;
 const CString PLACEHOLDER_TEXT = L"输入：选手(游戏ID1)(游戏ID2)...";
 
 constexpr int DEATH_X_ALGO_COLOR = 0;      // 当前颜色采样算法
@@ -227,8 +238,9 @@ static CString DnfReadLicenseFromFile();
 static json DnfBuildScoreboardTextStylesJson(const CString& iniPath);
 static void DnfSaveScoreboardTextStylesJson(const CString& iniPath, const json& styles);
 static json DnfBuildKillDisplaySettingsJson(const CString& iniPath);
-static void DnfSaveKillDisplaySettingsJson(const CString& iniPath, const json& settings);
+static DWORD DnfSaveKillDisplaySettingsJson(const CString& iniPath, const json& settings);
 static json DnfBuildInstalledFontListJson();
+static void DnfSyncKillVoicePlaybackPolicy(const CString& iniPath);
 static bool DnfStartKillDisplayHttpServer(CDNFGameCaptureDlg* host, const CString& webDir, CString& errorMsg);
 static void DnfStopKillDisplayHttpServer();
 void WriteMatchLog(const CString& logLine);
@@ -612,9 +624,9 @@ struct DnfKillDisplayLayoutDefault {
 };
 
 static const DnfKillDisplayLayoutDefault KILL_DISPLAY_LAYOUT_DEFAULTS[] = {
-    { "showDeathNumber", 0, 0,     1 },
+    { "showDeathNumber", 1, 0,     1 },
     { "bgAlpha",          0, 0,   100 },
-    { "panelAlpha",      49, 0,   100 },
+    { "panelAlpha",      31, 0,   100 },
     { "rowAlpha",         0, 0,   100 },
     { "canvasPadding",    0, 0,    40 },
     { "panelPadding",    14, 0,    40 },
@@ -644,25 +656,51 @@ static const DnfKillDisplayLayoutDefault KILL_DISPLAY_LAYOUT_DEFAULTS[] = {
     { "akCountBadgeOffsetX", 12, -80, 80 },
     { "akCountBadgeOffsetY",-26, -80, 80 },
     // 展示页风格与自定义背景（kill.js 写入；顺序只能追加）
-    { "skin",             0, 0,     8 },
+    { "skin",             3, 0,     8 },  // 默认 3 = 水墨国风
     { "bgImageRev",       0, 0, 2147483647 },
     { "bgImageScale",   100, 10,  400 },
     { "bgImageX",         0, -3000, 3000 },
     { "bgImageY",         0, -3000, 3000 },
     { "bgImageOpacity", 100, 0,   100 },
     { "fxEnabled",       1, 0,     1 },
+    { "fxFullscreen",    0, 0,     1 },  // 全屏透明特效窗口开关（CKillFxDlg）
+    { "fxFullscreenScale", 100, 50, 200 }, // 全屏特效大小 %
+    { "fxFullscreenTipOff", 0, 0,   1 },  // 主窗口勾选全屏特效时「不再提示」
+    // 特效管理面板（主窗口「特效管理」）：开关 / 触发事件 / 延迟 ms / 出现 ms / 持续 ms
+    { "fxTextOn",        1, 0,     1 },
+    { "fxKillOn",        1, 0,     1 },
+    { "fxEvtDouble",     1, 0,     1 },
+    { "fxEvtTriple",     1, 0,     1 },
+    { "fxEvtFirst",      1, 0,     1 },
+    { "fxEvtShutdown",   1, 0,     1 },
+    { "fxEvtRevenge",    1, 0,     1 },
+    { "fxEvtAk",         1, 0,     1 },
+    { "fxEvtVictory",    1, 0,     1 },
+    { "fxTextDelay",     0, 0,  5000 },
+    { "fxTextIn",        0, 0,  2000 },
+    { "fxTextMs",   3500, 1000, 10000 },
+    { "fxKillDelay",     0, 0,  5000 },
+    { "fxKillIn",        0, 0,  2000 },
+    { "fxKillMs",   3500, 1000, 10000 },
+    { "fxFsDelay",       0, 0,  5000 },
+    { "fxFsIn",          0, 0,  2000 },
+    { "fxFsMs",     3500, 1000, 10000 },
+    // 语音播报：开关（默认不播放，勾选后才播放）+ 音色序号（DNF_KILL_VOICES 的下标）
+    { "fxVoiceOn",       0, 0,     1 },
+    { "fxVoice",         0, 0, 65535 },
 };
 
 static const DnfScoreboardStyleDefault KILL_DISPLAY_TEXT_STYLE_DEFAULTS[] = {
     { "teamName",    L"Microsoft YaHei", 54, L"team",   L"#ffffff", L"#000000", 4, 0, 0, true },
     { "score",       L"Arial Black",     70, L"team",   L"#ffffff", L"#000000", 3, 2, 0, true },
-    { "header",      L"FZXS24",          31, L"custom", L"#c9a86a", L"#000000", 2, 0, 0, false },
-    { "pickLabel",   L"FZXS24",          27, L"custom", L"#6fc8b9", L"#000000", 3, 0, 0, false },
-    { "playerName",  L"Arial",           43, L"custom", L"#f7ca69", L"#000000", 5, 2, 0, false },
-    { "killNumber",  L"FZXS24",          50, L"custom", L"#f7ca69", L"#000000", 4, 0, 0, false },
-    { "deathNumber", L"FZXS24",          50, L"custom", L"#ab986d", L"#000000", 4, 0, 0, false },
-    { "akMark",      L"FZXS24",          40, L"custom", L"#f7d67e", L"#000000", 3, 0, 0, false },
-    { "akCountBadge",L"Microsoft YaHei", 30, L"custom", L"#f7d67e", L"#000000", 1, 0, 0, false },
+    // 默认文字颜色 = 水墨国风推荐配色
+    { "header",      L"Microsoft YaHei", 31, L"custom", L"#b9ab8f", L"#000000", 2, 0, 0, false },
+    { "pickLabel",   L"Arial Black",     27, L"custom", L"#c8a86a", L"#000000", 3, 0, 0, false },
+    { "playerName",  L"Arial",           43, L"custom", L"#f2ead8", L"#000000", 5, 0, 0, false },
+    { "killNumber",  L"FZXS24",          50, L"custom", L"#f2ead8", L"#000000", 4, 0, 0, false },
+    { "deathNumber", L"FZXS24",          50, L"custom", L"#9c9486", L"#000000", 4, 0, 0, false },
+    { "akMark",      L"FZXS24",          40, L"custom", L"#e0473a", L"#000000", 3, 0, 0, false },
+    { "akCountBadge",L"Microsoft YaHei", 30, L"custom", L"#e0473a", L"#000000", 1, 0, 0, false },
 };
 
 static CString DnfMakeScoreboardStyleIniKey(const char* styleKey, const char* field)
@@ -906,17 +944,28 @@ static int DnfReadKillDisplayStyleInt(const CString& iniPath, const DnfScoreboar
     return fallback;
 }
 
-static void DnfWriteStyleStringToSection(const CString& iniPath, const wchar_t* section, const DnfScoreboardStyleDefault& def, const char* field, const CString& value)
+static bool DnfWriteStyleStringToSection(const CString& iniPath, const wchar_t* section, const DnfScoreboardStyleDefault& def, const char* field, const CString& value)
 {
     CString key = DnfMakeScoreboardStyleIniKey(def.key, field);
-    ::WritePrivateProfileString(section, key, value, iniPath);
+    return ::WritePrivateProfileString(section, key, value, iniPath) != FALSE;
 }
 
-static void DnfWriteStyleIntToSection(const CString& iniPath, const wchar_t* section, const DnfScoreboardStyleDefault& def, const char* field, int value)
+static bool DnfWriteStyleIntToSection(const CString& iniPath, const wchar_t* section, const DnfScoreboardStyleDefault& def, const char* field, int value)
 {
     CString text;
     text.Format(L"%d", value);
-    DnfWriteStyleStringToSection(iniPath, section, def, field, text);
+    return DnfWriteStyleStringToSection(iniPath, section, def, field, text);
+}
+
+// config.ini 被设为只读时（从压缩包/U盘/别的电脑拷来常见），所有设置都会静默保存失败，
+// 表现为击杀页拖动文字后被"拽回去"。写配置前自动去掉只读属性。
+static void DnfEnsureIniWritable(const CString& iniPath)
+{
+    if (iniPath.IsEmpty()) return;
+    const DWORD attrs = ::GetFileAttributes(iniPath);
+    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY)) {
+        ::SetFileAttributes(iniPath, attrs & ~FILE_ATTRIBUTE_READONLY);
+    }
 }
 
 static json DnfBuildKillDisplayStyleJson(const CString& iniPath, const DnfScoreboardStyleDefault& def)
@@ -977,6 +1026,7 @@ static json DnfBuildKillDisplayLayoutJson(const CString& iniPath)
         }
         layout[def.key] = DnfClampScoreboardInt(value, def.minValue, def.maxValue);
     }
+    if (g_killFxClosedByUser.load()) layout["fxFullscreen"] = 0;
     return layout;
 }
 
@@ -989,9 +1039,67 @@ static json DnfBuildKillDisplaySettingsJson(const CString& iniPath)
     return settings;
 }
 
-static void DnfSaveKillDisplaySettingsJson(const CString& iniPath, const json& settings)
+// 5.5.1 升级：击杀展示页一次性恢复为默认「水墨国风」配置。
+// 删除旧的风格/布局、文字样式、窗口尺寸三个节，读取时自然回落到新的默认值；
+// 写入标记后不再执行，之后用户自己的修改会正常保留。
+static void DnfApplyKillDisplayInkDefaultsOnce(const CString& iniPath)
 {
-    if (iniPath.IsEmpty() || !settings.is_object()) return;
+    if (iniPath.IsEmpty()) return;
+    DnfEnsureIniWritable(iniPath);
+    static const wchar_t* kUpgradeSection = L"Upgrade551";
+    static const wchar_t* kUpgradeKey = L"KillDisplayInkDefaultsApplied";
+    if (::GetPrivateProfileInt(kUpgradeSection, kUpgradeKey, 0, iniPath) == 1) return;
+
+    if (::GetFileAttributes(iniPath) != INVALID_FILE_ATTRIBUTES) {
+        // 覆盖前留一份备份（已存在则不覆盖）
+        ::CopyFile(iniPath, iniPath + L".before-5.5.1.bak", TRUE);
+        ::WritePrivateProfileString(KILL_DISPLAY_LAYOUT_SECTION, nullptr, nullptr, iniPath);
+        ::WritePrivateProfileString(KILL_DISPLAY_STYLE_SECTION, nullptr, nullptr, iniPath);
+        ::WritePrivateProfileString(L"KillDisplayWindow", nullptr, nullptr, iniPath);
+    }
+    // 新安装也写入标记，避免之后用户改过的样式在下次启动时被清掉
+    ::WritePrivateProfileString(kUpgradeSection, kUpgradeKey, L"1", iniPath);
+}
+
+// 5.5.2 升级：特效管理一次性恢复默认——文字特效、击杀特效开启，全屏特效关闭，持续时间 3.5 秒。
+// 只执行一次，之后用户在「特效管理」里的修改正常保留。
+static void DnfApplyKillFxDefaultsOnce(const CString& iniPath)
+{
+    if (iniPath.IsEmpty()) return;
+    DnfEnsureIniWritable(iniPath);
+    static const wchar_t* kUpgradeSection = L"Upgrade552";
+    static const wchar_t* kUpgradeKey = L"KillFxDefaultsApplied";
+    if (::GetPrivateProfileInt(kUpgradeSection, kUpgradeKey, 0, iniPath) == 1) return;
+
+    static const wchar_t* kDefaults[][2] = {
+        { L"fxEnabled", L"1" }, { L"fxTextOn", L"1" }, { L"fxKillOn", L"1" }, { L"fxFullscreen", L"0" },
+        { L"fxTextMs", L"3500" }, { L"fxKillMs", L"3500" }, { L"fxFsMs", L"3500" },
+    };
+    for (const auto& item : kDefaults) {
+        ::WritePrivateProfileString(KILL_DISPLAY_LAYOUT_SECTION, item[0], item[1], iniPath);
+    }
+    // 5.5.1 测试版里的持续时间倍率（%）已改为毫秒，旧键直接删掉
+    for (const wchar_t* oldKey : { L"fxTextDur", L"fxKillDur", L"fxFsDur" }) {
+        ::WritePrivateProfileString(KILL_DISPLAY_LAYOUT_SECTION, oldKey, nullptr, iniPath);
+    }
+    ::WritePrivateProfileString(kUpgradeSection, kUpgradeKey, L"1", iniPath);
+}
+
+// 返回 0 表示全部写入成功；否则返回 Windows 错误码（写入 config.ini 失败）。
+static DWORD DnfSaveKillDisplaySettingsJson(const CString& iniPath, const json& settings)
+{
+    if (iniPath.IsEmpty()) return ERROR_PATH_NOT_FOUND;
+    if (!settings.is_object()) return ERROR_INVALID_DATA;
+    DnfEnsureIniWritable(iniPath);
+    bool ok = true;
+    DWORD firstError = 0;
+    auto track = [&](bool written) {
+        if (!written && ok) {
+            ok = false;
+            firstError = ::GetLastError();
+            if (firstError == 0) firstError = ERROR_WRITE_FAULT;
+        }
+    };
 
     json layout = json::object();
     if (settings.contains("layout") && settings["layout"].is_object()) {
@@ -1002,7 +1110,7 @@ static void DnfSaveKillDisplaySettingsJson(const CString& iniPath, const json& s
         CString key = CA2W(def.key, CP_UTF8);
         CString text;
         text.Format(L"%d", value);
-        ::WritePrivateProfileString(KILL_DISPLAY_LAYOUT_SECTION, key, text, iniPath);
+        track(::WritePrivateProfileString(KILL_DISPLAY_LAYOUT_SECTION, key, text, iniPath) != FALSE);
     }
 
     json styles = json::object();
@@ -1033,15 +1141,25 @@ static void DnfSaveKillDisplaySettingsJson(const CString& iniPath, const json& s
         int glow = DnfClampScoreboardInt(DnfJsonScoreboardInt(style, "glow", def.glow), 0, 36);
         int letterSpacing = DnfClampScoreboardInt(DnfJsonScoreboardInt(style, "letterSpacing", def.letterSpacing), -4, 16);
 
-        DnfWriteStyleStringToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "fontFamily", fontFamily);
-        DnfWriteStyleIntToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "fontSize", fontSize);
-        DnfWriteStyleStringToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "colorMode", colorMode);
-        DnfWriteStyleStringToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "color", color);
-        DnfWriteStyleStringToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "strokeColor", strokeColor);
-        DnfWriteStyleIntToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "strokeWidth", strokeWidth);
-        DnfWriteStyleIntToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "glow", glow);
-        DnfWriteStyleIntToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "letterSpacing", letterSpacing);
+        track(DnfWriteStyleStringToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "fontFamily", fontFamily));
+        track(DnfWriteStyleIntToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "fontSize", fontSize));
+        track(DnfWriteStyleStringToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "colorMode", colorMode));
+        track(DnfWriteStyleStringToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "color", color));
+        track(DnfWriteStyleStringToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "strokeColor", strokeColor));
+        track(DnfWriteStyleIntToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "strokeWidth", strokeWidth));
+        track(DnfWriteStyleIntToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "glow", glow));
+        track(DnfWriteStyleIntToSection(iniPath, KILL_DISPLAY_STYLE_SECTION, def, "letterSpacing", letterSpacing));
     }
+    if (ok && layout.contains("fxFullscreen")) g_killFxClosedByUser.store(false);
+    DnfSyncKillVoicePlaybackPolicy(iniPath);
+    return ok ? 0 : firstError;
+}
+
+static CString DnfKillSettingsWriteErrorText(DWORD error)
+{
+    CString text;
+    text.Format(L"击杀展示页样式保存失败：config.ini 无法写入（错误码 %lu）。请检查该文件是否只读、软件目录是否需要管理员权限，或是否被安全软件拦截。", error);
+    return text;
 }
 
 struct DnfFontEnumContext {
@@ -1251,6 +1369,276 @@ static bool DnfKillDisplayStaticPathForRoute(const CString& webDir, const std::s
     return true;
 }
 
+/* ================= 击杀语音播报（移植自 StreamChargeOverlay 的语音生成系统） =================
+ * StreamChargeOverlay：豆包（火山引擎 seed-tts-2.0）优先，失败时回退到 Windows 系统语音。
+ * 这里的播报词是固定的（双杀 / 三杀 / 一血 / 终结 / 复仇 / AK），所以豆包音色直接预生成 WAV 随安装包发布：
+ * 客户端不保存任何 API Key、不联网、零延迟；缺文件时自动改用 Windows 语音现场合成。
+ * 新增音色：在 DNF_KILL_VOICES 末尾追加一项，并用 scripts/generate-kill-voices.ps1 生成
+ * web前端/voice/<目录>/<词>.wav（顺序只能追加，config.ini 里 fxVoice 存的是下标）。 */
+struct DnfKillVoiceDef {
+    const char* id;         // 目录名：web前端/voice/<id>/
+    const wchar_t* label;   // 特效管理里显示的名字
+    bool bundled;           // true = 预生成的豆包语音；false = Windows 系统语音离线合成
+    const char* inkId;      // 非空 = 水墨国风（古风 UI）的词改用这个目录（「默认」按风格自动选音色）
+};
+static const DnfKillVoiceDef DNF_KILL_VOICES[] = {
+    { "lol-announcer",   L"默认（LOL音效播报）", true, nullptr },
+    { "doubao-meihuo",   L"魅惑女声",               true,  nullptr },  // zh_female_jiaochuannv_uranus_bigtts
+    { "doubao-gufeng2",  L"古风雅韵 2.0",           true,  nullptr },  // zh_female_gufengshaoyu_uranus_bigtts
+    { "doubao-gufeng1",  L"古风雅韵 1.0",           true,  nullptr },  // zh_female_gufengshaoyu_mars_bigtts
+    { "doubao-wuzetian", L"武则天 1.0",             true,  nullptr },  // zh_female_wuzetian_mars_bigtts
+    { "windows",         L"Windows 系统语音（离线）", false, nullptr },
+};
+
+struct DnfKillVoicePhrase { const char* key; const wchar_t* text; };
+static const DnfKillVoicePhrase DNF_KILL_VOICE_PHRASES[] = {
+    // 通用（DNF 金边 / 经典 / 霓虹 / 玻璃 / 熔岩 / 转播 / 寒冰）、水墨国风、像素街机各用自己横幅上的文字；
+    // AK 读「大字 + 副标题」。新增词：在这里追加，并给每个豆包音色生成 web前端/voice/<音色>/<key>.wav
+    // （scripts/generate-kill-voices.ps1）。「默认」音色里，水墨国风的词用古风雅韵 2.0，其余用魅惑女声。
+    { "double", L"双杀！" },
+    { "triple", L"三杀！" },
+    { "first", L"一血！" },
+    { "shutdown", L"终结！" },
+    { "revenge", L"复仇！" },
+    { "ink-double", L"双斩！" },
+    { "ink-triple", L"三斩！" },
+    { "ink-first", L"首胜！" },
+    { "ink-shutdown", L"断其锋！" },
+    { "ink-revenge", L"雪耻！" },
+    { "pixel-double", L"Double!" },
+    { "pixel-triple", L"Triple!" },
+    { "pixel-first", L"First blood!" },
+    { "pixel-shutdown", L"Stopped!" },
+    { "pixel-revenge", L"Revenge!" },
+    { "ak-allkill", L"AK！一人团灭！" },
+    { "ak-ace", L"ACE！一人团灭！" },
+    { "ak-ink", L"全歼！一人破阵！" },
+    { "ak-pixel", L"AK! Perfect!" },
+    { "ak-inferno", L"AK！焚尽一切！" },
+    { "ak-frost", L"AK！冰封全场！" },
+    { "victory", L"胜利！" },
+    { "ink-victory", L"大捷！凯歌还！" },
+    { "victory-en", L"Victory!" },
+    { "victory-neon", L"Victory! Mission complete!" },
+    { "victory-inferno", L"烈焰凯旋！" },
+    { "victory-broadcast", L"比赛胜利！恭喜！" },
+    { "victory-frost", L"冰封全场，凯旋而归！" },
+};
+
+// 击杀展示风格 id（顺序同 kill.js 的 KILL_DISPLAY_SKINS，只能追加）及各自的 AK 播报词。
+struct DnfKillVoiceSkin { const char* skin; const char* akKey; };
+static const DnfKillVoiceSkin DNF_KILL_VOICE_SKINS[] = {
+    { "dnf", "ak-allkill" },
+    { "classic", "ak-ace" },
+    { "neon", "ak-allkill" },
+    { "ink", "ak-ink" },
+    { "glass", "ak-allkill" },
+    { "pixel", "ak-pixel" },
+    { "inferno", "ak-inferno" },
+    { "broadcast", "ak-ace" },
+    { "frost", "ak-frost" },
+};
+
+// 事件（double / triple / first / shutdown / revenge / ak）+ 风格（id 或序号）→ 播报词 key
+static std::string DnfKillVoicePhraseKey(const std::string& eventName, std::string skin)
+{
+    if (!skin.empty() && std::isdigit(static_cast<unsigned char>(skin[0]))) {
+        const int index = std::atoi(skin.c_str());
+        skin = (index >= 0 && index < (int)std::size(DNF_KILL_VOICE_SKINS)) ? DNF_KILL_VOICE_SKINS[index].skin : "";
+    }
+    if (eventName == "victory") {
+        if (skin == "ink") return "ink-victory";
+        if (skin == "classic" || skin == "pixel") return "victory-en";
+        if (skin == "neon" || skin == "inferno" || skin == "broadcast" || skin == "frost") return "victory-" + skin;
+        return "victory";
+    }
+    if (eventName == "ak") {
+        for (const auto& item : DNF_KILL_VOICE_SKINS) {
+            if (skin == item.skin) return item.akKey;
+        }
+        return "ak-allkill";
+    }
+    if (eventName != "double" && eventName != "triple" && eventName != "first" &&
+        eventName != "shutdown" && eventName != "revenge") return "";
+    if (skin == "ink" || skin == "pixel") return skin + "-" + eventName;
+    return eventName;
+}
+
+static std::mutex g_killVoiceMutex;
+// 独立的短时播放锁：静音不等待 SAPI 合成；epoch 让已经排队的旧请求失效。
+static std::mutex g_killVoicePlaybackMutex;
+static std::atomic<bool> g_killVoicePlaybackEnabled{ false };
+static std::atomic<unsigned long long> g_killVoicePlaybackEpoch{ 0 };
+
+static void DnfSyncKillVoicePlaybackPolicy(const CString& iniPath)
+{
+    const bool enabled = !iniPath.IsEmpty() &&
+        ::GetPrivateProfileInt(KILL_DISPLAY_LAYOUT_SECTION, L"fxVoiceOn", 0, iniPath) == 1 &&
+        ::GetPrivateProfileInt(KILL_DISPLAY_LAYOUT_SECTION, L"fxEnabled", 1, iniPath) == 1;
+    std::lock_guard<std::mutex> lock(g_killVoicePlaybackMutex);
+    g_killVoicePlaybackEnabled.store(enabled);
+    const int selection = ::GetPrivateProfileInt(KILL_DISPLAY_LAYOUT_SECTION, L"fxVoice", 0, iniPath);
+    const auto webDir = std::filesystem::path(iniPath.GetString()).parent_path() / L"web前端";
+    g_voiceCloudCache.SetPolicy(enabled, selection, webDir.wstring());
+    ++g_killVoicePlaybackEpoch;
+    if (!enabled) ::PlaySoundW(nullptr, nullptr, 0);
+}
+
+static json DnfBuildKillVoicesJson()
+{
+    return g_voiceCloudCache.List();
+}
+
+static const DnfKillVoicePhrase* DnfFindKillVoicePhrase(const std::string& key)
+{
+    for (const auto& phrase : DNF_KILL_VOICE_PHRASES) {
+        if (key == phrase.key) return &phrase;
+    }
+    return nullptr;
+}
+
+static CString DnfKillVoiceCacheDir()
+{
+    wchar_t appData[MAX_PATH] = {};
+    const DWORD length = ::GetEnvironmentVariableW(L"APPDATA", appData, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return CString();
+    CString dir(appData);
+    dir.TrimRight(L"\\/");
+    for (const wchar_t* part : { L"\\DNFGameCapture", L"\\voice-cache" }) {
+        dir += part;
+        if (!::CreateDirectoryW(dir, nullptr) && ::GetLastError() != ERROR_ALREADY_EXISTS) return CString();
+    }
+    return dir;
+}
+
+// Windows 系统语音（SAPI）合成到 WAV：优先中文（zh-CN，如 Microsoft Huihui），语速 +1、音量 100，
+// 与 StreamChargeOverlay 的 WindowsSpeechService 保持一致。调用方负责 COM 初始化。
+static bool DnfSapiSpeakToWav(const CString& text, const CString& path)
+{
+    CComPtr<ISpVoice> voice;
+    if (FAILED(voice.CoCreateInstance(CLSID_SpVoice)) || !voice) return false;
+
+    CComPtr<ISpObjectTokenCategory> category;
+    if (SUCCEEDED(category.CoCreateInstance(CLSID_SpObjectTokenCategory)) && category &&
+        SUCCEEDED(category->SetId(SPCAT_VOICES, FALSE))) {
+        CComPtr<IEnumSpObjectTokens> tokens;
+        if (SUCCEEDED(category->EnumTokens(L"Language=804", nullptr, &tokens)) && tokens) {
+            CComPtr<ISpObjectToken> token;
+            if (tokens->Next(1, &token, nullptr) == S_OK && token) voice->SetVoice(token);
+        }
+    }
+
+    const CString tempPath = path + L".tmp";
+    WAVEFORMATEX format = {};
+    format.wFormatTag = WAVE_FORMAT_PCM;
+    format.nChannels = 1;
+    format.nSamplesPerSec = 22050;
+    format.wBitsPerSample = 16;
+    format.nBlockAlign = 2;
+    format.nAvgBytesPerSec = 44100;
+
+    CComPtr<ISpStream> stream;
+    if (FAILED(stream.CoCreateInstance(CLSID_SpStream)) || !stream) return false;
+    if (FAILED(stream->BindToFile(tempPath, SPFM_CREATE_ALWAYS, &SPDFID_WaveFormatEx, &format, 0))) return false;
+
+    voice->SetOutput(stream, TRUE);
+    voice->SetRate(1);
+    voice->SetVolume(100);
+    const HRESULT hr = voice->Speak(text, SPF_DEFAULT, nullptr);
+    voice->SetOutput(nullptr, FALSE);
+    stream->Close();
+    stream.Release();
+    voice.Release();
+
+    if (FAILED(hr)) {
+        ::DeleteFileW(tempPath);
+        return false;
+    }
+    return ::MoveFileExW(tempPath, path, MOVEFILE_REPLACE_EXISTING) != FALSE;
+}
+
+// 找到（必要时生成）某个音色的某句播报词的 WAV 文件。
+static bool DnfResolveKillVoiceClip(int voiceIndex, const std::string& key, const CString& webDir, CString& outPath)
+{
+    const DnfKillVoicePhrase* phrase = DnfFindKillVoicePhrase(key);
+    if (!phrase) return false;
+    if (voiceIndex != 5) {
+        std::wstring cached;
+        if (g_voiceCloudCache.Resolve(voiceIndex, key, cached)) { outPath = cached.c_str(); return true; }
+        // Never play a stale bundled revision after a server catalog has become authoritative.
+        if (g_voiceCloudCache.HasCatalog()) voiceIndex = 5;
+    }
+    if (voiceIndex < 0 || voiceIndex >= (int)std::size(DNF_KILL_VOICES)) voiceIndex = 5;
+    const DnfKillVoiceDef& voice = DNF_KILL_VOICES[voiceIndex];
+    const CString keyW(phrase->key);
+
+    if (voice.bundled && !webDir.IsEmpty()) {
+        const bool inkPhrase = key.compare(0, 4, "ink-") == 0 || key == "ak-ink";
+        const char* dirId = (inkPhrase && voice.inkId) ? voice.inkId : voice.id;
+        CString clip = DnfJoinPath(webDir, L"voice\\" + CString(dirId) + L"\\" + keyW + L".wav");
+        if (DnfFileExists(clip)) {
+            outPath = clip;
+            return true;
+        }
+    }
+
+    // Windows 系统语音：按「词 + 文本哈希」缓存，改词后自动重新合成。
+    const CString cacheDir = DnfKillVoiceCacheDir();
+    if (cacheDir.IsEmpty()) return false;
+    CString cached;
+    cached.Format(L"%s\\windows-%s-%08zx.wav", cacheDir.GetString(), keyW.GetString(),
+        std::hash<std::wstring>{}(std::wstring(phrase->text)) & 0xffffffffu);
+    if (!DnfFileExists(cached)) {
+        const HRESULT coHr = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const bool ok = DnfSapiSpeakToWav(CString(phrase->text), cached);
+        if (SUCCEEDED(coHr)) ::CoUninitialize();
+        if (!ok) return false;
+    }
+    outPath = cached;
+    return true;
+}
+
+// 后台线程里准备并播放，不阻塞 HTTP 服务 / UI 线程。play=false 只预先合成（切换音色时预热）。
+static void DnfPlayKillVoiceAsync(int voiceIndex, const std::string& key, const CString& webDir, bool play = true)
+{
+    if (!DnfFindKillVoicePhrase(key) || (play && !g_killVoicePlaybackEnabled.load())) return;
+    if (key == "victory" || key == "ink-victory" || key.compare(0, 8, "victory-") == 0) {
+        // Victory supersedes any older queued kill speech.
+        std::lock_guard<std::mutex> playbackLock(g_killVoicePlaybackMutex);
+        ++g_killVoicePlaybackEpoch;
+    }
+    const auto epoch = g_killVoicePlaybackEpoch.load();
+    std::thread([voiceIndex, key, webDir, play, epoch]() {
+        std::lock_guard<std::mutex> lock(g_killVoiceMutex);
+        if (play && (!g_killVoicePlaybackEnabled.load() || epoch != g_killVoicePlaybackEpoch.load())) return;
+        CString path;
+        if (!DnfResolveKillVoiceClip(voiceIndex, key, webDir, path) || !play) return;
+        std::lock_guard<std::mutex> playbackLock(g_killVoicePlaybackMutex);
+        if (!g_killVoicePlaybackEnabled.load() || epoch != g_killVoicePlaybackEpoch.load()) return;
+        ::PlaySoundW(path, nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
+    }).detach();
+}
+
+static std::string DnfHttpQueryParam(const std::string& request, const char* name)
+{
+    const size_t lineEnd = request.find("\r\n");
+    const std::string firstLine = request.substr(0, lineEnd == std::string::npos ? request.size() : lineEnd);
+    const size_t queryPos = firstLine.find('?');
+    if (queryPos == std::string::npos) return "";
+    const size_t queryEnd = firstLine.find(' ', queryPos);
+    const std::string query = firstLine.substr(queryPos + 1, queryEnd == std::string::npos ? std::string::npos : queryEnd - queryPos - 1);
+    const std::string wanted = std::string(name) + "=";
+    size_t start = 0;
+    while (start <= query.size()) {
+        size_t end = query.find('&', start);
+        if (end == std::string::npos) end = query.size();
+        const std::string item = query.substr(start, end - start);
+        if (item.compare(0, wanted.size(), wanted) == 0) return item.substr(wanted.size());
+        start = end + 1;
+    }
+    return "";
+}
+
 static void DnfHandleKillDisplayHttpClient(SOCKET client)
 {
     DWORD timeout = 900;
@@ -1305,6 +1693,37 @@ static void DnfHandleKillDisplayHttpClient(SOCKET client)
         }
         const std::string body = host ? host->BuildKeyMappingStatePayload() : "{\"enabled\":false,\"activeMask\":0,\"slots\":[]}";
         DnfHttpSendResponse(client, 200, "OK", "application/json; charset=utf-8", body);
+        return;
+    }
+
+    // 击杀语音：kill.js 在多杀 / 一血 / 终结 / 复仇 / AK 时请求播放（event + skin → 该风格对应的播报词）；
+    // 也可直接传 key。prepare=1 只预先合成不播放。
+    if (route == "/api/voice/play") {
+        if (method != "POST") {
+            DnfHttpSendResponse(client, 405, "Method Not Allowed", "text/plain; charset=utf-8", "POST only");
+            return;
+        }
+        if (!g_killVoicePlaybackEnabled.load()) {
+            DnfHttpSendResponse(client, 200, "OK", "application/json; charset=utf-8", "{\"ok\":true,\"muted\":true}");
+            return;
+        }
+        std::string key = DnfHttpQueryParam(request, "key");
+        if (key.empty()) key = DnfKillVoicePhraseKey(DnfHttpQueryParam(request, "event"), DnfHttpQueryParam(request, "skin"));
+        const int voiceIndex = std::atoi(DnfHttpQueryParam(request, "voice").c_str());
+        const bool prepareOnly = DnfHttpQueryParam(request, "prepare") == "1";
+        CString voiceWebDir;
+        {
+            std::lock_guard<std::mutex> lock(g_killDisplayHttpServer.mutex);
+            voiceWebDir = g_killDisplayHttpServer.webDir;
+        }
+        const bool ok = DnfFindKillVoicePhrase(key) != nullptr;
+        if (ok) DnfPlayKillVoiceAsync(voiceIndex, key, voiceWebDir, !prepareOnly);
+        DnfHttpSendResponse(client, ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json; charset=utf-8",
+            ok ? "{\"ok\":true}" : "{\"ok\":false}");
+        return;
+    }
+    if (route == "/api/voices") {
+        DnfHttpSendResponse(client, 200, "OK", "application/json; charset=utf-8", DnfBuildKillVoicesJson().dump());
         return;
     }
 
@@ -1506,6 +1925,8 @@ static bool DnfStartKillDisplayHttpServer(CDNFGameCaptureDlg* host, const CStrin
 
 static void DnfStopKillDisplayHttpServer()
 {
+    DnfSyncKillVoicePlaybackPolicy(CString());
+    g_voiceCloudCache.Stop();
     std::thread worker;
     {
         std::lock_guard<std::mutex> lock(g_killDisplayHttpServer.mutex);
@@ -2956,6 +3377,257 @@ static const wchar_t* GetDeathPointName(int idx)
     }
 }
 
+// ===================================================
+// 对战血条识别（纯颜色）
+//   剩余血量：红 / 橙 / 黄（R 高、B 低）
+//   已损失：  深灰（低亮度、低饱和）
+// 每行取「首个血条像素 ~ 末个血条像素」作为该行血条跨度（自动适配斜边和框选误差），
+// 百分比 = 剩余血量像素 / 跨度，取所有有效行的中位数。
+// ===================================================
+static int DnfHpPixelClass(int r, int g, int b)
+{
+    if (r >= 110 && r - b >= 70) return 1;
+    const int mx = max(r, max(g, b));
+    const int mn = min(r, min(g, b));
+    if (mx >= 18 && mx <= 95 && mx - mn <= 26) return 2;
+    return 0;
+}
+
+static int DnfMeasureHpBarBits(const BYTE* bits, int w, int h, bool anchorRight)
+{
+    if (!bits || w < 20 || h < 1) return -1;
+    const int kGap = 4;   // 血条内部允许的杂色间隙；外框与背景之间的间隙通常更大
+    std::vector<int> cls((size_t)w);
+    std::vector<int> rowPct;
+    rowPct.reserve(h);
+    for (int y = 0; y < h; ++y) {
+        const BYTE* line = bits + (size_t)y * (size_t)w * 4;
+        for (int x = 0; x < w; ++x) {
+            const BYTE* p = line + x * 4;
+            cls[x] = DnfHpPixelClass(p[2], p[1], p[0]);
+        }
+        // 取最长的连续血条段（红黄=剩余，深灰=已损失），间隙 <= kGap 视为连续
+        int bestLen = 0, bestStart = -1, bestEnd = -1;
+        int start = -1, last = -1;
+        for (int x = 0; x < w; ++x) {
+            if (cls[x] == 0) continue;
+            if (start < 0 || x - last > kGap + 1) {
+                if (start >= 0 && last - start + 1 > bestLen) { bestLen = last - start + 1; bestStart = start; bestEnd = last; }
+                start = x;
+            }
+            last = x;
+        }
+        if (start >= 0 && last - start + 1 > bestLen) { bestLen = last - start + 1; bestStart = start; bestEnd = last; }
+        if (bestLen * 2 < w) continue;          // 跨度不足框宽一半：不是血条
+
+        // 血量从头像一侧开始填充：去掉锚点端第一个红黄像素之前的边框杂点
+        int segStart = bestStart, segEnd = bestEnd;
+        if (!anchorRight) {
+            while (segStart <= segEnd && cls[segStart] != 1) ++segStart;
+        } else {
+            while (segEnd >= segStart && cls[segEnd] != 1) --segEnd;
+        }
+        if ((segEnd - segStart + 1) * 2 < w) { segStart = bestStart; segEnd = bestEnd; }
+
+        const int span = segEnd - segStart + 1;
+        int filled = 0;
+        for (int x = segStart; x <= segEnd; ++x) {
+            if (cls[x] == 1) ++filled;
+        }
+        rowPct.push_back((filled * 1000 / span + 5) / 10);
+    }
+    if (rowPct.empty() || (int)rowPct.size() * 2 < h) return -1;
+    std::sort(rowPct.begin(), rowPct.end());
+    int pct = rowPct[rowPct.size() / 2];
+    if (pct >= 98) pct = 100;                   // 斜边外框会吃掉 1~2%，满血时补正
+    return max(0, min(100, pct));
+}
+
+void CDNFGameCaptureDlg::LoadHpBarRectsFromIni()
+{
+    ApplyDefaultHpBarRects();
+    if (m_iniPath.IsEmpty()) return;
+    const wchar_t* keys[2] = { L"LeftRect", L"RightRect" };
+    for (int side = 0; side < 2; ++side) {
+        wchar_t buf[128] = {};
+        ::GetPrivateProfileString(L"HpBar", keys[side], L"", buf, 128, m_iniPath);
+        float l = 0, t = 0, r = 0, b = 0;
+        if (swscanf_s(buf, L"%f,%f,%f,%f", &l, &t, &r, &b) == 4 &&
+            l >= 0.0f && t >= 0.0f && r <= 1.0f && b <= 1.0f && r - l > 0.02f && b - t > 0.005f) {
+            m_hpBarRect[side][0] = l;
+            m_hpBarRect[side][1] = t;
+            m_hpBarRect[side][2] = r;
+            m_hpBarRect[side][3] = b;
+        }
+    }
+}
+
+// 血条区域默认值（按 16:9 客户端画面比例）
+static const float kDefaultHpBarRect[2][4] = {
+    { 0.2000f, 0.0299f, 0.4496f, 0.0701f },
+    { 0.5477f, 0.0278f, 0.8027f, 0.0701f }
+};
+
+// 校准句柄编号：死亡 X 点 0-7；血条 100 + side*3 + part（part 0=左上角，1=右下角，2=整体平移）
+static const int HP_CALIB_BASE = 100;
+static bool IsHpCalibHandle(int idx) { return idx >= HP_CALIB_BASE && idx < HP_CALIB_BASE + 6; }
+
+static CString DnfCalibPointName(int idx)
+{
+    if (!IsHpCalibHandle(idx)) {
+        switch (idx) {
+        case 0: return L"左主"; case 1: return L"左1"; case 2: return L"左2"; case 3: return L"左3";
+        case 4: return L"右主"; case 5: return L"右1"; case 6: return L"右2"; case 7: return L"右3";
+        default: return L"?";
+        }
+    }
+    const int side = (idx - HP_CALIB_BASE) / 3;
+    const int part = (idx - HP_CALIB_BASE) % 3;
+    CString name = side == 0 ? L"左血条" : L"右血条";
+    name += part == 0 ? L"左上角" : (part == 1 ? L"右下角" : L"整体");
+    return name;
+}
+
+void CDNFGameCaptureDlg::ApplyDefaultHpBarRects()
+{
+    for (int side = 0; side < 2; ++side) {
+        for (int k = 0; k < 4; ++k) m_hpBarRect[side][k] = kDefaultHpBarRect[side][k];
+        m_hpHistoryCount[side] = m_hpMissCount[side] = 0;
+        m_hpPercent[side].store(-1);
+    }
+}
+
+bool CDNFGameCaptureDlg::SaveHpBarRectsToIni()
+{
+    if (m_iniPath.IsEmpty()) return false;
+    bool saved = true;
+    const wchar_t* keys[2] = { L"LeftRect", L"RightRect" };
+    for (int side = 0; side < 2; ++side) {
+        bool isDefault = true;
+        for (int k = 0; k < 4; ++k) {
+            if (fabs(m_hpBarRect[side][k] - kDefaultHpBarRect[side][k]) > 0.00005f) isDefault = false;
+        }
+        if (isDefault) {
+            if (!::WritePrivateProfileString(L"HpBar", keys[side], NULL, m_iniPath)) saved = false;
+            continue;
+        }
+        CString val;
+        val.Format(L"%.6f,%.6f,%.6f,%.6f",
+            m_hpBarRect[side][0], m_hpBarRect[side][1], m_hpBarRect[side][2], m_hpBarRect[side][3]);
+        if (!::WritePrivateProfileString(L"HpBar", keys[side], val, m_iniPath)) saved = false;
+    }
+    return saved;
+}
+
+void CDNFGameCaptureDlg::SetHpCalibHandle(int idx, ScorePointF pt)
+{
+    if (!IsHpCalibHandle(idx)) return;
+    const int side = (idx - HP_CALIB_BASE) / 3;
+    const int part = (idx - HP_CALIB_BASE) % 3;
+    float* rc = m_hpBarRect[side];
+    const float minW = 0.03f, minH = 0.008f;
+    if (part == 0) {
+        rc[0] = max(0.0f, min(rc[2] - minW, pt.x));
+        rc[1] = max(0.0f, min(rc[3] - minH, pt.y));
+    }
+    else if (part == 1) {
+        rc[2] = min(1.0f, max(rc[0] + minW, pt.x));
+        rc[3] = min(1.0f, max(rc[1] + minH, pt.y));
+    }
+    else {
+        const float w = rc[2] - rc[0];
+        const float h = rc[3] - rc[1];
+        const float l = max(0.0f, min(1.0f - w, pt.x - m_hpDragOffset.x));
+        const float t = max(0.0f, min(1.0f - h, pt.y - m_hpDragOffset.y));
+        rc[0] = l; rc[1] = t; rc[2] = l + w; rc[3] = t + h;
+    }
+    m_hpHistoryCount[side] = m_hpMissCount[side] = 0;
+    m_hpPercent[side].store(-1);
+}
+
+void CDNFGameCaptureDlg::NudgeHpCalibHandle(int idx, float dx, float dy)
+{
+    if (!IsHpCalibHandle(idx)) return;
+    const int side = (idx - HP_CALIB_BASE) / 3;
+    const int part = (idx - HP_CALIB_BASE) % 3;
+    const float* rc = m_hpBarRect[side];
+    if (part == 0) SetHpCalibHandle(idx, ScorePointF{ rc[0] + dx, rc[1] + dy });
+    else if (part == 1) SetHpCalibHandle(idx, ScorePointF{ rc[2] + dx, rc[3] + dy });
+    else {
+        m_hpDragOffset = ScorePointF{ 0.0f, 0.0f };
+        SetHpCalibHandle(idx, ScorePointF{ rc[0] + dx, rc[1] + dy });
+    }
+}
+
+void CDNFGameCaptureDlg::UpdateHpBars()
+{
+    int measured[2] = { -1, -1 };
+    {
+        std::lock_guard<std::mutex> lock(g_bmpMutex);
+        if (m_bmp && m_w > 0 && m_h > 0) {
+            HDC hSrc = ::CreateCompatibleDC(NULL);
+            HDC hDst = ::CreateCompatibleDC(NULL);
+            HGDIOBJ oldSrc = ::SelectObject(hSrc, m_bmp);
+            for (int side = 0; side < 2; ++side) {
+                const float* rc = m_hpBarRect[side];
+                const auto pixels = dnf::hp::ToPixels(rc, m_w, m_h);
+                const int x0 = pixels.left, x1 = pixels.right;
+                const int y0 = pixels.top, y1 = pixels.bottom;
+                // 只取框的中间一半高度，避开血条上下边框
+                const int by0 = y0 + (y1 - y0) / 4;
+                const int by1 = y1 - (y1 - y0) / 4;
+                const int bw = x1 - x0;
+                const int bh = by1 - by0;
+                if (bw < 20 || bh < 1) continue;
+
+                BITMAPINFO bmi = {};
+                bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+                bmi.bmiHeader.biWidth = bw;
+                bmi.bmiHeader.biHeight = -bh;
+                bmi.bmiHeader.biPlanes = 1;
+                bmi.bmiHeader.biBitCount = 32;
+                bmi.bmiHeader.biCompression = BI_RGB;
+                void* bits = nullptr;
+                HBITMAP dib = ::CreateDIBSection(hSrc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+                if (!dib || !bits) { if (dib) ::DeleteObject(dib); continue; }
+                HGDIOBJ oldDst = ::SelectObject(hDst, dib);
+                if (::BitBlt(hDst, 0, 0, bw, bh, hSrc, x0, by0, SRCCOPY)) {
+                    ::GdiFlush();
+                    measured[side] = DnfMeasureHpBarBits(static_cast<const BYTE*>(bits), bw, bh, side == 1);
+                }
+                ::SelectObject(hDst, oldDst);
+                ::DeleteObject(dib);
+            }
+            ::SelectObject(hSrc, oldSrc);
+            ::DeleteDC(hDst);
+            ::DeleteDC(hSrc);
+        }
+    }
+
+    // 平滑：最近 3 次中位数；连续 3 次识别失败才显示「--」，避免技能特效遮挡时闪烁
+    for (int side = 0; side < 2; ++side) {
+        if (measured[side] < 0) {
+            if (++m_hpMissCount[side] >= 3) {
+                m_hpHistoryCount[side] = 0;
+                m_hpPercent[side].store(-1);
+            }
+            continue;
+        }
+        m_hpMissCount[side] = 0;
+        int* hist = m_hpHistory[side];
+        hist[0] = hist[1];
+        hist[1] = hist[2];
+        hist[2] = measured[side];
+        if (m_hpHistoryCount[side] < 3) ++m_hpHistoryCount[side];
+        int value = measured[side];
+        if (m_hpHistoryCount[side] >= 3) {
+            int a = hist[0], b = hist[1], c = hist[2];
+            value = max(min(a, b), min(max(a, b), c));
+        }
+        m_hpPercent[side].store(value);
+    }
+}
+
 void CDNFGameCaptureDlg::ResetDeathXStableState()
 {
     g_mutualDeathWindow.Reset();
@@ -2996,6 +3668,10 @@ ScorePointF CDNFGameCaptureDlg::GetDeathXPoint(int logicalIdx) const
 
 void CDNFGameCaptureDlg::SetDeathXPoint(int logicalIdx, ScorePointF pt)
 {
+    if (IsHpCalibHandle(logicalIdx)) {
+        SetHpCalibHandle(logicalIdx, pt);
+        return;
+    }
     if (logicalIdx < 0 || logicalIdx >= DEATH_POINT_COUNT) return;
     pt.x = max(0.0f, min(1.0f, pt.x));
     pt.y = max(0.0f, min(1.0f, pt.y));
@@ -3005,7 +3681,7 @@ void CDNFGameCaptureDlg::SetDeathXPoint(int logicalIdx, ScorePointF pt)
 
 void CDNFGameCaptureDlg::SelectDeathXPoint(int logicalIdx)
 {
-    if (logicalIdx < 0 || logicalIdx >= DEATH_POINT_COUNT) return;
+    if ((logicalIdx < 0 || logicalIdx >= DEATH_POINT_COUNT) && !IsHpCalibHandle(logicalIdx)) return;
     m_selectedDeathXPoint = logicalIdx;
     InvalidateRect(&m_previewRect, FALSE);
 }
@@ -3014,11 +3690,29 @@ bool CDNFGameCaptureDlg::MoveSelectedDeathXPointByPixels(int dx, int dy)
 {
     if (!m_bDeathXCalibrationMode ||
         m_selectedDeathXPoint < 0 ||
-        m_selectedDeathXPoint >= DEATH_POINT_COUNT ||
         m_previewRect.Width() <= 0 ||
         m_previewRect.Height() <= 0) {
         return false;
     }
+
+    if (IsHpCalibHandle(m_selectedDeathXPoint)) {
+        const int side = (m_selectedDeathXPoint - HP_CALIB_BASE) / 3;
+        const int part = (m_selectedDeathXPoint - HP_CALIB_BASE) % 3;
+        {
+            std::lock_guard<std::mutex> lock(g_bmpMutex);
+            if (!m_bmp || !dnf::hp::HasFrame(m_w, m_h)) return false;
+            auto rect = dnf::hp::ToPixels(m_hpBarRect[side], m_w, m_h);
+            const auto handle = part == 2 ? dnf::hp::Handle::Whole
+                : part == 0 ? dnf::hp::Handle::TopLeft : dnf::hp::Handle::BottomRight;
+            if (!dnf::hp::Nudge(rect, m_w, m_h, handle, dx, dy) ||
+                !dnf::hp::ToNormalized(rect, m_w, m_h, m_hpBarRect[side])) return false;
+        }
+        m_hpHistoryCount[side] = m_hpMissCount[side] = 0;
+        m_hpPercent[side].store(-1);
+        InvalidateRect(&m_previewRect, FALSE);
+        return true;
+    }
+    if (m_selectedDeathXPoint >= DEATH_POINT_COUNT) return false;
 
     ScorePointF pt = GetDeathXPoint(m_selectedDeathXPoint);
     pt.x += (float)dx / (float)max(1, m_previewRect.Width());
@@ -3041,6 +3735,9 @@ void CDNFGameCaptureDlg::SnapshotDeathXCalibration()
 {
     for (int i = 0; i < DEATH_POINT_COUNT; ++i) {
         m_deathXSnapshotPoints[i] = m_deathXPoints[i];
+    }
+    for (int side = 0; side < 2; ++side) {
+        for (int k = 0; k < 4; ++k) m_hpBarSnapshot[side][k] = m_hpBarRect[side][k];
     }
 }
 
@@ -3077,7 +3774,29 @@ int CDNFGameCaptureDlg::HitTestDeathXPoint(CPoint point) const
             bestIdx = i;
         }
     }
-    return bestDist2 <= hitRadius * hitRadius ? bestIdx : -1;
+    if (bestDist2 <= hitRadius * hitRadius) return bestIdx;
+
+    // 血条：先找角（改大小），再看是否点在框内（整体平移）
+    const int cornerRadius = 12;
+    for (int side = 0; side < 2; ++side) {
+        const float* rc = m_hpBarRect[side];
+        const CPoint corners[2] = {
+            DeathXPointToClient(ScorePointF{ rc[0], rc[1] }),
+            DeathXPointToClient(ScorePointF{ rc[2], rc[3] })
+        };
+        for (int part = 0; part < 2; ++part) {
+            const int dx = point.x - corners[part].x;
+            const int dy = point.y - corners[part].y;
+            if (dx * dx + dy * dy <= cornerRadius * cornerRadius) return HP_CALIB_BASE + side * 3 + part;
+        }
+    }
+    for (int side = 0; side < 2; ++side) {
+        const float* rc = m_hpBarRect[side];
+        CRect box(DeathXPointToClient(ScorePointF{ rc[0], rc[1] }), DeathXPointToClient(ScorePointF{ rc[2], rc[3] }));
+        box.NormalizeRect();
+        if (box.PtInRect(point)) return HP_CALIB_BASE + side * 3 + 2;
+    }
+    return -1;
 }
 
 void CDNFGameCaptureDlg::LoadDeathXCalibrationFromIni()
@@ -3153,6 +3872,7 @@ void CDNFGameCaptureDlg::UpdateDeathXCalibrationButtons()
         m_btnDeathXSave.ShowWindow(SW_HIDE);
         m_btnDeathXCancel.ShowWindow(SW_HIDE);
         m_btnDeathXDefault.ShowWindow(SW_HIDE);
+        if (m_btnHpCalibration.m_hWnd) m_btnHpCalibration.ShowWindow(SW_HIDE);
         return;
     }
 
@@ -3169,6 +3889,10 @@ void CDNFGameCaptureDlg::UpdateDeathXCalibrationButtons()
     m_btnDeathXSave.ShowWindow(show ? SW_SHOW : SW_HIDE);
     m_btnDeathXCancel.ShowWindow(show ? SW_SHOW : SW_HIDE);
     m_btnDeathXDefault.ShowWindow(show ? SW_SHOW : SW_HIDE);
+    if (m_btnHpCalibration.m_hWnd) {
+        m_btnHpCalibration.MoveWindow(x + 268, y, 92, btnH);
+        m_btnHpCalibration.ShowWindow(SW_SHOW);
+    }
 }
 
 void CDNFGameCaptureDlg::EnterDeathXCalibrationMode()
@@ -3184,14 +3908,20 @@ void CDNFGameCaptureDlg::EnterDeathXCalibrationMode()
     ResetDeathXStableState();
     InvalidateRect(&m_previewRect, FALSE);
     SetFocus();
-    AppLog(L"🎯 [X校准] 已进入死亡X拖拽校准模式，拖动预览上的 8 个点实时调整。", RGB(0, 255, 255));
+    AppLog(L"🎯 [点位校准] 已进入校准模式：拖动 8 个死亡X点；血条框拖角改大小、拖框内整体平移。", RGB(0, 255, 255));
 }
 
 void CDNFGameCaptureDlg::ExitDeathXCalibrationMode(bool restoreSnapshot)
 {
+    if (m_hpCalibrationPanel) m_hpCalibrationPanel->Hide();
     if (restoreSnapshot) {
         for (int i = 0; i < DEATH_POINT_COUNT; ++i) {
             m_deathXPoints[i] = m_deathXSnapshotPoints[i];
+        }
+        for (int side = 0; side < 2; ++side) {
+            for (int k = 0; k < 4; ++k) m_hpBarRect[side][k] = m_hpBarSnapshot[side][k];
+            m_hpHistoryCount[side] = m_hpMissCount[side] = 0;
+            m_hpPercent[side].store(-1);
         }
     }
     m_bDeathXCalibrationMode = false;
@@ -3199,7 +3929,7 @@ void CDNFGameCaptureDlg::ExitDeathXCalibrationMode(bool restoreSnapshot)
     m_dragDeathXPoint = -1;
     m_bDraggingDeathXPoint = false;
     if (GetCapture() == this) ReleaseCapture();
-    if (m_btnDeathXCalibrate.m_hWnd) m_btnDeathXCalibrate.SetWindowText(L"X校准");
+    if (m_btnDeathXCalibrate.m_hWnd) m_btnDeathXCalibrate.SetWindowText(L"点位校准");
     UpdateDeathXCalibrationButtons();
     ResetDeathXStableState();
     InvalidateRect(&m_previewRect, FALSE);
@@ -3664,6 +4394,7 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     ON_BN_CLICKED(ID_BTN_DEATH_X_SAVE, OnBnClickedDeathXSave)
     ON_BN_CLICKED(ID_BTN_DEATH_X_CANCEL, OnBnClickedDeathXCancel)
     ON_BN_CLICKED(ID_BTN_DEATH_X_DEFAULT, OnBnClickedDeathXDefault)
+    ON_BN_CLICKED(ID_BTN_HP_CALIBRATE, OnBnClickedHpCalibration)
     ON_WM_SYSCOMMAND()
     ON_WM_HOTKEY()
     ON_EN_CHANGE(1025, &CDNFGameCaptureDlg::OnChangeEditNamesInput) // 1001是你输入框的ID
@@ -3692,6 +4423,7 @@ BEGIN_MESSAGE_MAP(CDNFGameCaptureDlg, CWnd)
     ON_MESSAGE(WM_OCR_RECOVER_RESULT, &CDNFGameCaptureDlg::OnOcrRecoverResult)
     ON_MESSAGE(WM_KILL_DISPLAY_VISIBILITY_CHANGED, &CDNFGameCaptureDlg::OnKillDisplayVisibilityChanged)
     ON_MESSAGE(WM_KILL_DISPLAY_READY, &CDNFGameCaptureDlg::OnKillDisplayReady)
+    ON_MESSAGE(WM_KILL_FX_SYNC, &CDNFGameCaptureDlg::OnKillFxSync)
     ON_MESSAGE(WM_KEY_DISPLAY_VISIBILITY_CHANGED, &CDNFGameCaptureDlg::OnKeyDisplayVisibilityChanged)
     ON_MESSAGE(WM_KEY_MAPPING_LAN_CHANGED, &CDNFGameCaptureDlg::OnKeyMappingLanChanged)
     ON_MESSAGE(WM_KEY_MAPPING_TEAM_SYNC, &CDNFGameCaptureDlg::OnKeyMappingTeamSync)
@@ -3721,6 +4453,14 @@ bool CDNFGameCaptureDlg::HandleDeathXCalibrationKey(UINT vk)
         SelectDeathXPoint((int)(vk - '1'));
         return true;
     }
+    if (vk == '9' || vk == '0') {
+        // 9 = 左血条整体，0 = 右血条整体；再按一次切换到右下角（改大小）
+        const int side = vk == '9' ? 0 : 1;
+        const int body = HP_CALIB_BASE + side * 3 + 2;
+        const int corner = HP_CALIB_BASE + side * 3 + 1;
+        SelectDeathXPoint(m_selectedDeathXPoint == body ? corner : body);
+        return true;
+    }
 
     int step = (::GetKeyState(VK_SHIFT) & 0x8000) ? 10 : 1;
     int dx = 0;
@@ -3747,6 +4487,9 @@ bool CDNFGameCaptureDlg::HandleDeathXCalibrationKey(UINT vk)
 
 BOOL CDNFGameCaptureDlg::PreTranslateMessage(MSG* pMsg)
 {
+    // The modeless editor owns its keys: do not steal 1/9/0 or arrow keys from its inputs.
+    if (pMsg && m_hpCalibrationPanel && m_hpCalibrationPanel->ContainsWindow(pMsg->hwnd))
+        return CWnd::PreTranslateMessage(pMsg);
     if (m_bDeathXCalibrationMode && pMsg && pMsg->message == WM_KEYDOWN) {
         if (HandleDeathXCalibrationKey((UINT)pMsg->wParam)) return TRUE;
     }
@@ -3795,11 +4538,23 @@ void CDNFGameCaptureDlg::OnLButtonDown(UINT nFlags, CPoint point) {
             m_dragDeathXPoint = idx;
             m_bDraggingDeathXPoint = true;
             SetCapture();
+            if (IsHpCalibHandle(idx)) {
+                const float* rc = m_hpBarRect[(idx - HP_CALIB_BASE) / 3];
+                const ScorePointF p = ClientToDeathXPoint(point);
+                m_hpDragOffset = ScorePointF{ p.x - rc[0], p.y - rc[1] };
+            }
             SetDeathXPoint(idx, ClientToDeathXPoint(point));
             InvalidateRect(&m_previewRect, FALSE);
             CString msg;
-            msg.Format(L"🎯 [X校准] 正在拖动 %s：%.4f, %.4f",
-                GetDeathPointName(idx), m_deathXPoints[idx].x, m_deathXPoints[idx].y);
+            if (IsHpCalibHandle(idx)) {
+                const float* rc = m_hpBarRect[(idx - HP_CALIB_BASE) / 3];
+                msg.Format(L"🎯 [点位校准] 正在拖动 %s：%.4f, %.4f - %.4f, %.4f",
+                    (LPCWSTR)DnfCalibPointName(idx), rc[0], rc[1], rc[2], rc[3]);
+            }
+            else {
+                msg.Format(L"🎯 [点位校准] 正在拖动 %s：%.4f, %.4f",
+                    GetDeathPointName(idx), m_deathXPoints[idx].x, m_deathXPoints[idx].y);
+            }
             AppLog(msg, RGB(0, 255, 255));
         }
         CWnd::OnLButtonDown(nFlags, point);
@@ -3823,10 +4578,62 @@ void CDNFGameCaptureDlg::OnLButtonUp(UINT nFlags, CPoint point) {
     CWnd::OnLButtonUp(nFlags, point);
 }
 
+void CDNFGameCaptureDlg::OnBnClickedHpCalibration()
+{
+    EnterDeathXCalibrationMode();
+    if (!IsHpCalibHandle(m_selectedDeathXPoint)) SelectDeathXPoint(HP_CALIB_BASE + 2);
+    if (!m_hpCalibrationPanel) {
+        m_hpCalibrationPanel = std::make_unique<CHpBarCalibrationPanel>(
+            [this]() {
+                CHpBarCalibrationPanel::State state;
+                {
+                    std::lock_guard<std::mutex> lock(g_bmpMutex);
+                    if (m_bmp) { state.width = m_w; state.height = m_h; }
+                }
+                for (int side = 0; side < 2; ++side) {
+                    for (int k = 0; k < 4; ++k) state.rect[side][k] = m_hpBarRect[side][k];
+                    state.percent[side] = m_hpPercent[side].load();
+                }
+                if (IsHpCalibHandle(m_selectedDeathXPoint)) {
+                    state.selectedSide = (m_selectedDeathXPoint - HP_CALIB_BASE) / 3;
+                    state.selectedPart = (m_selectedDeathXPoint - HP_CALIB_BASE) % 3;
+                }
+                return state;
+            },
+            [this](int side, const dnf::hp::PixelRect& rect, int width, int height) {
+                if (!m_bDeathXCalibrationMode || side < 0 || side > 1) return false;
+                {
+                    std::lock_guard<std::mutex> lock(g_bmpMutex);
+                    if (!m_bmp || width != m_w || height != m_h ||
+                        !dnf::hp::ToNormalized(rect, width, height, m_hpBarRect[side])) return false;
+                }
+                m_hpHistoryCount[side] = m_hpMissCount[side] = 0;
+                m_hpPercent[side].store(-1);
+                if (!m_captureSwitchPending.load(std::memory_order_acquire)) UpdateHpBars();
+                InvalidateRect(&m_previewRect, FALSE);
+                return true;
+            },
+            [this](int side, int part) { SelectDeathXPoint(HP_CALIB_BASE + side * 3 + part); },
+            [this]() { OnBnClickedDeathXSave(); },
+            [this]() { OnBnClickedDeathXCancel(); },
+            [this](int side) {
+                if (side < 0 || side > 1) return;
+                for (int k = 0; k < 4; ++k) m_hpBarRect[side][k] = kDefaultHpBarRect[side][k];
+                m_hpHistoryCount[side] = m_hpMissCount[side] = 0;
+                m_hpPercent[side].store(-1);
+                if (!m_captureSwitchPending.load(std::memory_order_acquire)) UpdateHpBars();
+                InvalidateRect(&m_previewRect, FALSE);
+            });
+    }
+    if (!m_hpCalibrationPanel->Open(this)) {
+        MessageBox(L"无法创建血条微调面板，仍可在预览内拖动区域。", L"血条微调", MB_ICONERROR);
+    }
+}
+
 void CDNFGameCaptureDlg::OnBnClickedDeathXCalibrate() {
     if (m_bDeathXCalibrationMode) {
         ExitDeathXCalibrationMode(true);
-        AppLog(L"↩️ [X校准] 已取消校准，恢复进入校准前的点位。", RGB(255, 180, 0));
+        AppLog(L"↩️ [点位校准] 已取消校准，恢复进入校准前的点位。", RGB(255, 180, 0));
     }
     else {
         EnterDeathXCalibrationMode();
@@ -3834,24 +4641,30 @@ void CDNFGameCaptureDlg::OnBnClickedDeathXCalibrate() {
 }
 
 void CDNFGameCaptureDlg::OnBnClickedDeathXSave() {
+    if (!SaveHpBarRectsToIni()) {
+        MessageBox(L"血条区域未能完整写入 config.ini，请检查目录写入权限。校准尚未退出，可重试保存。",
+            L"保存校准失败", MB_ICONERROR);
+        return;
+    }
     SaveDeathXCalibrationToIni();
     SnapshotDeathXCalibration();
     ExitDeathXCalibrationMode(false);
-    AppLog(L"✅ [X校准] 死亡X点位已保存到 config.ini。", RGB(0, 255, 100));
+    AppLog(L"✅ [点位校准] 死亡X点位和血条采样区域已保存到 config.ini。", RGB(0, 255, 100));
 }
 
 void CDNFGameCaptureDlg::OnBnClickedDeathXCancel() {
     ExitDeathXCalibrationMode(true);
-    AppLog(L"↩️ [X校准] 已取消校准，恢复进入校准前的点位。", RGB(255, 180, 0));
+    AppLog(L"↩️ [点位校准] 已取消校准，恢复进入校准前的点位和血条区域。", RGB(255, 180, 0));
 }
 
 void CDNFGameCaptureDlg::OnBnClickedDeathXDefault() {
     ApplyDefaultDeathXPoints();
+    ApplyDefaultHpBarRects();
     if (m_bDeathXCalibrationMode && m_selectedDeathXPoint < 0) {
         m_selectedDeathXPoint = 0;
     }
     InvalidateRect(&m_previewRect, FALSE);
-    AppLog(L"🎯 [X校准] 已恢复内置默认点位；点击保存后才会写入 config.ini。", RGB(0, 255, 255));
+    AppLog(L"🎯 [点位校准] 已恢复内置默认点位和血条区域；点击保存后才会写入 config.ini。", RGB(0, 255, 255));
 }
 
 void CDNFGameCaptureDlg::OnHotKey(UINT nHotKeyId, UINT nKey1, UINT nKey2) {
@@ -4083,6 +4896,7 @@ LRESULT CDNFGameCaptureDlg::OnUpdateAuthTime(WPARAM wParam, LPARAM lParam) {
     }
     if (serverUrlValid) {
         m_cloudMatchServerUrl = authorizedServerUrl;
+    g_voiceCloudCache.SetServer(authorizedServerUrl.GetString());
         m_cloudServerLastKnownUrl = authorizedServerUrl;
         m_cloudServerSessionToken = authSuccess->serverAuthV2
             ? authSuccess->serverSessionToken : std::string();
@@ -4498,6 +5312,7 @@ bool CDNFGameCaptureDlg::TryActivateFromLicenseLease(const CString& normalizedKe
     m_cloudExpireTime = lease.expireTime;
     m_bIsAuthValid = true;
     m_cloudMatchServerUrl = authorizedServerUrl;
+    g_voiceCloudCache.SetServer(authorizedServerUrl.GetString());
     m_cloudServerLastKnownUrl = authorizedServerUrl;
     if (m_cloudServerAuthV2) {
         m_cloudServerSessionToken = std::string(CW2A(
@@ -6105,6 +6920,9 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
 
     m_configPath = appDir + L"players_config.txt";
     m_iniPath = appDir + L"config.ini";
+    DnfApplyKillDisplayInkDefaultsOnce(m_iniPath);
+    DnfApplyKillFxDefaultsOnce(m_iniPath);
+    DnfSyncKillVoicePlaybackPolicy(m_iniPath);
     m_matchHistoryMaxSteps = GetPrivateProfileInt(
         L"Settings", L"MatchHistoryMaxSteps", 30, m_iniPath);
     m_matchHistoryMaxSteps = (std::max)(1, (std::min)(200, m_matchHistoryMaxSteps));
@@ -6261,7 +7079,7 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     if (m_nDeathAlgorithmChoice < 0 || m_nDeathAlgorithmChoice > 1) m_nDeathAlgorithmChoice = 0;
     m_cmbDeathAlgorithm.SetCurSel(m_nDeathAlgorithmChoice);
 
-    m_btnDeathXCalibrate.Create(L"X校准", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(460, row1_Y, 530, row1_Y + 25), this, ID_BTN_DEATH_X_CALIBRATE); m_btnDeathXCalibrate.SetFont(&m_font);
+    m_btnDeathXCalibrate.Create(L"点位校准", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(460, row1_Y, 530, row1_Y + 25), this, ID_BTN_DEATH_X_CALIBRATE); m_btnDeathXCalibrate.SetFont(&m_font);
 
     m_cmbCaptureEngine.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, CRect(535, row1_Y, 665, row1_Y + 200), this, 1030); m_cmbCaptureEngine.SetFont(&m_font);
     m_cmbCaptureEngine.AddString(L"🔄 自动选择引擎"); m_cmbCaptureEngine.AddString(L"🎮 WGC 硬件捕获"); m_cmbCaptureEngine.AddString(L"🖥️ PrintWindow");
@@ -6273,9 +7091,11 @@ CDNFGameCaptureDlg::CDNFGameCaptureDlg() {
     m_chkCropTitle.Create(L"去标题栏", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, CRect(r.right - 100, row1_Y, r.right - 10, row1_Y + 25), this, 1032); m_chkCropTitle.SetFont(&m_font); m_chkCropTitle.SetCheck(BST_CHECKED);
     m_btnCropBlackBars.Create(L"重新裁剪", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, CRect(r.right - 125, row1_Y + 28, r.right - 10, row1_Y + 53), this, ID_CHK_AUTO_CROP_BLACK_BARS); m_btnCropBlackBars.SetFont(&m_font);
 
-    m_btnDeathXSave.Create(L"保存X点位", WS_CHILD | BS_PUSHBUTTON, CRect(10, 10, 100, 38), this, ID_BTN_DEATH_X_SAVE); m_btnDeathXSave.SetFont(&m_font); m_btnDeathXSave.ShowWindow(SW_HIDE);
+    m_btnDeathXSave.Create(L"保存点位", WS_CHILD | BS_PUSHBUTTON, CRect(10, 10, 100, 38), this, ID_BTN_DEATH_X_SAVE); m_btnDeathXSave.SetFont(&m_font); m_btnDeathXSave.ShowWindow(SW_HIDE);
     m_btnDeathXCancel.Create(L"取消", WS_CHILD | BS_PUSHBUTTON, CRect(106, 10, 176, 38), this, ID_BTN_DEATH_X_CANCEL); m_btnDeathXCancel.SetFont(&m_font); m_btnDeathXCancel.ShowWindow(SW_HIDE);
     m_btnDeathXDefault.Create(L"恢复默认", WS_CHILD | BS_PUSHBUTTON, CRect(182, 10, 272, 38), this, ID_BTN_DEATH_X_DEFAULT); m_btnDeathXDefault.SetFont(&m_font); m_btnDeathXDefault.ShowWindow(SW_HIDE);
+    m_btnHpCalibration.Create(L"血条微调", WS_CHILD | BS_PUSHBUTTON, CRect(278, 10, 370, 38), this, ID_BTN_HP_CALIBRATE);
+    m_btnHpCalibration.SetFont(&m_font); m_btnHpCalibration.ShowWindow(SW_HIDE);
 
     int row2_Y = row1_Y + 60; int halfW = (r.right - 30) / 2;
     m_cmbTeamSelect.Create(WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, CRect(10, row2_Y, 80, row2_Y + 200), this, 1024); m_cmbTeamSelect.SetFont(&m_font); m_cmbTeamSelect.AddString(L"[红队]"); m_cmbTeamSelect.AddString(L"[蓝队]"); m_cmbTeamSelect.SetCurSel(0);
@@ -6362,6 +7182,7 @@ void CDNFGameCaptureDlg::RunStartupStage(int stage)
         };
         runTimedStartupStep(L"LoadDeathXCalibrationFromIni", [&]() {
             LoadDeathXCalibrationFromIni();
+            LoadHpBarRectsFromIni();
         });
         runTimedStartupStep(L"LoadConfigFromFile", [&]() {
             LoadConfigFromFile();
@@ -6746,6 +7567,7 @@ LRESULT CDNFGameCaptureDlg::OnAliasManualSyncResult(WPARAM wParam,
 }
 
 CDNFGameCaptureDlg::~CDNFGameCaptureDlg() {
+    m_hpCalibrationPanel.reset();
     if (m_playerLibraryStore) m_playerLibraryStore->Shutdown();
     if (m_aliasAutoSyncLifetime) {
         m_aliasAutoSyncLifetime->store(false, std::memory_order_release);
@@ -6790,6 +7612,11 @@ CDNFGameCaptureDlg::~CDNFGameCaptureDlg() {
         delete m_pKillDisplayDlg;
         m_pKillDisplayDlg = nullptr;
     }
+    if (m_pKillFxDlg) {
+        m_pKillFxDlg->DestroyWindow();
+        delete m_pKillFxDlg;
+        m_pKillFxDlg = nullptr;
+    }
     if (m_pKeyDisplayDlg) {
         m_pKeyDisplayDlg->DestroyWindow();
         delete m_pKeyDisplayDlg;
@@ -6832,6 +7659,7 @@ void CDNFGameCaptureDlg::OnSysCommand(UINT nID, LPARAM lParam) {
 }
 
 void CDNFGameCaptureDlg::OnClose() {
+    if (m_bDeathXCalibrationMode) ExitDeathXCalibrationMode(true);
     ShowWindow(SW_HIDE);
     BroadcastStateToWeb(); // 👈 新增
 }
@@ -12177,6 +13005,70 @@ void CDNFGameCaptureDlg::Draw(CDC& dc, HBITMAP previewFrame, int previewW, int p
     }
 
     // ===================================================
+    // 对战血条：框出识别区域，实时显示剩余血量百分比；校准模式下显示可拖动的角
+    // ===================================================
+    if ((m_bIsRunning || m_bDeathXCalibrationMode) && m_previewRect.Width() > 0 && m_previewRect.Height() > 0) {
+        CFont hpFont;
+        hpFont.CreateFont(-max(16, min(34, m_previewRect.Height() / 18)), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"微软雅黑");
+        CFont* oldHpFont = dc.SelectObject(&hpFont);
+        dc.SetBkMode(TRANSPARENT);
+        for (int side = 0; side < 2; ++side) {
+            const float* rc = m_hpBarRect[side];
+            CPoint a = DeathXPointToClient(ScorePointF{ rc[0], rc[1] });
+            CPoint b = DeathXPointToClient(ScorePointF{ rc[2], rc[3] });
+            const int pct = m_hpPercent[side].load();
+            const COLORREF col = pct < 0 ? RGB(160, 160, 160)
+                : pct > 50 ? RGB(70, 230, 120)
+                : pct > 20 ? RGB(255, 200, 50) : RGB(255, 70, 70);
+
+            CPen hpPen(PS_SOLID, 2, col);
+            CPen* oldPen = dc.SelectObject(&hpPen);
+            CBrush* oldBrush = (CBrush*)dc.SelectStockObject(NULL_BRUSH);
+            dc.Rectangle(a.x, a.y, b.x, b.y);
+            dc.SelectObject(oldBrush);
+            dc.SelectObject(oldPen);
+
+            CString text;
+            if (pct < 0) text.Format(L"%s 血量 --", side == 0 ? L"左" : L"右");
+            else text.Format(L"%s %d%%", side == 0 ? L"左" : L"右", pct);
+            CRect tr(0, 0, 0, 0);
+            dc.DrawText(text, &tr, DT_SINGLELINE | DT_CALCRECT);
+            const int cx = (a.x + b.x) / 2;
+            const int cy = (a.y + b.y) / 2;
+            // 数字画在血条框中间，不挡下方替补名字和死亡 X 标记
+            CRect box(cx - tr.Width() / 2 - 8, cy - tr.Height() / 2 - 2, cx + tr.Width() / 2 + 8, cy + tr.Height() / 2 + 2);
+            if (m_bDeathXCalibrationMode) {
+                // 校准时数字挪到框下方，露出血条本身方便对齐
+                box.OffsetRect(0, b.y + 6 - box.top);
+
+                const int selSide = IsHpCalibHandle(m_selectedDeathXPoint) ? (m_selectedDeathXPoint - HP_CALIB_BASE) / 3 : -1;
+                const int selPart = selSide >= 0 ? (m_selectedDeathXPoint - HP_CALIB_BASE) % 3 : -1;
+                if (selSide == side && selPart == 2) {
+                    CPen selPen(PS_DOT, 1, RGB(255, 255, 255));
+                    CPen* op = dc.SelectObject(&selPen);
+                    CBrush* ob = (CBrush*)dc.SelectStockObject(NULL_BRUSH);
+                    dc.Rectangle(a.x - 3, a.y - 3, b.x + 3, b.y + 3);
+                    dc.SelectObject(ob);
+                    dc.SelectObject(op);
+                }
+                const CPoint handles[2] = { a, b };
+                for (int part = 0; part < 2; ++part) {
+                    const bool sel = (selSide == side && selPart == part);
+                    const int r = sel ? 6 : 4;
+                    CRect hr(handles[part].x - r, handles[part].y - r, handles[part].x + r + 1, handles[part].y + r + 1);
+                    dc.FillSolidRect(&hr, sel ? RGB(255, 255, 255) : col);
+                    dc.FrameRect(&hr, CBrush::FromHandle((HBRUSH)::GetStockObject(BLACK_BRUSH)));
+                }
+            }
+            dc.FillSolidRect(&box, RGB(20, 20, 20));
+            dc.SetTextColor(col);
+            dc.DrawText(text, &box, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        dc.SelectObject(oldHpFont);
+    }
+
+    // ===================================================
     // 极简死亡 X 调试显示
     // 未检测到死亡：沿用原来的青蓝色 X；检测到死亡：同一个 X 改成红色。
     // 不再额外绘制圆点、文字、总览面板，避免遮挡游戏画面。
@@ -12594,7 +13486,7 @@ void CDNFGameCaptureDlg::Draw(CDC& dc, HBITMAP previewFrame, int previewW, int p
         tipFont.CreatePointFont(88, L"微软雅黑");
         CFont* oldFont = dc.SelectObject(&tipFont);
         dc.SetTextColor(RGB(0, 255, 255));
-        CString tip = L"X校准：拖动或方向键1像素微调；1-8选点，Shift+方向键10像素";
+        CString tip = L"点位校准：拖动或方向键1像素微调，Shift+方向键10像素；1-8选X点，9/0选左/右血条（再按切到右下角改大小），拖角改大小、拖框内平移";
         CRect tipRect(footerRect.left + 10, footerRect.top + 2, footerRect.right - 10, footerRect.top + 20);
         dc.DrawText(tip, &tipRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         dc.SelectObject(oldFont);
@@ -12644,6 +13536,14 @@ void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
     }
     else if (nID == 1 && m_bIsRunning) {
         Capture();
+
+        // 血条百分比：每 100ms 按颜色识别一次
+        static DWORD s_lastHpCheck = 0;
+        const DWORD hpNow = GetTickCount();
+        if (!m_captureSwitchPending.load(std::memory_order_acquire) && hpNow - s_lastHpCheck >= 100) {
+            s_lastHpCheck = hpNow;
+            UpdateHpBars();
+        }
 
         // ★ 颜色检测降频：每 240ms 检测一次，不是每 50ms
         static DWORD s_lastColorCheck = 0;
@@ -12741,6 +13641,10 @@ void CDNFGameCaptureDlg::OnTimer(UINT_PTR nID) {
 
         if (!m_bIsRunning) {
             Capture();
+            if (m_bDeathXCalibrationMode && !m_captureSwitchPending.load(std::memory_order_acquire)) {
+                UpdateHpBars();
+                InvalidateRect(&m_previewRect, FALSE);
+            }
         }
     }
     else if (nID == 8) {
@@ -17111,8 +18015,21 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
         }
         else if (action == "cmd_set_kill_display_settings") {
             if (j.contains("settings") && j["settings"].is_object()) {
-                DnfSaveKillDisplaySettingsJson(m_iniPath, j["settings"]);
-                AppLog(L"🎨 [击杀展示页] 外观样式已保存。", RGB(255, 210, 106));
+                const DWORD writeError = DnfSaveKillDisplaySettingsJson(m_iniPath, j["settings"]);
+                if (writeError == 0) {
+                    AppLog(L"🎨 [击杀展示页] 外观样式已保存。", RGB(255, 210, 106));
+                    SyncKillFxWindow();
+                }
+                else {
+                    const CString message = DnfKillSettingsWriteErrorText(writeError);
+                    AppLog(L"❌ [击杀展示页] " + message, RGB(255, 80, 80));
+                    WriteMatchLog(L"[击杀展示页] " + message);
+                    static bool warned = false;
+                    if (!warned) {
+                        warned = true;
+                        ::MessageBox(GetSafeHwnd(), message, L"保存失败", MB_OK | MB_ICONWARNING);
+                    }
+                }
                 BroadcastStateToWeb();
             }
         }
@@ -17461,6 +18378,33 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
         }
         else if (action == "cmd_open_kill_display") {
             OpenKillDisplayWindow();
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_kill_voice_test") {
+            // 主播工具：试听UI与音色独立于直播配置，只取消旧播放，不修改选择。
+            {
+                std::lock_guard<std::mutex> lock(g_killVoicePlaybackMutex);
+                ++g_killVoicePlaybackEpoch;
+                ::PlaySoundW(nullptr, nullptr, 0);
+            }
+            CString voiceWebDir;
+            {
+                std::lock_guard<std::mutex> lock(g_killDisplayHttpServer.mutex);
+                voiceWebDir = g_killDisplayHttpServer.webDir;
+            }
+            const std::string eventName = j.value("event", std::string("double"));
+            const std::string key = DnfKillVoicePhraseKey(eventName, std::to_string(j.value("skin", 3)));
+            DnfPlayKillVoiceAsync(j.value("voice", 0), key, voiceWebDir);
+        }
+        else if (action == "cmd_stop_kill_voice_test") {
+            std::lock_guard<std::mutex> lock(g_killVoicePlaybackMutex);
+            ++g_killVoicePlaybackEpoch;
+            ::PlaySoundW(nullptr, nullptr, 0);
+        }
+        else if (action == "cmd_set_kill_display_visible") {
+            // Explicit state is idempotent: retries cannot accidentally reopen a hidden window.
+            if (j.value("visible", false)) OpenKillDisplayWindow();
+            else HideKillDisplayWindow();
             BroadcastStateToWeb();
         }
         else if (action == "cmd_toggle_kill_display") {
@@ -18059,6 +19003,8 @@ json CDNFGameCaptureDlg::DnfBuildSharedWebStateJson()
     data["redScore"] = matchSnapshot.value("redScore", 0);
 
     data["isMonitoring"] = (m_bIsRunning == TRUE);
+    data["hpLeft"] = m_bIsRunning ? m_hpPercent[0].load() : -1;
+    data["hpRight"] = m_bIsRunning ? m_hpPercent[1].load() : -1;
     data["isStartPending"] = (m_bOcrStartPending.load() == true);
     data["startupReady"] = m_startupReady.load(std::memory_order_acquire);
     data["isFlipped"] = (m_bFlipSides == true);
@@ -18073,6 +19019,8 @@ json CDNFGameCaptureDlg::DnfBuildSharedWebStateJson()
     data["scoreboardTextStyles"] = DnfBuildScoreboardTextStylesJson(m_iniPath);
     data["killDisplaySettings"] = DnfBuildKillDisplaySettingsJson(m_iniPath);
     data["killDisplayObsUrl"] = KILL_DISPLAY_OBS_URL_UTF8;
+    data["killVoices"] = DnfBuildKillVoicesJson();
+    data["killVoiceSync"] = g_voiceCloudCache.Status();
     data["killDisplayHttpReady"] = m_bKillDisplayHttpReady;
     data["killDisplayHttpError"] = DnfJsonUtf8(m_killDisplayHttpError);
     data["killDisplayWindowVisible"] = IsKillDisplayWindowVisible();
@@ -18303,8 +19251,21 @@ bool CDNFGameCaptureDlg::SaveKillDisplaySettingsPayload(const std::string& reque
             return false;
         }
 
-        DnfSaveKillDisplaySettingsJson(m_iniPath, incoming["settings"]);
+        const DWORD writeError = DnfSaveKillDisplaySettingsJson(m_iniPath, incoming["settings"]);
+        if (writeError != 0) {
+            const CString message = DnfKillSettingsWriteErrorText(writeError);
+            AppLog(L"❌ [击杀展示页] " + message, RGB(255, 80, 80));
+            WriteMatchLog(L"[击杀展示页] " + message);
+            json failure;
+            failure["ok"] = false;
+            failure["error"] = "config_write_failed";
+            failure["code"] = static_cast<unsigned long>(writeError);
+            failure["message"] = DnfJsonUtf8(message);
+            responseBody = failure.dump();
+            return false;
+        }
         PostMessage(WM_UPDATE_ALL_UI, 0, 0);
+        PostMessage(WM_KILL_FX_SYNC, 0, 0);
 
         json response;
         response["ok"] = true;
@@ -18544,7 +19505,10 @@ void CDNFGameCaptureDlg::OpenKillDisplayWindow()
 
     if (m_pKillDisplayDlg == nullptr) {
         m_pKillDisplayDlg = new CKillDisplayDlg(m_iniPath, this);
-        m_pKillDisplayDlg->Create(IDD_WEB_SCORE_DIALOG, this);
+        // 独立窗口类：直播伴侣重启后按「进程 + 窗口类」重新找窗口时，击杀展示和全屏特效不会串
+        if (!DnfCreateDialogWithClass(m_pKillDisplayDlg, kDnfKillDisplayWindowClass, this)) {
+            m_pKillDisplayDlg->Create(IDD_WEB_SCORE_DIALOG, this);
+        }
     }
 
     if (m_pKillDisplayDlg) {
@@ -18565,6 +19529,7 @@ void CDNFGameCaptureDlg::TryOpenDeferredDisplayWindows()
     m_deferredDisplayWindowsPending = false;
     WriteMatchLog(L"[展示页] 主计分页面已就绪，开始创建击杀和按键展示窗口。");
     if (!IsKillDisplayWindowVisible()) OpenKillDisplayWindow();
+    SyncKillFxWindow();
     if (GetPrivateProfileInt(L"KeyDisplayWindow", L"Visible", 0,
         m_iniPath) != 0) {
         OpenKeyDisplayWindow();
@@ -18731,6 +19696,7 @@ void CDNFGameCaptureDlg::DisableCloudMatchForAuthorization(const CString& reason
     InvalidateCloudMatchSyncUndo();
     m_cloudMatchClient.Stop();
     m_cloudMatchServerUrl.Empty();
+    g_voiceCloudCache.SetServer(L"");
     m_cloudMatchRoomConfirmed = false;
     m_cloudMatchRestoring = false;
     m_cloudMatchJoining = false;
@@ -23002,6 +23968,55 @@ LRESULT CDNFGameCaptureDlg::OnKillDisplayReady(WPARAM wParam, LPARAM lParam)
     (void)lParam;
     RevealMainWebWindow();
     return 0;
+}
+
+LRESULT CDNFGameCaptureDlg::OnKillFxSync(WPARAM wParam, LPARAM lParam)
+{
+    (void)wParam;
+    (void)lParam;
+    SyncKillFxWindow();
+    return 0;
+}
+
+// 按 config.ini 的 [KillDisplay] fxFullscreen / fxEnabled / fxFullscreenScale 显示或隐藏全屏特效窗口。
+void CDNFGameCaptureDlg::SyncKillFxWindow()
+{
+    const json layout = DnfBuildKillDisplayLayoutJson(m_iniPath);
+    const bool wanted = m_bKillDisplayHttpReady &&
+        layout.value("fxFullscreen", 0) == 1 &&
+        layout.value("fxEnabled", 1) != 0;
+    const int scale = layout.value("fxFullscreenScale", 100);
+
+    if (wanted) {
+        if (m_pKillFxDlg == nullptr) {
+            // 不设主窗口为所有者：主窗口最小化/隐藏到托盘时，全屏特效窗口仍需保持可被采集
+            m_pKillFxDlg = new CKillFxDlg(nullptr);
+            m_pKillFxDlg->SetOnUserClose([this]() {
+                g_killFxClosedByUser.store(true);
+                if (!::WritePrivateProfileString(KILL_DISPLAY_LAYOUT_SECTION, L"fxFullscreen", L"0", m_iniPath)) {
+                    AppLog(L"⚠️ [全屏特效] 本次已关闭，但设置保存失败；下次启动可能仍会开启。", RGB(255, 180, 0));
+                }
+                DnfSyncKillVoicePlaybackPolicy(m_iniPath);
+                BroadcastStateToWeb();
+            });
+            if (!DnfCreateDialogWithClass(m_pKillFxDlg, kDnfKillFxWindowClass, CWnd::GetDesktopWindow()) &&
+                !m_pKillFxDlg->Create(IDD_WEB_SCORE_DIALOG, CWnd::GetDesktopWindow())) {
+                delete m_pKillFxDlg;
+                m_pKillFxDlg = nullptr;
+                AppLog(L"⚠️ [全屏特效] 窗口创建失败。", RGB(255, 180, 0));
+                return;
+            }
+        }
+        const bool wasVisible = m_pKillFxDlg->IsOverlayVisible();
+        m_pKillFxDlg->ShowOverlay(scale);
+        if (!wasVisible) {
+            AppLog(L"✨ [全屏特效] 全屏击杀特效已开启：在直播软件中单独捕获「DNF Kill FX Fullscreen」，放到 DNF 上一层并铺满全屏（该窗口位于最底层，不会遮挡游戏）。", RGB(255, 210, 106));
+        }
+    }
+    else if (m_pKillFxDlg && ::IsWindow(m_pKillFxDlg->GetSafeHwnd()) && m_pKillFxDlg->IsOverlayVisible()) {
+        m_pKillFxDlg->HideOverlay();
+        AppLog(L"✨ [全屏特效] 全屏特效窗口已关闭。", RGB(255, 210, 106));
+    }
 }
 
 LRESULT CDNFGameCaptureDlg::OnKeyDisplayVisibilityChanged(WPARAM wParam, LPARAM lParam)

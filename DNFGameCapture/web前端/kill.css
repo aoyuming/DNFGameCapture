@@ -2037,3 +2037,49 @@ body {
 
 .kill-ak-mark.fx-ak-glow .kill-ak-symbol { animation: fx-ak-breathe 1.6s ease-in-out infinite; }
 @keyframes fx-ak-breathe { 0%, 100% { filter: drop-shadow(0 0 3px rgba(255, 196, 64, .5)); scale: 1; } 50% { filter: drop-shadow(0 0 12px rgba(255, 170, 30, 1)) brightness(1.4); scale: 1.12; } }
+
+/* ================= 全屏特效窗口（kill.html?mode=fx，由 CKillFxDlg 承载） =================
+ * 只保留特效层，记分板、按钮、设置面板全部隐藏（保留 DOM 供行号识别）。
+ * 窗口靠颜色键透明：半透明的整屏遮罩会变成不透明的暗色块，所以压暗 / 闪白 / 暗角 / 黑色上下幕全部关闭。 */
+html.kill-fx-fullscreen,
+html.kill-fx-fullscreen body { background: transparent !important; }
+html.kill-fx-fullscreen body > :not(#kill-display-root) { display: none !important; }
+html.kill-fx-fullscreen #kill-display-root {
+    position: fixed; inset: 0; width: 100vw; height: 100vh; padding: 0;
+    background: none !important; cursor: default; pointer-events: none;
+}
+html.kill-fx-fullscreen #kill-display-root > :not(.fx-layer) { visibility: hidden !important; pointer-events: none !important; }
+html.kill-fx-fullscreen .fx-ak-dim,
+html.kill-fx-fullscreen .fx-ak-band,
+html.kill-fx-fullscreen .fx-flash,
+html.kill-fx-fullscreen .fx-edge,
+html.kill-fx-fullscreen .fx-ak-frost { display: none !important; }
+
+.kill-fx-scale-row input:disabled + b { opacity: 0.4; }
+
+/* 特效管理：每组特效的容器（出现时间 = 整组淡入） */
+.fx-group { position: absolute; inset: 0; pointer-events: none; }
+@keyframes fx-group-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* Match victory: seven points on the physical left side, themed with the active UI. */
+.fx-victory{--victory-gold:#f7d77a;position:absolute;inset:0;z-index:90;display:grid;place-items:center;overflow:hidden;color:var(--victory-gold);pointer-events:none;animation:fx-victory-life var(--victory-life,4300ms) both}
+.fx-victory-dim{position:absolute;inset:0;background:radial-gradient(ellipse at center,rgba(70,46,15,.64),rgba(9,11,20,.86) 65%,rgba(0,0,0,.65));backdrop-filter:blur(3px)}
+.fx-victory-rays{position:absolute;width:140vmax;height:140vmax;left:50%;top:50%;background:repeating-conic-gradient(from 5deg,transparent 0deg 12deg,rgba(246,206,109,.05) 12deg 18deg);animation:fx-victory-rays 28s linear infinite}
+.fx-victory-core{position:relative;z-index:2;display:flex;flex-direction:column;align-items:center;text-align:center;animation:fx-victory-rise .65s cubic-bezier(.16,1,.3,1) both}
+.fx-victory-crown{width:48px;height:32px;filter:drop-shadow(0 0 14px currentColor);margin-bottom:7px}.fx-victory-crown svg{width:100%;height:100%}
+.fx-victory-kicker{font:700 9px/1.4 Georgia,serif;letter-spacing:.44em;margin-left:.44em;opacity:.8}
+.fx-victory-title{font-size:clamp(42px,12vh,90px);font-weight:900;line-height:1.3;letter-spacing:.08em;margin:.025em -.08em .03em 0;text-shadow:0 2px 0 #412808,0 0 28px rgba(255,209,114,.4);white-space:nowrap}
+.fx-victory-sub{font-size:11px;letter-spacing:.26em;opacity:.9;margin-left:.26em}.fx-victory-seal{margin-top:13px;display:grid;place-items:center;width:26px;height:26px;border:1px solid currentColor;transform:rotate(45deg);font:700 16px Georgia,serif;box-shadow:0 0 18px rgba(247,215,122,.16)}
+.fx-victory-rule{position:absolute;left:15%;right:15%;height:1px;background:linear-gradient(90deg,transparent,currentColor,transparent);opacity:.5;animation:fx-victory-rule .85s ease-out both}.fx-victory-rule.top{top:12%}.fx-victory-rule.bottom{bottom:12%}
+.fx-victory-laurel{position:absolute;top:50%;width:66px;height:150px;opacity:.65;transform:translateY(-50%)}.fx-victory-laurel svg{width:100%;height:100%}.fx-victory-laurel.left{right:calc(50% + 130px)}.fx-victory-laurel.right{left:calc(50% + 130px);transform:translateY(-50%) scaleX(-1)}
+.fx-victory-classic{--victory-gold:#efe4bc}.fx-victory-neon{--victory-gold:#66ffec}.fx-victory-neon .fx-victory-title{text-shadow:3px 1px #bd49ff,-2px -1px #0affdb}.fx-victory-neon .fx-victory-dim{background:radial-gradient(ellipse,#1f164bdd,#080e20eb)}
+.fx-victory-ink{--victory-gold:#efdcb5}.fx-victory-ink .fx-victory-title{font-family:KaiTi,STKaiti,serif;font-size:76px;letter-spacing:.22em;text-shadow:3px 4px 0 #171612}.fx-victory-ink .fx-victory-dim{background:radial-gradient(ellipse,#464133eb,#131513e8)}.fx-victory-ink .fx-victory-seal{color:#eb6554;background:#641f1a;transform:rotate(-9deg);border-width:2px;font-family:KaiTi,serif}.fx-victory-ink .fx-victory-rays{background:none;border:6px solid rgba(220,202,155,.08);border-radius:48%;width:240px;height:240px}
+.fx-victory-glass{--victory-gold:#edfafc}.fx-victory-glass .fx-victory-dim{background:linear-gradient(145deg,#425f7eb8,#111c38df);backdrop-filter:blur(12px)}
+.fx-victory-pixel{--victory-gold:#ffec71}.fx-victory-pixel .fx-victory-title{font-family:Consolas,monospace;text-shadow:4px 4px #8a3718;letter-spacing:0}.fx-victory-pixel .fx-victory-laurel{display:none}.fx-victory-pixel .fx-victory-dim{background:repeating-linear-gradient(0deg,#0d1438e8 0 2px,#171d3fe8 2px 4px)}
+.fx-victory-inferno{--victory-gold:#ffb957}.fx-victory-inferno .fx-victory-dim{background:radial-gradient(ellipse at bottom,#9a2a0cca,#200b0fed 65%)}.fx-victory-inferno .fx-victory-title{text-shadow:0 0 18px #e75d1b,0 3px #571000}
+.fx-victory-broadcast{--victory-gold:#ffeabc}.fx-victory-broadcast .fx-victory-title{font-size:52px}.fx-victory-frost{--victory-gold:#b3f1ff}.fx-victory-frost .fx-victory-dim{background:radial-gradient(ellipse,#254763dd,#081a2fed)}.fx-victory-frost .fx-victory-title{text-shadow:0 0 25px #5abbff88,1px 2px #22486c}
+@keyframes fx-victory-life{0%{opacity:0;transform:scale(.92)}12%,83%{opacity:1;transform:scale(1)}100%{opacity:0;transform:scale(1.04)}}
+@keyframes fx-victory-rise{from{opacity:0;transform:translateY(18px) scale(.8);filter:blur(5px)}to{opacity:1;transform:none;filter:none}}
+@keyframes fx-victory-rays{from{transform:translate(-50%,-50%) rotate(0)}to{transform:translate(-50%,-50%) rotate(360deg)}}
+@keyframes fx-victory-rule{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+@media(prefers-reduced-motion:reduce){.fx-victory,.fx-victory-core,.fx-victory-rays,.fx-victory-rule{animation:none}.fx-victory-rays{transform:translate(-50%,-50%)}}

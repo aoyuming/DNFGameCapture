@@ -1,4 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { VoiceStore } from './voices.js';
+import { createVoiceAdminApi } from './voice-routes.js';
+import { buildVoiceAdminPage, VOICE_ADMIN_CSS, VOICE_ADMIN_JS } from './voice-admin-page.js';
 import type Database from 'better-sqlite3';
 import express, {
   type Express,
@@ -58,6 +61,7 @@ export interface CreateCloudMatchAdminAppOptions {
   adminPassword: string;
   socketController: AdminSocketController;
   attribution?: BroadcasterAttributionService;
+  voices?: VoiceStore;
 }
 
 const manualLicenseLinkSchema = z.object({
@@ -167,6 +171,7 @@ export function createCloudMatchAdminApp(
     }
     next();
   });
+  app.use('/admin/api/voices', createVoiceAdminApi(options.voices ?? new VoiceStore(db)));
   app.use('/admin/api/library', createLibraryAdminApi(db, now));
   app.get('/admin/library', (_request, response) => {
     response.type('html').send(buildLibraryAdminPage(csrfToken));
@@ -184,6 +189,7 @@ export function createCloudMatchAdminApp(
     response.type('html').send(buildAdminPage(csrfToken));
   });
   for (const [path, buildPage, css, js] of [
+    ['/admin/voices', buildVoiceAdminPage, VOICE_ADMIN_CSS, VOICE_ADMIN_JS],
     ['/admin/licenses', buildLicenseAdminPage, LICENSE_ADMIN_CSS, LICENSE_ADMIN_JS],
     ['/admin/broadcasters', buildBroadcasterAdminPage, BROADCASTER_ADMIN_CSS, BROADCASTER_ADMIN_JS],
   ] as const) {

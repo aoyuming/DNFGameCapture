@@ -4,10 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DNF 击杀展示页</title>
-    <link rel="stylesheet" href="kill.css?v=20260927-kill-fx">
+    <script>if (/(?:^|[?&])mode=fx(?:&|$)/.test(location.search)) document.documentElement.classList.add('kill-fx-fullscreen');</script>
+    <link rel="stylesheet" href="kill.css?v=20260929-5.5.2-victory-1">
 </head>
 <body>
-    <main id="kill-display-root" class="kill-display-root" data-skin="dnf" aria-live="polite">
+    <main id="kill-display-root" class="kill-display-root" data-skin="ink" aria-live="polite">
         <button class="kill-window-skin" id="kill-window-skin" type="button" title="切换界面风格 / 自定义背景" aria-label="切换界面风格"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 3a9 9 0 0 0 0 18c.83 0 1.5-.67 1.5-1.5 0-.39-.15-.74-.39-1.01-.23-.26-.38-.61-.38-.99 0-.83.67-1.5 1.5-1.5H16a5 5 0 0 0 5-5c0-4.42-4.03-8-9-8zm-5.5 9a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm3-4a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm3 4a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z"/></svg></button>
         <button class="kill-window-settings" id="kill-window-settings" type="button" title="打开外观设置" aria-label="打开外观设置">⚙</button>
         <button class="kill-window-close" id="kill-window-close" type="button" title="关闭展示窗口" aria-label="关闭展示窗口">×</button>
@@ -49,7 +50,8 @@
             </div>
             <div class="kill-skin-grid" id="kill-skin-grid"></div>
             <label class="kill-skin-apply"><input id="kill-skin-apply-colors" type="checkbox" checked><span>切换时套用推荐文字配色</span></label>
-            <label class="kill-skin-apply"><input id="kill-fx-enabled" type="checkbox" checked><span>击杀特效（多杀 / AK / 一血 / 终结 / 复仇）</span></label>
+            <label class="kill-skin-apply" title="文字 / 击杀 / 全屏特效的详细开关与时间在主窗口「特效管理」里设置"><input id="kill-fx-enabled" type="checkbox" checked><span>特效总开关（详细设置见主窗口「特效管理」）</span></label>
+            <label class="kill-bg-range kill-fx-scale-row" title="全屏击杀特效在主窗口「特效管理」中开启"><span>全屏特效大小</span><input id="kill-fx-scale" type="range" min="50" max="200" step="5"><b id="kill-fx-scale-val">100%</b></label>
             <div class="kill-bg-section">
                 <div class="kill-bg-head"><strong>自定义背景</strong><span id="kill-bg-state">未设置</span></div>
                 <div class="kill-bg-actions">
@@ -111,6 +113,6 @@
         </section>
         <div class="kill-resize-grip" id="kill-resize-grip" aria-hidden="true"></div>
     </main>
-    <script src="kill.js?v=20260927-kill-fx" defer></script>
+    <script src="kill.js?v=20260929-5.5.2-victory-1" defer></script>
 </body>
 </html>

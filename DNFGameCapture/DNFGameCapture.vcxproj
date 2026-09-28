@@ -228,10 +228,14 @@
     <ClInclude Include="PlayerLibraryPushPolicy.h" />
     <ClInclude Include="PlayerIdentityOcrCache.h" />
     <ClInclude Include="PreviewLayout.h" />
+    <ClInclude Include="HpBarCalibration.h" />
+    <ClInclude Include="VoiceCloudCache.h" />
+    <ClInclude Include="HpBarCalibrationPanel.h" />
     <ClInclude Include="OcrServiceHealth.h" />
     <ClInclude Include="MutualDeathTriggerPolicy.h" />
     <ClInclude Include="third_party\sqlite\sqlite3.h" />
     <ClInclude Include="KillDisplayDlg.h" />
+    <ClInclude Include="KillFxDlg.h" />
     <ClInclude Include="KeyDisplayDlg.h" />
     <ClInclude Include="KeyMappingHook.h" />
     <ClInclude Include="KeyMappingLanService.h" />
@@ -290,6 +294,7 @@
     </ClCompile>
     <ClCompile Include="DNFGameCaptureDlg_IdentityPatch.cpp" />
     <ClCompile Include="KillDisplayDlg.cpp" />
+    <ClCompile Include="KillFxDlg.cpp" />
     <ClCompile Include="KeyDisplayDlg.cpp" />
     <ClCompile Include="KeyMappingHook.cpp" />
     <ClCompile Include="KeyMappingLanService.cpp" />

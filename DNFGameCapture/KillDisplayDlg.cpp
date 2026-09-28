@@ -5,8 +5,11 @@
 #include <algorithm>
 
 namespace {
-    constexpr int kKillDisplayClientWidth = 900;
-    constexpr int kKillDisplayClientHeight = 360;
+    // 默认窗口尺寸（96 DPI 逻辑像素）与位置（屏幕像素，与 INI 保存的 X/Y 同一口径），取自推荐配置
+    constexpr int kKillDisplayClientWidth = 690;
+    constexpr int kKillDisplayClientHeight = 278;
+    constexpr int kKillDisplayDefaultX = 483;
+    constexpr int kKillDisplayDefaultY = 572;
     constexpr int kKillDisplayEditExtraHeight = 250;
     constexpr int kKillDisplayEditMinHeight = 590;
     constexpr int kKillDisplayMinWidth = 460;
@@ -263,11 +266,10 @@ void CKillDisplayDlg::RestoreWindowRect()
     const int logicalHeight = (std::max)(kKillDisplayMinHeight,
         static_cast<int>(GetPrivateProfileInt(kKillDisplayWindowSection, L"Height",
             kKillDisplayClientHeight, m_iniPath)));
-    const int defaultPosition = ScaleForDpi(120, dpi);
     const int x = GetPrivateProfileInt(kKillDisplayWindowSection, L"X",
-        defaultPosition, m_iniPath);
+        kKillDisplayDefaultX, m_iniPath);
     const int y = GetPrivateProfileInt(kKillDisplayWindowSection, L"Y",
-        defaultPosition, m_iniPath);
+        kKillDisplayDefaultY, m_iniPath);
 
     SetWindowPos(nullptr, x, y,
         ScaleForDpi(logicalWidth, dpi), ScaleForDpi(logicalHeight, dpi),

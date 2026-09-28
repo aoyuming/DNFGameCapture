@@ -110,7 +110,7 @@ if ($missing.Count -eq 0) {
         @{ File = "web/kill.js"; Needle = "cmd_kill_window_drag" },
         @{ File = "web/kill.js"; Needle = "cmd_kill_window_resize" },
         @{ File = "web/kill.js"; Needle = "bgAlpha: 0" },
-        @{ File = "web/kill.js"; Needle = "panelAlpha: 49" },
+        @{ File = "web/kill.js"; Needle = "panelAlpha: 31" },
         @{ File = "web/kill.js"; Needle = "teamGap: 0" },
         @{ File = "web/kill.css"; Needle = "--kill-bg-alpha" },
         @{ File = "web/kill.css"; Needle = "--kill-team-gap" },
@@ -186,23 +186,23 @@ if ($missing.Count -eq 0) {
     $regexChecks = @(
         @{
             File = "web/kill.js"
-            Pattern = "key:\s*'killNumber'(?:(?!\r?\n\s*key:\s*')[\s\S])*?color:\s*'#f7ca69'"
-            Message = "web/kill.js killNumber default color must be #f7ca69"
+            Pattern = "key:\s*'killNumber'(?:(?!\r?\n\s*key:\s*')[\s\S])*?color:\s*'#f2ead8'"
+            Message = "web/kill.js killNumber default color must be #f2ead8"
         },
         @{
             File = "web/kill.js"
-            Pattern = "key:\s*'deathNumber'(?:(?!\r?\n\s*key:\s*')[\s\S])*?color:\s*'#ab986d'"
-            Message = "web/kill.js deathNumber default color must be #ab986d"
+            Pattern = "key:\s*'deathNumber'(?:(?!\r?\n\s*key:\s*')[\s\S])*?color:\s*'#9c9486'"
+            Message = "web/kill.js deathNumber default color must be #9c9486"
         },
         @{
             File = "web/main.js"
-            Pattern = "key:\s*'killNumber'(?:(?!\r?\n\s*key:\s*')[\s\S])*?color:\s*'#f7ca69'"
-            Message = "web/main.js killNumber default color must be #f7ca69"
+            Pattern = "key:\s*'killNumber'(?:(?!\r?\n\s*key:\s*')[\s\S])*?color:\s*'#f2ead8'"
+            Message = "web/main.js killNumber default color must be #f2ead8"
         },
         @{
             File = "web/main.js"
-            Pattern = "key:\s*'deathNumber'(?:(?!\r?\n\s*key:\s*')[\s\S])*?color:\s*'#ab986d'"
-            Message = "web/main.js deathNumber default color must be #ab986d"
+            Pattern = "key:\s*'deathNumber'(?:(?!\r?\n\s*key:\s*')[\s\S])*?color:\s*'#9c9486'"
+            Message = "web/main.js deathNumber default color must be #9c9486"
         },
         @{
             File = "web/kill.js"
@@ -221,18 +221,18 @@ if ($missing.Count -eq 0) {
         },
         @{
             File = "DNFGameCaptureDlg.cpp"
-            Pattern = "\{\s*`"showDeathNumber`"\s*,\s*0,\s*0,\s*1\s*\}"
-            Message = "C++ kill display default must hide death numbers"
+            Pattern = "\{\s*`"showDeathNumber`"\s*,\s*1,\s*0,\s*1\s*\}"
+            Message = "C++ kill display default must show death numbers"
         },
         @{
             File = "web/kill.js"
-            Pattern = "showDeathNumber:\s*0"
-            Message = "web/kill.js kill display default must hide death numbers"
+            Pattern = "showDeathNumber:\s*1"
+            Message = "web/kill.js kill display default must show death numbers"
         },
         @{
             File = "web/main.js"
-            Pattern = "showDeathNumber:\s*0"
-            Message = "web/main.js kill display default must hide death numbers"
+            Pattern = "showDeathNumber:\s*1"
+            Message = "web/main.js kill display default must show death numbers"
         },
         @{
             File = "DNFGameCaptureDlg.cpp"

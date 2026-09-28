@@ -12,6 +12,7 @@ export function buildAdminPage(csrfToken: string): string {
 <a class="hub-entry licenses" href="/admin/licenses" aria-label="管理密钥">管理密钥</a>
 <a class="hub-entry broadcasters" href="/admin/broadcasters" aria-label="管理主播">管理主播</a>
 <a class="hub-entry library" href="/admin/library" aria-label="管理共享库">管理共享库</a>
+<a class="hub-entry voices" href="/admin/voices" aria-label="声音管理">声音管理</a>
 </nav></main></body></html>`;
 }
 

@@ -723,7 +723,7 @@ test('HTML, scripts, styles and autocomplete cache use one frontend version', ()
     const html = fs.readFileSync(path.join(root, 'web\u524d\u7aef', 'index.html'), 'utf8');
     const version = main.match(/const WEB_LAYOUT_VERSION = '([^']+)'/)?.[1];
     assert.ok(version);
-    assert.equal(version, '20260927-5.5.1-mvp-name-1');
+    assert.match(version, /^\d{8}-5\.5\.3-[a-z0-9-]+$/);
     assert.ok(html.includes(`name="dnf-web-layout-version" content="${version}"`));
     assert.ok(html.includes(`style.css?v=${version}`));
     assert.ok(!html.includes('graphite-theme.css'));

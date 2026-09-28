@@ -1,5 +1,9 @@
 const KILL_STATE_URL = 'http://127.0.0.1:18777/api/state';
+const KILL_VOICE_URL = 'http://127.0.0.1:18777/api/voice/play';
 const KILL_SETTINGS_URL = 'http://127.0.0.1:18777/api/kill-display-settings';
+// 全屏特效窗口（C++ CKillFxDlg）以 kill.html?mode=fx 打开同一页面：只渲染特效层，记分板隐藏。
+const KILL_FX_FULLSCREEN = /(?:^|[?&])mode=fx(?:&|$)/.test(location.search);
+if (KILL_FX_FULLSCREEN) document.documentElement.classList.add('kill-fx-fullscreen');
 
 // 展示页风格（皮肤）：序号写入 layout.skin 并保存到 ini，顺序只能追加，不能调整。
 // 皮肤只改变背景、边框和装饰；recommended 是「套用配色」时写入的推荐文字颜色（不改字体、字号、描边宽度）。
@@ -45,22 +49,34 @@ const KILL_DISPLAY_SKINS = [
     }
 ];
 const KILL_DISPLAY_SKIN_MAX = KILL_DISPLAY_SKINS.length - 1;
+// 默认风格：水墨国风（未保存过风格、或保存值无效时使用）
+const KILL_DISPLAY_DEFAULT_SKIN = Math.max(0, KILL_DISPLAY_SKINS.findIndex(skin => skin.id === 'ink'));
 
 function getKillDisplaySkin(index) {
-    return KILL_DISPLAY_SKINS[clampNumber(index, 0, KILL_DISPLAY_SKIN_MAX, 0)] || KILL_DISPLAY_SKINS[0];
+    return KILL_DISPLAY_SKINS[clampNumber(index, 0, KILL_DISPLAY_SKIN_MAX, KILL_DISPLAY_DEFAULT_SKIN)] || KILL_DISPLAY_SKINS[KILL_DISPLAY_DEFAULT_SKIN];
 }
 
 const KILL_DISPLAY_LAYOUT_DEFAULTS = {
-    skin: 0,
+    skin: KILL_DISPLAY_DEFAULT_SKIN,
     bgImageRev: 0,
     bgImageScale: 100,
     bgImageX: 0,
     bgImageY: 0,
     bgImageOpacity: 100,
     fxEnabled: 1,
-    showDeathNumber: 0,
+    fxFullscreen: 0,
+    fxFullscreenScale: 100,
+    fxFullscreenTipOff: 0,
+    // 特效管理（主窗口「特效管理」面板维护）
+    fxTextOn: 1, fxKillOn: 1,
+    fxEvtDouble: 1, fxEvtTriple: 1, fxEvtFirst: 1, fxEvtShutdown: 1, fxEvtRevenge: 1, fxEvtAk: 1, fxEvtVictory: 1,
+    fxTextDelay: 0, fxTextIn: 0, fxTextMs: 3500,
+    fxKillDelay: 0, fxKillIn: 0, fxKillMs: 3500,
+    fxFsDelay: 0, fxFsIn: 0, fxFsMs: 3500,
+    fxVoiceOn: 0, fxVoice: 0,
+    showDeathNumber: 1,
     bgAlpha: 0,
-    panelAlpha: 49,
+    panelAlpha: 31,
     rowAlpha: 0,
     canvasPadding: 0,
     panelPadding: 14,
@@ -99,6 +115,15 @@ const KILL_DISPLAY_LAYOUT_LIMITS = {
     bgImageY: [-3000, 3000],
     bgImageOpacity: [0, 100],
     fxEnabled: [0, 1],
+    fxFullscreen: [0, 1],
+    fxFullscreenScale: [50, 200],
+    fxFullscreenTipOff: [0, 1],
+    fxTextOn: [0, 1], fxKillOn: [0, 1],
+    fxEvtDouble: [0, 1], fxEvtTriple: [0, 1], fxEvtFirst: [0, 1], fxEvtShutdown: [0, 1], fxEvtRevenge: [0, 1], fxEvtAk: [0, 1], fxEvtVictory: [0, 1],
+    fxTextDelay: [0, 5000], fxTextIn: [0, 2000], fxTextMs: [1000, 10000],
+    fxKillDelay: [0, 5000], fxKillIn: [0, 2000], fxKillMs: [1000, 10000],
+    fxFsDelay: [0, 5000], fxFsIn: [0, 2000], fxFsMs: [1000, 10000],
+    fxVoiceOn: [0, 1], fxVoice: [0, 65535],
     showDeathNumber: [0, 1],
     bgAlpha: [0, 100],
     panelAlpha: [0, 100],
@@ -152,49 +177,49 @@ const KILL_DISPLAY_TEXT_STYLE_TYPES = [
         cssKey: 'header',
         label: '表头',
         allowTeamColor: false,
-        defaults: { fontFamily: 'FZXS24', fontSize: 31, colorMode: 'custom', color: '#c9a86a', strokeColor: '#000000', strokeWidth: 2, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 31, colorMode: 'custom', color: '#b9ab8f', strokeColor: '#000000', strokeWidth: 2, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'pickLabel',
         cssKey: 'pick-label',
         label: '选人顺序',
         allowTeamColor: false,
-        defaults: { fontFamily: 'FZXS24', fontSize: 27, colorMode: 'custom', color: '#6fc8b9', strokeColor: '#000000', strokeWidth: 3, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'Arial Black', fontSize: 27, colorMode: 'custom', color: '#c8a86a', strokeColor: '#000000', strokeWidth: 3, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'playerName',
         cssKey: 'player-name',
         label: '选手',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Arial', fontSize: 43, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 5, glow: 2, letterSpacing: 0 }
+        defaults: { fontFamily: 'Arial', fontSize: 43, colorMode: 'custom', color: '#f2ead8', strokeColor: '#000000', strokeWidth: 5, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'killNumber',
         cssKey: 'kill-number',
         label: '杀',
         allowTeamColor: false,
-        defaults: { fontFamily: 'FZXS24', fontSize: 50, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 4, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'FZXS24', fontSize: 50, colorMode: 'custom', color: '#f2ead8', strokeColor: '#000000', strokeWidth: 4, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'deathNumber',
         cssKey: 'death-number',
         label: '死',
         allowTeamColor: false,
-        defaults: { fontFamily: 'FZXS24', fontSize: 50, colorMode: 'custom', color: '#ab986d', strokeColor: '#000000', strokeWidth: 4, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'FZXS24', fontSize: 50, colorMode: 'custom', color: '#9c9486', strokeColor: '#000000', strokeWidth: 4, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'akMark',
         cssKey: 'ak-mark',
         label: 'AK',
         allowTeamColor: false,
-        defaults: { fontFamily: 'FZXS24', fontSize: 40, colorMode: 'custom', color: '#f7d67e', strokeColor: '#000000', strokeWidth: 3, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'FZXS24', fontSize: 40, colorMode: 'custom', color: '#e0473a', strokeColor: '#000000', strokeWidth: 3, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'akCountBadge',
         cssKey: 'ak-count',
         label: 'AK次数',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 30, colorMode: 'custom', color: '#f7d67e', strokeColor: '#000000', strokeWidth: 1, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 30, colorMode: 'custom', color: '#e0473a', strokeColor: '#000000', strokeWidth: 1, glow: 0, letterSpacing: 0 }
     }
 ];
 
@@ -228,6 +253,7 @@ let selectedKillStyleKey = 'playerName';
 let dragLayoutState = null;
 let suppressClickAfterDrag = false;
 let suppressRemoteKillSettingsUntil = 0;
+let killSettingsWriteFailed = false;
 let isSavingKillSettings = false;
 
 function clampNumber(value, min, max, fallback) {
@@ -698,7 +724,7 @@ function syncKillEditToolbar() {
     if (showDeath) showDeath.checked = killDisplaySettings.layout.showDeathNumber === 1;
     if (skin) {
         if (skin.options.length !== KILL_DISPLAY_SKINS.length) populateKillSkinList();
-        skin.value = String(clampNumber(killDisplaySettings.layout.skin, 0, KILL_DISPLAY_SKIN_MAX, 0));
+        skin.value = String(clampNumber(killDisplaySettings.layout.skin, 0, KILL_DISPLAY_SKIN_MAX, KILL_DISPLAY_DEFAULT_SKIN));
     }
 }
 
@@ -715,7 +741,7 @@ function populateKillSkinList() {
 }
 
 function setKillDisplaySkin(index, save = true) {
-    killDisplaySettings.layout.skin = clampNumber(index, 0, KILL_DISPLAY_SKIN_MAX, 0);
+    killDisplaySettings.layout.skin = clampNumber(index, 0, KILL_DISPLAY_SKIN_MAX, KILL_DISPLAY_DEFAULT_SKIN);
     applyKillDisplaySettings(killDisplaySettings);
     showStatus(`风格：${getKillDisplaySkin(killDisplaySettings.layout.skin).label}`, false);
     if (save) queueKillDisplaySettingsSave();
@@ -816,8 +842,16 @@ async function saveKillDisplaySettings() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ settings: killDisplaySettings })
         });
+        let payload = null;
+        try { payload = await response.json(); } catch (parseErr) { payload = null; }
+        if (payload?.error === 'config_write_failed') {
+            // 配置写不进去：保留当前编辑结果，不要被主程序读回的旧值"拽回去"
+            killSettingsWriteFailed = true;
+            showStatus(payload.message || '保存失败：config.ini 无法写入，请检查是否只读或权限不足', true);
+            return;
+        }
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const payload = await response.json();
+        killSettingsWriteFailed = false;
         if (payload?.settings) {
             applyKillDisplaySettings(payload.settings);
         }
@@ -1240,7 +1274,7 @@ async function clearKillBackground() {
 
 function selectKillSkinFromPanel(index) {
     const applyColors = document.getElementById('kill-skin-apply-colors')?.checked !== false;
-    killDisplaySettings.layout.skin = clampNumber(index, 0, KILL_DISPLAY_SKIN_MAX, 0);
+    killDisplaySettings.layout.skin = clampNumber(index, 0, KILL_DISPLAY_SKIN_MAX, KILL_DISPLAY_DEFAULT_SKIN);
     if (applyColors) {
         applyKillSkinRecommendedColors(false);
         showStatus(`风格：${getKillDisplaySkin(killDisplaySettings.layout.skin).label}（已套用推荐配色）`, false);
@@ -1444,7 +1478,7 @@ async function fetchKillDisplayState() {
         if (signature !== lastStateSignature) {
             lastStateSignature = signature;
             systemFonts = normalizeSystemFonts(data.systemFonts);
-            if (!isSavingKillSettings && Date.now() >= suppressRemoteKillSettingsUntil) {
+            if (!isSavingKillSettings && !killSettingsWriteFailed && Date.now() >= suppressRemoteKillSettingsUntil) {
                 applyKillDisplaySettings(data.killDisplaySettings || getDefaultKillDisplaySettings());
             } else {
                 populateFontList(selectedStyle()?.fontFamily || '');
@@ -1530,7 +1564,35 @@ const KillFx = (() => {
     function center() { const r = layer.getBoundingClientRect(); return { cx: r.width / 2, cy: r.height / 2, w: r.width, h: r.height }; }
     function panelFor(team) { return root.querySelector(`.kill-team[data-team-color="${team}"]`); }
     function rowOf(team, idx) { return panelFor(team)?.querySelectorAll('.kill-row')[idx] || null; }
-    function add(el, ms) { layer.appendChild(el); setTimeout(() => el.remove(), ms); return el; }
+
+    /* ---------- 特效分组：延迟 / 出现（淡入）/ 持续时间倍率 ----------
+     * cur.host = 本组特效的容器；cur.dur = 持续时间（毫秒，横幅 / 行高亮直接用这个时长）；
+     * cur.k = 时间倍率（AK 这类固定编排的大场面按「持续时间 / 4300ms」整体缩放）。 */
+    let cur = { host: layer, k: 1, dur: 0 };
+    function withCtx(c, fn) { const prev = cur; cur = c; try { fn(); } finally { cur = prev; } }
+    function later(fn, ms) { const c = cur; return setTimeout(() => withCtx(c, fn), ms * c.k); }
+    function speed(el, subtree = true) {
+        if (cur.k === 1 || !el?.getAnimations) return el;
+        try { el.getAnimations({ subtree }).forEach(a => { a.playbackRate = 1 / cur.k; }); } catch (err) { /* ignore */ }
+        return el;
+    }
+    function add(el, ms) { cur.host.appendChild(el); speed(el); setTimeout(() => el.remove(), ms * cur.k); return el; }
+    function group(delayMs, inMs, durMs, fn) {
+        const c = { host: layer, k: 1, dur: Math.max(1000, Math.min(10000, Number(durMs) || 3500)) };
+        const start = () => {
+            if (!enabled) return;
+            const host = document.createElement('div');
+            host.className = 'fx-group';
+            const fade = Math.max(0, Number(inMs) || 0);
+            if (fade > 0) host.style.animation = `fx-group-in ${fade}ms ease-out both`;
+            layer.appendChild(host);
+            c.host = host;
+            withCtx(c, fn);
+            setTimeout(() => host.remove(), c.dur + 1500 + fade);
+        };
+        const delay = Math.max(0, Number(delayMs) || 0);
+        if (delay > 0) setTimeout(start, delay); else start();
+    }
     function div(cls, style = {}) { const d = document.createElement('div'); d.className = cls; Object.assign(d.style, style); return d; }
     function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
@@ -1552,15 +1614,16 @@ const KillFx = (() => {
     function burst(x, y, n, opts = {}) {
         const type = opts.type || theme.p;
         const pre = PRESET[type] || PRESET.ember;
+        const k = cur.k; // 持续时间倍率：粒子寿命变长、速度变慢，轨迹基本不变
         for (let i = 0; i < n; i++) {
             const a = (opts.dir ?? 0) + (Math.random() - 0.5) * (opts.spread ?? Math.PI * 2);
-            const v = (opts.speed ?? 3) * (0.35 + Math.random());
+            const v = (opts.speed ?? 3) * (0.35 + Math.random()) / k;
             particles.push({
-                type, x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - (opts.lift ?? 0.6),
-                life: 0, max: (opts.life ?? 50) * (0.6 + Math.random() * 0.8),
+                type, x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - (opts.lift ?? 0.6) / k,
+                life: 0, max: (opts.life ?? 50) * (0.6 + Math.random() * 0.8) * k,
                 size: (opts.size ?? 2.4) * (0.5 + Math.random()),
                 hue: opts.hue ?? (type === 'neon' ? (Math.random() < .5 ? 186 : 312) : type === 'flame' ? rnd(8, 40) : type === 'snow' ? 195 : rnd(32, 54)),
-                g: opts.gravity ?? pre.g, drag: pre.drag, add: pre.add,
+                g: (opts.gravity ?? pre.g) / (k * k), drag: Math.pow(pre.drag, 1 / k), add: pre.add,
                 shard: opts.shard && Math.random() < 0.5, rot: Math.random() * 6, vr: (Math.random() - .5) * .4,
                 color: type === 'confetti' ? CONFETTI[i % 5] : type === 'pixel' ? PIXEL[i % 5] : null,
                 wob: Math.random() * 6
@@ -1644,8 +1707,9 @@ const KillFx = (() => {
     /* 持续飘洒（AK 后的余烬 / 雪 / 火 / 彩带…） */
     function drizzle(count, every) {
         const { w, h } = center();
+        const c = cur;
         let n = 0;
-        const iv = setInterval(() => {
+        const iv = setInterval(() => withCtx(c, () => {
             const t = theme.p;
             if (t === 'flame' || t === 'bubble') burst(Math.random() * w, h + 6, 3, { dir: -Math.PI / 2, spread: .5, speed: 1.4, life: 90, size: 2.2, lift: 0 });
             else if (t === 'confetti' || t === 'pixel') burst(Math.random() * w, -6, 3, { dir: Math.PI / 2, spread: .8, speed: 1.5, life: 140, size: 3, lift: 0, gravity: .02 });
@@ -1653,11 +1717,12 @@ const KillFx = (() => {
             else if (t === 'ink') { if (n % 3 === 0) burst(Math.random() * w, Math.random() * h, 1, { speed: .2, life: 60, size: 4, lift: 0, gravity: 0 }); }
             else burst(Math.random() * w, -6, 3, { dir: Math.PI / 2, spread: 0.6, speed: 1.2, life: 120, size: t === 'snow' ? 2.4 : 1.8, lift: 0, gravity: 0.01 });
             if (++n > count) clearInterval(iv);
-        }, every);
+        }), every * c.k);
     }
 
     /* ---------- 基础：击杀者行 + 阵亡行 ---------- */
     function rowHit(team, idx, slashes, dur) {
+        if (cur.dur) dur = cur.dur;
         const row = rowOf(team, idx);
         if (!row) return null;
         const r = localRect(row);
@@ -1668,6 +1733,7 @@ const KillFx = (() => {
         if (num) {
             num.style.setProperty('--fx-pop', getComputedStyle(layer).getPropertyValue('--fx-accent'));
             num.classList.remove('fx-pop'); void num.offsetWidth; num.classList.add('fx-pop');
+            speed(num, false);
             const n = localRect(num);
             add(div('fx-plus', { left: n.x + n.w / 2 + 'px', top: n.y - 4 + 'px' }), 1200).textContent = '+1';
             burst(n.x + n.w / 2, n.y + n.h / 2, 14 + slashes * 8, { speed: 2.4, life: 38, size: 2 });
@@ -1693,13 +1759,15 @@ const KillFx = (() => {
         const nr = name ? localRect(name) : r;
         add(div('fx-mark ' + theme.mark, { left: nr.x + Math.min(nr.w, 90) * 0.5 + 'px', top: nr.y + nr.h / 2 + 'px' }), 1000);
         row.classList.remove('fx-dead'); void row.offsetWidth; row.classList.add('fx-dead');
-        setTimeout(() => row.classList.remove('fx-dead'), 1500);
+        speed(row, false);
+        later(() => row.classList.remove('fx-dead'), 1500);
         const deadOpt = { ember: { hue: 0 }, flame: { hue: 0 }, spark: { hue: 0, type: 'ember' } }[theme.p] || {};
         burst(nr.x + 30, nr.y + nr.h / 2, 12, { speed: 2, life: 30, size: 1.8, ...deadOpt });
     }
 
     /* ---------- 横幅 ---------- */
     function banner(team, title, sub, name, dur, extra = '', mini = false) {
+        if (cur.dur) dur = cur.dur;
         const b = div('fx-banner' + (mini ? ' mini' : ''));
         b.style.setProperty('--fx-dur', dur + 'ms');
         const tag = skin === 'ink' ? (team === 'red' ? '朱' : '青') : (team === 'red' ? '红队' : '蓝队');
@@ -1714,7 +1782,8 @@ const KillFx = (() => {
         const board = root.querySelector('.kill-board');
         if (!board) return;
         board.classList.remove('fx-shake'); void board.offsetWidth; board.classList.add('fx-shake');
-        setTimeout(() => board.classList.remove('fx-shake'), 600);
+        speed(board, false);
+        later(() => board.classList.remove('fx-shake'), 600);
     }
 
     /* ---------- AK：各风格装饰 ---------- */
@@ -1748,6 +1817,11 @@ const KillFx = (() => {
         return '';
     }
     function ak(team, idx, name) {
+        if (cur.dur) { // 按持续时间整体缩放 AK 编排（默认 4.3 秒）
+            const c2 = { host: cur.host, k: Math.max(0.3, Math.min(3, cur.dur / 4300)), dur: 0 };
+            withCtx(c2, () => ak(team, idx, name));
+            return;
+        }
         const wrap = div('fx-ak' + (theme.bands ? ' bands' : ''));
         const flash = ['ink', 'glass', 'broadcast'].includes(skin) ? '' : '<div class="fx-flash"></div>';
         wrap.innerHTML = `<div class="fx-ak-dim"></div><div class="fx-ak-band t"></div><div class="fx-ak-band b"></div>
@@ -1758,10 +1832,10 @@ const KillFx = (() => {
         add(wrap, 4300);
         const { cx, cy } = center();
         const big = { ember: { shard: true }, flame: { lift: 2 }, snow: { speed: 4 }, ink: { speed: 3, size: 3 }, bubble: { speed: 2.5, size: 3 }, pixel: { size: 3 }, confetti: { size: 3.2, lift: 2 } }[theme.p] || {};
-        setTimeout(() => { if (!['glass', 'ink'].includes(skin)) shake(); burst(cx, cy, 90, { speed: 6, life: 70, size: 2.6, gravity: undefined, ...big }); }, 350);
-        setTimeout(() => burst(cx, cy, 40, { speed: 3.5, life: 90, size: 2.2, lift: 1.2 }), 700);
+        later(() => { if (!['glass', 'ink'].includes(skin)) shake(); burst(cx, cy, 90, { speed: 6, life: 70, size: 2.6, gravity: undefined, ...big }); }, 350);
+        later(() => burst(cx, cy, 40, { speed: 3.5, life: 90, size: 2.2, lift: 1.2 }), 700);
         drizzle(40, 70);
-        setTimeout(() => rowOf(team, idx)?.querySelector('.kill-ak-mark')?.classList.add('fx-ak-glow'), 3800);
+        if (!KILL_FX_FULLSCREEN) later(() => rowOf(team, idx)?.querySelector('.kill-ak-mark')?.classList.add('fx-ak-glow'), 3800);
     }
 
     const LEVEL_TEXT = {
@@ -1772,24 +1846,112 @@ const KillFx = (() => {
     const PIXEL_TEXT = { 2: 'DOUBLE!', 3: 'TRIPLE!!', first: '1ST BLOOD', shutdown: 'STOPPED!', revenge: 'REVENGE!' };
 
     let enabled = true;
-    function setEnabled(on) { enabled = !!on; if (!enabled) { particles.length = 0; layer.innerHTML = ''; layer.appendChild(canvas); } }
+    function setEnabled(on) { enabled = !!on; if (!enabled) { cancelVoiceRequests(); particles.length = 0; layer.innerHTML = ''; layer.appendChild(canvas); } }
+
+    // 每种大场面对应「特效管理」里的触发事件开关
+    const EVENT_KEY = { 2: 'fxEvtDouble', 3: 'fxEvtTriple', first: 'fxEvtFirst', shutdown: 'fxEvtShutdown', revenge: 'fxEvtRevenge', ak: 'fxEvtAk', victory: 'fxEvtVictory' };
 
     function play({ team = 'red', killerRow = 0, victimRow = 0, level = 1, name = '', victim = '' }) {
         if (!enabled) return;
         syncSkin();
         layer.style.setProperty('--fx-team', TEAM_RGB[team]);
+        const L = killDisplaySettings?.layout || {};
         const enemy = team === 'red' ? 'blue' : 'red';
-        const { cx, cy } = center();
-        if (level === 'ak') {
-            rowHit(team, killerRow, 3, 1800);
-            rowDead(enemy, victimRow);
-            setTimeout(() => ak(team, killerRow, name), 250);
-            return;
+        if (level === 'victory') cancelVoiceRequests();
+
+        // 文字特效（行高亮 / +1 / 数字跳动 / 刀光 / 阵亡标记）：只在击杀小窗播放
+        if (level !== 'victory' && !KILL_FX_FULLSCREEN && L.fxTextOn !== 0) {
+            group(L.fxTextDelay, L.fxTextIn, L.fxTextMs, () => {
+                if (level === 'ak') rowHit(team, killerRow, 3, 1800);
+                else rowHit(team, killerRow, typeof level === 'string' ? 1 : level, level === 1 ? 1500 : 2000);
+                rowDead(enemy, victimRow);
+            });
         }
-        const special = typeof level === 'string';
-        rowHit(team, killerRow, special ? 1 : level, level === 1 ? 1500 : 2000);
-        rowDead(enemy, victimRow);
         if (level === 1) return;
+
+        // 击杀特效（横幅 / AK / 粒子）：全屏窗口开启时只在全屏窗口播放，小窗不再触发
+        const eventOn = L[EVENT_KEY[level]] !== 0;
+        const bigOn = eventOn && (KILL_FX_FULLSCREEN || (L.fxKillOn !== 0 && L.fxFullscreen !== 1));
+        if (bigOn) {
+            const [d, i, u] = KILL_FX_FULLSCREEN ? [L.fxFsDelay, L.fxFsIn, L.fxFsMs] : [L.fxKillDelay, L.fxKillIn, L.fxKillMs];
+            group(d, i, u, () => playBig(team, killerRow, level, name, victim));
+        } else if (level === 'ak' && !KILL_FX_FULLSCREEN) {
+            // 小窗不播 AK 大场面时，仍给 AK 标记加上常亮光效
+            setTimeout(() => rowOf(team, killerRow)?.querySelector('.kill-ak-mark')?.classList.add('fx-ak-glow'), 600);
+        }
+
+        // 语音播报（双杀 / 三杀 / 一血 / 终结 / 复仇 / AK）：读当前风格横幅上的文字（C++ 按 event + skin 选词）。
+        // 由负责大场面的窗口请求（全屏特效开启时 = 全屏窗口，否则 = 击杀小窗），不会重复朗读；
+        // 只在软件内置窗口里触发（OBS 浏览器源里没有 chrome.webview，不播）。
+        const voiceEvent = VOICE_EVENT[level];
+        if (voiceEvent && eventOn && L.fxVoiceOn === 1 && window.chrome?.webview
+            && (KILL_FX_FULLSCREEN || L.fxFullscreen !== 1)) {
+            const delay = Math.max(0, Number(KILL_FX_FULLSCREEN ? L.fxFsDelay : L.fxKillDelay) || 0);
+            const voiceSkin = skin;
+            scheduleKillVoice(voiceEvent, voiceSkin, L.fxVoice, delay);
+        }
+    }
+
+    const VOICE_EVENT = { 2: 'double', 3: 'triple', first: 'first', shutdown: 'shutdown', revenge: 'revenge', ak: 'ak', victory: 'victory' };
+    const voiceTimers = new Set();
+    let voiceSettingsSignature = '';
+    function cancelVoiceRequests() {
+        voiceTimers.forEach(id => clearTimeout(id));
+        voiceTimers.clear();
+    }
+    function syncVoiceSettings() {
+        const L = killDisplaySettings?.layout || {};
+        const signature = JSON.stringify(['fxEnabled', 'fxVoiceOn', 'fxVoice', 'skin', 'fxFullscreen',
+            ...Object.values(EVENT_KEY)].map(key => L[key]));
+        if (signature !== voiceSettingsSignature) cancelVoiceRequests();
+        voiceSettingsSignature = signature;
+    }
+    function scheduleKillVoice(eventName, skinId, voice, delay) {
+        syncVoiceSettings();
+        const id = setTimeout(() => {
+            voiceTimers.delete(id);
+            requestKillVoice(eventName, skinId, voice);
+        }, delay);
+        voiceTimers.add(id);
+    }
+    function requestKillVoice(eventName, skinId, voice) {
+        // 延迟期间取消勾选、关闭特效或切换播放窗口后，不得再发出旧的播放请求。
+        const L = killDisplaySettings?.layout || {};
+        const level = Object.keys(VOICE_EVENT).find(key => VOICE_EVENT[key] === eventName);
+        if (!enabled || document.hidden || !window.chrome?.webview || L.fxVoiceOn !== 1 || L.fxEnabled === 0
+            || !level || L[EVENT_KEY[level]] === 0 || L.fxVoice !== voice
+            || (KILL_FX_FULLSCREEN ? L.fxFullscreen !== 1 : L.fxFullscreen === 1)) return;
+        const url = `${KILL_VOICE_URL}?event=${encodeURIComponent(eventName)}&skin=${encodeURIComponent(skinId || '')}&voice=${Number(voice) || 0}`;
+        fetch(url, { method: 'POST', cache: 'no-store' }).catch(() => {});
+    }
+
+    function victory(team) {
+        const copy = {
+            dnf: ['胜利', '荣耀归于胜者'], classic: ['VICTORY', 'THE BATTLE IS WON'],
+            neon: ['VICTORY', 'MISSION COMPLETE'], ink: ['大捷', '凯歌还 · 胜局定'],
+            glass: ['胜利', '这一刻，属于你'], pixel: ['VICTORY!', 'STAGE CLEAR'],
+            inferno: ['凯旋', '烈焰铸就胜名'], broadcast: ['比赛胜利', 'WINNER · FIRST TO SEVEN'],
+            frost: ['凯旋', '冰封全场 · 荣耀归来']
+        }[skin] || ['胜利', 'VICTORY'];
+        const wrap = div('fx-victory fx-victory-' + skin);
+        const crown = '<svg viewBox="0 0 96 64" aria-hidden="true"><path d="M12 16l18 17L48 8l18 25 18-17-9 36H21z" fill="currentColor"/><path d="M22 59h52" fill="none" stroke="currentColor" stroke-width="4"/></svg>';
+        const laurel = '<svg viewBox="0 0 80 180" aria-hidden="true"><path d="M64 166C9 137 8 62 56 12" fill="none" stroke="currentColor" stroke-width="2"/>'
+            + [0,1,2,3,4,5].map(i => '<ellipse cx="'+(28 + Math.abs(2-i)*4)+'" cy="'+(36+i*22)+'" rx="7" ry="16" transform="rotate(-38 '+(28+Math.abs(2-i)*4)+' '+(36+i*22)+')" fill="currentColor"/>').join('') + '</svg>';
+        wrap.innerHTML = '<div class="fx-victory-dim"></div><div class="fx-victory-rays"></div><div class="fx-victory-rule top"></div><div class="fx-victory-rule bottom"></div>'
+            + '<div class="fx-victory-laurel left">'+laurel+'</div><div class="fx-victory-laurel right">'+laurel+'</div>'
+            + '<div class="fx-victory-core"><div class="fx-victory-crown">'+crown+'</div><div class="fx-victory-kicker">FIRST TO SEVEN</div>'
+            + '<div class="fx-victory-title">'+esc(copy[0])+'</div><div class="fx-victory-sub">'+esc(copy[1])+'</div><div class="fx-victory-seal">7</div></div>';
+        wrap.style.setProperty('--victory-life', (cur.dur || 4300) + 'ms');
+        add(wrap, cur.dur || 4300);
+        const { cx, cy } = center();
+        burst(cx, cy, 100, { speed: 5, life: 90, size: 3, hue: skin === 'ink' ? 40 : undefined });
+        later(() => burst(cx, cy * .6, 50, { speed: 3, life: 70, size: 2.4 }), 550);
+    }
+
+    function playBig(team, killerRow, level, name, victim) {
+        if (level === 'victory') { victory(team); return; }
+        const { cx, cy } = center();
+        if (level === 'ak') { later(() => ak(team, killerRow, name), 250); return; }
 
         let [title, sub] = LEVEL_TEXT[level];
         if (skin === 'ink') title = INK_TEXT[level];
@@ -1798,23 +1960,23 @@ const KillFx = (() => {
             : level === 'revenge' && victim ? `向 ${esc(victim)} 复仇` : '';
         if (level === 2) {
             banner(team, title, sub, name, 2200);
-            setTimeout(() => burst(cx, cy, 40, { speed: 4, life: 50 }), 200);
+            later(() => burst(cx, cy, 40, { speed: 4, life: 50 }), 200);
         } else if (level === 3) {
-            add(div('fx-edge'), 2500);
+            add(div('fx-edge'), cur.dur || 2500);
             add(div('fx-ring'), 900);
-            setTimeout(() => add(div('fx-ring'), 900), 160);
+            later(() => add(div('fx-ring'), 900), 160);
             banner(team, title, sub, name, 2600);
             shake();
-            setTimeout(() => burst(cx, cy, 80, { speed: 5.5, life: 60, size: 2.6, shard: true }), 180);
+            later(() => burst(cx, cy, 80, { speed: 5.5, life: 60, size: 2.6, shard: true }), 180);
         } else {
             // 一血 / 终结 / 复仇：迷你横幅
             banner(team, title, sub, name, 1900, extra, true);
-            if (level === 'first') setTimeout(() => burst(cx, cy, 36, { speed: 3.5, life: 45, hue: theme.p === 'ember' ? 0 : undefined }), 150);
-            if (level === 'shutdown') { add(div('fx-ring'), 900); setTimeout(() => burst(cx, cy, 44, { speed: 4.5, life: 50, shard: true }), 150); }
-            if (level === 'revenge') setTimeout(() => burst(cx, cy, 30, { speed: 3, life: 55, hue: TEAM_HUE[team] }), 150);
+            if (level === 'first') later(() => burst(cx, cy, 36, { speed: 3.5, life: 45, hue: theme.p === 'ember' ? 0 : undefined }), 150);
+            if (level === 'shutdown') { add(div('fx-ring'), 900); later(() => burst(cx, cy, 44, { speed: 4.5, life: 50, shard: true }), 150); }
+            if (level === 'revenge') later(() => burst(cx, cy, 30, { speed: 3, life: 55, hue: TEAM_HUE[team] }), 150);
         }
     }
-    return { play, burst, setEnabled, THEMES };
+    return { play, burst, setEnabled, syncVoiceSettings, cancelVoiceRequests, THEMES };
 })();
 
 /* ================= 击杀事件识别 =================
@@ -1823,7 +1985,33 @@ const KillFx = (() => {
  * 连杀直接使用主程序的 currentStreak（任何人击杀会清零其他人，每局结束全部清零）。
  * 只做推断，不改动任何战绩数据。
  * ================================================= */
+// Pure score-edge tracker: physical left follows the same isFlipped mapping as renderKillDisplay.
+function createLeftVictoryTracker() {
+    let previous = null, announced = false;
+    return {
+        resync() { previous = null; },
+        ingest(data, canPlay = true) {
+            if (data?.redScore == null || data?.blueScore == null) return null;
+            const scores = { red: Number(data.redScore), blue: Number(data.blueScore) };
+            if (![scores.red, scores.blue].every(n => Number.isInteger(n) && n >= 0)) return null;
+            if (scores.red === 0 && scores.blue === 0) announced = false;
+            const team = data.isFlipped === true ? 'blue' : 'red';
+            if (!previous) {
+                previous = scores;
+                if (scores[team] >= 7) announced = true;
+                return null; // Never replay a historical victory on refresh/reopen.
+            }
+            const crossed = previous[team] < 7 && scores[team] >= 7;
+            previous = scores;
+            if (!crossed || announced) return null;
+            announced = true; // Consume hidden/disabled events too, without deferred playback.
+            return canPlay ? { team, score: scores[team], level: 'victory', killerRow: -1, victimRow: -1 } : null;
+        }
+    };
+}
+
 const KillFxTracker = (() => {
+    const victoryTracker = createLeftVictoryTracker();
     const QUEUE_STEP = 240;        // 同一次刷新里多次击杀的播放间隔
     const MAX_QUEUE = 12;          // 队列上限，防止异常数据堆积
 
@@ -1907,8 +2095,20 @@ const KillFxTracker = (() => {
         if (!enabled) resetMatch();
     }
 
+    // 页面从隐藏恢复显示时丢弃旧快照，避免把隐藏期间的击杀一次性补播
+    function resync() { prev = null; victoryTracker.resync(); }
+
     function ingest(data) {
+        const victory = victoryTracker.ingest(data, enabled && !document.hidden && killDisplaySettings?.layout?.fxEvtVictory !== 0);
         if (!enabled || document.hidden) return;
+        if (victory) {
+            queue = [];
+            if (timer) { clearTimeout(timer); timer = null; }
+            prev = snapshot(Array.isArray(data?.players) ? data.players : []);
+            prevRound = roundOf(data);
+            enqueue(victory); // Victory takes precedence over the final kill/AK of the match.
+            return;
+        }
         // 本次新增的击杀归属上一次状态所在的局：决胜击杀与大比分 +1 会在同一次刷新里到达。
         const killRound = prevRound;
         prevRound = roundOf(data);
@@ -1991,7 +2191,7 @@ const KillFxTracker = (() => {
         });
     }
 
-    return { ingest, setEnabled, resetMatch };
+    return { ingest, setEnabled, resetMatch, resync };
 })();
 
 /* ---------- 与记分板 / 设置面板联动 ---------- */
@@ -2015,6 +2215,7 @@ const KillFxTracker = (() => {
         origApplySettings(settings);
         const on = killDisplaySettings?.layout?.fxEnabled !== 0;
         KillFxTracker.setEnabled(on);
+        KillFx.syncVoiceSettings();
         const box = document.getElementById('kill-fx-enabled');
         if (box) box.checked = on;
     };
@@ -2027,6 +2228,53 @@ const KillFxTracker = (() => {
         showStatus(fxBox.checked ? '击杀特效：开' : '击杀特效：关', false);
     });
     KillFxTracker.setEnabled(killDisplaySettings?.layout?.fxEnabled !== 0);
+    document.addEventListener('visibilitychange', () => { if (document.hidden) KillFx.cancelVoiceRequests(); else KillFxTracker.resync(); });
+
+    // 全屏特效大小（开关在主窗口「特效管理」，保存到 ini 后由主程序显示 / 隐藏透明全屏窗口）
+    const fsBox = null;
+    const fsScale = document.getElementById('kill-fx-scale');
+    const fsScaleVal = document.getElementById('kill-fx-scale-val');
+    const syncFullscreenControls = () => {
+        const layout = killDisplaySettings?.layout || {};
+        const on = layout.fxFullscreen === 1;
+        const scale = Number(layout.fxFullscreenScale) || 100;
+        if (fsBox) fsBox.checked = on;
+        if (fsScale) {
+            if (document.activeElement !== fsScale) fsScale.value = String(scale);
+            fsScale.disabled = !on;
+        }
+        if (fsScaleVal) fsScaleVal.textContent = `${scale}%`;
+    };
+    const origSyncSkinPanel2 = syncKillSkinPanel;
+    syncKillSkinPanel = function () {
+        origSyncSkinPanel2();
+        syncFullscreenControls();
+    };
+    fsBox?.addEventListener('change', () => {
+        killDisplaySettings.layout.fxFullscreen = fsBox.checked ? 1 : 0;
+        syncFullscreenControls();
+        queueKillDisplaySettingsSave();
+        showStatus(fsBox.checked ? '全屏特效窗口：开（直播伴侣用「窗口」采集 DNF Kill FX Fullscreen）' : '全屏特效窗口：关', false);
+    });
+    fsScale?.addEventListener('input', () => {
+        killDisplaySettings.layout.fxFullscreenScale = clampNumber(fsScale.value, 50, 200, 100);
+        syncFullscreenControls();
+        queueKillDisplaySettingsSave();
+    });
+    syncFullscreenControls();
+
+    // 调试预览：kill.html?mode=fx#demo=ak（可选 2 / 3 / first / shutdown / revenge）
+    const demo = KILL_FX_FULLSCREEN ? /demo=(\w+)/.exec(location.hash) : null;
+    if (demo) {
+        const level = /^\d$/.test(demo[1]) ? Number(demo[1]) : demo[1];
+        setTimeout(() => KillFx.play({ team: 'red', level, name: '90老王', victim: '对手' }), 300);
+        // #demo=ak&freeze=900：把所有 CSS 动画定格在第 900ms，便于截图检查
+        const freeze = /freeze=(\d+)/.exec(location.hash);
+        if (freeze) {
+            const at = Number(freeze[1]);
+            setTimeout(() => document.getAnimations().forEach(a => { try { a.pause(); a.currentTime = at; } catch (err) { /* ignore */ } }), 300 + Math.min(at, 600));
+        }
+    }
 
     window.KillFx = KillFx;
     window.KillFxTracker = KillFxTracker;

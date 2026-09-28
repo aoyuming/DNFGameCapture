@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DNF点将工具</title>
-    <meta name="dnf-web-layout-version" content="20260927-5.5.1-mvp-name-1">
-    <link rel="stylesheet" href="style.css?v=20260927-5.5.1-mvp-name-1">
+    <meta name="dnf-web-layout-version" content="20260929-5.5.3-main-actions-3">
+    <link rel="stylesheet" href="style.css?v=20260929-5.5.3-main-actions-3">
 </head>
 <body>
     <svg class="rd-sprite" width="0" height="0" aria-hidden="true" focusable="false">
@@ -111,8 +111,12 @@
                     <span class="rd-sep" aria-hidden="true"></span>
                     <button class="ctrl-btn btn-swap" id="btn-swap"><svg class="rd-i" aria-hidden="true"><use href="#rd-i-swap"/></svg>翻转红蓝</button>
                     <button class="ctrl-btn btn-reset" id="btn-reset"><svg class="rd-i" aria-hidden="true"><use href="#rd-i-reset"/></svg>重置战绩</button>
-                    <button class="ctrl-btn btn-kill-display-toggle" id="btn-kill-display-toggle" aria-pressed="false"><svg class="rd-i" aria-hidden="true"><use href="#rd-i-screen"/></svg>展示页面</button>
+                    <button class="ctrl-btn btn-fx-manager" id="btn-fx-manager" title="展示页面、特效与声音" aria-haspopup="dialog" aria-controls="fx-manager-overlay" aria-expanded="false"><svg class="rd-i" aria-hidden="true"><use href="#rd-i-screen"/></svg>主播工具</button>
                     <button class="ctrl-btn btn-pro" id="btn-pro">👑 专业模式</button>
+                    <button class="ctrl-btn btn-random main-random-action" id="btn-random-teams" type="button" title="随机分组、抽签和名单管理" aria-haspopup="dialog" aria-controls="random-tool-overlay" aria-expanded="false">
+                        <span class="main-random-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="8" cy="8" r="1.2"/><circle cx="16" cy="8" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="8" cy="16" r="1.2"/><circle cx="16" cy="16" r="1.2"/></svg></span>
+                        <span>分组和抽签</span>
+                    </button>
                 </div>
                 <div class="control-row control-row-aux">
                     <label class="prefer-local-aliases-toggle" title="同步其他主播比分时，优先保留本地已填写的别名">
@@ -129,7 +133,6 @@
                         <div class="more-controls-menu" id="more-controls-menu" aria-hidden="true">
                             <div class="more-controls-section">
                                 <div class="more-controls-title">工具</div>
-                                <button class="ctrl-btn btn-random" id="btn-random-teams">🎲 分组和抽签</button>
                                 <button class="ctrl-btn btn-key-mapping" id="btn-key-mapping">⌨ 按键映射</button>
                                 <button class="ctrl-btn btn-key-lan" id="btn-key-lan">局域网同步</button>
                                 <button class="ctrl-btn btn-console-toggle" id="btn-console-open">🧾 C++日志 <span class="console-toggle-count" id="console-toggle-count">0</span></button>
@@ -162,10 +165,7 @@
                                         <option value="1">打补丁红蓝判断</option>
                                     </select>
                                 </label>
-                                <label class="output-seat-label-toggle" title="开启后，仅在 击杀.txt 的名字前输出选人顺序">
-                                    <input type="checkbox" id="output-seat-label-toggle">
-                                    <span>选人顺序</span>
-                                </label>
+
                             </div>
                             <div class="more-controls-section more-controls-danger">
                                 <div class="more-controls-title">危险操作</div>
@@ -263,10 +263,10 @@
     </div>
 
     <div class="random-tool-overlay" id="random-tool-overlay" aria-hidden="true">
-        <div class="random-tool-panel" role="dialog" aria-modal="true" aria-labelledby="random-tool-title">
+        <div class="random-tool-panel" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="random-tool-title">
             <div class="random-tool-header">
                 <div>
-                    <div class="random-tool-title" id="random-tool-title">随机工具</div>
+                    <div class="random-tool-title" id="random-tool-title">分组和抽签</div>
                     <div class="random-tool-subtitle">随机分组或者抽签</div>
                 </div>
                 <button class="random-tool-close" id="btn-random-tool-close" title="关闭">&times;</button>
@@ -306,6 +306,7 @@
                         <button class="random-action-btn" id="btn-random-draw">抽签</button>
                         <button class="random-action-btn" id="btn-random-apply">应用到红蓝</button>
                         <button class="random-action-btn" id="btn-random-copy">复制结果</button>
+                        <button class="random-action-btn import" id="btn-random-import-numbers" type="button" title="用编号 1～8 直接覆盖待分名单">一键导入编号</button>
                         <button class="random-action-btn reset" id="btn-random-reset">重置</button>
                     </div>
                     <div class="random-result" id="random-result">
@@ -567,6 +568,115 @@
         </div>
     </div>
 
+    <div class="fx-manager-overlay" id="fx-manager-overlay" aria-hidden="true">
+        <section class="fx-manager-panel" role="dialog" aria-modal="true" aria-labelledby="fx-manager-title">
+            <header class="fxm-header">
+                <div>
+                    <div class="fxm-title" id="fx-manager-title">主播工具</div>
+                    <div class="fxm-subtitle">展示、特效与声音，集中管理</div>
+                </div>
+
+                <button class="fxm-close" id="btn-fx-manager-close" title="关闭">&times;</button>
+            </header>
+            <nav class="streamer-tabs" role="tablist" aria-label="主播工具分类">
+                <button id="streamer-tab-display" type="button" role="tab" data-streamer-tab="display" aria-controls="streamer-pane-display" aria-selected="true">展示与输出</button>
+                <button id="streamer-tab-effects" type="button" role="tab" data-streamer-tab="effects" aria-controls="streamer-pane-effects" aria-selected="false" tabindex="-1">特效管理</button>
+                <button id="streamer-tab-voice" type="button" role="tab" data-streamer-tab="voice" aria-controls="streamer-pane-voice" aria-selected="false" tabindex="-1">声音管理</button>
+            </nav>
+            <div class="fxm-body">
+                <section id="streamer-pane-display" class="streamer-pane" role="tabpanel" aria-labelledby="streamer-tab-display" data-streamer-pane="display">
+                    <div class="streamer-section-heading"><strong>直播展示</strong><small>只控制原「展示页面」窗口，其他窗口保持原位置。</small></div>
+                    <section class="streamer-setting-row">
+                        <div class="streamer-setting-copy"><strong id="streamer-display-label">展示页面</strong><small>显示或隐藏击杀展示窗口，不清空比赛数据。</small><span class="streamer-state" id="streamer-display-status" role="status">等待窗口状态</span></div>
+                        <label class="fxm-switch"><input type="checkbox" id="btn-kill-display-toggle" role="switch" aria-labelledby="streamer-display-label" disabled><i aria-hidden="true"></i></label>
+                    </section>
+                    <section class="streamer-setting-row">
+                        <div class="streamer-setting-copy"><strong id="streamer-txt-label">txt输出选人顺序</strong><small>仅在「击杀.txt」名字前输出选人顺序，不改变展示页面样式。</small></div>
+                        <label class="fxm-switch"><input type="checkbox" id="output-seat-label-toggle" role="switch" aria-labelledby="streamer-txt-label"><i aria-hidden="true"></i></label>
+                    </section>
+                    <p class="streamer-hint">展示开关跟随窗口实际状态；特效开关与声音设置在其他页签中管理。</p>
+                </section>
+                <section id="streamer-pane-effects" class="streamer-pane" role="tabpanel" aria-labelledby="streamer-tab-effects" data-streamer-pane="effects" hidden>
+                    <div class="streamer-section-heading streamer-effects-heading"><div><strong>特效管理</strong><small>修改后自动保存，展示窗口同步生效。</small></div>
+                <label class="fxm-master" title="关闭后所有击杀特效都不播放">
+                    <span>全部特效</span>
+                    <span class="fxm-switch"><input type="checkbox" data-fx-toggle="fxEnabled"><i aria-hidden="true"></i></span>
+                </label>
+                    </div>
+                <div class="fxm-cards">
+                <section class="fxm-card" data-fx-card="text">
+                    <header class="fxm-card-head">
+                        <label class="fxm-switch"><input type="checkbox" data-fx-toggle="fxTextOn"><i aria-hidden="true"></i></label>
+                        <div><strong>文字特效</strong><small>击杀小窗：行高亮、+1、数字跳动、刀光、阵亡标记</small></div>
+                    </header>
+                        <label class="fxm-range" title="击杀发生后等待多久再出现"><span>延迟时间</span><input type="range" data-fx-range="fxTextDelay" min="0" max="5000" step="50"><b data-fx-out="fxTextDelay"></b></label>
+                        <label class="fxm-range" title="淡入时长；0 = 使用特效自带的出场动画"><span>出现时间</span><input type="range" data-fx-range="fxTextIn" min="0" max="2000" step="50"><b data-fx-out="fxTextIn"></b></label>
+                        <label class="fxm-range" title="特效在画面上停留的总时长（AK 等大场面按同比例缩放）"><span>持续时间</span><input type="range" data-fx-range="fxTextMs" min="1000" max="10000" step="100"><b data-fx-out="fxTextMs"></b></label>
+                </section>
+                <section class="fxm-card" data-fx-card="kill">
+                    <header class="fxm-card-head">
+                        <label class="fxm-switch"><input type="checkbox" data-fx-toggle="fxKillOn"><i aria-hidden="true"></i></label>
+                        <div><strong>击杀特效</strong><small>击杀小窗：多杀横幅、一血 / 终结 / 复仇、AK 大场面</small></div>
+                    </header>
+                    <div class="fxm-note" id="fxm-kill-handoff" hidden>已开启全屏特效：击杀特效改由全屏窗口播放，小窗只保留文字特效</div>
+                        <label class="fxm-range" title="击杀发生后等待多久再出现"><span>延迟时间</span><input type="range" data-fx-range="fxKillDelay" min="0" max="5000" step="50"><b data-fx-out="fxKillDelay"></b></label>
+                        <label class="fxm-range" title="淡入时长；0 = 使用特效自带的出场动画"><span>出现时间</span><input type="range" data-fx-range="fxKillIn" min="0" max="2000" step="50"><b data-fx-out="fxKillIn"></b></label>
+                        <label class="fxm-range" title="特效在画面上停留的总时长（AK 等大场面按同比例缩放）"><span>持续时间</span><input type="range" data-fx-range="fxKillMs" min="1000" max="10000" step="100"><b data-fx-out="fxKillMs"></b></label>
+                </section>
+                <section class="fxm-card" data-fx-card="fs">
+                    <header class="fxm-card-head">
+                        <label class="fxm-switch"><input type="checkbox" id="fxm-fullscreen"><i aria-hidden="true"></i></label>
+                        <div><strong>全屏特效</strong><small>透明全屏窗口，需在直播软件中单独捕获并铺满画面</small></div>
+                    </header>
+                        <label class="fxm-range" title="全屏特效的整体缩放"><span>特效大小</span><input type="range" data-fx-range="fxFullscreenScale" min="50" max="200" step="5"><b data-fx-out="fxFullscreenScale"></b></label>
+                        <label class="fxm-range" title="击杀发生后等待多久再出现"><span>延迟时间</span><input type="range" data-fx-range="fxFsDelay" min="0" max="5000" step="50"><b data-fx-out="fxFsDelay"></b></label>
+                        <label class="fxm-range" title="淡入时长；0 = 使用特效自带的出场动画"><span>出现时间</span><input type="range" data-fx-range="fxFsIn" min="0" max="2000" step="50"><b data-fx-out="fxFsIn"></b></label>
+                        <label class="fxm-range" title="特效在画面上停留的总时长（AK 等大场面按同比例缩放）"><span>持续时间</span><input type="range" data-fx-range="fxFsMs" min="1000" max="10000" step="100"><b data-fx-out="fxFsMs"></b></label>
+                </section>
+                </div>
+                <div class="fxm-events">
+                    <div class="fxm-events-title">触发事件<small>（击杀特效、全屏特效与语音播报共用）</small></div>
+                    <div class="fxm-chips">
+                        <label class="fxm-chip"><input type="checkbox" data-fx-toggle="fxEvtDouble"><span>双杀</span></label>
+                        <label class="fxm-chip"><input type="checkbox" data-fx-toggle="fxEvtTriple"><span>三杀</span></label>
+                        <label class="fxm-chip"><input type="checkbox" data-fx-toggle="fxEvtFirst"><span>一血</span></label>
+                        <label class="fxm-chip"><input type="checkbox" data-fx-toggle="fxEvtShutdown"><span>终结</span></label>
+                        <label class="fxm-chip"><input type="checkbox" data-fx-toggle="fxEvtRevenge"><span>复仇</span></label>
+                        <label class="fxm-chip"><input type="checkbox" data-fx-toggle="fxEvtAk"><span>AK 团灭</span></label>
+                        <label class="fxm-chip" title="实际左侧队伍首次达到 7 分；翻转红蓝不会补播"><input type="checkbox" data-fx-toggle="fxEvtVictory"><span>左侧七分胜利</span></label>
+                    </div>
+                </div>
+                </section>
+                <section id="streamer-pane-voice" class="streamer-pane" role="tabpanel" aria-labelledby="streamer-tab-voice" data-streamer-pane="voice" hidden>
+                <div class="streamer-section-heading"><strong>声音管理</strong><small>直播使用下方播报音色；试听可独立选择，不修改直播设置。</small></div>
+                <section class="fxm-voice" id="fxm-voice">
+                    <label class="fxm-switch" title="击杀事件朗读播报"><input type="checkbox" data-fx-toggle="fxVoiceOn" aria-label="语音播报"><i aria-hidden="true"></i></label>
+                    <div class="fxm-voice-text"><strong>语音播报</strong><small>默认关闭，勾选后才下载并播放（含试听）。音色列表由服务器同步，音频按版本缓存，不调用付费生成 API。</small><small id="voice-cloud-status" role="status">等待同步</small></div>
+                    <label class="fxm-voice-pick"><span>音色</span><select id="fxm-voice-select" title="选择播报音色"></select></label>
+
+                </section>
+                <section class="streamer-preview" aria-labelledby="streamer-preview-title">
+                    <div class="streamer-section-heading"><strong id="streamer-preview-title">声音试听</strong><small>自由组合UI风格与音色，仅试听，不改变当前展示。</small></div>
+                    <div class="streamer-preview-grid">
+                        <label class="fxm-voice-pick"><span>试听UI风格</span><select id="fxm-preview-skin">
+                            <option value="-1">跟随当前展示UI</option>
+                            <option value="0">DNF 金边</option><option value="1">经典简洁</option><option value="2">电竞霓虹</option><option value="3">水墨国风</option><option value="4">玻璃极简</option><option value="5">像素街机</option><option value="6">烈焰熔岩</option><option value="7">赛事转播</option><option value="8">寒冰水晶</option>
+                        </select></label>
+                        <label class="fxm-voice-pick"><span>试听音色</span><select id="fxm-preview-voice"><option value="-1">跟随播报音色</option></select></label>
+                        <label class="fxm-voice-pick"><span>试听内容</span><select id="fxm-preview-event"><option value="victory">胜利</option><option value="double">双杀</option><option value="triple">三杀</option><option value="first">一血</option><option value="shutdown">终结</option><option value="revenge">复仇</option><option value="ak">AK 团灭</option></select></label>
+                    </div>
+                    <div class="streamer-preview-actions"><button class="fxm-btn primary fxm-voice-test" id="btn-fx-voice-test" type="button">播放试听</button><button class="fxm-btn" id="btn-fx-voice-stop" type="button">停止试听</button></div>
+                    <p class="streamer-hint" id="streamer-preview-hint" role="status">请先开启语音播报和全部特效，试听仅复用已有音频，不调用付费生成。</p>
+                </section>
+                </section>
+            </div>
+            <footer class="fxm-footer">
+                <button class="fxm-btn" id="btn-fx-manager-reset" hidden>恢复特效与声音默认</button>
+                <button class="fxm-btn primary" id="btn-fx-manager-done">完成</button>
+            </footer>
+        </section>
+    </div>
+
     <div class="modal-overlay" id="custom-modal">
         <div class="modal-box">
             <div class="modal-msg" id="modal-msg">提示信息</div>
@@ -617,6 +727,6 @@
         </section>
     </div>
 
-    <script src="main.js?v=20260927-5.5.1-mvp-name-1" defer></script>
+    <script src="main.js?v=20260929-5.5.3-main-actions-3" defer></script>
 </body>
 </html>

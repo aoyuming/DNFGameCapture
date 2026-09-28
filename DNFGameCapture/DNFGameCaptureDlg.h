@@ -27,6 +27,7 @@
 #include <deque>
 #include "WebScoreDlg.h"
 #include "KillDisplayDlg.h"
+#include "KillFxDlg.h"
 #include "KeyDisplayDlg.h"
 #include "KeyMappingHook.h"
 #include "KeyMappingLanService.h"
@@ -35,6 +36,8 @@
 #include "CloudMatchStatusDisplay.h"
 #include "AliasDbAutoSyncPolicy.h"
 #include "json.hpp"
+
+class CHpBarCalibrationPanel;
 
 void DnfReleaseSingleInstanceMutex() noexcept;
 
@@ -53,7 +56,7 @@ struct PlayerIdentityGroupRecord {
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"5.5.1"    //当前版本号
+#define CURRENT_VERSION L"5.5.3"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -99,6 +102,7 @@ struct PlayerIdentityGroupRecord {
 #define WM_STARTUP_STAGE (WM_USER + 119)
 #define WM_CLOUD_PROGRESS (WM_USER + 120)
 #define WM_ALIAS_MANUAL_SYNC_RESULT (WM_USER + 121)
+#define WM_KILL_FX_SYNC (WM_USER + 140) // kill display settings saved: show/hide fullscreen fx window
 
 // =========================================================
 // 【编译环境切换开关】
@@ -268,6 +272,7 @@ protected:
     afx_msg LRESULT OnOcrRecoverResult(WPARAM wParam, LPARAM lParam); // 【新增】：OCR 运行中恢复完成回调
     afx_msg LRESULT OnKillDisplayVisibilityChanged(WPARAM wParam, LPARAM lParam);
     afx_msg LRESULT OnKillDisplayReady(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnKillFxSync(WPARAM wParam, LPARAM lParam);
     afx_msg LRESULT OnKeyDisplayVisibilityChanged(WPARAM wParam, LPARAM lParam);
     afx_msg LRESULT OnKeyMappingLanChanged(WPARAM wParam, LPARAM lParam);
     afx_msg LRESULT OnKeyMappingTeamSync(WPARAM wParam, LPARAM lParam);
@@ -316,6 +321,12 @@ private:
 
     void Capture();
     void CheckColorTrigger();
+    void UpdateHpBars();
+    void LoadHpBarRectsFromIni();
+    bool SaveHpBarRectsToIni();
+    void ApplyDefaultHpBarRects();
+    void SetHpCalibHandle(int idx, ScorePointF pt);
+    void NudgeHpCalibHandle(int idx, float dx, float dy);
     void Draw(CDC& dc, HBITMAP previewFrame, int previewW, int previewH);
     OcrResultData RunOCR_Internal(HBITMAP hTargetBmp, int nAreaIndex, std::uint64_t monitoringGeneration);
 
@@ -349,6 +360,7 @@ private:
     void HideKillDisplayWindow();
     void ToggleKillDisplayWindow();
     bool IsKillDisplayWindowVisible() const;
+    void SyncKillFxWindow();
     CString GetKillDisplayObsUrl() const;
     nlohmann::json BuildKeyMappingSettingsJson();
     void LoadKeyMappingSettings();
@@ -557,6 +569,7 @@ private:
     afx_msg void OnMouseMove(UINT nFlags, CPoint point);
     afx_msg void OnRButtonDown(UINT nFlags, CPoint point);
     afx_msg void OnBnClickedDeathXCalibrate();
+    afx_msg void OnBnClickedHpCalibration();
     afx_msg void OnBnClickedDeathXSave();
     afx_msg void OnBnClickedDeathXCancel();
     afx_msg void OnBnClickedDeathXDefault();
@@ -592,6 +605,7 @@ private:
 
     CWebScoreDlg* m_pWebDlg; // 新窗口的指针
     CKillDisplayDlg* m_pKillDisplayDlg = nullptr; // OBS/直播伴侣击杀展示窗口
+    CKillFxDlg* m_pKillFxDlg = nullptr; // 全屏透明击杀特效窗口（直播伴侣窗口采集）
     CKeyDisplayDlg* m_pKeyDisplayDlg = nullptr;
     CString m_webFrontDir;
     bool m_bKillDisplayHttpReady = false;
@@ -679,6 +693,18 @@ private:
     int m_selectedDeathXPoint = -1;
     int m_dragDeathXPoint = -1;
     bool m_bDraggingDeathXPoint = false;
+
+    // 对战双方血条（0=左侧，1=右侧）：归一化矩形 l,t,r,b，按颜色识别剩余血量百分比，-1 = 未识别到血条
+    float m_hpBarRect[2][4] = {
+        { 0.2000f, 0.0299f, 0.4496f, 0.0701f },
+        { 0.5477f, 0.0278f, 0.8027f, 0.0701f }
+    };
+    std::atomic<int> m_hpPercent[2] = { -1, -1 };
+    float m_hpBarSnapshot[2][4] = {};
+    ScorePointF m_hpDragOffset = {};
+    int m_hpHistory[2][3] = { { -1, -1, -1 }, { -1, -1, -1 } };
+    int m_hpHistoryCount[2] = { 0, 0 };
+    int m_hpMissCount[2] = { 0, 0 };
 
     KeyMappingSlot m_keyMappingSlots[KEY_MAPPING_SLOT_COUNT];
     std::mutex m_keyMappingMutex;
@@ -857,6 +883,8 @@ private:
     CButton         m_btnDeathXSave;
     CButton         m_btnDeathXCancel;
     CButton         m_btnDeathXDefault;
+    CButton         m_btnHpCalibration;
+    std::unique_ptr<CHpBarCalibrationPanel> m_hpCalibrationPanel;
     CEdit           m_editOutDir;
     CFont           m_font;
 

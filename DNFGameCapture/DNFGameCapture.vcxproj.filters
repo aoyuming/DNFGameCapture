@@ -81,6 +81,15 @@
     <ClInclude Include="PreviewLayout.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="VoiceCloudCache.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="HpBarCalibration.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="HpBarCalibrationPanel.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="OcrServiceHealth.h">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -94,6 +103,9 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="KillDisplayDlg.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="KillFxDlg.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="KeyDisplayDlg.h">
@@ -171,6 +183,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="KillDisplayDlg.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="KillFxDlg.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="KeyDisplayDlg.cpp">

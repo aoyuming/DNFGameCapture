@@ -89,7 +89,7 @@ let pendingAliasPopoverName = '';
 let pendingAliasPopoverInput = null;
 let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
-const WEB_LAYOUT_VERSION = '20260927-5.5.1-mvp-name-1';
+const WEB_LAYOUT_VERSION = '20260929-5.5.3-main-actions-3';
 const ALIAS_POPOVER_OFFSET_X = 8;
 const CLOUD_MATCH_WEB_THEMES = new Set([
     'dark-esports', 'frost-broadcast', 'black-gold'
@@ -1406,9 +1406,9 @@ const SCOREBOARD_TEXT_STYLE_TYPES = [
 ];
 
 const KILL_DISPLAY_LAYOUT_DEFAULTS = {
-    showDeathNumber: 0,
+    showDeathNumber: 1,
     bgAlpha: 0,
-    panelAlpha: 49,
+    panelAlpha: 31,
     rowAlpha: 0,
     canvasPadding: 0,
     panelPadding: 14,
@@ -1437,13 +1437,24 @@ const KILL_DISPLAY_LAYOUT_DEFAULTS = {
     akMarkOffsetY: 0,
     akCountBadgeOffsetX: 12,
     akCountBadgeOffsetY: -26,
-    skin: 0,
+    skin: 3, // 默认击杀展示风格：水墨国风（kill.js 中 KILL_DISPLAY_SKINS 的序号 3）
     bgImageRev: 0,
     bgImageScale: 100,
     bgImageX: 0,
     bgImageY: 0,
     bgImageOpacity: 100,
-    fxEnabled: 1
+    fxEnabled: 1,
+    fxFullscreen: 0,
+    fxFullscreenScale: 100,
+    fxFullscreenTipOff: 0,
+    // 特效管理面板
+    fxTextOn: 1, fxKillOn: 1,
+    fxEvtDouble: 1, fxEvtTriple: 1, fxEvtFirst: 1, fxEvtShutdown: 1, fxEvtRevenge: 1, fxEvtAk: 1, fxEvtVictory: 1,
+    fxTextDelay: 0, fxTextIn: 0, fxTextMs: 3500,
+    fxKillDelay: 0, fxKillIn: 0, fxKillMs: 3500,
+    fxFsDelay: 0, fxFsIn: 0, fxFsMs: 3500,
+    // 语音播报：开关（默认不播放，勾选后才播放）+ 音色序号（音色列表由 C++ 下发 state.killVoices）
+    fxVoiceOn: 0, fxVoice: 0
 };
 
 // 由击杀展示窗口右上角「界面风格」面板维护的字段：主窗口不编辑，但保存时必须原样保留。
@@ -1454,7 +1465,30 @@ const KILL_DISPLAY_LAYOUT_PASSTHROUGH_FIELDS = [
     { key: 'bgImageX', min: -3000, max: 3000 },
     { key: 'bgImageY', min: -3000, max: 3000 },
     { key: 'bgImageOpacity', min: 0, max: 100 },
-    { key: 'fxEnabled', min: 0, max: 1 }
+    { key: 'fxEnabled', min: 0, max: 1 },
+    { key: 'fxFullscreen', min: 0, max: 1 },
+    { key: 'fxFullscreenScale', min: 50, max: 200 },
+    { key: 'fxFullscreenTipOff', min: 0, max: 1 },
+    { key: 'fxTextOn', min: 0, max: 1 },
+    { key: 'fxKillOn', min: 0, max: 1 },
+    { key: 'fxEvtDouble', min: 0, max: 1 },
+    { key: 'fxEvtTriple', min: 0, max: 1 },
+    { key: 'fxEvtFirst', min: 0, max: 1 },
+    { key: 'fxEvtShutdown', min: 0, max: 1 },
+    { key: 'fxEvtRevenge', min: 0, max: 1 },
+    { key: 'fxEvtAk', min: 0, max: 1 },
+    { key: 'fxEvtVictory', min: 0, max: 1 },
+    { key: 'fxTextDelay', min: 0, max: 5000 },
+    { key: 'fxTextIn', min: 0, max: 2000 },
+    { key: 'fxTextMs', min: 1000, max: 10000 },
+    { key: 'fxKillDelay', min: 0, max: 5000 },
+    { key: 'fxKillIn', min: 0, max: 2000 },
+    { key: 'fxKillMs', min: 1000, max: 10000 },
+    { key: 'fxFsDelay', min: 0, max: 5000 },
+    { key: 'fxFsIn', min: 0, max: 2000 },
+    { key: 'fxFsMs', min: 1000, max: 10000 },
+    { key: 'fxVoiceOn', min: 0, max: 1 },
+    { key: 'fxVoice', min: 0, max: 65535 }
 ];
 
 const KILL_DISPLAY_LAYOUT_FIELDS = [
@@ -1517,49 +1551,49 @@ const KILL_DISPLAY_TEXT_STYLE_TYPES = [
         cssKey: 'header',
         label: '表头',
         allowTeamColor: false,
-        defaults: { fontFamily: 'FZXS24', fontSize: 31, colorMode: 'custom', color: '#c9a86a', strokeColor: '#000000', strokeWidth: 2, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 31, colorMode: 'custom', color: '#b9ab8f', strokeColor: '#000000', strokeWidth: 2, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'pickLabel',
         cssKey: 'pick-label',
         label: '选人顺序',
         allowTeamColor: false,
-        defaults: { fontFamily: 'FZXS24', fontSize: 27, colorMode: 'custom', color: '#6fc8b9', strokeColor: '#000000', strokeWidth: 3, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'Arial Black', fontSize: 27, colorMode: 'custom', color: '#c8a86a', strokeColor: '#000000', strokeWidth: 3, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'playerName',
         cssKey: 'player-name',
         label: '选手名',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Arial', fontSize: 43, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 5, glow: 2, letterSpacing: 0 }
+        defaults: { fontFamily: 'Arial', fontSize: 43, colorMode: 'custom', color: '#f2ead8', strokeColor: '#000000', strokeWidth: 5, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'killNumber',
         cssKey: 'kill-number',
         label: '杀',
         allowTeamColor: false,
-        defaults: { fontFamily: 'FZXS24', fontSize: 50, colorMode: 'custom', color: '#f7ca69', strokeColor: '#000000', strokeWidth: 4, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'FZXS24', fontSize: 50, colorMode: 'custom', color: '#f2ead8', strokeColor: '#000000', strokeWidth: 4, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'deathNumber',
         cssKey: 'death-number',
         label: '死',
         allowTeamColor: false,
-        defaults: { fontFamily: 'FZXS24', fontSize: 50, colorMode: 'custom', color: '#ab986d', strokeColor: '#000000', strokeWidth: 4, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'FZXS24', fontSize: 50, colorMode: 'custom', color: '#9c9486', strokeColor: '#000000', strokeWidth: 4, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'akMark',
         cssKey: 'ak-mark',
         label: 'AK标记',
         allowTeamColor: false,
-        defaults: { fontFamily: 'FZXS24', fontSize: 40, colorMode: 'custom', color: '#f7d67e', strokeColor: '#000000', strokeWidth: 3, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'FZXS24', fontSize: 40, colorMode: 'custom', color: '#e0473a', strokeColor: '#000000', strokeWidth: 3, glow: 0, letterSpacing: 0 }
     },
     {
         key: 'akCountBadge',
         cssKey: 'ak-count',
         label: 'AK次数',
         allowTeamColor: false,
-        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 30, colorMode: 'custom', color: '#f7d67e', strokeColor: '#000000', strokeWidth: 1, glow: 0, letterSpacing: 0 }
+        defaults: { fontFamily: 'Microsoft YaHei', fontSize: 30, colorMode: 'custom', color: '#e0473a', strokeColor: '#000000', strokeWidth: 1, glow: 0, letterSpacing: 0 }
     }
 ];
 
@@ -1735,6 +1769,263 @@ function normalizeKillDisplaySettings(settings = {}) {
 function applyKillDisplaySettings(settings = killDisplaySettings) {
     killDisplaySettings = normalizeKillDisplaySettings(settings);
     syncMainShowDeathToggle();
+    syncMainFxFullscreenToggle();
+}
+
+function syncMainFxFullscreenToggle() {
+    renderFxManager();
+}
+
+const KILL_FX_FULLSCREEN_TIP = '此特效为击杀全屏特效，需要单独开一个游戏进程捕获放到DNF上一层然后覆盖到全屏';
+
+function setKillDisplayFxFullscreen(enabled, tipOff = false) {
+    killDisplaySettings = normalizeKillDisplaySettings(killDisplaySettings);
+    const layout = killDisplaySettings.layout;
+    const nextValue = enabled ? 1 : 0;
+    const nextTipOff = tipOff ? 1 : (layout.fxFullscreenTipOff === 1 ? 1 : 0);
+    if (layout.fxFullscreen === nextValue && layout.fxFullscreenTipOff === nextTipOff) {
+        syncMainFxFullscreenToggle();
+        return;
+    }
+    layout.fxFullscreen = nextValue;
+    layout.fxFullscreenTipOff = nextTipOff;
+    applyKillDisplaySettings(killDisplaySettings);
+    queueKillDisplaySettingsSync();
+}
+
+function onMainFxFullscreenToggleChange(input) {
+    if (!input.checked) {
+        setKillDisplayFxFullscreen(false);
+        return;
+    }
+    if (normalizeKillDisplayLayout(killDisplaySettings.layout).fxFullscreenTipOff === 1) {
+        setKillDisplayFxFullscreen(true);
+        return;
+    }
+    input.checked = false; // 确认前先不开启
+    const html = `<div class="kill-fx-tip">${KILL_FX_FULLSCREEN_TIP}</div>`
+        + '<label class="kill-fx-tip-noremind" style="display:inline-flex;align-items:center;gap:6px;margin-top:12px;cursor:pointer;font-size:13px;">'
+        + '<input type="checkbox" id="kill-fx-tip-noremind"><span>不再提示</span></label>';
+    showConfirm(html, (ok) => {
+        const noRemind = !!document.getElementById('kill-fx-tip-noremind')?.checked;
+        if (ok) {
+            setKillDisplayFxFullscreen(true, noRemind);
+        } else {
+            syncMainFxFullscreenToggle();
+        }
+    }, { okText: '知道了，开启', cancelText: '取消' });
+}
+
+/* ================= 特效管理面板（主界面「主播工具」按钮） =================
+ * 所有设置都保存在 killDisplaySettings.layout（config.ini [KillDisplay]），
+ * 击杀展示窗口与全屏特效窗口收到同步后立即生效。 */
+const FX_MANAGER_KEYS = [
+    'fxEnabled', 'fxTextOn', 'fxKillOn', 'fxFullscreen',
+    'fxEvtDouble', 'fxEvtTriple', 'fxEvtFirst', 'fxEvtShutdown', 'fxEvtRevenge', 'fxEvtAk', 'fxEvtVictory',
+    'fxTextDelay', 'fxTextIn', 'fxTextMs', 'fxKillDelay', 'fxKillIn', 'fxKillMs',
+    'fxFsDelay', 'fxFsIn', 'fxFsMs', 'fxFullscreenScale',
+    'fxVoiceOn', 'fxVoice'
+];
+// 云端音色列表由 C++ 缓存并下发；未连接前仅显示自动与本机离线语音。
+let killVoices = [
+    { index: 0, id: 'auto', label: '默认（LOL音效播报）' },
+    { index: 5, id: 'windows', label: 'Windows 系统语音（离线）' }
+];
+let streamerToolsTab = 'display';
+
+function renderFxVoiceOptions(layout) {
+    const select = document.getElementById('fxm-voice-select');
+    if (!select) return;
+    const signature = killVoices.map(v => `${v.index}:${v.label}`).join('|');
+    if (select.dataset.signature !== signature) {
+        select.innerHTML = '';
+        killVoices.forEach(v => {
+            const option = document.createElement('option');
+            option.value = String(v.index);
+            option.textContent = v.label;
+            select.appendChild(option);
+        });
+        select.dataset.signature = signature;
+    }
+    const current = killVoices.some(v => v.index === layout.fxVoice) ? layout.fxVoice : (killVoices[0]?.index ?? 0);
+    if (document.activeElement !== select) select.value = String(current);
+    const preview = document.getElementById('fxm-preview-voice');
+    if (preview && preview.dataset.signature !== signature) {
+        const previous = preview.value;
+        preview.replaceChildren(new Option('跟随播报音色', '-1'));
+        killVoices.forEach(v => preview.add(new Option(v.label, String(v.index))));
+        preview.value = killVoices.some(v => String(v.index) === previous) ? previous : '-1';
+        preview.dataset.signature = signature;
+    }
+}
+
+function selectStreamerToolsTab(tab, focus = false) {
+    if (!['display', 'effects', 'voice'].includes(tab)) return;
+    streamerToolsTab = tab;
+    document.querySelectorAll('[data-streamer-tab]').forEach(button => {
+        const active = button.dataset.streamerTab === tab;
+        button.setAttribute('aria-selected', String(active));
+        button.tabIndex = active ? 0 : -1;
+        if (active && focus) button.focus();
+    });
+    document.querySelectorAll('[data-streamer-pane]').forEach(pane => { pane.hidden = pane.dataset.streamerPane !== tab; });
+    const reset = document.getElementById('btn-fx-manager-reset');
+    if (reset) reset.hidden = tab === 'display';
+}
+
+function getVoicePreviewSelection(layout) {
+    const ui = Number(document.getElementById('fxm-preview-skin')?.value ?? -1);
+    const selectedVoice = Number(document.getElementById('fxm-preview-voice')?.value ?? -1);
+    const skin = Number.isInteger(ui) && ui >= 0 && ui <= 8 ? ui : layout.skin;
+    const voice = killVoices.some(v => v.index === selectedVoice) ? selectedVoice : layout.fxVoice;
+    const candidate = document.getElementById('fxm-preview-event')?.value;
+    const event = ['double', 'triple', 'first', 'shutdown', 'revenge', 'ak', 'victory'].includes(candidate) ? candidate : 'victory';
+    return { skin, voice, event };
+}
+
+function formatFxManagerValue(key, value) {
+    if (/Ms$/.test(key)) return `${(value / 1000).toFixed(1)} 秒`;
+    if (/In$/.test(key)) return value > 0 ? `${(value / 1000).toFixed(2)} 秒` : '默认';
+    if (/Delay$/.test(key)) return value > 0 ? `${(value / 1000).toFixed(2)} 秒` : '立即';
+    if (key === 'fxFullscreenScale') return `${value}%`;
+    return String(value);
+}
+
+function renderFxManager() {
+    const panel = document.getElementById('fx-manager-overlay');
+    if (!panel) return;
+    const layout = normalizeKillDisplayLayout(killDisplaySettings.layout);
+    panel.querySelectorAll('[data-fx-toggle]').forEach(input => {
+        input.checked = layout[input.dataset.fxToggle] !== 0;
+    });
+    const fs = document.getElementById('fxm-fullscreen');
+    if (fs) fs.checked = layout.fxFullscreen === 1;
+    panel.querySelectorAll('[data-fx-range]').forEach(input => {
+        const key = input.dataset.fxRange;
+        if (document.activeElement !== input) input.value = String(layout[key]);
+        const out = panel.querySelector(`[data-fx-out="${key}"]`);
+        if (out) out.textContent = formatFxManagerValue(key, layout[key]);
+    });
+    const master = layout.fxEnabled !== 0;
+    panel.classList.toggle('fxm-all-off', !master);
+    const cardState = {
+        text: layout.fxTextOn !== 0,
+        kill: layout.fxKillOn !== 0 && layout.fxFullscreen !== 1,
+        fs: layout.fxFullscreen === 1
+    };
+    panel.querySelectorAll('[data-fx-card]').forEach(card => {
+        card.classList.toggle('is-off', !master || !cardState[card.dataset.fxCard]);
+    });
+    const handoff = document.getElementById('fxm-kill-handoff');
+    if (handoff) handoff.hidden = layout.fxFullscreen !== 1;
+    renderFxVoiceOptions(layout);
+    document.getElementById('fxm-voice')?.classList.toggle('is-off', !master || layout.fxVoiceOn !== 1);
+    const voiceTest = document.getElementById('btn-fx-voice-test');
+    if (voiceTest) {
+        voiceTest.disabled = !master || layout.fxVoiceOn !== 1;
+        voiceTest.title = voiceTest.disabled ? '请先勾选语音播报并开启特效' : '优先播放本地缓存，缺失时从服务器下载；不调用付费 API';
+    }
+    const hint = document.getElementById('streamer-preview-hint');
+    if (hint) hint.textContent = !master ? '全部特效已关闭，请在「特效管理」中开启后试听。'
+        : layout.fxVoiceOn !== 1 ? '请先开启语音播报；默认静音，勾选后才下载和播放。'
+        : '试听仅使用所选UI与音色，不改变直播设置；优先复用缓存，缺失时下载，不调用付费生成。';
+    const btn = document.getElementById('btn-fx-manager');
+    if (btn) { btn.classList.toggle('is-open', panel.classList.contains('active')); btn.setAttribute('aria-expanded', String(panel.classList.contains('active'))); }
+}
+
+function setFxManagerValue(key, value) {
+    killDisplaySettings = normalizeKillDisplaySettings(killDisplaySettings);
+    killDisplaySettings.layout[key] = value;
+    applyKillDisplaySettings(killDisplaySettings);
+    queueKillDisplaySettingsSync();
+}
+
+function openFxManager() {
+    const panel = document.getElementById('fx-manager-overlay');
+    if (!panel) return;
+    panel.classList.add('active');
+    panel.setAttribute('aria-hidden', 'false');
+    selectStreamerToolsTab(streamerToolsTab, true);
+    renderFxManager();
+}
+
+function closeFxManager() {
+    const panel = document.getElementById('fx-manager-overlay');
+    if (!panel) return;
+    panel.classList.remove('active');
+    panel.setAttribute('aria-hidden', 'true');
+    document.getElementById('btn-fx-manager')?.focus();
+    renderFxManager();
+}
+
+function resetFxManagerDefaults() {
+    killDisplaySettings = normalizeKillDisplaySettings(killDisplaySettings);
+    FX_MANAGER_KEYS.forEach(key => { killDisplaySettings.layout[key] = KILL_DISPLAY_LAYOUT_DEFAULTS[key]; });
+    applyKillDisplaySettings(killDisplaySettings);
+    queueKillDisplaySettingsSync();
+}
+
+function initFxManager() {
+    const panel = document.getElementById('fx-manager-overlay');
+    if (!panel) return;
+    document.getElementById('btn-fx-manager')?.addEventListener('click', () => {
+        if (panel.classList.contains('active')) closeFxManager(); else openFxManager();
+    });
+    document.getElementById('btn-fx-manager-close')?.addEventListener('click', closeFxManager);
+    document.getElementById('btn-fx-manager-done')?.addEventListener('click', closeFxManager);
+    document.getElementById('btn-fx-manager-reset')?.addEventListener('click', () => {
+        showConfirm('将文字 / 击杀 / 全屏特效的开关、触发事件、延迟、出现和持续时间恢复为默认值？<br><small>全屏特效与语音播报将关闭，音色恢复为默认LOL；展示页面开关不变。</small>', ok => {
+            if (ok) resetFxManagerDefaults();
+        }, { okText: '恢复默认', cancelText: '取消' });
+    });
+    panel.addEventListener('mousedown', event => { if (event.target === panel) closeFxManager(); });
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && panel.classList.contains('active')
+            && !document.getElementById('custom-modal')?.classList.contains('active')) closeFxManager();
+    });
+    panel.querySelectorAll('[data-fx-toggle]').forEach(input => {
+        input.addEventListener('change', () => setFxManagerValue(input.dataset.fxToggle, input.checked ? 1 : 0));
+    });
+    panel.querySelectorAll('[data-fx-range]').forEach(input => {
+        input.addEventListener('input', () => {
+            const min = Number(input.min), max = Number(input.max);
+            setFxManagerValue(input.dataset.fxRange, clampNumber(input.value, min, max, min));
+        });
+    });
+    document.getElementById('fxm-fullscreen')?.addEventListener('change', function () {
+        onMainFxFullscreenToggleChange(this);
+    });
+    document.getElementById('fxm-voice-select')?.addEventListener('change', function () {
+        setFxManagerValue('fxVoice', clampNumber(this.value, 0, 65535, 0));
+    });
+    panel.querySelectorAll('[data-streamer-tab]').forEach(button => {
+        button.addEventListener('click', () => selectStreamerToolsTab(button.dataset.streamerTab));
+        button.addEventListener('keydown', event => {
+            const tabs = ['display', 'effects', 'voice'];
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const index = tabs.indexOf(button.dataset.streamerTab);
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? 2 : (index + (event.key === 'ArrowRight' ? 1 : 2)) % 3;
+            selectStreamerToolsTab(tabs[next], true);
+        });
+    });
+    panel.addEventListener('keydown', event => {
+        if (event.key !== 'Tab') return;
+        const elements = [...panel.querySelectorAll('button, input, select, [tabindex="0"]')].filter(el => !el.disabled && el.tabIndex >= 0 && el.getClientRects().length);
+        const first = elements[0], last = elements[elements.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    });
+    document.getElementById('btn-fx-voice-test')?.addEventListener('click', () => {
+        const layout = normalizeKillDisplayLayout(killDisplaySettings.layout);
+        if (layout.fxVoiceOn !== 1 || layout.fxEnabled === 0) return;
+        const { skin, voice, event } = getVoicePreviewSelection(layout);
+        if (window.chrome?.webview) window.chrome.webview.postMessage({ action: 'cmd_kill_voice_test', voice, skin, event });
+    });
+    document.getElementById('btn-fx-voice-stop')?.addEventListener('click', () => {
+        window.chrome?.webview?.postMessage({ action: 'cmd_stop_kill_voice_test' });
+    });
+    renderFxManager();
 }
 
 function syncMainShowDeathToggle() {
@@ -2412,7 +2703,7 @@ function getRosterRandomParticipants() {
             source: 'roster',
             label: item.displayName,
             isPlaceholder: item.isPlaceholder,
-            meta: item.duplicated ? `重复名/编号${item.seatNumber}` : (item.isPlaceholder ? '空名字' : '名单'),
+            meta: item.duplicated ? `重复名/编号${item.seatNumber}` : (item.isPlaceholder ? '编号' : '名单'),
             rowData: makeRandomRowData(getRandomApplyName(item.displayName, item.seatNumber, item.isPlaceholder), item.seatNumber)
         };
     });
@@ -2432,6 +2723,12 @@ function updateRandomRosterSuggestions() {
     const textarea = document.getElementById('random-roster-input');
     const box = document.getElementById('random-roster-suggestions');
     if (!textarea || !box) return;
+    // Opening/resetting the dialog is not an edit: never show candidates without roster focus.
+    if (document.activeElement !== textarea || !document.getElementById('random-tool-overlay')?.classList.contains('active')) {
+        box.classList.remove('active');
+        box.innerHTML = '';
+        return;
+    }
     const range = getRandomRosterLineRange(textarea);
     randomToolState.activeSuggestLine = range.index;
     const query = range.text.trim();
@@ -2475,6 +2772,21 @@ function handleRandomRosterInput() {
     invalidateRandomToolResult('名单已更新，请重新随机分组或者抽签。');
     renderRandomParticipants();
     updateRandomRosterSuggestions();
+}
+
+// 一键导入编号：用 [编号1]…[编号8] 直接覆盖待分名单（原名单和固定人员都清掉）。
+// 编号是座位占位：应用到红蓝时按编号排座、名字留空。
+function importRandomRosterSeatNumbers() {
+    const input = document.getElementById('random-roster-input');
+    if (!input) return;
+    input.value = Array.from({ length: 8 }, (_, idx) => makeRandomSeatPlaceholder(idx + 1)).join('\n');
+    randomToolState.fixedIds.clear();
+    randomToolState.fixedOrder = [];
+    randomToolState.lastResult = null;
+    randomToolState.activeSuggestLine = -1;
+    document.getElementById('random-roster-suggestions')?.classList.remove('active');
+    renderRandomParticipants();
+    invalidateRandomToolResult('已导入编号 1～8（覆盖原名单），可以随机分组或者抽签。');
 }
 
 function syncRandomFixedState(participants) {
@@ -2864,8 +3176,11 @@ function openRandomTool() {
     if (!overlay) return;
     overlay.classList.add('active');
     overlay.setAttribute('aria-hidden', 'false');
+    document.getElementById('btn-random-teams')?.setAttribute('aria-expanded', 'true');
+    setMoreControlsOpen(false);
     resetRandomToolToInitialState({ notify: false });
-    updateRandomRosterSuggestions();
+    // Focus the dialog, not the prefilled last name. Tab/click enters roster editing explicitly.
+    overlay.querySelector('.random-tool-panel')?.focus({ preventScroll: true });
 }
 
 function closeRandomTool() {
@@ -2873,6 +3188,7 @@ function closeRandomTool() {
     if (!overlay) return;
     overlay.classList.remove('active');
     overlay.setAttribute('aria-hidden', 'true');
+    document.getElementById('btn-random-teams')?.setAttribute('aria-expanded', 'false');
     document.getElementById('random-roster-suggestions')?.classList.remove('active');
 }
 
@@ -3167,8 +3483,15 @@ function renderBroadcasterSidebar() {
     if (input && document.activeElement !== input) input.value = state.broadcasterName || '';
     const save = document.getElementById('btn-cloud-rename-broadcaster');
     if (save) {
+        // 尚未加入云端主播池（首次填写名称）时按钮叫「连接」，加入后才是「保存」改名
+        const firstJoin = !state.unifiedPool?.joined;
         save.disabled = state.renaming || state.joining || state.registering;
-        save.textContent = state.renaming || state.joining ? '保存中' : '保存';
+        const label = firstJoin
+            ? (state.joining ? '连接中' : '连接')
+            : (state.renaming || state.joining ? '保存中' : '保存');
+        if (save.textContent !== label) save.textContent = label;
+        const title = firstJoin ? '填写主播名称并连接云端' : '修改主播名称';
+        if (save.title !== title) save.title = title;
     }
 
     const selfId = String(state.unifiedPool?.deviceId || '');
@@ -4562,6 +4885,14 @@ function applyStateFromServer(state) {
     systemFonts = normalizeSystemFonts(state.systemFonts);
     scoreboardTextStyles = normalizeScoreboardTextStyles(state.scoreboardTextStyles);
     killDisplaySettings = normalizeKillDisplaySettings(state.killDisplaySettings);
+    if (Array.isArray(state.killVoices) && state.killVoices.length) {
+        killVoices = state.killVoices
+            .filter(v => v && Number.isInteger(v.index) && v.label)
+            .map(v => ({ index: v.index, id: String(v.id || ''), label: String(v.label) }));
+    }
+    syncMainFxFullscreenToggle();
+    const voiceSync = document.getElementById('voice-cloud-status');
+    if (voiceSync) voiceSync.textContent = ({ waiting: '等待服务器音色列表', syncing: '正在同步音色与缓存…', disabled: '列表已同步；勾选后才下载音频', ready: '所选音色已缓存，直接本地播放', partial: '部分音频待下载，暂用离线语音', offline: '服务器暂不可用，保留并使用已有缓存' })[state.killVoiceSync?.status] || '等待同步';
     keyMappingSettings = normalizeKeyMappingSettings(state.keyMappingSettings || keyMappingSettings || {});
     aliasDbAutoSyncState = normalizeAliasDbAutoSyncState(state.aliasDbAutoSync || aliasDbAutoSyncState || {});
     renderAliasDbAutoSync(aliasDbAutoSyncState);
@@ -4982,8 +5313,10 @@ function syncKillDisplayToggle(state = {}) {
     const ready = state.killDisplayHttpReady !== false;
     isKillDisplayWindowVisible = !!state.killDisplayWindowVisible;
     btn.classList.toggle('is-open', isKillDisplayWindowVisible);
-    btn.setAttribute('aria-pressed', isKillDisplayWindowVisible ? 'true' : 'false');
-    btn.disabled = !ready;
+    btn.checked = isKillDisplayWindowVisible;
+    btn.disabled = !ready && !isKillDisplayWindowVisible;
+    const status = document.getElementById('streamer-display-status');
+    if (status) { status.textContent = isKillDisplayWindowVisible ? '显示中' : ready ? '已隐藏' : '展示服务暂不可用'; status.classList.toggle('is-visible', isKillDisplayWindowVisible); }
     btn.title = ready
         ? (isKillDisplayWindowVisible ? '点击关闭击杀展示页面' : '点击打开击杀展示页面')
         : (state.killDisplayHttpError || '击杀展示页本地服务未启动');
@@ -7136,8 +7469,8 @@ if (deathAlgoSelect) {
 }
 
 document.getElementById('btn-auth').addEventListener('click', () => { showPrompt("请输入授权卡密 (CDK):", (c) => { if (c) window.chrome.webview.postMessage({ action: "cmd_auth", code: c.trim() }); }); });
-document.getElementById('btn-kill-display-toggle')?.addEventListener('click', () => {
-    if (window.chrome?.webview) window.chrome.webview.postMessage({ action: 'cmd_toggle_kill_display' });
+document.getElementById('btn-kill-display-toggle')?.addEventListener('change', function () {
+    if (window.chrome?.webview) window.chrome.webview.postMessage({ action: 'cmd_set_kill_display_visible', visible: this.checked });
 });
 document.getElementById('btn-key-mapping-close')?.addEventListener('click', closeKeyMappingPanel);
 document.getElementById('key-mapping-overlay')?.addEventListener('click', (event) => {
@@ -7350,6 +7683,7 @@ document.getElementById('btn-key-style-apply-all')?.addEventListener('click', ()
 document.getElementById('kill-show-death-toggle-main')?.addEventListener('change', function () {
     setKillDisplayShowDeathNumber(this.checked);
 });
+initFxManager();
 document.getElementById('btn-reset-local-library')?.addEventListener('click', requestPlayerLibraryReset);
 document.getElementById('btn-sync-alias-db')?.addEventListener('click', () => {
     if (!canEditPlayerLibrary()) return;
@@ -7550,11 +7884,19 @@ document.getElementById('random-tool-overlay')?.addEventListener('mousedown', (e
 });
 const randomRosterInput = document.getElementById('random-roster-input');
 randomRosterInput?.addEventListener('input', handleRandomRosterInput);
-randomRosterInput?.addEventListener('keyup', updateRandomRosterSuggestions);
+randomRosterInput?.addEventListener('keyup', (event) => {
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) updateRandomRosterSuggestions();
+});
+randomRosterInput?.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+        document.getElementById('random-roster-suggestions')?.classList.remove('active');
+        event.stopPropagation();
+    }
+});
 randomRosterInput?.addEventListener('click', updateRandomRosterSuggestions);
 randomRosterInput?.addEventListener('focus', updateRandomRosterSuggestions);
 randomRosterInput?.addEventListener('blur', () => {
-    setTimeout(() => document.getElementById('random-roster-suggestions')?.classList.remove('active'), 120);
+    document.getElementById('random-roster-suggestions')?.classList.remove('active');
 });
 document.getElementById('random-group-sizes')?.addEventListener('input', () => {
     invalidateRandomToolResult('分组数量已更新，请重新随机。');
@@ -7566,6 +7908,7 @@ document.getElementById('btn-random-run')?.addEventListener('click', runRandomTo
 document.getElementById('btn-random-draw')?.addEventListener('click', drawRandomParticipant);
 document.getElementById('btn-random-apply')?.addEventListener('click', applyRandomResultToTeams);
 document.getElementById('btn-random-copy')?.addEventListener('click', copyRandomResult);
+document.getElementById('btn-random-import-numbers')?.addEventListener('click', importRandomRosterSeatNumbers);
 document.getElementById('btn-random-reset')?.addEventListener('click', resetRandomToolToInitialState);
 
 function resetSeatNumbers() {
