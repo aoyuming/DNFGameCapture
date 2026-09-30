@@ -1,0 +1,16 @@
+// Client-only package: explicit file allowlist. Never enumerate deployment-packages or private credentials.
+const fs=require('fs'),path=require('path'),crypto=require('crypto'),cp=require('child_process');
+const root=path.resolve(__dirname,'..'),verify=path.join(root,'build/main-actions-553-verify'),label='DNF-5.5.3-Client-Main-Actions',stage=path.join(verify,'package',label),zip=path.join(root,'deployment-packages',label+'.zip');
+const hash=f=>crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex'),q=s=>"'"+s.replaceAll("'","''")+"'";
+const ps=s=>cp.execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',"$ErrorActionPreference='Stop';Add-Type -AssemblyName System.IO.Compression;Add-Type -AssemblyName System.IO.Compression.FileSystem;"+s],{stdio:'inherit'});
+if(fs.existsSync(stage)||fs.existsSync(zip))throw Error('Refusing to overwrite prior package');
+const payload=[['build/main-actions-553-verify/bin/DNFGameCapture.exe','client-update/DNFGameCapture.exe'],['build/main-actions-553-verify/bin/WebView2Loader.dll','client-update/WebView2Loader.dll'],['docs/client-main-actions-553.md','README.md']];
+for(const f of ['autocomplete-worker.js','index.html','keys.css','keys.html','keys.js','kill.css','kill.html','kill.js','main.js','style.css'])payload.push(['web前端/'+f,'client-update/web前端/'+f]);
+for(const [src,rel] of payload){const f=path.join(root,src);if(!fs.lstatSync(f).isFile())throw Error('Not regular file: '+src);if(/private|\.env|server|\.(key|pem|db|sqlite|ini|wav)$/i.test(rel))throw Error('Forbidden payload');}
+ps("$v=(Get-Item -LiteralPath "+q(path.join(verify,'bin/DNFGameCapture.exe'))+").VersionInfo;if($v.FileVersion -ne '5.5.3.0'){throw 'Wrong EXE version'}");
+const revision='20260929-5.5.3-main-actions-1';for(const f of ['index.html','main.js'])if(!fs.readFileSync(path.join(root,'web前端',f),'utf8').includes(revision))throw Error('Stale frontend');
+fs.mkdirSync(stage,{recursive:true});const records=[];
+for(const [src,rel] of payload){const from=path.join(root,src),to=path.join(stage,rel);fs.mkdirSync(path.dirname(to),{recursive:true});fs.copyFileSync(from,to);if(hash(from)!==hash(to))throw Error('Copy mismatch');records.push({path:rel,bytes:fs.statSync(to).size,sha256:hash(to)});}
+fs.writeFileSync(path.join(stage,'SHA256SUMS.json'),JSON.stringify({package:label,version:'5.5.3',revision,packageType:'existing-client-update',productionDeployed:false,installedExeReplaced:false,serverIncluded:false,audioIncluded:false,paidTtsCallsThisUpdate:0,files:records},null,2));
+ps('$base='+q(stage)+';$z=[IO.Compression.ZipFile]::Open('+q(zip)+",[IO.Compression.ZipArchiveMode]::Create);try{foreach($f in Get-ChildItem -LiteralPath $base -File -Recurse){$entry=$f.FullName.Substring($base.Length+1).Replace([char]92,[char]47);[IO.Compression.ZipFileExtensions]::CreateEntryFromFile($z,$f.FullName,$entry,[IO.Compression.CompressionLevel]::Optimal)|Out-Null}}finally{$z.Dispose()}");
+const result={zip,sha256:hash(zip),bytes:fs.statSync(zip).size,files:records.length+1,version:'5.5.3.0',clientOnly:true};fs.writeFileSync(zip+'.manifest.json',JSON.stringify(result,null,2));console.log('PACKAGE_RESULT:'+JSON.stringify(result));

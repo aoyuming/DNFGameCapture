@@ -1700,7 +1700,8 @@ html[data-theme="black-gold"] .cloud-room-status {
     font-size: 11px;
     flex-shrink: 0;
 }
-.random-fixed-btn {
+.random-fixed-btn,
+.random-fixed-select {
     flex: 0 0 auto;
     border: 1px solid rgba(255,255,255,0.16);
     border-radius: 5px;
@@ -1709,7 +1710,15 @@ html[data-theme="black-gold"] .cloud-room-status {
     padding: 4px 8px;
     cursor: pointer;
 }
-.random-fixed-btn.active {
+.random-fixed-select {
+    max-width: 118px;
+    padding: 3px 4px;
+    font: inherit;
+    font-size: 12px;
+}
+.random-fixed-select option { color: #1b2530; background: #ffffff; }
+.random-fixed-btn.active,
+.random-fixed-select.active {
     border-color: rgba(255, 204, 102, 0.85);
     color: #ffdd85;
     background: rgba(255, 204, 102, 0.14);
@@ -4796,106 +4805,179 @@ body.realtime-readonly .operation-history-item[aria-disabled="true"] {
    - 主题值沿用 dark-esports / black-gold / frost-broadcast，C++ 与外观设置不受影响。
    - 记分文字仍读取外观面板的 --sb-* 变量（字号按比例换算到新版布局）。
    ========================================================================== */
+/* 5.5.4 主题重设计：深空导播台（暗）/ 青玉白银 / 雾蓝暮色（中间调）/ 冰川淡蓝 / 晨光暖白（亮）。
+   id 保持不变以兼容已保存的设置：dark-esports = 深空导播台，black-gold = 青玉白银，frost-broadcast = 晨光暖白；
+   新增 mist-blue = 雾蓝暮色，glacier-blue = 冰川淡蓝。 */
 html[data-theme="dark-esports"] {
-    --rd-bg: radial-gradient(1200px 600px at 20% -10%, #1a2340 0%, transparent 60%),
-             radial-gradient(900px 500px at 110% 10%, #2a1426 0%, transparent 55%), #0b0f17;
-    --rd-surface: rgba(22, 28, 42, 0.72);
-    --rd-surface-solid: #151b29;
-    --rd-surface-2: rgba(30, 38, 56, 0.85);
-    --rd-surface-3: #141a27;
-    --rd-line: rgba(255, 255, 255, 0.07);
-    --rd-line-strong: rgba(255, 255, 255, 0.14);
-    --rd-text: #e9eef7;
-    --rd-muted: #8b97ad;
-    --rd-faint: #5d6880;
-    --rd-red: #ff3d6e;
-    --rd-red-soft: rgba(255, 61, 110, 0.14);
-    --rd-blue: #2fd4ff;
-    --rd-blue-soft: rgba(47, 212, 255, 0.13);
-    --rd-accent: #7c6cff;
-    --rd-accent-2: #a78bfa;
-    --rd-accent-text: #ffffff;
-    --rd-ok: #3ddc97;
-    --rd-warn: #ffc35c;
+    --rd-bg: radial-gradient(1200px 420px at 50% -18%, rgba(34, 211, 166, 0.07) 0%, transparent 60%),
+             linear-gradient(180deg, #0e131c 0%, #0a0e15 100%);
+    --rd-surface: #131a25;
+    --rd-surface-solid: #131a25;
+    --rd-surface-2: #1a2230;
+    --rd-surface-3: #10161f;
+    --rd-line: rgba(148, 163, 184, 0.12);
+    --rd-line-strong: rgba(148, 163, 184, 0.24);
+    --rd-text: #e6ebf2;
+    --rd-muted: #8793a6;
+    --rd-faint: #5b6678;
+    --rd-red: #ff4d5e;
+    --rd-red-soft: rgba(255, 77, 94, 0.14);
+    --rd-blue: #3b9eff;
+    --rd-blue-soft: rgba(59, 158, 255, 0.14);
+    --rd-accent: #22d3a6;
+    --rd-accent-2: #5eead4;
+    --rd-accent-text: #05231b;
+    --rd-ok: #22d3a6;
+    --rd-warn: #fbbf24;
     --rd-danger: #ff5d6c;
-    --rd-radius: 14px;
-    --rd-radius-sm: 9px;
-    --rd-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
-    --rd-menu-bg: #1a2132;
+    --rd-radius: 10px;
+    --rd-radius-sm: 7px;
+    --rd-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 8px 24px rgba(0, 0, 0, 0.35);
+    --rd-menu-bg: #17202d;
     --rd-title-font: "Segoe UI", "Microsoft YaHei", sans-serif;
     --rd-num-font: "Bahnschrift", "DIN Alternate", "Segoe UI", sans-serif;
-    --rd-run-bg: linear-gradient(135deg, #7c6cff, #a78bfa);
-    --rd-run-text: #ffffff;
-    --rd-run-shadow: 0 6px 18px rgba(124, 108, 255, 0.4);
+    --rd-run-bg: linear-gradient(135deg, #2ee6b6, #16b890);
+    --rd-run-text: #05231b;
+    --rd-run-shadow: 0 0 0 1px rgba(34, 211, 166, 0.5), 0 6px 16px rgba(34, 211, 166, 0.22);
     --rd-stop-bg: linear-gradient(135deg, #e5484d, #ff6b6b);
     --rd-stop-text: #ffffff;
 }
 
 html[data-theme="black-gold"] {
-    --rd-bg: radial-gradient(1000px 520px at 50% -20%, #3a2a12 0%, transparent 60%),
-             repeating-linear-gradient(45deg, rgba(255, 215, 140, 0.018) 0 2px, transparent 2px 12px), #0d0b09;
-    --rd-surface: rgba(28, 23, 17, 0.9);
-    --rd-surface-solid: #1c1711;
-    --rd-surface-2: rgba(40, 32, 22, 0.95);
-    --rd-surface-3: #17130e;
-    --rd-line: rgba(214, 176, 98, 0.16);
-    --rd-line-strong: rgba(214, 176, 98, 0.38);
-    --rd-text: #f3e7cc;
-    --rd-muted: #b3a17b;
-    --rd-faint: #7b6c4f;
-    --rd-red: #e2483d;
-    --rd-red-soft: rgba(226, 72, 61, 0.16);
-    --rd-blue: #4aa3ff;
-    --rd-blue-soft: rgba(74, 163, 255, 0.14);
-    --rd-accent: #d9a84a;
-    --rd-accent-2: #f4d58d;
-    --rd-accent-text: #2a1c06;
-    --rd-ok: #8fcf6d;
-    --rd-warn: #f0c060;
-    --rd-danger: #ff6b5b;
+    --rd-bg: radial-gradient(1000px 420px at 50% -20%, rgba(64, 200, 170, 0.14) 0%, transparent 62%),
+             repeating-linear-gradient(135deg, rgba(160, 230, 215, 0.02) 0 1px, transparent 1px 10px), #07100f;
+    --rd-surface: rgba(15, 28, 26, 0.94);
+    --rd-surface-solid: #0f1c1a;
+    --rd-surface-2: rgba(19, 36, 34, 0.96);
+    --rd-surface-3: #0c1716;
+    --rd-line: rgba(190, 220, 214, 0.13);
+    --rd-line-strong: rgba(190, 220, 214, 0.34);
+    --rd-text: #e8f3f0;
+    --rd-muted: #8fa8a2;
+    --rd-faint: #5f7771;
+    --rd-red: #f0506a;
+    --rd-red-soft: rgba(240, 80, 106, 0.15);
+    --rd-blue: #5b9dff;
+    --rd-blue-soft: rgba(91, 157, 255, 0.14);
+    --rd-accent: #5ed6b8;
+    --rd-accent-2: #9eeedb;
+    --rd-accent-text: #04201a;
+    --rd-ok: #5ed6b8;
+    --rd-warn: #e9c46a;
+    --rd-danger: #ff6b7d;
     --rd-radius: 6px;
     --rd-radius-sm: 4px;
-    --rd-shadow: 0 8px 24px rgba(0, 0, 0, 0.55), inset 0 0 0 1px rgba(214, 176, 98, 0.08);
-    --rd-menu-bg: #221c14;
+    --rd-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(190, 220, 214, 0.06);
+    --rd-menu-bg: #11201e;
     --rd-title-font: "STKaiti", "KaiTi", "Noto Serif SC", "Microsoft YaHei", serif;
     --rd-num-font: Georgia, "Times New Roman", serif;
-    --rd-run-bg: linear-gradient(180deg, #f4d58d, #c8963a);
-    --rd-run-text: #2a1c06;
-    --rd-run-shadow: 0 0 0 1px rgba(244, 213, 141, 0.53), 0 6px 18px rgba(217, 168, 74, 0.25);
-    --rd-stop-bg: linear-gradient(180deg, #d9534a, #9e2a22);
+    --rd-run-bg: linear-gradient(180deg, #8ff0d6, #3fb89a);
+    --rd-run-text: #04201a;
+    --rd-run-shadow: inset 0 0 0 1px rgba(200, 255, 240, 0.45), 0 6px 16px rgba(63, 184, 154, 0.3);
+    --rd-stop-bg: linear-gradient(180deg, #e0566a, #a3263f);
     --rd-stop-text: #ffffff;
 }
 
-html[data-theme="frost-broadcast"] {
-    --rd-bg: linear-gradient(180deg, #f6f8fb 0%, #e9eef5 100%);
-    --rd-surface: #ffffff;
+html[data-theme="mist-blue"] {
+    --rd-bg: radial-gradient(1000px 440px at 50% -20%, rgba(150, 200, 255, 0.22) 0%, transparent 62%),
+             linear-gradient(180deg, #2b3a50 0%, #223044 100%);
+    --rd-surface: rgba(52, 68, 92, 0.8);
+    --rd-surface-solid: #34445c;
+    --rd-surface-2: rgba(58, 77, 104, 0.92);
+    --rd-surface-3: #2c3b51;
+    --rd-line: rgba(190, 215, 245, 0.16);
+    --rd-line-strong: rgba(190, 215, 245, 0.34);
+    --rd-text: #eef4fb;
+    --rd-muted: #a7b8cd;
+    --rd-faint: #7d8ea5;
+    --rd-red: #ff6b7d;
+    --rd-red-soft: rgba(255, 107, 125, 0.16);
+    --rd-blue: #6cc2ff;
+    --rd-blue-soft: rgba(108, 194, 255, 0.16);
+    --rd-accent: #9fd4ff;
+    --rd-accent-2: #cfe7ff;
+    --rd-accent-text: #10233a;
+    --rd-ok: #6ee7b7;
+    --rd-warn: #ffd08a;
+    --rd-danger: #ff7b8a;
+    --rd-radius: 8px;
+    --rd-radius-sm: 5px;
+    --rd-shadow: 0 8px 22px rgba(10, 20, 35, 0.35);
+    --rd-menu-bg: #34445c;
+    --rd-title-font: "Segoe UI", "Microsoft YaHei", sans-serif;
+    --rd-num-font: "Bahnschrift", "DIN Alternate", "Segoe UI", sans-serif;
+    --rd-run-bg: linear-gradient(180deg, #cfe7ff, #8ec8ff);
+    --rd-run-text: #10233a;
+    --rd-run-shadow: 0 6px 16px rgba(120, 190, 255, 0.3);
+    --rd-stop-bg: linear-gradient(135deg, #e5484d, #ff6b6b);
+    --rd-stop-text: #ffffff;
+}
+
+html[data-theme="glacier-blue"] {
+    --rd-bg: radial-gradient(900px 420px at 12% -20%, rgba(125, 200, 255, 0.4) 0%, transparent 62%),
+             linear-gradient(180deg, #eef6fd 0%, #e2eef9 100%);
+    --rd-surface: rgba(255, 255, 255, 0.88);
     --rd-surface-solid: #ffffff;
-    --rd-surface-2: #f6f8fb;
-    --rd-surface-3: #f0f3f8;
-    --rd-line: #e3e8ef;
-    --rd-line-strong: #cfd7e2;
-    --rd-text: #18212f;
-    --rd-muted: #5f6b7d;
-    --rd-faint: #9aa5b5;
-    --rd-red: #e5304f;
+    --rd-surface-2: #f1f7fd;
+    --rd-surface-3: #eaf3fb;
+    --rd-line: #d6e6f4;
+    --rd-line-strong: #bcd5ec;
+    --rd-text: #12263a;
+    --rd-muted: #5a7189;
+    --rd-faint: #93a8bd;
+    --rd-red: #e0344f;
     --rd-red-soft: #fdecef;
-    --rd-blue: #0a84d6;
-    --rd-blue-soft: #e6f3fc;
-    --rd-accent: #4f46e5;
-    --rd-accent-2: #6366f1;
+    --rd-blue: #1d5fd6;
+    --rd-blue-soft: #e6effd;
+    --rd-accent: #1f8be8;
+    --rd-accent-2: #2a9df4;
     --rd-accent-text: #ffffff;
-    --rd-ok: #12a26b;
+    --rd-ok: #16a37a;
     --rd-warn: #c98a06;
     --rd-danger: #d93245;
     --rd-radius: 12px;
     --rd-radius-sm: 8px;
-    --rd-shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 4px 14px rgba(16, 24, 40, 0.06);
+    --rd-shadow: 0 1px 2px rgba(20, 60, 110, 0.05), 0 6px 18px rgba(20, 60, 110, 0.08);
     --rd-menu-bg: #ffffff;
     --rd-title-font: "Segoe UI", "Microsoft YaHei", sans-serif;
     --rd-num-font: "Bahnschrift", "Segoe UI", sans-serif;
-    --rd-run-bg: linear-gradient(135deg, #4f46e5, #6366f1);
+    --rd-run-bg: linear-gradient(135deg, #46b1ff, #1f8be8);
     --rd-run-text: #ffffff;
-    --rd-run-shadow: 0 6px 18px rgba(79, 70, 229, 0.3);
+    --rd-run-shadow: 0 6px 16px rgba(42, 157, 244, 0.32);
+    --rd-stop-bg: linear-gradient(135deg, #e5484d, #ff6b6b);
+    --rd-stop-text: #ffffff;
+}
+
+html[data-theme="frost-broadcast"] {
+    --rd-bg: radial-gradient(900px 400px at 88% -20%, rgba(255, 196, 110, 0.26) 0%, transparent 62%), #f7f4ef;
+    --rd-surface: #ffffff;
+    --rd-surface-solid: #ffffff;
+    --rd-surface-2: #f7f4ef;
+    --rd-surface-3: #f2eee7;
+    --rd-line: #ebe5dc;
+    --rd-line-strong: #ddd4c7;
+    --rd-text: #1f1b16;
+    --rd-muted: #766c5f;
+    --rd-faint: #a89e90;
+    --rd-red: #d4263f;
+    --rd-red-soft: #fcebed;
+    --rd-blue: #1d64d8;
+    --rd-blue-soft: #e8f0fd;
+    --rd-accent: #cf7a0c;
+    --rd-accent-2: #e08a12;
+    --rd-accent-text: #ffffff;
+    --rd-ok: #1f9d63;
+    --rd-warn: #b7791f;
+    --rd-danger: #d93245;
+    --rd-radius: 12px;
+    --rd-radius-sm: 8px;
+    --rd-shadow: 0 1px 2px rgba(60, 40, 10, 0.05), 0 6px 18px rgba(60, 40, 10, 0.06);
+    --rd-menu-bg: #ffffff;
+    --rd-title-font: "Segoe UI", "Microsoft YaHei", sans-serif;
+    --rd-num-font: "Bahnschrift", "Segoe UI", sans-serif;
+    --rd-run-bg: linear-gradient(135deg, #2a241d, #1f1b16);
+    --rd-run-text: #ffffff;
+    --rd-run-shadow: 0 4px 12px rgba(31, 27, 22, 0.22);
     --rd-stop-bg: linear-gradient(135deg, #e5484d, #ff6b6b);
     --rd-stop-text: #ffffff;
 }
@@ -5674,7 +5756,8 @@ html[data-theme] .stat-item input {
 }
 
 html[data-theme] .stat-item input.stat-death { color: var(--rd-muted); }
-html[data-theme] .stat-item input.stat-ak { color: var(--rd-accent-2); font-size: calc(var(--sb-stat-number-font-size, 25px) * 0.72); }
+html[data-theme] .stat-item input.stat-ak,
+html[data-theme] .stat-item input.stat-streak { color: var(--rd-accent-2); font-size: calc(var(--sb-stat-number-font-size, 25px) * 0.72); }
 
 /* 空位：数字显示为「–」 */
 html[data-theme] .player-row.rd-empty .stat-item input { color: transparent !important; -webkit-text-stroke: 0 !important; }
@@ -6297,7 +6380,8 @@ html[data-theme] .console-sidebar {
 html[data-theme="frost-broadcast"].rd-fix-name .name-input { color: #18212f !important; -webkit-text-stroke: 0 !important; text-shadow: none !important; }
 html[data-theme="frost-broadcast"].rd-fix-stat .stat-item input.stat-kill { color: #18212f !important; -webkit-text-stroke: 0 !important; }
 html[data-theme="frost-broadcast"].rd-fix-stat .stat-item input.stat-death { color: #5f6b7d !important; -webkit-text-stroke: 0 !important; }
-html[data-theme="frost-broadcast"].rd-fix-stat .stat-item input.stat-ak { color: var(--rd-accent-2) !important; -webkit-text-stroke: 0 !important; }
+html[data-theme="frost-broadcast"].rd-fix-stat .stat-item input.stat-ak,
+html[data-theme="frost-broadcast"].rd-fix-stat .stat-item input.stat-streak { color: var(--rd-accent-2) !important; -webkit-text-stroke: 0 !important; }
 html[data-theme="frost-broadcast"].rd-fix-header .stats-labels span { color: #5f6b7d !important; }
 html[data-theme="frost-broadcast"] .team-red .team-name-label,
 html[data-theme="frost-broadcast"] .team-red .team-score-input { color: var(--rd-red) !important; -webkit-text-stroke: 0 !important; text-shadow: none !important; }
@@ -6338,10 +6422,12 @@ html[data-theme] .stats-labels span { width: 54px; }
 html[data-theme] .broadcaster-list { overflow-y: auto; }
 html[data-theme] .player-row.rd-empty .stat-item input.stat-kill,
 html[data-theme] .player-row.rd-empty .stat-item input.stat-death,
-html[data-theme] .player-row.rd-empty .stat-item input.stat-ak { color: transparent !important; }
+html[data-theme] .player-row.rd-empty .stat-item input.stat-ak,
+html[data-theme] .player-row.rd-empty .stat-item input.stat-streak { color: transparent !important; }
 html[data-theme] .player-row.rd-empty .stat-item:focus-within input.stat-kill,
 html[data-theme] .player-row.rd-empty .stat-item:focus-within input.stat-death,
-html[data-theme] .player-row.rd-empty .stat-item:focus-within input.stat-ak { color: var(--rd-text) !important; }
+html[data-theme] .player-row.rd-empty .stat-item:focus-within input.stat-ak,
+html[data-theme] .player-row.rd-empty .stat-item:focus-within input.stat-streak { color: var(--rd-text) !important; }
 html[data-theme] .more-controls-menu .algo-select { font: 400 12.5px "Segoe UI", "Microsoft YaHei", sans-serif; }
 html[data-theme] .more-controls-menu .algo-select-wrap > span { color: var(--rd-muted); font-weight: 400; }
 html[data-theme] .control-panel .prefer-local-aliases-toggle { flex: none; min-width: 0; }
@@ -6428,8 +6514,8 @@ html[data-theme] .random-roster-suggestion:hover { background: var(--rd-accent-s
 html[data-theme] .random-participant-list { border: 1px solid var(--rd-line) !important; background: var(--rd-dialog-item) !important; }
 html[data-theme] .random-result { border: 1px solid var(--rd-line) !important; background: var(--rd-dialog-item) !important; }
 html[data-theme] .random-participant-row { border-bottom: 1px solid var(--rd-line) !important; }
-html[data-theme] .random-fixed-btn { border: 1px solid var(--rd-line) !important; background: var(--rd-dialog-item) !important; color: var(--rd-accent) !important; }
-html[data-theme] .random-fixed-btn.active { border-color: var(--rd-warn) !important; color: var(--rd-warn) !important; background: var(--rd-warn-soft) !important; }
+html[data-theme] .random-fixed-btn, html[data-theme] .random-fixed-select { border: 1px solid var(--rd-line) !important; background: var(--rd-dialog-item) !important; color: var(--rd-accent) !important; }
+html[data-theme] .random-fixed-btn.active, html[data-theme] .random-fixed-select.active { border-color: var(--rd-warn) !important; color: var(--rd-warn) !important; background: var(--rd-warn-soft) !important; }
 html[data-theme] .random-option-line { color: var(--rd-accent) !important; }
 html[data-theme] .random-check-line { color: var(--rd-accent) !important; }
 html[data-theme] .random-section-title { color: var(--rd-accent) !important; }
@@ -6992,7 +7078,7 @@ html[data-theme] .player-row .name-wrapper > .rd-seat.rd-seat-toggle { cursor: p
    ========================================================================== */
 /* 名字框最小宽度 ≈ 2 个数字 + 2 个汉字（按名字字号自适应），可继续伸长但不再缩成“90...” */
 html[data-theme] .player-row .name-input {
-    min-width: calc(3.4em + 6px);
+    min-width: calc(4.6em + 8px);
 }
 
 /* MVP：绝对定位到名字文字正上方（left/top 由 main.js 的 rdPlaceMvp 按文字宽度计算），不占排版宽度 */
@@ -7014,12 +7100,14 @@ html[data-theme] .player-row .rd-mvp {
 /* ==========================================================================
    第 8 轮：AK 数字与击杀/死亡统一字号、颜色，并与表头 / 其它数字对齐
    ========================================================================== */
-html[data-theme] .stat-item input.stat-ak {
+html[data-theme] .stat-item input.stat-ak,
+html[data-theme] .stat-item input.stat-streak {
     color: var(--sb-stat-number-color);
     font-size: calc(var(--sb-stat-number-font-size, 25px) * 0.96);
     text-align: center;
 }
-html[data-theme="frost-broadcast"].rd-fix-stat .stat-item input.stat-ak { color: #18212f !important; -webkit-text-stroke: 0 !important; }
+html[data-theme="frost-broadcast"].rd-fix-stat .stat-item input.stat-ak,
+html[data-theme="frost-broadcast"].rd-fix-stat .stat-item input.stat-streak { color: #18212f !important; -webkit-text-stroke: 0 !important; }
 
 /* ==========================================================================
    特效管理面板（主界面「特效管理」按钮）
@@ -7304,4 +7392,153 @@ html[data-theme] .control-panel #btn-more-controls { height: 42px; }
 /* Extremely narrow panes remain one line; only the action strip can scroll. */
 @container match-workspace (max-width: 620px) {
     html[data-theme] .control-panel .control-row-match { overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; padding: 4px 0; }
+}
+
+/* ==========================================================================
+   5.5.4 主题重设计：五套主题的细节（切换器、主按钮、面板纹理、云同步与弹窗配色）
+   ========================================================================== */
+/* 顶部风格切换：每套主题自己的底色与选中样式 */
+html[data-theme="dark-esports"] { --rd-sw-bg: #0a0e15; --rd-sw-on-bg: #1f2a3a; --rd-sw-on-text: #e6ebf2; --rd-sw-on-shadow: inset 0 -2px 0 #22d3a6; }
+html[data-theme="black-gold"] { --rd-sw-bg: #07100f; --rd-sw-on-bg: linear-gradient(180deg, #f1f7f5, #b8ccc7); --rd-sw-on-text: #0b1d19; --rd-sw-on-shadow: 0 1px 4px rgba(0, 0, 0, 0.35); }
+html[data-theme="mist-blue"] { --rd-sw-bg: #223044; --rd-sw-on-bg: #cfe7ff; --rd-sw-on-text: #10233a; --rd-sw-on-shadow: 0 2px 8px rgba(120, 190, 255, 0.3); }
+html[data-theme="glacier-blue"] { --rd-sw-bg: #dcebf8; --rd-sw-on-bg: #ffffff; --rd-sw-on-text: #12263a; --rd-sw-on-shadow: 0 1px 3px rgba(20, 60, 110, 0.18), inset 0 -2px 0 #2a9df4; }
+html[data-theme="frost-broadcast"] { --rd-sw-bg: #efe9e0; --rd-sw-on-bg: #ffffff; --rd-sw-on-text: #1f1b16; --rd-sw-on-shadow: 0 1px 3px rgba(60, 40, 10, 0.18), inset 0 -2px 0 #e08a12; }
+html[data-theme] .rd-theme-switch { background: var(--rd-sw-bg, var(--rd-surface-2)); box-shadow: none; }
+html[data-theme] .rd-theme-switch button.is-active {
+    background: var(--rd-sw-on-bg, var(--rd-accent));
+    color: var(--rd-sw-on-text, var(--rd-accent-text));
+    box-shadow: var(--rd-sw-on-shadow, none);
+}
+
+/* Logo */
+html[data-theme="dark-esports"] .rd-logo { background: #22d3a6; color: #05231b; }
+html[data-theme="black-gold"] .rd-logo { background: linear-gradient(135deg, #8aa39d, #f1f7f5 50%, #8aa39d); color: #0b1d19; box-shadow: 0 0 0 1px rgba(241, 247, 245, 0.35); }
+html[data-theme="mist-blue"] .rd-logo { background: linear-gradient(135deg, #cfe7ff, #7fbfff); color: #10233a; }
+html[data-theme="glacier-blue"] .rd-logo { background: linear-gradient(135deg, #7cc4ff, #2a9df4); color: #ffffff; }
+html[data-theme="frost-broadcast"] .rd-logo { background: #1f1b16; color: #ffd28a; }
+
+/* 青玉白银：面板纹理（沿用原金纹主题的结构，换成青玉色） */
+html[data-theme="black-gold"] .teams-wrap::before {
+    background:
+        linear-gradient(90deg, var(--rd-red-soft), transparent 38%, transparent 62%, var(--rd-blue-soft)),
+        linear-gradient(180deg, #132422, #0d1918);
+}
+html[data-theme="black-gold"] .stats-header { background: linear-gradient(180deg, rgba(94, 214, 184, 0.07), transparent); }
+html[data-theme="black-gold"] .player-row { background: linear-gradient(90deg, #10201e, #0c1716); }
+
+/* 比分数字：暗色主题加一点同色辉光 */
+html[data-theme="dark-esports"] .team-red .team-score-input { text-shadow: 0 0 18px rgba(255, 77, 94, 0.35); }
+html[data-theme="dark-esports"] .team-blue .team-score-input { text-shadow: 0 0 18px rgba(59, 158, 255, 0.35); }
+
+/* 「主播工具」按钮：跟随主题的描边款 */
+html[data-theme="dark-esports"] { --rd-fx-btn-bg: rgba(34, 211, 166, 0.12); --rd-fx-btn-text: #5eead4; --rd-fx-btn-line: rgba(34, 211, 166, 0.5); --rd-fx-btn-glow: rgba(34, 211, 166, 0.18); --rd-fx-btn-ring: #22d3a6; }
+html[data-theme="black-gold"] { --rd-fx-btn-bg: linear-gradient(180deg, #e9f1ef, #b7c9c4); --rd-fx-btn-text: #0b1d19; --rd-fx-btn-line: rgba(255, 255, 255, 0.5); --rd-fx-btn-glow: rgba(183, 201, 196, 0.22); --rd-fx-btn-ring: #cfe3de; }
+html[data-theme="mist-blue"] { --rd-fx-btn-bg: rgba(159, 212, 255, 0.16); --rd-fx-btn-text: #cfe7ff; --rd-fx-btn-line: rgba(159, 212, 255, 0.5); --rd-fx-btn-glow: rgba(120, 190, 255, 0.2); --rd-fx-btn-ring: #9fd4ff; }
+html[data-theme="glacier-blue"] { --rd-fx-btn-bg: #e3f2ff; --rd-fx-btn-text: #1270c4; --rd-fx-btn-line: #9fd0f7; --rd-fx-btn-glow: rgba(42, 157, 244, 0.15); --rd-fx-btn-ring: #2a9df4; }
+html[data-theme="frost-broadcast"] { --rd-fx-btn-bg: #fff4e0; --rd-fx-btn-text: #a65e00; --rd-fx-btn-line: #f2c778; --rd-fx-btn-glow: rgba(224, 138, 18, 0.15); --rd-fx-btn-ring: #e08a12; }
+html[data-theme] .control-panel .btn-fx-manager {
+    box-shadow: inset 0 0 0 1px var(--rd-fx-btn-line, transparent), 0 4px 14px var(--rd-fx-btn-glow, transparent) !important;
+    text-shadow: none !important;
+}
+html[data-theme] .control-panel .btn-fx-manager::after { opacity: 0.45; }
+
+/* 「分组和抽签」按钮 */
+html[data-theme="dark-esports"] .control-panel #btn-random-teams.main-random-action { --random-bg: #1a2230; --random-ink: #e6ebf2; --random-line: rgba(148, 163, 184, 0.32); --random-shadow: rgba(0, 0, 0, 0.28); }
+html[data-theme="black-gold"] .control-panel #btn-random-teams.main-random-action { --random-bg: #132422; --random-ink: #e8f3f0; --random-line: rgba(190, 220, 214, 0.4); --random-shadow: rgba(0, 0, 0, 0.3); }
+html[data-theme="mist-blue"] .control-panel #btn-random-teams.main-random-action { --random-bg: #3a4d68; --random-ink: #eef4fb; --random-line: rgba(190, 215, 245, 0.38); --random-shadow: rgba(10, 20, 35, 0.3); }
+html[data-theme="glacier-blue"] .control-panel #btn-random-teams.main-random-action { --random-bg: #ffffff; --random-ink: #12263a; --random-line: #bcd5ec; --random-shadow: rgba(20, 60, 110, 0.1); }
+html[data-theme="frost-broadcast"] .control-panel #btn-random-teams.main-random-action { --random-bg: #ffffff; --random-ink: #1f1b16; --random-line: #ddd4c7; --random-shadow: rgba(60, 40, 10, 0.1); }
+html[data-theme] .control-panel #btn-random-teams.main-random-action { border-color: var(--random-line, rgba(255, 255, 255, 0.2)) !important; }
+
+/* 亮色主题（晨光暖白 / 冰川淡蓝）共用的对比度修正 */
+html[data-theme="glacier-blue"] .team-name::before { box-shadow: none !important; }
+html[data-theme="glacier-blue"] .more-controls-menu,
+html[data-theme="frost-broadcast"] .more-controls-menu { box-shadow: 0 20px 50px rgba(16, 24, 40, 0.16); }
+html[data-theme="glacier-blue"].rd-fix-name .name-input,
+html[data-theme="frost-broadcast"].rd-fix-name .name-input { color: var(--rd-text) !important; -webkit-text-stroke: 0 !important; text-shadow: none !important; }
+html[data-theme="glacier-blue"].rd-fix-stat .stat-item input.stat-kill,
+html[data-theme="frost-broadcast"].rd-fix-stat .stat-item input.stat-kill { color: var(--rd-text) !important; -webkit-text-stroke: 0 !important; }
+html[data-theme="glacier-blue"].rd-fix-stat .stat-item input.stat-death,
+html[data-theme="frost-broadcast"].rd-fix-stat .stat-item input.stat-death { color: var(--rd-muted) !important; -webkit-text-stroke: 0 !important; }
+html[data-theme="glacier-blue"].rd-fix-stat .stat-item input.stat-ak,
+html[data-theme="glacier-blue"].rd-fix-stat .stat-item input.stat-streak { color: var(--rd-accent-2) !important; -webkit-text-stroke: 0 !important; }
+html[data-theme="glacier-blue"].rd-fix-header .stats-labels span,
+html[data-theme="frost-broadcast"].rd-fix-header .stats-labels span { color: var(--rd-muted) !important; }
+html[data-theme="glacier-blue"] .team-red .team-name-label,
+html[data-theme="glacier-blue"] .team-red .team-score-input { color: var(--rd-red) !important; -webkit-text-stroke: 0 !important; text-shadow: none !important; }
+html[data-theme="glacier-blue"] .team-blue .team-name-label,
+html[data-theme="glacier-blue"] .team-blue .team-score-input { color: var(--rd-blue) !important; -webkit-text-stroke: 0 !important; text-shadow: none !important; }
+html[data-theme="glacier-blue"] .team-name-label::after { color: var(--rd-muted) !important; }
+/* 雾蓝暮色是中间调底色，外观面板里的描边队名 / 比分在上面发灰，这里统一用主题的红蓝色 */
+html[data-theme="mist-blue"] .team-red .team-name-label,
+html[data-theme="mist-blue"] .team-red .team-score-input { color: var(--rd-red) !important; -webkit-text-stroke: 0 !important; text-shadow: 0 0 16px rgba(255, 107, 125, 0.3) !important; }
+html[data-theme="mist-blue"] .team-blue .team-name-label,
+html[data-theme="mist-blue"] .team-blue .team-score-input { color: var(--rd-blue) !important; -webkit-text-stroke: 0 !important; text-shadow: 0 0 16px rgba(108, 194, 255, 0.3) !important; }
+
+/* 弹窗遮罩与阴影 */
+html[data-theme="dark-esports"] { --rd-scrim: rgba(5, 8, 13, 0.64); }
+html[data-theme="black-gold"] { --rd-scrim: rgba(3, 8, 7, 0.66); --rd-dialog-shadow: 0 24px 64px rgba(0, 0, 0, 0.6), inset 0 0 0 1px rgba(190, 220, 214, 0.1); }
+html[data-theme="mist-blue"] { --rd-scrim: rgba(14, 22, 34, 0.55); --rd-dialog-shadow: 0 24px 64px rgba(8, 15, 28, 0.5); }
+html[data-theme="glacier-blue"] { --rd-scrim: rgba(18, 38, 58, 0.26); --rd-dialog-shadow: 0 24px 60px rgba(20, 60, 110, 0.18), 0 2px 8px rgba(20, 60, 110, 0.06); }
+html[data-theme="frost-broadcast"] { --rd-scrim: rgba(31, 27, 22, 0.26); --rd-dialog-shadow: 0 24px 60px rgba(60, 40, 10, 0.16), 0 2px 8px rgba(60, 40, 10, 0.06); }
+
+/* 云同步弹窗与房间状态 */
+html[data-theme="dark-esports"] {
+    --cloud-sync-surface: #121923; --cloud-sync-surface-raised: #1a2230; --cloud-sync-surface-muted: #10161f; --cloud-sync-header: #161e2a;
+    --cloud-sync-border: rgba(34, 211, 166, 0.42); --cloud-sync-accent: #22d3a6; --cloud-sync-preview-bg: #10161f; --cloud-sync-group-bg: #1a2230;
+}
+html[data-theme="black-gold"] {
+    --cloud-sync-overlay: rgba(2, 8, 7, 0.86); --cloud-sync-surface: #0c1716; --cloud-sync-surface-raised: #132422; --cloud-sync-surface-muted: #0f1c1a;
+    --cloud-sync-header: #11201e; --cloud-sync-text: #e8f3f0; --cloud-sync-muted: #8fa8a2; --cloud-sync-border: #4f9c8a;
+    --cloud-sync-border-soft: rgba(190, 220, 214, 0.18); --cloud-sync-accent: #5ed6b8; --cloud-sync-preview-bg: #0c1716;
+    --cloud-sync-group-bg: #152725; --cloud-sync-empty: #7d958f; --cloud-sync-success: #8ee0c4; --cloud-sync-warning: #e9c46a; --cloud-sync-warning-bg: #2f2d1c;
+}
+html[data-theme="mist-blue"] {
+    --cloud-sync-overlay: rgba(14, 22, 34, 0.78); --cloud-sync-surface: #2c3b51; --cloud-sync-surface-raised: #34445c; --cloud-sync-surface-muted: #28364a;
+    --cloud-sync-header: #30405a; --cloud-sync-text: #eef4fb; --cloud-sync-muted: #a7b8cd; --cloud-sync-border: rgba(159, 212, 255, 0.5);
+    --cloud-sync-border-soft: rgba(190, 215, 245, 0.16); --cloud-sync-accent: #9fd4ff; --cloud-sync-danger: #ff8a97; --cloud-sync-danger-bg: #5a2a3a;
+    --cloud-sync-warning: #ffd08a; --cloud-sync-warning-bg: #4a4030; --cloud-sync-success: #8ee0b8; --cloud-sync-preview-bg: #2a384d;
+    --cloud-sync-group-bg: #3a4d68; --cloud-sync-empty: #8b9cb2;
+}
+html[data-theme="glacier-blue"] {
+    --cloud-sync-overlay: rgba(18, 38, 58, 0.42); --cloud-sync-surface: #f5faff; --cloud-sync-surface-raised: #ffffff; --cloud-sync-surface-muted: #eaf3fb;
+    --cloud-sync-header: #e3effa; --cloud-sync-text: #12263a; --cloud-sync-muted: #5a7189; --cloud-sync-border: #8fbfe6;
+    --cloud-sync-border-soft: rgba(29, 95, 214, 0.16); --cloud-sync-accent: #1f8be8; --cloud-sync-danger: #a3263f; --cloud-sync-danger-bg: #f9dce2;
+    --cloud-sync-warning: #795814; --cloud-sync-warning-bg: #fff2c9; --cloud-sync-success: #1c7a55; --cloud-sync-preview-bg: #ffffff;
+    --cloud-sync-group-bg: #e6f1fb; --cloud-sync-empty: #6a8199;
+}
+html[data-theme="frost-broadcast"] {
+    --cloud-sync-overlay: rgba(40, 32, 22, 0.42); --cloud-sync-surface: #fbf9f5; --cloud-sync-surface-muted: #f4efe8; --cloud-sync-header: #f1ebe2;
+    --cloud-sync-text: #1f1b16; --cloud-sync-muted: #766c5f; --cloud-sync-border: #d9c3a0; --cloud-sync-border-soft: rgba(90, 70, 40, 0.16);
+    --cloud-sync-accent: #b86a06; --cloud-sync-group-bg: #f4ede2; --cloud-sync-empty: #857a6c;
+}
+html[data-theme="black-gold"] .cloud-room-status { --cloud-status-online: #8ee0c4; --cloud-status-reconnecting: #e9c46a; --cloud-status-idle: #8fa8a2; --cloud-status-bg: #0f1c1a; --cloud-status-border: rgba(190, 220, 214, 0.24); }
+html[data-theme="mist-blue"] .cloud-room-status { --cloud-status-online: #8ee0b8; --cloud-status-reconnecting: #ffd08a; --cloud-status-offline: #ff9aa6; --cloud-status-idle: #a7b8cd; --cloud-status-bg: #2c3b51; --cloud-status-border: rgba(190, 215, 245, 0.24); }
+html[data-theme="glacier-blue"] .cloud-room-status { --cloud-status-online: #167347; --cloud-status-reconnecting: #795814; --cloud-status-offline: #a3263f; --cloud-status-idle: #5a7189; --cloud-status-bg: #eaf3fb; --cloud-status-border: rgba(29, 95, 214, 0.22); }
+html[data-theme="frost-broadcast"] .cloud-room-status { --cloud-status-idle: #766c5f; --cloud-status-bg: #f4efe8; --cloud-status-border: rgba(90, 70, 40, 0.2); }
+
+/* 5.5.4：主题增加到五套后顶栏变挤——最小化 / 关闭按钮永远保留，其余元素按宽度依次收缩 */
+html[data-theme] .rd-top-spacer { min-width: 0; }
+html[data-theme] .rd-window-controls { flex: none; margin-left: auto; }
+html[data-theme] .rd-brand { flex: none; }
+html[data-theme] .rd-status { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+html[data-theme] .rd-theme-switch { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+html[data-theme] .rd-theme-switch button { flex: none; padding: 5px 9px; }
+html[data-theme] .rd-top-actions { flex: 0 1 auto; min-width: 0; }
+html[data-theme] .rd-topbar .btn-auth { flex: 0 1 auto; min-width: 32px; overflow: hidden; }
+html[data-theme] .rd-topbar .btn-auth .auth-short { min-width: 0; }
+@media (max-width: 1560px) {
+    html[data-theme] .rd-topbar .rd-top-actions .ctrl-btn > span:not([class]) { display: none; }
+    html[data-theme] .rd-topbar .btn-auth .auth-short::before { content: none; }
+}
+@media (max-width: 1280px) {
+    html[data-theme] .rd-theme-switch button { padding: 4px 7px; font-size: 11.5px; }
+    html[data-theme] .rd-status-extra { display: none; }
+    html[data-theme] .rd-topbar .btn-auth { max-width: 120px; }
+}
+@media (max-width: 1060px) {
+    html[data-theme] .rd-topbar { gap: 6px; padding-left: 10px; }
+    html[data-theme] .rd-theme-switch button { padding: 4px 5px; font-size: 11px; }
+    html[data-theme] .rd-topbar .btn-auth .auth-short { display: none; }
+    html[data-theme] .rd-topbar .btn-auth { padding: 0 8px !important; }
 }

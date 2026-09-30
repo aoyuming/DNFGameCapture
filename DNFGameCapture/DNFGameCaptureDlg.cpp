@@ -32,6 +32,8 @@
 #include <mmsystem.h>
 #include <sapi.h>
 #include <thread>
+#include <condition_variable>
+#include <algorithm>
 
 #pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "winhttp.lib")
@@ -281,7 +283,7 @@ static CString DnfNormalizeHexColor(CString value)
 static bool DnfIsWebTheme(const CString& value)
 {
     return value == L"dark-esports" || value == L"frost-broadcast" ||
-        value == L"black-gold";
+        value == L"black-gold" || value == L"mist-blue" || value == L"glacier-blue";
 }
 
 static CString DnfNormalizeWebTheme(CString value)
@@ -688,6 +690,8 @@ static const DnfKillDisplayLayoutDefault KILL_DISPLAY_LAYOUT_DEFAULTS[] = {
     // 语音播报：开关（默认不播放，勾选后才播放）+ 音色序号（DNF_KILL_VOICES 的下标）
     { "fxVoiceOn",       0, 0,     1 },
     { "fxVoice",         0, 0, 65535 },
+    // 台词套：0 = 跟随展示风格；1..9 = 指定风格的台词（kill.js 以风格序号请求播报词）
+    { "fxVoiceStyle",    0, 0,     9 },
 };
 
 static const DnfScoreboardStyleDefault KILL_DISPLAY_TEXT_STYLE_DEFAULTS[] = {
@@ -1359,6 +1363,7 @@ static bool DnfKillDisplayStaticPathForRoute(const CString& webDir, const std::s
     if (route == "/" || route == "/kill.html") name = "kill.html";
     else if (route == "/kill.css") name = "kill.css";
     else if (route == "/kill.js") name = "kill.js";
+    else if (route == "/scene-rules.js") name = "scene-rules.js";
     else if (route == "/keys.html") name = "keys.html";
     else if (route == "/keys.css") name = "keys.css";
     else if (route == "/keys.js") name = "keys.js";
@@ -1598,6 +1603,130 @@ static bool DnfResolveKillVoiceClip(int voiceIndex, const std::string& key, cons
     return true;
 }
 
+/* ================= 语音播放队列 =================
+ * 所有播报（击杀台词 / 场景规则的自定义文字 / 自定义本地音频）都进同一个队列，一句播完再播下一句，不再互相打断。
+ * 排队超过 6 秒的旧语音直接丢弃；队列最多保留 3 句（新的挤掉最旧的）。
+ * epoch 变化（静音、试听、胜利、停止）时：正在播的立即停止，排队中的全部作废。
+ * WAV 用 PlaySound，MP3 / WMA 用 MCI（都在队列线程里打开和关闭）。 */
+struct DnfVoiceJob {
+    CString path;
+    ULONGLONG queuedAt = 0;
+    unsigned long long epoch = 0;
+    bool force = false;   // 自定义语音试听：不受「语音播报」开关限制
+};
+static std::mutex g_voiceQueueMutex;
+static std::condition_variable g_voiceQueueCv;
+static std::deque<DnfVoiceJob> g_voiceQueue;
+static std::once_flag g_voiceQueueOnce;
+
+static bool DnfIsWavPath(const CString& path)
+{
+    return path.GetLength() > 4 && path.Right(4).CompareNoCase(L".wav") == 0;
+}
+
+// 读取 WAV 头计算时长（毫秒）；解析失败返回 0
+static ULONGLONG DnfWavDurationMs(const CString& path)
+{
+    std::ifstream in(std::filesystem::path(path.GetString()), std::ios::binary);
+    if (!in) return 0;
+    char riff[12] = {};
+    if (!in.read(riff, 12) || memcmp(riff, "RIFF", 4) != 0 || memcmp(riff + 8, "WAVE", 4) != 0) return 0;
+    unsigned long byteRate = 0;
+    for (int guard = 0; guard < 64; ++guard) {
+        char head[8] = {};
+        if (!in.read(head, 8)) return 0;
+        unsigned long size = 0;
+        memcpy(&size, head + 4, 4);
+        if (memcmp(head, "fmt ", 4) == 0) {
+            char fmt[16] = {};
+            if (size < 16 || !in.read(fmt, 16)) return 0;
+            memcpy(&byteRate, fmt + 8, 4);
+            in.seekg((std::streamoff)(size - 16 + (size & 1)), std::ios::cur);
+        }
+        else if (memcmp(head, "data", 4) == 0) {
+            return byteRate ? (ULONGLONG)size * 1000ull / byteRate : 0;
+        }
+        else {
+            in.seekg((std::streamoff)(size + (size & 1)), std::ios::cur);
+        }
+    }
+    return 0;
+}
+
+static void DnfVoiceQueueWorker()
+{
+    for (;;) {
+        DnfVoiceJob job;
+        {
+            std::unique_lock<std::mutex> lock(g_voiceQueueMutex);
+            g_voiceQueueCv.wait(lock, [] { return !g_voiceQueue.empty(); });
+            job = g_voiceQueue.front();
+            g_voiceQueue.pop_front();
+        }
+        const auto stale = [&job]() {
+            return (!job.force && !g_killVoicePlaybackEnabled.load()) || job.epoch != g_killVoicePlaybackEpoch.load();
+        };
+        if (stale() || ::GetTickCount64() - job.queuedAt > 6000) continue;
+
+        const bool wav = DnfIsWavPath(job.path);
+        ULONGLONG durationMs = 0;
+        bool started = false;
+        if (wav) {
+            durationMs = DnfWavDurationMs(job.path);
+            std::lock_guard<std::mutex> playbackLock(g_killVoicePlaybackMutex);
+            if (stale()) continue;
+            started = ::PlaySoundW(job.path, nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT) != FALSE;
+        }
+        else {
+            ::mciSendStringW(L"close dnfvoice", nullptr, 0, nullptr);
+            CString cmd;
+            cmd.Format(L"open \"%s\" type mpegvideo alias dnfvoice", job.path.GetString());
+            if (::mciSendStringW(cmd, nullptr, 0, nullptr) == 0) {
+                ::mciSendStringW(L"set dnfvoice time format milliseconds", nullptr, 0, nullptr);
+                wchar_t length[64] = {};
+                if (::mciSendStringW(L"status dnfvoice length", length, 64, nullptr) == 0) durationMs = _wtoi64(length);
+                std::lock_guard<std::mutex> playbackLock(g_killVoicePlaybackMutex);
+                if (!stale()) started = ::mciSendStringW(L"play dnfvoice", nullptr, 0, nullptr) == 0;
+            }
+            if (!started) {
+                ::mciSendStringW(L"close dnfvoice", nullptr, 0, nullptr);
+                continue;
+            }
+        }
+        if (!started) continue;
+        if (durationMs == 0) durationMs = 3000;
+        if (durationMs > 30000) durationMs = 30000;
+        const ULONGLONG endAt = ::GetTickCount64() + durationMs + 150;
+        while (::GetTickCount64() < endAt) {
+            if (stale()) {
+                if (wav) ::PlaySoundW(nullptr, nullptr, 0);
+                else ::mciSendStringW(L"stop dnfvoice", nullptr, 0, nullptr);
+                break;
+            }
+            ::Sleep(30);
+        }
+        if (!wav) ::mciSendStringW(L"close dnfvoice", nullptr, 0, nullptr);
+    }
+}
+
+static void DnfEnqueueVoice(const CString& path, unsigned long long epoch, bool force = false)
+{
+    std::call_once(g_voiceQueueOnce, [] { std::thread(DnfVoiceQueueWorker).detach(); });
+    {
+        std::lock_guard<std::mutex> lock(g_voiceQueueMutex);
+        const auto current = g_killVoicePlaybackEpoch.load();
+        while (!g_voiceQueue.empty() && g_voiceQueue.front().epoch != current) g_voiceQueue.pop_front();
+        while (g_voiceQueue.size() >= 3) g_voiceQueue.pop_front();
+        DnfVoiceJob job;
+        job.path = path;
+        job.queuedAt = ::GetTickCount64();
+        job.epoch = epoch;
+        job.force = force;
+        g_voiceQueue.push_back(job);
+    }
+    g_voiceQueueCv.notify_one();
+}
+
 // 后台线程里准备并播放，不阻塞 HTTP 服务 / UI 线程。play=false 只预先合成（切换音色时预热）。
 static void DnfPlayKillVoiceAsync(int voiceIndex, const std::string& key, const CString& webDir, bool play = true)
 {
@@ -1615,8 +1744,910 @@ static void DnfPlayKillVoiceAsync(int voiceIndex, const std::string& key, const 
         if (!DnfResolveKillVoiceClip(voiceIndex, key, webDir, path) || !play) return;
         std::lock_guard<std::mutex> playbackLock(g_killVoicePlaybackMutex);
         if (!g_killVoicePlaybackEnabled.load() || epoch != g_killVoicePlaybackEpoch.load()) return;
-        ::PlaySoundW(path, nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
+        DnfEnqueueVoice(path, epoch);
     }).detach();
+}
+
+// 场景规则的自定义语音文字：Windows 系统语音合成（按文字哈希缓存到 voice-cache\say-*.wav），与击杀语音共用开关和取消逻辑。
+static void DnfSayTextAsync(CString text)
+{
+    text.Replace(L"<", L" ");
+    text.Replace(L">", L" ");
+    text.Replace(L"\r", L" ");
+    text.Replace(L"\n", L" ");
+    text.Trim();
+    if (text.GetLength() > 120) text = text.Left(120);
+    if (text.IsEmpty() || !g_killVoicePlaybackEnabled.load()) return;
+    const auto epoch = g_killVoicePlaybackEpoch.load();
+    std::thread([text, epoch]() {
+        std::lock_guard<std::mutex> lock(g_killVoiceMutex);
+        if (!g_killVoicePlaybackEnabled.load() || epoch != g_killVoicePlaybackEpoch.load()) return;
+        const CString cacheDir = DnfKillVoiceCacheDir();
+        if (cacheDir.IsEmpty()) return;
+        CString cached;
+        cached.Format(L"%s\\say-%08zx.wav", cacheDir.GetString(),
+            std::hash<std::wstring>{}(std::wstring(text.GetString())) & 0xffffffffu);
+        if (!DnfFileExists(cached)) {
+            const HRESULT coHr = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            const bool ok = DnfSapiSpeakToWav(text, cached);
+            if (SUCCEEDED(coHr)) ::CoUninitialize();
+            if (!ok) return;
+        }
+        std::lock_guard<std::mutex> playbackLock(g_killVoicePlaybackMutex);
+        if (!g_killVoicePlaybackEnabled.load() || epoch != g_killVoicePlaybackEpoch.load()) return;
+        DnfEnqueueVoice(cached, epoch);
+    }).detach();
+}
+
+/* ================= 自定义语音（本地音频） =================
+ * 「主播工具 → 声音管理 → 自定义语音」导入的音频复制到 %APPDATA%\DNFGameCapture\custom-voice\，
+ * 场景规则里选「自定义语音」后按文件名（id）播放。支持 WAV / MP3 / WMA，单个 ≤ 20MB。 */
+static std::mutex g_customVoiceMutex;
+static json g_customVoiceList = json::array();
+static bool g_customVoiceListed = false;
+
+static CString DnfCustomVoiceDir()
+{
+    wchar_t appData[MAX_PATH] = {};
+    const DWORD length = ::GetEnvironmentVariableW(L"APPDATA", appData, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return CString();
+    CString dir(appData);
+    dir.TrimRight(L"\\/");
+    for (const wchar_t* part : { L"\\DNFGameCapture", L"\\custom-voice" }) {
+        dir += part;
+        if (!::CreateDirectoryW(dir, nullptr) && ::GetLastError() != ERROR_ALREADY_EXISTS) return CString();
+    }
+    return dir;
+}
+
+static bool DnfIsCustomVoiceExt(const std::wstring& ext)
+{
+    return _wcsicmp(ext.c_str(), L".wav") == 0 || _wcsicmp(ext.c_str(), L".mp3") == 0 || _wcsicmp(ext.c_str(), L".wma") == 0;
+}
+
+static void DnfRefreshCustomVoicesLocked()
+{
+    g_customVoiceListed = true;
+    g_customVoiceList = json::array();
+    const CString dir = DnfCustomVoiceDir();
+    if (dir.IsEmpty()) return;
+    std::vector<std::pair<std::wstring, uintmax_t>> files;
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::path(dir.GetString()), ec)) {
+        if (ec || !entry.is_regular_file(ec)) continue;
+        if (!DnfIsCustomVoiceExt(entry.path().extension().wstring())) continue;
+        files.emplace_back(entry.path().filename().wstring(), entry.file_size(ec));
+        if (files.size() >= 200) break;
+    }
+    std::sort(files.begin(), files.end(), [](const auto& a, const auto& b) { return _wcsicmp(a.first.c_str(), b.first.c_str()) < 0; });
+    for (const auto& file : files) {
+        const std::filesystem::path p(file.first);
+        g_customVoiceList.push_back({
+            { "id", std::string(CW2A(file.first.c_str(), CP_UTF8)) },
+            { "name", std::string(CW2A(p.stem().wstring().c_str(), CP_UTF8)) },
+            { "size", (unsigned long long)file.second }
+        });
+    }
+}
+
+static json DnfCustomVoicesJson()
+{
+    std::lock_guard<std::mutex> lock(g_customVoiceMutex);
+    if (!g_customVoiceListed) DnfRefreshCustomVoicesLocked();
+    return g_customVoiceList;
+}
+
+// id = custom-voice 目录下的文件名（不允许路径分隔符）
+static bool DnfCustomVoicePath(const std::string& idUtf8, CString& outPath)
+{
+    const std::wstring id = std::wstring(CA2W(idUtf8.c_str(), CP_UTF8));
+    if (id.empty() || id.size() > 120 || id.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos || id.find(L"..") != std::wstring::npos) return false;
+    if (!DnfIsCustomVoiceExt(std::filesystem::path(id).extension().wstring())) return false;
+    const CString dir = DnfCustomVoiceDir();
+    if (dir.IsEmpty()) return false;
+    outPath = dir + L"\\" + id.c_str();
+    return DnfFileExists(outPath) != FALSE;
+}
+
+static void DnfPlayCustomVoice(const std::string& idUtf8, bool preview)
+{
+    CString path;
+    if (!DnfCustomVoicePath(idUtf8, path)) return;
+    if (preview) {
+        // 试听：打断当前播放和排队中的语音
+        std::lock_guard<std::mutex> playbackLock(g_killVoicePlaybackMutex);
+        ++g_killVoicePlaybackEpoch;
+        ::PlaySoundW(nullptr, nullptr, 0);
+    }
+    else if (!g_killVoicePlaybackEnabled.load()) {
+        return;
+    }
+    DnfEnqueueVoice(path, g_killVoicePlaybackEpoch.load(), preview);
+}
+
+// 复制一个本地音频到自定义语音目录；重名时自动加 (2)、(3)…。返回导入后的文件名（空 = 失败）
+static std::wstring DnfImportCustomVoiceFile(const CString& source, CString& error)
+{
+    const std::filesystem::path src(source.GetString());
+    std::wstring ext = src.extension().wstring();
+    if (!DnfIsCustomVoiceExt(ext)) { error = L"只支持 WAV / MP3 / WMA"; return L""; }
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(src, ec);
+    if (ec || size == 0) { error = L"文件无法读取"; return L""; }
+    if (size > 20ull * 1024ull * 1024ull) { error = L"文件超过 20MB"; return L""; }
+    const CString dir = DnfCustomVoiceDir();
+    if (dir.IsEmpty()) { error = L"无法创建自定义语音目录"; return L""; }
+    std::wstring stem = src.stem().wstring();
+    for (auto& ch : stem) if (wcschr(L"\\/:*?\"<>|", ch) || ch < 32) ch = L'_';
+    if (stem.size() > 60) stem.resize(60);
+    if (stem.empty()) stem = L"语音";
+    for (auto& ch : ext) ch = (wchar_t)towlower(ch);
+    std::wstring name = stem + ext;
+    for (int n = 2; DnfFileExists(dir + L"\\" + name.c_str()) && n < 1000; ++n) name = stem + L" (" + std::to_wstring(n) + L")" + ext;
+    if (!::CopyFileW(source, dir + L"\\" + name.c_str(), TRUE)) { error = L"复制失败"; return L""; }
+    return name;
+}
+
+/* ================= 豆包音色生成 + 服务器音频库 =================
+ * 1) 场景规则「自定义文字（豆包音色合成）」：POST /api/v2/tts/generate（服务器扣主播额度 / 每日预算，服务端全局缓存），
+ *    本地按 音色+文字 缓存到 voice-cache\tts-*.wav，同一句只花一次钱；失败时退回 Windows 系统语音。
+ * 2) 「自定义语音 → 用豆包音色生成」：生成一句存进自定义语音目录，之后和本地导入的音频一样在场景规则里使用。
+ * 3) 「服务器音频库」：管理员在后台生成 / 上传并发布的音频（GET /api/voice/library），试听和下载都不计费。 */
+static bool DnfHttpRequestUtf8(const CString& endpoint,
+    const wchar_t* method, const wchar_t* route, const std::string* body,
+    std::string& responseUtf8, CString& errorMsg, int timeoutMs,
+    DWORD& httpStatus, bool& networkFailure,
+    const std::string* bearerToken, const std::string* deviceId,
+    std::size_t maxResponseBytes);
+
+static json DnfSceneRulesSnapshot();
+static void DnfVoiceLibraryPrefetchRules(const json& rulesData);
+
+struct DnfTtsAuth {
+    bool v2 = false;
+    CString endpoint;
+    std::string token;
+    std::string device;
+    HWND notify = nullptr;
+};
+static std::mutex g_ttsMutex;
+static DnfTtsAuth g_ttsAuth;
+static json g_ttsStatus = json::object();          // /api/v2/tts/status 的结果
+static std::string g_ttsMessage;                   // 最近一次失败原因（UTF-8，给界面显示）
+static json g_voiceLibraryItems = json::array();   // 服务器音频库
+static std::string g_voiceLibraryMessage;
+static ULONGLONG g_ttsStatusAt = 0, g_voiceLibraryAt = 0, g_ttsBlockedUntil = 0;
+static std::atomic<bool> g_ttsStatusBusy{ false }, g_voiceLibraryBusy{ false }, g_ttsGenerating{ false }, g_voiceLibraryDownloading{ false };
+
+static std::string DnfUtf8(const CString& text) { return std::string(CW2A(text, CP_UTF8)); }
+
+// 容错读取服务器 / 网页传来的 JSON：类型不对（例如 null）时返回默认值，不抛异常
+static std::string DnfJStr(const json& j, const char* key)
+{
+    if (!j.is_object()) return std::string();
+    const auto it = j.find(key);
+    return it != j.end() && it->is_string() ? it->get<std::string>() : std::string();
+}
+static long long DnfJNum(const json& j, const char* key, long long def)
+{
+    if (!j.is_object()) return def;
+    const auto it = j.find(key);
+    return it != j.end() && it->is_number() ? (long long)it->get<double>() : def;
+}
+static bool DnfJBool(const json& j, const char* key, bool def)
+{
+    if (!j.is_object()) return def;
+    const auto it = j.find(key);
+    return it != j.end() && it->is_boolean() ? it->get<bool>() : def;
+}
+// 后台线程：任何异常都吞掉，绝不让程序因为网络数据异常而闪退
+template <class F> static void DnfRunDetached(F f)
+{
+    std::thread([f]() mutable {
+        try { f(); }
+        catch (...) {}
+    }).detach();
+}
+
+static size_t DnfUtf8Chars(const std::string& text)
+{
+    size_t n = 0;
+    for (unsigned char c : text) if ((c & 0xC0) != 0x80) ++n;
+    return n;
+}
+
+static std::string DnfUrlDecode(const std::string& raw)
+{
+    std::string out;
+    for (size_t i = 0; i < raw.size(); ++i) {
+        if (raw[i] == '%' && i + 2 < raw.size() && isxdigit((unsigned char)raw[i + 1]) && isxdigit((unsigned char)raw[i + 2])) {
+            out.push_back((char)std::stoi(raw.substr(i + 1, 2), nullptr, 16));
+            i += 2;
+        }
+        else out.push_back(raw[i] == '+' ? ' ' : raw[i]);
+    }
+    return out;
+}
+
+static bool DnfBase64Decode(const std::string& in, std::string& out)
+{
+    static const auto table = [] {
+        std::array<int, 256> t{}; t.fill(-1);
+        const char* chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for (int i = 0; i < 64; ++i) t[(unsigned char)chars[i]] = i;
+        return t;
+    }();
+    out.clear();
+    out.reserve(in.size() / 4 * 3);
+    int value = 0, bits = -8;
+    for (unsigned char c : in) {
+        if (c == '=' ) break;
+        if (c == '\r' || c == '\n' || c == ' ') continue;
+        if (table[c] < 0) return false;
+        value = (value << 6) + table[c];
+        bits += 6;
+        if (bits >= 0) { out.push_back((char)((value >> bits) & 0xFF)); bits -= 8; }
+    }
+    return true;
+}
+
+static bool DnfWriteFileAtomic(const CString& path, const std::string& data)
+{
+    CString temp;
+    temp.Format(L"%s.%lu.tmp", path.GetString(), ::GetCurrentProcessId());
+    {
+        std::ofstream s(std::filesystem::path(temp.GetString()), std::ios::binary | std::ios::trunc);
+        if (!s || !s.write(data.data(), (std::streamsize)data.size()) || !s.flush()) return false;
+    }
+    if (::MoveFileExW(temp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return true;
+    ::DeleteFileW(temp);
+    return false;
+}
+
+static bool DnfLooksLikeWav(const std::string& data)
+{
+    return data.size() > 44 && data.compare(0, 4, "RIFF") == 0 && data.compare(8, 4, "WAVE") == 0;
+}
+
+static void DnfTtsSetAuth(bool v2, const CString& endpoint, const std::string& token, const std::string& device, HWND notify)
+{
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(g_ttsMutex);
+        changed = g_ttsAuth.v2 != v2 || g_ttsAuth.endpoint != endpoint || g_ttsAuth.token != token;
+        g_ttsAuth.v2 = v2;
+        g_ttsAuth.endpoint = endpoint;
+        g_ttsAuth.token = token;
+        g_ttsAuth.device = device;
+        g_ttsAuth.notify = notify;
+        if (changed) { g_ttsStatusAt = 0; g_voiceLibraryAt = 0; g_ttsBlockedUntil = 0; g_ttsMessage.clear(); }
+    }
+}
+
+static DnfTtsAuth DnfTtsAuthSnapshot()
+{
+    std::lock_guard<std::mutex> lock(g_ttsMutex);
+    return g_ttsAuth;
+}
+
+static bool DnfTtsSessionReady(const DnfTtsAuth& auth)
+{
+    return auth.v2 && !auth.endpoint.IsEmpty() && !auth.token.empty() && !auth.device.empty();
+}
+
+// 线程里完成后通知主窗口（在 UI 线程刷新界面、广播状态）
+static void DnfPostInternalWebCmd(HWND hwnd, const json& message)
+{
+    if (!hwnd || !::IsWindow(hwnd)) return;
+    CString* payload = new CString(CA2W(message.dump().c_str(), CP_UTF8));
+    if (!::PostMessageW(hwnd, WM_WEB_CMD_RECEIVED, 0, (LPARAM)payload)) delete payload;
+}
+
+static CString DnfTtsErrorText(const std::string& code, const json& reply)
+{
+    auto num = [&](const char* key) { return reply.is_object() && reply.contains(key) && reply[key].is_number() ? reply[key].get<long long>() : 0ll; };
+    CString text;
+    if (code == "quota_daily") text.Format(L"今日生成额度已用完（每日 %lld 字），明天再来，或请管理员加额度", num("dayLimit"));
+    else if (code == "quota_monthly") text.Format(L"本月生成额度已用完（每月 %lld 字），请联系管理员加额度", num("monthLimit"));
+    else if (code == "budget_exhausted") text = L"今天服务器的语音生成预算已用完，明天自动恢复";
+    else if (code == "rate_limited") text = L"生成太频繁了，请稍后再试";
+    else if (code == "busy") text = L"服务器正忙，请几秒后再试";
+    else if (code == "text_too_long") text.Format(L"文字太长：最多 %lld 字", num("maxChars"));
+    else if (code == "empty_text") text = L"请输入要生成的文字";
+    else if (code == "text_invalid_chars") text = L"文字里有不支持的符号";
+    else if (code == "text_blocked") text = L"文字包含不适合直播播报的词，请修改";
+    else if (code == "tts_disabled") text = L"这个卡密的语音生成已被管理员关闭";
+    else if (code == "tts_generation_disabled") text = L"服务器暂未开放语音生成";
+    else if (code == "tts_not_configured") text = L"服务器还没有配置豆包语音";
+    else if (code == "voice_not_found" || code == "voice_not_tts") text = L"这个音色不能用于生成";
+    else if (code == "http_401" || code == "unauthorized" || code == "invalid_session" || code == "session_expired") text = L"授权会话已过期，请重新验证授权";
+    else if (code == "tts_upstream_failed" || code == "upstream_error") text = L"豆包语音服务暂时不可用，请稍后再试";
+    else text = CString(L"生成失败（") + CString(CA2W(code.c_str(), CP_UTF8)) + L"）";
+    return text;
+}
+
+// 合成一句（带本地缓存）。在后台线程调用。
+static bool DnfTtsSynthesize(const std::string& voiceId, const std::string& textUtf8, int timeoutMs, CString& outPath, CString& error, bool* reused = nullptr)
+{
+    if (voiceId.empty() || voiceId.size() > 80 || textUtf8.empty() || textUtf8.size() > 600) { error = L"参数不正确"; return false; }
+    const CString cacheDir = DnfKillVoiceCacheDir();
+    if (cacheDir.IsEmpty()) { error = L"无法创建语音缓存目录"; return false; }
+    unsigned long long hash = 1469598103934665603ull;
+    for (unsigned char c : voiceId + "\n" + textUtf8) { hash ^= c; hash *= 1099511628211ull; }
+    CString path;
+    path.Format(L"%s\\tts-%016llx.wav", cacheDir.GetString(), hash);
+    if (DnfFileExists(path)) { outPath = path; if (reused) *reused = true; return true; }
+
+    const DnfTtsAuth auth = DnfTtsAuthSnapshot();
+    {
+        std::lock_guard<std::mutex> lock(g_ttsMutex);
+        if (::GetTickCount64() < g_ttsBlockedUntil) {
+            error = g_ttsMessage.empty() ? CString(L"语音生成暂时不可用") : CString(CA2W(g_ttsMessage.c_str(), CP_UTF8));
+            return false;
+        }
+    }
+    if (!DnfTtsSessionReady(auth)) { error = L"需要先在线验证授权，才能用豆包音色生成"; return false; }
+
+    const std::string body = json{ { "voice", voiceId }, { "text", textUtf8 } }.dump();
+    std::string response;
+    CString requestError;
+    DWORD status = 0;
+    bool networkFailure = false;
+    const bool sent = DnfHttpRequestUtf8(auth.endpoint, L"POST", L"/api/v2/tts/generate", &body, response, requestError,
+        timeoutMs, status, networkFailure, &auth.token, &auth.device, 0);
+    const json reply = json::parse(response, nullptr, false);
+    if (!sent && networkFailure) { error = L"连接服务器失败，请检查网络"; return false; }
+    if (status < 200 || status >= 300 || !reply.is_object() || !DnfJBool(reply, "ok", false)) {
+        std::string code = reply.is_object() ? DnfJStr(reply, "code") : std::string();
+        if (code.empty()) code = "http_" + std::to_string(status);
+        error = DnfTtsErrorText(code, reply);
+        ULONGLONG block = 0;
+        if (code == "budget_exhausted" || code == "quota_daily" || code == "quota_monthly") block = 30ull * 60 * 1000;
+        else if (code == "rate_limited") block = 20ull * 1000;
+        else if (code == "tts_disabled" || code == "tts_generation_disabled" || code == "tts_not_configured" || status == 401) block = 60ull * 1000;
+        std::lock_guard<std::mutex> lock(g_ttsMutex);
+        if (block) g_ttsBlockedUntil = ::GetTickCount64() + block;
+        g_ttsMessage = DnfUtf8(error);
+        if (code == "budget_exhausted") g_ttsStatus["budgetExhausted"] = true;
+        if (reply.is_object() && reply.contains("dayUsed") && g_ttsStatus.contains("usage") && g_ttsStatus["usage"].is_object()) g_ttsStatus["usage"]["dayUsed"] = reply["dayUsed"];
+        g_ttsStatusAt = 0;
+        return false;
+    }
+    std::string wav;
+    if (!reply.contains("audio") || !reply["audio"].is_string() || !DnfBase64Decode(reply["audio"].get<std::string>(), wav) || !DnfLooksLikeWav(wav)) {
+        error = L"服务器返回的音频无效";
+        return false;
+    }
+    if (!DnfWriteFileAtomic(path, wav)) { error = L"保存音频失败"; return false; }
+    {
+        std::lock_guard<std::mutex> lock(g_ttsMutex);
+        if (reply.contains("usage") && reply["usage"].is_object()) g_ttsStatus["usage"] = reply["usage"];
+        g_ttsMessage.clear();
+    }
+    if (reused) *reused = DnfJBool(reply, "cached", false);
+    outPath = path;
+    return true;
+}
+
+static void DnfTtsRefreshStatusAsync(bool force)
+{
+    const DnfTtsAuth auth = DnfTtsAuthSnapshot();
+    if (!DnfTtsSessionReady(auth)) return;
+    {
+        std::lock_guard<std::mutex> lock(g_ttsMutex);
+        const ULONGLONG now = ::GetTickCount64();
+        if (!force && g_ttsStatusAt && now - g_ttsStatusAt < 10ull * 60 * 1000) return;
+        if (g_ttsStatusBusy.exchange(true)) return;
+        g_ttsStatusAt = now;
+    }
+    DnfRunDetached([auth]() {
+        std::string response;
+        CString requestError;
+        DWORD status = 0;
+        bool networkFailure = false;
+        DnfHttpRequestUtf8(auth.endpoint, L"GET", L"/api/v2/tts/status", nullptr, response, requestError,
+            8000, status, networkFailure, &auth.token, &auth.device, 0);
+        const json reply = json::parse(response, nullptr, false);
+        {
+            std::lock_guard<std::mutex> lock(g_ttsMutex);
+            if (status == 200 && reply.is_object() && DnfJBool(reply, "ok", false)) g_ttsStatus = reply;
+            else if (status == 404) g_ttsStatus = json{ { "ok", false }, { "enabled", false }, { "unsupported", true } };
+            else g_ttsStatusAt = ::GetTickCount64() - 9ull * 60 * 1000;   // 失败：1 分钟后再试
+        }
+        g_ttsStatusBusy = false;
+        DnfPostInternalWebCmd(auth.notify, json{ { "action", "internal_tts_state" } });
+    });
+}
+
+static void DnfVoiceLibraryRefreshAsync(bool force)
+{
+    const DnfTtsAuth auth = DnfTtsAuthSnapshot();
+    if (auth.endpoint.IsEmpty()) return;
+    {
+        std::lock_guard<std::mutex> lock(g_ttsMutex);
+        const ULONGLONG now = ::GetTickCount64();
+        if (!force && g_voiceLibraryAt && now - g_voiceLibraryAt < 10ull * 60 * 1000) return;
+        if (g_voiceLibraryBusy.exchange(true)) return;
+        g_voiceLibraryAt = now;
+    }
+    DnfRunDetached([auth]() {
+        std::string response;
+        CString requestError;
+        DWORD status = 0;
+        bool networkFailure = false;
+        DnfHttpRequestUtf8(auth.endpoint, L"GET", L"/api/voice/library", nullptr, response, requestError,
+            8000, status, networkFailure, nullptr, nullptr, 0);
+        const json reply = json::parse(response, nullptr, false);
+        bool prefetch = false;
+        {
+            std::lock_guard<std::mutex> lock(g_ttsMutex);
+            if (status == 200 && reply.is_object() && reply.contains("items") && reply["items"].is_array()) {
+                g_voiceLibraryItems = json::array();
+                for (const auto& item : reply["items"]) {
+                    if (!item.is_object() || !item.contains("sha256") || !item["sha256"].is_string()) continue;
+                    g_voiceLibraryItems.push_back({
+                        { "id", DnfJStr(item, "id") }, { "title", DnfJStr(item, "title") },
+                        { "text", DnfJStr(item, "text") }, { "voiceLabel", DnfJStr(item, "voiceLabel") }, { "voiceId", DnfJStr(item, "voiceId") },
+                        { "sha256", item["sha256"] }, { "bytes", (int)DnfJNum(item, "bytes", 0) } });
+                    if (g_voiceLibraryItems.size() >= 500) break;
+                }
+                g_voiceLibraryMessage.clear();
+                prefetch = true;
+            }
+            else if (status == 404) { g_voiceLibraryItems = json::array(); g_voiceLibraryMessage = DnfUtf8(L"服务器暂未开放音频库"); }
+            else { g_voiceLibraryMessage = DnfUtf8(L"读取服务器音频库失败，请检查网络"); g_voiceLibraryAt = ::GetTickCount64() - 9ull * 60 * 1000; }
+        }
+        g_voiceLibraryBusy = false;
+        if (prefetch) {
+            const json rules = DnfSceneRulesSnapshot();
+            if (rules.contains("data")) DnfVoiceLibraryPrefetchRules(rules["data"]);
+        }
+        DnfPostInternalWebCmd(auth.notify, json{ { "action", "internal_tts_state" } });
+    });
+}
+
+static json DnfTtsStateJsonUnsafe();
+static json DnfTtsStateJson()
+{
+    try { return DnfTtsStateJsonUnsafe(); }
+    catch (...) { return json{ { "ready", false }, { "voices", json::array() }, { "library", json::array() } }; }
+}
+static json DnfTtsStateJsonUnsafe()
+{
+    DnfTtsRefreshStatusAsync(false);
+    DnfVoiceLibraryRefreshAsync(false);
+    std::lock_guard<std::mutex> lock(g_ttsMutex);
+    json voices = json::array();
+    if (g_ttsStatus.contains("voices") && g_ttsStatus["voices"].is_array()) voices = g_ttsStatus["voices"];
+    return {
+        { "ready", DnfTtsSessionReady(g_ttsAuth) },
+        { "enabled", DnfJBool(g_ttsStatus, "enabled", false) },
+        { "loaded", g_ttsStatus.contains("ok") },
+        { "maxTextChars", (int)DnfJNum(g_ttsStatus, "maxTextChars", 30) },
+        { "voices", voices },
+        { "usage", g_ttsStatus.contains("usage") ? g_ttsStatus["usage"] : json() },
+        { "budgetExhausted", DnfJBool(g_ttsStatus, "budgetExhausted", false) },
+        { "message", g_ttsMessage },
+        { "generating", g_ttsGenerating.load() },
+        { "library", g_voiceLibraryItems },
+        { "libraryMessage", g_voiceLibraryMessage },
+        { "libraryLoading", g_voiceLibraryBusy.load() },
+        { "libraryDownloading", g_voiceLibraryDownloading.load() }
+    };
+}
+
+static bool DnfTtsVoiceAllowed(const std::string& voiceId)
+{
+    std::lock_guard<std::mutex> lock(g_ttsMutex);
+    if (!g_ttsStatus.contains("voices") || !g_ttsStatus["voices"].is_array()) return voiceId.compare(0, 7, "doubao-") == 0;
+    for (const auto& v : g_ttsStatus["voices"]) if (v.is_object() && DnfJStr(v, "id") == voiceId) return true;
+    return false;
+}
+
+// 「跟随播报音色」：当前「特效管理 → 音色」选中的服务器音色（默认 / Windows 时为空）
+static std::string DnfTtsVoiceForIndex(int index)
+{
+    const json list = g_voiceCloudCache.List();
+    for (const auto& v : list) {
+        if (!v.is_object() || (int)DnfJNum(v, "index", -1) != index) continue;
+        const std::string id = DnfJStr(v, "id");
+        return (id == "auto" || id == "windows") ? std::string() : id;
+    }
+    return std::string();
+}
+
+// 场景规则：豆包音色念一句（变量已在网页端替换）；生成不了就用 Windows 系统语音念。
+static void DnfSayTtsAsync(std::string voiceId, int fxIndex, std::string textUtf8)
+{
+    if (textUtf8.empty() || !g_killVoicePlaybackEnabled.load()) return;
+    const auto epoch = g_killVoicePlaybackEpoch.load();
+    DnfRunDetached([voiceId, fxIndex, textUtf8, epoch]() mutable {
+        if (voiceId.empty()) voiceId = DnfTtsVoiceForIndex(fxIndex);
+        int maxChars = 30;
+        { std::lock_guard<std::mutex> lock(g_ttsMutex); maxChars = (int)DnfJNum(g_ttsStatus, "maxTextChars", 30); }
+        CString path, error;
+        if (!voiceId.empty() && DnfTtsVoiceAllowed(voiceId) && (int)DnfUtf8Chars(textUtf8) <= maxChars &&
+            DnfTtsSynthesize(voiceId, textUtf8, 6000, path, error)) {
+            std::lock_guard<std::mutex> playbackLock(g_killVoicePlaybackMutex);
+            if (!g_killVoicePlaybackEnabled.load() || epoch != g_killVoicePlaybackEpoch.load()) return;
+            DnfEnqueueVoice(path, epoch);
+            return;
+        }
+        if (!g_killVoicePlaybackEnabled.load() || epoch != g_killVoicePlaybackEpoch.load()) return;
+        DnfSayTextAsync(CString(CA2W(textUtf8.c_str(), CP_UTF8)));
+    });
+}
+
+// 把一个文件以指定名字存进自定义语音目录（重名加 (2)…），返回文件名
+static std::wstring DnfSaveCustomVoiceAs(const CString& source, std::wstring stem, CString& error)
+{
+    const CString dir = DnfCustomVoiceDir();
+    if (dir.IsEmpty()) { error = L"无法创建自定义语音目录"; return L""; }
+    for (auto& ch : stem) if (wcschr(L"\\/:*?\"<>|", ch) || ch < 32) ch = L'_';
+    while (!stem.empty() && (stem.back() == L'.' || stem.back() == L' ')) stem.pop_back();
+    if (stem.size() > 60) stem.resize(60);
+    if (stem.empty()) stem = L"语音";
+    std::wstring name = stem + L".wav";
+    for (int n = 2; DnfFileExists(dir + L"\\" + name.c_str()) && n < 1000; ++n) name = stem + L" (" + std::to_wstring(n) + L").wav";
+    if (!::CopyFileW(source, dir + L"\\" + name.c_str(), TRUE)) { error = L"保存到自定义语音失败"; return L""; }
+    return name;
+}
+
+// 服务器音频库：下载到 voice-cache\lib-<sha>.wav（校验 sha256），不需要授权、不计费
+static bool DnfVoiceLibraryFetch(const std::string& sha, CString& outPath, CString& error)
+{
+    if (sha.size() != 64 || sha.find_first_not_of("0123456789abcdef") != std::string::npos) { error = L"音频编号不正确"; return false; }
+    const CString cacheDir = DnfKillVoiceCacheDir();
+    if (cacheDir.IsEmpty()) { error = L"无法创建语音缓存目录"; return false; }
+    CString path = cacheDir + L"\\lib-" + CString(sha.c_str()) + L".wav";
+    if (DnfFileExists(path)) { outPath = path; return true; }
+    const DnfTtsAuth auth = DnfTtsAuthSnapshot();
+    if (auth.endpoint.IsEmpty()) { error = L"还没有连接服务器"; return false; }
+    const std::wstring route = L"/api/voice/audio/" + std::wstring(CA2W(sha.c_str())) + L".wav";
+    std::string data;
+    CString requestError;
+    DWORD status = 0;
+    bool networkFailure = false;
+    DnfHttpRequestUtf8(auth.endpoint, L"GET", route.c_str(), nullptr, data, requestError,
+        20000, status, networkFailure, nullptr, nullptr, 12u * 1024u * 1024u);
+    if (status != 200 || !DnfLooksLikeWav(data)) {
+        error = networkFailure ? L"下载失败，请检查网络" : (status == 404 ? L"服务器上已没有这个音频，请刷新列表" : L"下载的音频无效");
+        return false;
+    }
+    if (dnf_voice::Hash(data) != sha) { error = L"下载的音频校验失败"; return false; }
+    if (!DnfWriteFileAtomic(path, data)) { error = L"保存音频失败"; return false; }
+    outPath = path;
+    return true;
+}
+
+// 按标题找服务器音频（忽略空格和标点）：场景规则里只写了标题、或服务器重新生成导致 sha 变化时用
+static std::wstring DnfLooseTitle(const std::string& utf8)
+{
+    std::wstring s(CA2W(utf8.c_str(), CP_UTF8)), out;
+    for (wchar_t ch : s) {
+        if (iswspace(ch) || iswpunct(ch) || wcschr(L"，。！？、；：“”‘’（）《》【】…—～·", ch)) continue;
+        out.push_back((wchar_t)towlower(ch));
+    }
+    return out;
+}
+
+static std::string DnfVoiceLibraryResolve(const std::string& sha, const std::string& title)
+{
+    std::lock_guard<std::mutex> lock(g_ttsMutex);
+    const bool shaValid = dnf_voice::IsHash(sha);
+    if (shaValid) {
+        for (const auto& item : g_voiceLibraryItems) if (DnfJStr(item, "sha256") == sha) return sha;
+    }
+    const std::wstring wanted = DnfLooseTitle(title);
+    if (!wanted.empty()) {
+        for (const auto& item : g_voiceLibraryItems) if (DnfLooseTitle(DnfJStr(item, "title")) == wanted) return DnfJStr(item, "sha256");
+        for (const auto& item : g_voiceLibraryItems) if (DnfLooseTitle(DnfJStr(item, "text")) == wanted) return DnfJStr(item, "sha256");
+        // 近似匹配：错一两个同音字也能对上（例如「阿旺 / 啊旺」），与网页端规则一致
+        auto distance = [](const std::wstring& a, const std::wstring& b) {
+            std::vector<size_t> prev(b.size() + 1), cur(b.size() + 1);
+            for (size_t j = 0; j <= b.size(); ++j) prev[j] = j;
+            for (size_t i = 1; i <= a.size(); ++i) {
+                cur[0] = i;
+                for (size_t j = 1; j <= b.size(); ++j)
+                    cur[j] = (std::min)({ prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1) });
+                std::swap(prev, cur);
+            }
+            return prev[b.size()];
+        };
+        if (wanted.size() >= 2) {
+            std::string best;
+            double bestScore = 0;
+            for (const auto& item : g_voiceLibraryItems) {
+                for (const char* key : { "title", "text" }) {
+                    const std::wstring cand = DnfLooseTitle(DnfJStr(item, key));
+                    if (cand.empty()) continue;
+                    const double len = (double)(std::max)(cand.size(), wanted.size());
+                    const double score = (cand.find(wanted) != std::wstring::npos || wanted.find(cand) != std::wstring::npos)
+                        ? 0.8 + 0.2 * (double)(std::min)(cand.size(), wanted.size()) / len
+                        : 1.0 - (double)distance(cand, wanted) / len;
+                    if (score > bestScore) { bestScore = score; best = DnfJStr(item, "sha256"); }
+                }
+            }
+            if (bestScore >= 0.75 && !best.empty()) return best;
+        }
+    }
+    return shaValid ? sha : std::string();   // 列表还没读到时先按 sha 试（本地可能已有缓存）
+}
+
+// 把「前面先念」和服务器音频拼成一个 wav：去掉名字结尾和音频开头的静音，中间只留很短的间隔，避免两段之间明显停顿
+struct DnfPcmWav { int rate = 0; int ch = 0; std::vector<int16_t> s; };
+static bool DnfReadPcmWav(const CString& path, DnfPcmWav& out)
+{
+    std::string d;
+    if (!DnfHttpReadStaticFile(path, d) || !DnfLooksLikeWav(d)) return false;
+    auto u16 = [&](size_t i) { return (unsigned)(unsigned char)d[i] | ((unsigned)(unsigned char)d[i + 1] << 8); };
+    auto u32 = [&](size_t i) { return (size_t)u16(i) | ((size_t)u16(i + 2) << 16); };
+    size_t p = 12;
+    unsigned fmt = 0, bits = 0;
+    bool haveFmt = false;
+    while (p + 8 <= d.size()) {
+        const std::string id = d.substr(p, 4);
+        size_t len = u32(p + 4);
+        const size_t body = p + 8;
+        if (body + len > d.size()) len = d.size() - body;
+        if (id == "fmt " && len >= 16) {
+            fmt = u16(body); out.ch = (int)u16(body + 2); out.rate = (int)u32(body + 4); bits = u16(body + 14); haveFmt = true;
+        }
+        else if (id == "data" && haveFmt) {
+            if ((fmt != 1 && fmt != 0xFFFE) || bits != 16 || out.ch < 1 || out.ch > 2 || out.rate < 8000 || out.rate > 96000) return false;
+            out.s.resize(len / 2);
+            if (!out.s.empty()) memcpy(out.s.data(), d.data() + body, out.s.size() * 2);
+            return out.s.size() >= (size_t)out.ch;
+        }
+        p = body + len + (len & 1);
+    }
+    return false;
+}
+// 转成目标采样率 / 声道（线性插值），两段来源不同（豆包合成 / Windows 语音）时也能拼
+static std::vector<int16_t> DnfPcmConvert(const DnfPcmWav& a, int rate, int ch)
+{
+    if (a.rate == rate && a.ch == ch) return a.s;
+    const size_t frames = a.s.size() / a.ch;
+    std::vector<float> mono(frames);
+    for (size_t i = 0; i < frames; ++i) {
+        float v = 0;
+        for (int c = 0; c < a.ch; ++c) v += a.s[i * a.ch + c];
+        mono[i] = v / a.ch;
+    }
+    const size_t outFrames = (size_t)((double)frames * rate / a.rate);
+    std::vector<int16_t> out(outFrames * ch);
+    for (size_t j = 0; j < outFrames; ++j) {
+        const double src = (double)j * a.rate / rate;
+        const size_t i0 = (std::min)((size_t)src, frames - 1), i1 = (std::min)(i0 + 1, frames - 1);
+        const double f = src - (double)i0;
+        const double v = mono[i0] * (1.0 - f) + mono[i1] * f;
+        const int16_t s = (int16_t)(std::max)(-32768.0, (std::min)(32767.0, v));
+        for (int c = 0; c < ch; ++c) out[j * ch + c] = s;
+    }
+    return out;
+}
+static CString DnfJoinVoiceWav(const CString& firstPath, const CString& secondPath)
+{
+    const CString cacheDir = DnfKillVoiceCacheDir();
+    if (cacheDir.IsEmpty()) return CString();
+    unsigned long long h = 1469598103934665603ull;
+    for (const wchar_t* s : { firstPath.GetString(), L"|", secondPath.GetString(), L"|join-v1" })
+        for (; *s; ++s) { h ^= (unsigned long long)*s; h *= 1099511628211ull; }
+    CString out;
+    out.Format(L"%s\\join-%016llx.wav", cacheDir.GetString(), h);
+    if (DnfFileExists(out)) return out;
+    DnfPcmWav a, b;
+    if (!DnfReadPcmWav(firstPath, a) || !DnfReadPcmWav(secondPath, b)) return CString();
+    const int rate = b.rate, ch = b.ch;
+    std::vector<int16_t> x = DnfPcmConvert(a, rate, ch);
+    const std::vector<int16_t>& y = b.s;
+    const auto loud = [ch](const std::vector<int16_t>& v, size_t frame) {
+        for (int c = 0; c < ch; ++c) if (std::abs((int)v[frame * ch + c]) > 700) return true;
+        return false;
+    };
+    const size_t xf = x.size() / ch, yf = y.size() / ch;
+    size_t xEnd = xf;
+    while (xEnd > 0 && !loud(x, xEnd - 1)) --xEnd;
+    size_t yStart = 0;
+    while (yStart < yf && !loud(y, yStart)) ++yStart;
+    if (xEnd == 0 || yStart >= yf) return CString();
+    xEnd = (std::min)(xf, xEnd + (size_t)rate * 40 / 1000);             // 名字尾音留 40ms，不要切掉
+    yStart = yStart > (size_t)rate * 15 / 1000 ? yStart - (size_t)rate * 15 / 1000 : 0;
+    const size_t gap = (size_t)rate * 60 / 1000;                        // 中间只留 60ms
+    std::vector<int16_t> pcm;
+    pcm.reserve((xEnd + gap + (yf - yStart)) * ch);
+    pcm.insert(pcm.end(), x.begin(), x.begin() + xEnd * ch);
+    pcm.insert(pcm.end(), gap * ch, 0);
+    pcm.insert(pcm.end(), y.begin() + yStart * ch, y.end());
+    const unsigned dataBytes = (unsigned)(pcm.size() * 2);
+    std::string wav;
+    auto put16 = [&](unsigned v) { wav.push_back((char)(v & 0xff)); wav.push_back((char)((v >> 8) & 0xff)); };
+    auto put32 = [&](unsigned v) { put16(v & 0xffff); put16(v >> 16); };
+    wav += "RIFF"; put32(36 + dataBytes); wav += "WAVEfmt "; put32(16); put16(1); put16((unsigned)ch);
+    put32((unsigned)rate); put32((unsigned)(rate * ch * 2)); put16((unsigned)(ch * 2)); put16(16);
+    wav += "data"; put32(dataBytes);
+    wav.append(reinterpret_cast<const char*>(pcm.data()), dataBytes);
+    return DnfWriteFileAtomic(out, wav) ? out : CString();
+}
+
+// 「前面先念」：用服务器音频同样的音色合成一小段文字（例如选手搞名），失败时退回 Windows 系统语音；返回 wav 路径
+static CString DnfVoicePrefixWav(const std::string& libSha, const std::string& textUtf8, int fxIndex)
+{
+    std::string voiceId;
+    {
+        std::lock_guard<std::mutex> lock(g_ttsMutex);
+        for (const auto& item : g_voiceLibraryItems) if (DnfJStr(item, "sha256") == libSha) { voiceId = DnfJStr(item, "voiceId"); break; }
+    }
+    if (voiceId.empty() || !DnfTtsVoiceAllowed(voiceId)) voiceId = DnfTtsVoiceForIndex(fxIndex);
+    int maxChars = 30;
+    { std::lock_guard<std::mutex> lock(g_ttsMutex); maxChars = (int)DnfJNum(g_ttsStatus, "maxTextChars", 30); }
+    CString path, error;
+    if (!voiceId.empty() && DnfTtsVoiceAllowed(voiceId) && (int)DnfUtf8Chars(textUtf8) <= maxChars &&
+        DnfTtsSynthesize(voiceId, textUtf8, 12000, path, error)) return path;   // 名字第一次要现生成，多等一会儿
+    CString text(CA2W(textUtf8.c_str(), CP_UTF8));
+    text.Replace(L"<", L" ");
+    text.Replace(L">", L" ");
+    text.Trim();
+    if (text.IsEmpty()) return CString();
+    std::lock_guard<std::mutex> lock(g_killVoiceMutex);
+    const CString cacheDir = DnfKillVoiceCacheDir();
+    if (cacheDir.IsEmpty()) return CString();
+    CString cached;
+    cached.Format(L"%s\\say-%08zx.wav", cacheDir.GetString(), std::hash<std::wstring>{}(std::wstring(text.GetString())) & 0xffffffffu);
+    if (!DnfFileExists(cached)) {
+        const HRESULT coHr = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const bool ok = DnfSapiSpeakToWav(text, cached);
+        if (SUCCEEDED(coHr)) ::CoUninitialize();
+        if (!ok) return CString();
+    }
+    return cached;
+}
+
+// 场景规则「服务器音频库」：按需下载（不计费）并排队播放；prefix 非空时先念 prefix 再播音频（两段连续入队）
+static void DnfPlayVoiceLibraryAsync(std::string sha, std::string title, std::string prefix = std::string(), int fxIndex = 0)
+{
+    if (!g_killVoicePlaybackEnabled.load()) return;
+    const auto epoch = g_killVoicePlaybackEpoch.load();
+    DnfRunDetached([sha, title, prefix, fxIndex, epoch]() {
+        std::string resolved = DnfVoiceLibraryResolve(sha, title);
+        if (resolved.empty()) {
+            DnfVoiceLibraryRefreshAsync(true);
+            for (int i = 0; i < 30 && resolved.empty(); ++i) { ::Sleep(100); if (!g_voiceLibraryBusy.load()) resolved = DnfVoiceLibraryResolve(sha, title); }
+        }
+        CString path, error;
+        if (resolved.empty() || !DnfVoiceLibraryFetch(resolved, path, error)) return;
+        const CString prefixPath = prefix.empty() ? CString() : DnfVoicePrefixWav(resolved, prefix, fxIndex);
+        std::lock_guard<std::mutex> playbackLock(g_killVoicePlaybackMutex);
+        if (!g_killVoicePlaybackEnabled.load() || epoch != g_killVoicePlaybackEpoch.load()) return;
+        const CString joined = prefixPath.IsEmpty() ? CString() : DnfJoinVoiceWav(prefixPath, path);
+        if (!joined.IsEmpty()) { DnfEnqueueVoice(joined, epoch); return; }   // 拼好的一段连续播放，中间不停顿
+        if (!prefixPath.IsEmpty()) DnfEnqueueVoice(prefixPath, epoch);
+        DnfEnqueueVoice(path, epoch);
+    });
+}
+
+// 场景规则里用到的服务器音频提前下载到本地，第一次触发时不用等网络
+static void DnfVoiceLibraryPrefetchRules(const json& rulesData)
+{
+    if (!rulesData.is_object() || !rulesData.contains("rules") || !rulesData["rules"].is_array()) return;
+    std::vector<std::pair<std::string, std::string>> wanted;
+    for (const auto& r : rulesData["rules"]) {
+        if (!r.is_object() || !r.contains("action") || !r["action"].is_object()) continue;
+        const json& a = r["action"];
+        if (DnfJStr(a, "voice") != "lib") continue;
+        wanted.emplace_back(DnfJStr(a, "voiceLib"), DnfJStr(a, "voiceLibTitle"));
+        if (wanted.size() >= 40) break;
+    }
+    if (wanted.empty()) return;
+    DnfRunDetached([wanted]() {
+        for (const auto& w : wanted) {
+            const std::string sha = DnfVoiceLibraryResolve(w.first, w.second);
+            CString path, error;
+            if (!sha.empty()) DnfVoiceLibraryFetch(sha, path, error);
+        }
+    });
+}
+
+/* ================= 场景规则（情景模式） =================
+ * 规则由主窗口「主播工具 → 场景规则」编辑，保存为 %APPDATA%\DNFGameCapture\scene_rules.json（{ version, rules: [...] }）。
+ * 击杀小窗 / 全屏特效窗口通过 /api/scene-rules 读取，状态里的 sceneRulesRev 变化时重新拉取。
+ * 文件不存在时 data = null，页面使用内置预设（与旧版固定逻辑一致）。 */
+static std::mutex g_sceneRulesMutex;
+static json g_sceneRulesData;               // null = 从未保存
+static bool g_sceneRulesLoaded = false;
+static std::atomic<int> g_sceneRulesRev{ 1 };
+static std::atomic<int> g_sceneTestId{ 0 };
+static json g_sceneTestRule;                // 主窗口「测试」按钮发来的单条规则
+
+static CString DnfSceneRulesPath()
+{
+    wchar_t appData[MAX_PATH] = {};
+    const DWORD length = ::GetEnvironmentVariableW(L"APPDATA", appData, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return CString();
+    CString dir(appData);
+    dir.TrimRight(L"\\/");
+    dir += L"\\DNFGameCapture";
+    if (!::CreateDirectoryW(dir, nullptr) && ::GetLastError() != ERROR_ALREADY_EXISTS) return CString();
+    return dir + L"\\scene_rules.json";
+}
+
+static bool DnfIsValidSceneRules(const json& data)
+{
+    return data.is_object() && data.contains("rules") && data["rules"].is_array() && data["rules"].size() <= 200;
+}
+
+static void DnfLoadSceneRulesLocked()
+{
+    if (g_sceneRulesLoaded) return;
+    g_sceneRulesLoaded = true;
+    const CString path = DnfSceneRulesPath();
+    std::string body;
+    if (path.IsEmpty() || !DnfFileExists(path) || !DnfHttpReadStaticFile(path, body)) return;
+    json parsed = json::parse(body, nullptr, false);
+    if (!parsed.is_discarded() && DnfIsValidSceneRules(parsed)) g_sceneRulesData = parsed;
+}
+
+static json DnfSceneRulesSnapshot()
+{
+    std::lock_guard<std::mutex> lock(g_sceneRulesMutex);
+    DnfLoadSceneRulesLocked();
+    return json{ { "rev", g_sceneRulesRev.load() }, { "data", g_sceneRulesData } };
+}
+
+static bool DnfSaveSceneRules(const json& data)
+{
+    if (!DnfIsValidSceneRules(data)) return false;
+    const std::string text = data.dump(1, '\t');
+    if (text.size() > 512 * 1024) return false;
+    const CString path = DnfSceneRulesPath();
+    if (path.IsEmpty()) return false;
+    std::lock_guard<std::mutex> lock(g_sceneRulesMutex);
+    const CString tempPath = path + L".tmp";
+    {
+        std::ofstream out(std::filesystem::path(tempPath.GetString()), std::ios::binary | std::ios::trunc);
+        if (!out) return false;
+        out.write(text.data(), (std::streamsize)text.size());
+        if (!out) return false;
+    }
+    if (!::MoveFileExW(tempPath, path, MOVEFILE_REPLACE_EXISTING)) {
+        ::DeleteFileW(tempPath);
+        return false;
+    }
+    g_sceneRulesLoaded = true;
+    g_sceneRulesData = data;
+    ++g_sceneRulesRev;
+    DnfVoiceLibraryPrefetchRules(data);
+    return true;
+}
+
+static void DnfSetSceneTestRule(const json& rule)
+{
+    std::lock_guard<std::mutex> lock(g_sceneRulesMutex);
+    g_sceneTestRule = rule.is_object() ? rule : json();
+    ++g_sceneTestId;
+}
+
+// 手动改比分后，主窗口可要求展示窗口调整场景规则用的比赛记录（全部复活 / 连续没人头清零 / 清空击杀记录）
+static std::atomic<int> g_sceneResetId{ 0 };
+static json g_sceneResetFlags = json::object();
+static void DnfRequestSceneReset(bool drought, bool history)
+{
+    std::lock_guard<std::mutex> lock(g_sceneRulesMutex);
+    g_sceneResetFlags = json{ { "drought", drought }, { "history", history } };
+    ++g_sceneResetId;
+}
+static json DnfSceneResetSnapshot()
+{
+    std::lock_guard<std::mutex> lock(g_sceneRulesMutex);
+    json out = g_sceneResetFlags;
+    out["id"] = g_sceneResetId.load();
+    return out;
+}
+
+static json DnfSceneTestSnapshot()
+{
+    std::lock_guard<std::mutex> lock(g_sceneRulesMutex);
+    return json{ { "id", g_sceneTestId.load() }, { "rule", g_sceneTestRule } };
 }
 
 static std::string DnfHttpQueryParam(const std::string& request, const char* name)
@@ -1720,6 +2751,77 @@ static void DnfHandleKillDisplayHttpClient(SOCKET client)
         if (ok) DnfPlayKillVoiceAsync(voiceIndex, key, voiceWebDir, !prepareOnly);
         DnfHttpSendResponse(client, ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json; charset=utf-8",
             ok ? "{\"ok\":true}" : "{\"ok\":false}");
+        return;
+    }
+    // 场景规则 / 自定义语音：播放导入的本地音频（?id=文件名，URL 编码）
+    if (route == "/api/voice/file") {
+        if (method != "POST") {
+            DnfHttpSendResponse(client, 405, "Method Not Allowed", "text/plain; charset=utf-8", "POST only");
+            return;
+        }
+        const std::string raw = DnfHttpQueryParam(request, "id");
+        std::string id;
+        for (size_t i = 0; i < raw.size(); ++i) {
+            if (raw[i] == '%' && i + 2 < raw.size() && isxdigit((unsigned char)raw[i + 1]) && isxdigit((unsigned char)raw[i + 2])) {
+                id.push_back((char)std::stoi(raw.substr(i + 1, 2), nullptr, 16));
+                i += 2;
+            }
+            else id.push_back(raw[i] == '+' ? ' ' : raw[i]);
+        }
+        if (g_killVoicePlaybackEnabled.load()) DnfPlayCustomVoice(id, false);
+        DnfHttpSendResponse(client, 200, "OK", "application/json; charset=utf-8", "{\"ok\":true}");
+        return;
+    }
+    // 场景规则的自定义语音文字（请求体 = UTF-8 文本）
+    if (route == "/api/voice/say") {
+        if (method != "POST") {
+            DnfHttpSendResponse(client, 405, "Method Not Allowed", "text/plain; charset=utf-8", "POST only");
+            return;
+        }
+        const std::string body = DnfHttpRequestBody(request);
+        if (g_killVoicePlaybackEnabled.load() && !body.empty() && body.size() <= 2048) {
+            DnfSayTextAsync(CString(CA2W(body.c_str(), CP_UTF8)));
+        }
+        DnfHttpSendResponse(client, 200, "OK", "application/json; charset=utf-8", "{\"ok\":true}");
+        return;
+    }
+    // 场景规则「自定义文字（豆包音色合成）」：?voice=<音色 id，空 = 跟随播报音色>&index=<播报音色序号>，请求体 = UTF-8 文本
+    if (route == "/api/voice/tts") {
+        if (method != "POST") {
+            DnfHttpSendResponse(client, 405, "Method Not Allowed", "text/plain; charset=utf-8", "POST only");
+            return;
+        }
+        const std::string body = DnfHttpRequestBody(request);
+        if (g_killVoicePlaybackEnabled.load() && !body.empty() && body.size() <= 600) {
+            DnfSayTtsAsync(DnfUrlDecode(DnfHttpQueryParam(request, "voice")), atoi(DnfHttpQueryParam(request, "index").c_str()), body);
+        }
+        DnfHttpSendResponse(client, 200, "OK", "application/json; charset=utf-8", "{\"ok\":true}");
+        return;
+    }
+    // 场景规则「服务器音频库」：?sha=<sha256>&title=<标题>（sha 失效时按标题找）
+    if (route == "/api/voice/lib") {
+        if (method != "POST") {
+            DnfHttpSendResponse(client, 405, "Method Not Allowed", "text/plain; charset=utf-8", "POST only");
+            return;
+        }
+        if (g_killVoicePlaybackEnabled.load()) {
+            std::string prefix = DnfUrlDecode(DnfHttpQueryParam(request, "prefix"));
+            if (DnfUtf8Chars(prefix) > 30) prefix.clear();
+            DnfPlayVoiceLibraryAsync(DnfUrlDecode(DnfHttpQueryParam(request, "sha")).substr(0, 64),
+                DnfUrlDecode(DnfHttpQueryParam(request, "title")).substr(0, 240), prefix, atoi(DnfHttpQueryParam(request, "index").c_str()));
+        }
+        DnfHttpSendResponse(client, 200, "OK", "application/json; charset=utf-8", "{\"ok\":true}");
+        return;
+    }
+    if (route == "/api/scene-rules") {
+        if (method == "POST") {
+            json parsed = json::parse(DnfHttpRequestBody(request), nullptr, false);
+            const bool ok = !parsed.is_discarded() && DnfSaveSceneRules(parsed);
+            DnfHttpSendResponse(client, ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json; charset=utf-8",
+                ok ? "{\"ok\":true}" : "{\"ok\":false}");
+            return;
+        }
+        DnfHttpSendResponse(client, 200, "OK", "application/json; charset=utf-8", DnfSceneRulesSnapshot().dump());
         return;
     }
     if (route == "/api/voices") {
@@ -3559,9 +4661,326 @@ void CDNFGameCaptureDlg::NudgeHpCalibHandle(int idx, float dx, float dy)
     }
 }
 
+// ===================================================
+// 「开始!!!」字样识别（纯颜色，9 个点）
+//   字从大到小缩放，只有停稳在最终大小时 7 个金色点才会同时命中；
+//   两个「!」之间的间隔点必须不是金色，防止整片金色特效误触发。
+// 坐标为游戏画面归一化坐标，按 2560x1440 实测。
+// ===================================================
+static const float kStartBannerGold[7][2] = {
+    { 0.4543f, 0.4361f }, // 「开」上横
+    { 0.4700f, 0.4550f }, // 「开」右竖
+    { 0.5145f, 0.4625f }, // 「始」女字旁
+    { 0.5530f, 0.4550f }, // 「始」台字
+    { 0.5768f, 0.4550f }, // 第 1 个 !
+    { 0.6012f, 0.4550f }, // 第 2 个 !
+    { 0.6254f, 0.4550f }  // 第 3 个 !
+};
+static const float kStartBannerGap[2][2] = {
+    { 0.5889f, 0.4550f }, // ①② 之间
+    { 0.6133f, 0.4550f }  // ②③ 之间
+};
+
+static bool DnfIsStartBannerGold(int r, int g, int b)
+{
+    return r >= 170 && g >= 110 && b <= 150 && r >= g && r - b >= 90 && g - b >= 40;
+}
+
+// 返回命中掩码：bit0-6 金色点，bit7-8 间隔点为金色，bit9 判定为「开始」
+static int DnfDetectStartBanner(HDC hSrc, int fw, int fh)
+{
+    if (!hSrc || fw < 320 || fh < 180) return 0;
+    const int rx0 = (int)(0.44f * fw), rx1 = (int)(0.64f * fw);
+    const int ry0 = (int)(0.425f * fh), ry1 = (int)(0.475f * fh);
+    const int bw = rx1 - rx0, bh = ry1 - ry0;
+    if (bw < 10 || bh < 5) return 0;
+
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = bw;
+    bmi.bmiHeader.biHeight = -bh;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP dib = ::CreateDIBSection(hSrc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (!dib || !bits) { if (dib) ::DeleteObject(dib); return 0; }
+    HDC hDst = ::CreateCompatibleDC(NULL);
+    HGDIOBJ oldDst = ::SelectObject(hDst, dib);
+    int mask = 0;
+    if (::BitBlt(hDst, 0, 0, bw, bh, hSrc, rx0, ry0, SRCCOPY)) {
+        ::GdiFlush();
+        const BYTE* px = static_cast<const BYTE*>(bits);
+        // 每个点取 3x3 平均
+        const auto isGold = [&](float fx, float fy) {
+            const int cx = (int)(fx * fw) - rx0;
+            const int cy = (int)(fy * fh) - ry0;
+            int sr = 0, sg = 0, sb = 0, n = 0;
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const int x = cx + dx, y = cy + dy;
+                    if (x < 0 || y < 0 || x >= bw || y >= bh) continue;
+                    const BYTE* p = px + ((size_t)y * (size_t)bw + (size_t)x) * 4;
+                    sb += p[0]; sg += p[1]; sr += p[2]; ++n;
+                }
+            }
+            if (n == 0) return false;
+            return DnfIsStartBannerGold(sr / n, sg / n, sb / n);
+        };
+        int goldCount = 0;
+        for (int i = 0; i < 7; ++i) {
+            if (isGold(kStartBannerGold[i][0], kStartBannerGold[i][1])) { mask |= (1 << i); ++goldCount; }
+        }
+        bool gapGold = false;
+        for (int i = 0; i < 2; ++i) {
+            if (isGold(kStartBannerGap[i][0], kStartBannerGap[i][1])) { mask |= (1 << (7 + i)); gapGold = true; }
+        }
+        // 允许角色挡住 1 个金色点
+        if (goldCount >= 6 && !gapGold) mask |= (1 << 9);
+    }
+    ::SelectObject(hDst, oldDst);
+    ::DeleteDC(hDst);
+    ::DeleteObject(dib);
+    return mask;
+}
+
+// ===================================================
+// 「红队胜!! / 蓝队胜!!」横幅识别（纯颜色）
+//   用途：主播掉线时场上少一个大 X，「整队被歼」凑不满 4 个 X，本局不会结束，
+//   连杀、比分、存活状态会串到下一局。认到这个横幅即可当作一局结束。
+//   左半区是纯色大字（红队=亮红，蓝队=亮蓝），右半区是「胜!!」黑字白边，
+//   两块同时成立才算命中，避免技能特效或地图底色误判。
+//   判据全部是「占区域面积的比例」，与游戏窗口分辨率无关。
+//   坐标按 2560x1440 实测，取横幅在画面中的固定位置。
+// ===================================================
+static const float kWinBannerColor[4] = { 0.3570f, 0.4170f, 0.5040f, 0.5620f }; // 「红队/蓝队」两个大字
+static const float kWinBannerGlyph[4] = { 0.5070f, 0.4170f, 0.6500f, 0.5620f }; // 「胜!!」黑字白边
+
+struct DnfWinBannerStat {
+    int side = 0;        // 1=红队胜，2=蓝队胜，0=没识别到
+    double red = 0.0;    // 左区亮红占比
+    double blue = 0.0;   // 左区亮蓝占比
+    double dark = 0.0;   // 右区黑字占比
+    double white = 0.0;  // 右区白边占比
+    double cov = 0.0;    // 主色横向覆盖（有主色像素的列占比）
+    double vcov = 0.0;   // 主色纵向覆盖（行占比）
+    double edge = 0.0;   // 左区白边横向覆盖（大字都有银色描边）
+};
+
+// 每 2 像素采 1 个，比例判据与游戏窗口分辨率无关
+static DnfWinBannerStat DnfDetectWinBanner(HDC hSrc, int fw, int fh)
+{
+    DnfWinBannerStat st;
+    if (!hSrc || fw < 640 || fh < 360) return st;
+    const int x0 = (int)(kWinBannerColor[0] * fw);
+    const int x1 = (int)(kWinBannerGlyph[2] * fw);
+    const int y0 = (int)(kWinBannerColor[1] * fh);
+    const int y1 = (int)(kWinBannerColor[3] * fh);
+    const int bw = x1 - x0, bh = y1 - y0;
+    const int splitX = (int)(kWinBannerGlyph[0] * fw) - x0;
+    if (bw < 120 || bh < 40 || splitX < 40 || splitX >= bw) return st;
+
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = bw;
+    bmi.bmiHeader.biHeight = -bh;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP dib = ::CreateDIBSection(hSrc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (!dib || !bits) { if (dib) ::DeleteObject(dib); return st; }
+    HDC hDst = ::CreateCompatibleDC(NULL);
+    HGDIOBJ oldDst = ::SelectObject(hDst, dib);
+    if (::BitBlt(hDst, 0, 0, bw, bh, hSrc, x0, y0, SRCCOPY)) {
+        ::GdiFlush();
+        const BYTE* px = static_cast<const BYTE*>(bits);
+        const int sw = (bw + 1) / 2, sh = (bh + 1) / 2;
+        const int splitS = splitX / 2;
+        if (sw > 1 && sh > 1 && splitS > 0 && splitS < sw) {
+            std::vector<int> redCol(sw, 0), blueCol(sw, 0), edgeCol(sw, 0), darkCol(sw, 0);
+            std::vector<int> redRow(sh, 0), blueRow(sh, 0), edgeRow(sh, 0);
+            long red = 0, blue = 0, dark = 0, white = 0, colorN = 0, glyphN = 0;
+            for (int r = 0; r < sh; ++r) {
+                const BYTE* row = px + ((size_t)(r * 2) * (size_t)bw) * 4;
+                for (int c = 0; c < sw; ++c) {
+                    const int b = row[(size_t)(c * 2) * 4 + 0];
+                    const int g = row[(size_t)(c * 2) * 4 + 1];
+                    const int rr = row[(size_t)(c * 2) * 4 + 2];
+                    if (c < splitS) {
+                        ++colorN;
+                        if (rr > 130 && g < 90 && b < 90) { ++red; ++redCol[c]; ++redRow[r]; }
+                        else if (b > 140 && b - rr > 90 && b - g > 60) { ++blue; ++blueCol[c]; ++blueRow[r]; }
+                        if (rr > 190 && g > 190 && b > 190) { ++edgeCol[c]; ++edgeRow[r]; }
+                    } else {
+                        ++glyphN;
+                        if (rr < 80 && g < 80 && b < 90) { ++dark; ++darkCol[c]; }
+                        else if (rr > 190 && g > 190 && b > 190) ++white;
+                    }
+                }
+            }
+            if (colorN > 0 && glyphN > 0) {
+                st.red = (double)red / (double)colorN;
+                st.blue = (double)blue / (double)colorN;
+                st.dark = (double)dark / (double)glyphN;
+                st.white = (double)white / (double)glyphN;
+                int dom = 0;
+                if (st.red >= 0.12 && st.red >= st.blue * 4.0) dom = 1;
+                else if (st.blue >= 0.12 && st.blue >= st.red * 4.0) dom = 2;
+                const auto covCols = [&](const std::vector<int>& v, int lo, int hi) {
+                    if (hi <= lo) return 0.0;
+                    int hit = 0;
+                    for (int i = lo; i < hi; ++i) if (v[i] > 0) ++hit;
+                    return (double)hit / (double)(hi - lo);
+                };
+                const auto covRows = [&](const std::vector<int>& v) {
+                    int hit = 0;
+                    for (size_t i = 0; i < v.size(); ++i) if (v[i] > 0) ++hit;
+                    return (double)hit / (double)v.size();
+                };
+                if (dom == 1) {
+                    st.cov = covCols(redCol, 0, splitS); st.vcov = covRows(redRow); st.edge = covCols(edgeCol, 0, splitS);
+                } else if (dom == 2) {
+                    st.cov = covCols(blueCol, 0, splitS); st.vcov = covRows(blueRow); st.edge = covCols(edgeCol, 0, splitS);
+                }
+                // 大字必须是横贯左区的一条宽带，右区还得有「胜!!」的黑字
+                if (dom && st.cov >= 0.55 && st.vcov >= 0.45 && st.edge >= 0.45 && st.dark >= 0.20) st.side = dom;
+            }
+        }
+    }
+    ::SelectObject(hDst, oldDst);
+    ::DeleteDC(hDst);
+    ::DeleteObject(dib);
+    return st;
+}
+
+// 回合血量的公开副本：UpdateHpBars 线程写入，击杀展示页状态（HTTP 线程）读取，供场景规则的血量条件使用。
+struct DnfRoundHpPublic {
+    int no = 0;
+    bool active = false;
+    int start[2] = { -1, -1 };
+    int end[2] = { -1, -1 };
+    int low[2] = { -1, -1 };
+    int winner = -1;
+    DWORD startTick = 0;
+    DWORD endTick = 0;
+};
+static std::mutex g_roundHpPubMutex;
+static DnfRoundHpPublic g_roundHpPub;
+
+void CDNFGameCaptureDlg::UpdateRoundHpTracker(bool startBanner)
+{
+    const DWORD now = GetTickCount();
+    const int hp[2] = { m_hpPercent[0].load(), m_hpPercent[1].load() };
+    const auto hpText = [](int v) {
+        CString s;
+        if (v < 0) s = L"--"; else s.Format(L"%d%%", v);
+        return s;
+    };
+    const auto emit = [](const CString& line) {
+        AppLog(line, RGB(120, 220, 255));
+        WriteMatchLog(line);
+    };
+    const auto finishRound = [&](int winner, const wchar_t* reason) {
+        const int endHp[2] = { m_roundLastHp[0], m_roundLastHp[1] };
+        CString line;
+        line.Format(L"[回合血量] 第%d局结束（%s）用时%.1f秒 | 左 开局%s → 结束%s（最低%s） | 右 开局%s → 结束%s（最低%s）",
+            m_roundNo, reason, (now - m_roundStartTick) / 1000.0,
+            hpText(m_roundStartHp[0]).GetString(), hpText(endHp[0]).GetString(), hpText(m_roundMinHp[0]).GetString(),
+            hpText(m_roundStartHp[1]).GetString(), hpText(endHp[1]).GetString(), hpText(m_roundMinHp[1]).GetString());
+        if (winner == 0 || winner == 1) {
+            CString w;
+            w.Format(L" | 胜方=%s 剩余%s", winner == 0 ? L"左" : L"右", hpText(endHp[winner]).GetString());
+            line += w;
+        }
+        emit(line);
+        m_roundActive = false;
+        {
+            std::lock_guard<std::mutex> pub(g_roundHpPubMutex);
+            g_roundHpPub.active = false;
+            g_roundHpPub.winner = winner;
+            g_roundHpPub.endTick = now;
+            for (int side = 0; side < 2; ++side) {
+                g_roundHpPub.end[side] = endHp[side];
+                g_roundHpPub.low[side] = m_roundMinHp[side];
+            }
+        }
+    };
+
+    // 1) 「开始」停稳：连续 2 次命中才算，5 秒内不重复开新局
+    m_startBannerHits = startBanner ? m_startBannerHits + 1 : 0;
+    if (m_startBannerHits >= 2) {
+        if (!m_roundBannerLatched) {
+            if (now - m_roundStartTick > 5000 || m_roundNo == 0) {
+                if (m_roundActive) finishRound(-1, L"未检测到结束，被新一局覆盖");
+                m_roundBannerLatched = true;
+                m_roundActive = true;
+                ++m_roundNo;
+                m_roundStartTick = now;
+                m_roundBarsLostTick = 0;
+                for (int side = 0; side < 2; ++side) {
+                    m_hpDeadLock[side] = false;
+                    m_hpReviveCount[side] = 0;
+                    m_roundStartHp[side] = hp[side];
+                    m_roundMinHp[side] = hp[side];
+                    m_roundLastHp[side] = hp[side];
+                    m_roundZeroCount[side] = 0;
+                }
+                std::lock_guard<std::mutex> pub(g_roundHpPubMutex);
+                g_roundHpPub.winner = -1;
+                g_roundHpPub.endTick = 0;
+            }
+        }
+        else if (m_roundActive) {
+            // 「开始」显示期间取最大值作为开局血量（血条已稳定）
+            for (int side = 0; side < 2; ++side) {
+                if (hp[side] > m_roundStartHp[side]) m_roundStartHp[side] = hp[side];
+            }
+        }
+    }
+    if (m_roundBannerLatched && !startBanner) {
+        m_roundBannerLatched = false;
+        if (m_roundActive) {
+            CString line;
+            line.Format(L"[回合血量] 第%d局开始（识别到「开始!!!」）| 开局血量 左%s 右%s",
+                m_roundNo, hpText(m_roundStartHp[0]).GetString(), hpText(m_roundStartHp[1]).GetString());
+            emit(line);
+        }
+    }
+    if (!m_roundActive || m_roundBannerLatched) return;
+
+    // 2) 对战中：记录最低值与最后有效值
+    bool anyBar = false;
+    for (int side = 0; side < 2; ++side) {
+        if (hp[side] < 0) { m_roundZeroCount[side] = 0; continue; }
+        anyBar = true;
+        m_roundLastHp[side] = hp[side];
+        if (m_roundMinHp[side] < 0 || hp[side] < m_roundMinHp[side]) m_roundMinHp[side] = hp[side];
+        m_roundZeroCount[side] = hp[side] <= 0 ? m_roundZeroCount[side] + 1 : 0;
+    }
+
+    // 3) 结束：一方血量连续 3 次为 0（约 300ms）
+    const bool leftDead = m_roundZeroCount[0] >= 3 || m_hpDeadLock[0];
+    const bool rightDead = m_roundZeroCount[1] >= 3 || m_hpDeadLock[1];
+    if (leftDead || rightDead) {
+        finishRound(leftDead && rightDead ? -1 : (leftDead ? 1 : 0), leftDead && rightDead ? L"双方血量归零" : L"一方血量归零");
+        return;
+    }
+    // 血条消失超过 3 秒：按最后有效值结束
+    if (!anyBar) {
+        if (m_roundBarsLostTick == 0) m_roundBarsLostTick = now;
+        else if (now - m_roundBarsLostTick > 3000) finishRound(-1, L"血条消失，按最后有效值");
+    }
+    else {
+        m_roundBarsLostTick = 0;
+    }
+    if (m_roundActive && now - m_roundStartTick > 240000) finishRound(-1, L"超过 4 分钟未结束");
+}
+
 void CDNFGameCaptureDlg::UpdateHpBars()
 {
     int measured[2] = { -1, -1 };
+    int bannerMask = 0;
     {
         std::lock_guard<std::mutex> lock(g_bmpMutex);
         if (m_bmp && m_w > 0 && m_h > 0) {
@@ -3598,11 +5017,13 @@ void CDNFGameCaptureDlg::UpdateHpBars()
                 ::SelectObject(hDst, oldDst);
                 ::DeleteObject(dib);
             }
+            bannerMask = DnfDetectStartBanner(hSrc, m_w, m_h);
             ::SelectObject(hSrc, oldSrc);
             ::DeleteDC(hDst);
             ::DeleteDC(hSrc);
         }
     }
+    m_startBannerMask.store(bannerMask);
 
     // 平滑：最近 3 次中位数；连续 3 次识别失败才显示「--」，避免技能特效遮挡时闪烁
     for (int side = 0; side < 2; ++side) {
@@ -3612,6 +5033,24 @@ void CDNFGameCaptureDlg::UpdateHpBars()
                 m_hpPercent[side].store(-1);
             }
             continue;
+        }
+        if (m_hpDeadLock[side]) {
+            // 死亡后血条常残留 1~3% 的红色像素：锁定显示 0；连续 3 次 ≥10% 视为换人/新血条，解除锁定
+            if (measured[side] >= 10) {
+                if (++m_hpReviveCount[side] >= 3) {
+                    m_hpDeadLock[side] = false;
+                    m_hpReviveCount[side] = 0;
+                    m_hpHistoryCount[side] = 0;
+                }
+            }
+            else {
+                m_hpReviveCount[side] = 0;
+            }
+            if (m_hpDeadLock[side]) {
+                m_hpMissCount[side] = 0;
+                m_hpPercent[side].store(0);
+                continue;
+            }
         }
         m_hpMissCount[side] = 0;
         int* hist = m_hpHistory[side];
@@ -3625,6 +5064,20 @@ void CDNFGameCaptureDlg::UpdateHpBars()
             value = max(min(a, b), min(max(a, b), c));
         }
         m_hpPercent[side].store(value);
+    }
+    UpdateRoundHpTracker((bannerMask & (1 << 9)) != 0);
+    {
+        std::lock_guard<std::mutex> pub(g_roundHpPubMutex);
+        g_roundHpPub.no = m_roundNo;
+        if (m_roundActive) {
+            g_roundHpPub.active = true;
+            g_roundHpPub.startTick = m_roundStartTick;
+            for (int side = 0; side < 2; ++side) {
+                g_roundHpPub.start[side] = m_roundStartHp[side];
+                g_roundHpPub.low[side] = m_roundMinHp[side];
+                g_roundHpPub.end[side] = m_roundLastHp[side];
+            }
+        }
     }
 }
 
@@ -5758,7 +7211,8 @@ static bool DnfHttpRequestUtf8(const CString& endpoint,
     std::string& responseUtf8, CString& errorMsg, int timeoutMs,
     DWORD& httpStatus, bool& networkFailure,
     const std::string* bearerToken = nullptr,
-    const std::string* deviceId = nullptr)
+    const std::string* deviceId = nullptr,
+    std::size_t maxResponseBytes = 0)
 {
     responseUtf8.clear();
     errorMsg.Empty();
@@ -5859,7 +7313,7 @@ static bool DnfHttpRequestUtf8(const CString& endpoint,
         WINHTTP_HEADER_NAME_BY_INDEX, &httpStatus, &statusBytes,
         WINHTTP_NO_HEADER_INDEX);
 
-    constexpr std::size_t kMaxResponseBytes = 2 * 1024 * 1024;
+    const std::size_t kMaxResponseBytes = maxResponseBytes ? maxResponseBytes : 2 * 1024 * 1024;
     while (true) {
         DWORD available = 0;
         if (!WinHttpQueryDataAvailable(request, &available)) {
@@ -10367,6 +11821,12 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
                 actionLog.Format(L"⚔ [击杀成功] 玩家 [%s] 拿下一击！连杀: %d",
                     (LPCTSTR)visualDisplayName, review.akDelta ? 4 : m_players[killerBestP].currentStreak);
                 PushVisualLog(actionLog, teamColor);
+                {
+                    CString hpLine;
+                    hpLine.Format(L"[回合血量] 击杀确认时（OCR 完成，比实际击杀稍晚）血量 左%d%% 右%d%%（-1=未识别）",
+                        m_hpPercent[0].load(), m_hpPercent[1].load());
+                    WriteMatchLog(hpLine);
+                }
 
                 if (review.akDelta) {
                     PushVisualLog(L"🌟 [AK宣告] 恐怖如斯！玩家 [" + visualDisplayName + L"] 完成一次 AK！",
@@ -10672,6 +12132,7 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
     int debugPatchClass[DEATH_POINT_COUNT][4] = { 0 };
     bool debugPatchPass[DEATH_POINT_COUNT] = { false };
     int currentDeathAlgorithm = m_nDeathAlgorithmChoice;
+    DnfWinBannerStat winBanner;   // 本帧的「红队胜/蓝队胜」横幅识别结果
 
     {
         std::lock_guard<std::mutex> lock(g_bmpMutex);
@@ -11175,6 +12636,8 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
             g_deathXDebug.lastTick = GetTickCount();
         }
 
+        winBanner = DnfDetectWinBanner(hMemDC, m_w, m_h);
+
         ::SelectObject(hMemDC, oldBmp);
         ::DeleteDC(hMemDC);
     }
@@ -11325,6 +12788,9 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
     // 🎯 左边正在打的死了 -> 右边赢了这一小局！(传入 0 代表左边被击杀)
     if (leftActiveDead && !g_leftActiveWasDead) {
         g_leftActiveWasDead = true;
+        m_hpDeadLock[0] = true;
+        m_hpReviveCount[0] = 0;
+        if (m_hpPercent[0].load() > 0) m_hpPercent[0].store(0);
         if (m_bCanTrigger) {
             fireActiveXTrigger(0, L"左侧大X产生新的死亡边沿，允许触发");
         }
@@ -11340,6 +12806,9 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
     // 🎯 右边正在打的死了 -> 左边赢了这一小局！(传入 1 代表右边被击杀)
     if (rightActiveDead && !g_rightActiveWasDead) {
         g_rightActiveWasDead = true;
+        m_hpDeadLock[1] = true;
+        m_hpReviveCount[1] = 0;
+        if (m_hpPercent[1].load() > 0) m_hpPercent[1].store(0);
         if (m_bCanTrigger) {
             fireActiveXTrigger(1, L"右侧大X产生新的死亡边沿，允许触发");
         }
@@ -11372,6 +12841,66 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
         }
 
         SetTimer(4, COOLDOWN_TEAM_SCORE, NULL);
+    }
+
+    // ========================================================
+    // 5.1 「红队胜!! / 蓝队胜!!」横幅：掉线少一个 X 时补一次「本局结束」
+    //     连续 2 帧（约 480ms）同侧命中才算；命中后就地结算：胜方大比分 +1、全场连杀清零、
+    //     并清掉待结算标记，免得这些数据拖到下一局第一个击杀才落地。
+    // ========================================================
+    {
+        static int s_winBannerSide = 0;
+        static int s_winBannerHits = 0;
+        static bool s_winBannerLatched = false;
+        static DWORD s_winBannerLogTick = 0;
+        const DWORD wbNow = GetTickCount();
+        const bool wbHit = winBanner.side != 0;
+        s_winBannerHits = (wbHit && winBanner.side == s_winBannerSide) ? s_winBannerHits + 1 : 0;
+        s_winBannerSide = wbHit ? winBanner.side : 0;
+        const wchar_t* wbName = winBanner.side == 1 ? L"红队胜" : (winBanner.side == 2 ? L"蓝队胜" : L"无");
+        CString wbDiag;
+        wbDiag.Format(L"[队胜识别] 横幅=%s 连续%d帧 | 左区 红%.1f%% 蓝%.1f%% 横覆盖%.0f%% 纵覆盖%.0f%% 描边%.0f%% | 右区 黑%.1f%% 白%.1f%% | 允许结算=%s",
+            wbName, s_winBannerHits, winBanner.red * 100.0, winBanner.blue * 100.0,
+            winBanner.cov * 100.0, winBanner.vcov * 100.0, winBanner.edge * 100.0,
+            winBanner.dark * 100.0, winBanner.white * 100.0, m_bCanTriggerTeamScore ? L"是" : L"否（局间冷却中）");
+        if (wbHit && wbNow - s_winBannerLogTick >= 400) {
+            s_winBannerLogTick = wbNow;
+            AppLog(L"🔎 " + wbDiag, RGB(120, 220, 255));
+        }
+        else if (wbNow - s_winBannerLogTick >= 3000 &&
+                 (winBanner.red >= 0.05 || winBanner.blue >= 0.05 || winBanner.dark >= 0.25)) {
+            s_winBannerLogTick = wbNow;
+            WriteMatchLog(wbDiag + L"（未达触发条件，仅作调参参考）");
+        }
+        if (wbHit && s_winBannerHits >= 2 && m_bCanTriggerTeamScore && !s_winBannerLatched) {
+            s_winBannerLatched = true;
+            s_winBannerHits = 0;
+            const int bannerTeam = winBanner.side - 1;   // 0=红队 1=蓝队（选手 team，不受翻面影响）
+            WriteMatchLog(wbDiag + L" → 已按一局结束结算");
+            CString wbAct;
+            wbAct.Format(L"🏆 [结算] 识别到「%s!!」横幅，本局提前结束：%s 大比分 +1，所有人连杀清零%s",
+                winBanner.side == 1 ? L"红队胜" : L"蓝队胜",
+                winBanner.side == 1 ? L"红队" : L"蓝队",
+                m_bPendingTeamScoreWin ? L"（原来的待结算标记已就地处理，不重复加分）" : L"");
+            AppLog(wbAct, RGB(0, 255, 100));
+            KillTimer(2);
+            clearPendingActiveX(L"识别到队伍胜利横幅，残留大X不再补触发");
+            m_bCanTrigger = FALSE;
+            g_triggerCooldownKind = 2;
+            SetTimer(2, COOLDOWN_ROUND_END, NULL);
+            m_bCanTriggerTeamScore = FALSE;
+            SetTimer(4, COOLDOWN_TEAM_SCORE, NULL);
+            {
+                std::lock_guard<std::mutex> dataLock(m_dataMutex);
+                m_lastKillerTeam = bannerTeam;
+                if (bannerTeam == 0) ++m_totalScoreRed;
+                else ++m_totalScoreBlue;
+                m_bPendingTeamScoreWin = false;   // 已就地结算，别让下一局的第一个击杀再补一次
+                for (int p = 0; p < 8; ++p) m_players[p].currentStreak = 0;
+            }
+            PostMessage(WM_UPDATE_ALL_UI, 0, 0);
+        }
+        if (!wbHit && m_bCanTriggerTeamScore) s_winBannerLatched = false;
     }
 }
 
@@ -13001,6 +14530,30 @@ void CDNFGameCaptureDlg::Draw(CDC& dc, HBITMAP previewFrame, int previewW, int p
             cY -= 25;
             SelectObject(hM, oB);
             DeleteDC(hM);
+        }
+    }
+
+    // 「开始!!!」识别点：校准模式下显示，绿=金色命中，灰=未命中；间隔点 紫=正常，红=被判成金色
+    if (m_bDeathXCalibrationMode && m_previewRect.Width() > 0 && m_previewRect.Height() > 0) {
+        const int bm = m_startBannerMask.load();
+        for (int i = 0; i < 9; ++i) {
+            const float* p = i < 7 ? kStartBannerGold[i] : kStartBannerGap[i - 7];
+            const CPoint c = DeathXPointToClient(ScorePointF{ p[0], p[1] });
+            const bool on = (bm & (1 << i)) != 0;
+            const COLORREF col = i < 7 ? (on ? RGB(60, 230, 90) : RGB(150, 150, 150))
+                : (on ? RGB(255, 60, 60) : RGB(220, 80, 255));
+            CPen pen(PS_SOLID, 2, col);
+            CPen* op = dc.SelectObject(&pen);
+            CBrush* ob = (CBrush*)dc.SelectStockObject(NULL_BRUSH);
+            dc.Ellipse(c.x - 4, c.y - 4, c.x + 5, c.y + 5);
+            dc.SelectObject(ob);
+            dc.SelectObject(op);
+        }
+        if (bm & (1 << 9)) {
+            const CPoint c = DeathXPointToClient(ScorePointF{ 0.54f, 0.40f });
+            dc.SetBkMode(TRANSPARENT);
+            dc.SetTextColor(RGB(60, 230, 90));
+            dc.TextOut(c.x, c.y, L"开始✓");
         }
     }
 
@@ -17783,6 +19336,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             bool killsChanged = false;
             bool deathsChanged = false;
             bool akChanged = false;
+            bool streakChanged = false;
             if (data.contains("players") && data["players"].is_array() &&
                 data["players"].size() == 8) {
                 for (size_t index = 0; index < 8; ++index) {
@@ -17802,11 +19356,13 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                         m_players[index].deaths) deathsChanged = true;
                     if (incoming.value("akCount", m_players[index].akCount) !=
                         m_players[index].akCount) akChanged = true;
+                    if ((int)DnfJNum(incoming, "currentStreak", m_players[index].currentStreak) !=
+                        m_players[index].currentStreak) streakChanged = true;
                 }
             }
             const std::string currentPickMode = m_bRedPickFirst ? "first" : "second";
             const bool pickModeChanged = data.value("redPickMode", currentPickMode) != currentPickMode;
-            const bool statsChanged = killsChanged || deathsChanged || akChanged;
+            const bool statsChanged = killsChanged || deathsChanged || akChanged || streakChanged;
             const wchar_t* historyLabel = L"手动修改场上状态";
             if (namesChanged && statsChanged) historyLabel = L"手动修改人名和战绩";
             else if (namesChanged) historyLabel = L"手动修改人名";
@@ -17876,6 +19432,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                     m_players[mfcIdx].kills = p["kills"].get<int>();
                     m_players[mfcIdx].deaths = p["deaths"].get<int>();
                     m_players[mfcIdx].akCount = p["akCount"].get<int>();
+                    m_players[mfcIdx].currentStreak = (std::max)(0, (int)DnfJNum(p, "currentStreak", m_players[mfcIdx].currentStreak));   // 主界面「连杀」列
 
                     m_players[mfcIdx].aliases.clear();
                     // Web 同步阶段只接收并保存游戏ID，不因为 2 字短 ID 清空选手。
@@ -17901,6 +19458,7 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
                     m_players[mfcIdx].kills = p["kills"].get<int>();
                     m_players[mfcIdx].deaths = p["deaths"].get<int>();
                     m_players[mfcIdx].akCount = p["akCount"].get<int>();
+                    m_players[mfcIdx].currentStreak = (std::max)(0, (int)DnfJNum(p, "currentStreak", m_players[mfcIdx].currentStreak));   // 主界面「连杀」列
 
                     m_players[mfcIdx].aliases.clear();
                     // Web 同步阶段只接收并保存游戏ID，不因为 2 字短 ID 清空选手。
@@ -18400,6 +19958,170 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             std::lock_guard<std::mutex> lock(g_killVoicePlaybackMutex);
             ++g_killVoicePlaybackEpoch;
             ::PlaySoundW(nullptr, nullptr, 0);
+        }
+        else if (action == "cmd_scene_rules_save") {
+            // 主播工具 → 场景规则：保存整套规则（击杀小窗 / 全屏特效窗口按 sceneRulesRev 热更新）
+            if (j.contains("data")) DnfSaveSceneRules(j["data"]);
+        }
+        else if (action == "cmd_scene_rules_test") {
+            if (j.contains("rule")) DnfSetSceneTestRule(j["rule"]);
+        }
+        else if (action == "cmd_scene_reset") {
+            DnfRequestSceneReset(DnfJBool(j, "drought", false), DnfJBool(j, "history", false));
+        }
+        else if (action == "cmd_custom_voice_import") {
+            // 自定义语音：选择本地音频（可多选），复制到 %APPDATA%\DNFGameCapture\custom-voice
+            const DWORD bufferChars = 32768;
+            std::vector<wchar_t> buffer(bufferChars, L'\0');
+            CFileDialog dlg(TRUE, nullptr, nullptr, OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_ALLOWMULTISELECT | OFN_EXPLORER,
+                L"音频文件 (*.wav;*.mp3;*.wma)|*.wav;*.mp3;*.wma||", m_pWebDlg ? (CWnd*)m_pWebDlg : (CWnd*)this);
+            dlg.m_ofn.lpstrFile = buffer.data();
+            dlg.m_ofn.nMaxFile = bufferChars;
+            dlg.m_ofn.lpstrTitle = L"导入自定义语音";
+            if (dlg.DoModal() == IDOK) {
+                int okCount = 0;
+                CString errors;
+                std::string lastId;
+                POSITION pos = dlg.GetStartPosition();
+                while (pos) {
+                    const CString source = dlg.GetNextPathName(pos);
+                    CString error;
+                    const std::wstring name = DnfImportCustomVoiceFile(source, error);
+                    if (name.empty()) {
+                        errors += L"\n" + CString(std::filesystem::path(source.GetString()).filename().wstring().c_str()) + L"：" + error;
+                    }
+                    else {
+                        ++okCount;
+                        lastId = std::string(CW2A(name.c_str(), CP_UTF8));
+                    }
+                }
+                {
+                    std::lock_guard<std::mutex> lock(g_customVoiceMutex);
+                    DnfRefreshCustomVoicesLocked();
+                }
+                CString message;
+                message.Format(L"已导入 %d 个音频", okCount);
+                if (!errors.IsEmpty()) message += L"；以下文件未导入：" + errors;
+                if (m_pWebDlg) {
+                    json reply;
+                    reply["action"] = "custom_voice_result";
+                    reply["ok"] = okCount > 0;
+                    reply["id"] = lastId;
+                    reply["message"] = std::string(CW2A(message, CP_UTF8));
+                    m_pWebDlg->SendStateToWeb(CString(CA2W(reply.dump().c_str(), CP_UTF8)));
+                }
+                BroadcastStateToWeb();
+            }
+        }
+        else if (action == "cmd_custom_voice_delete") {
+            CString path;
+            if (DnfCustomVoicePath(j.value("id", std::string()), path)) {
+                {
+                    std::lock_guard<std::mutex> playbackLock(g_killVoicePlaybackMutex);
+                    ++g_killVoicePlaybackEpoch;
+                    ::PlaySoundW(nullptr, nullptr, 0);
+                }
+                ::Sleep(80); // 等队列线程关闭正在播放的文件
+                ::DeleteFileW(path);
+            }
+            {
+                std::lock_guard<std::mutex> lock(g_customVoiceMutex);
+                DnfRefreshCustomVoicesLocked();
+            }
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_custom_voice_test") {
+            DnfPlayCustomVoice(j.value("id", std::string()), true);
+        }
+        else if (action == "cmd_tts_refresh") {
+            DnfTtsRefreshStatusAsync(true);
+            DnfVoiceLibraryRefreshAsync(true);
+            BroadcastStateToWeb();
+        }
+        else if (action == "cmd_tts_generate" || action == "cmd_voice_library_download") {
+            // 生成（扣主播额度）/ 下载服务器音频库（不计费），存进自定义语音目录；在线程里做，完成后回到 UI 线程通知网页
+            const bool generate = action == "cmd_tts_generate";
+            std::atomic<bool>& busy = generate ? g_ttsGenerating : g_voiceLibraryDownloading;
+            auto fail = [this](const CString& message) {
+                if (!m_pWebDlg) return;
+                json reply{ { "action", "custom_voice_result" }, { "ok", false }, { "id", "" }, { "message", DnfUtf8(message) } };
+                m_pWebDlg->SendStateToWeb(CString(CA2W(reply.dump().c_str(), CP_UTF8)));
+            };
+            do {
+                std::string voice = DnfJStr(j, "voice");
+                std::string text = DnfJStr(j, "text");
+                const std::string sha = DnfJStr(j, "sha256");
+                std::string title = DnfJStr(j, "title");
+                if (generate) {
+                    int maxChars = 30;
+                    { std::lock_guard<std::mutex> lock(g_ttsMutex); maxChars = (int)DnfJNum(g_ttsStatus, "maxTextChars", 30); }
+                    CString trimmed(CA2W(text.c_str(), CP_UTF8));
+                    trimmed.Trim();
+                    text = DnfUtf8(trimmed);
+                    if (voice.empty()) { fail(L"请选择音色"); break; }
+                    if (text.empty()) { fail(L"请输入要生成的文字"); break; }
+                    if ((int)DnfUtf8Chars(text) > maxChars) { CString m; m.Format(L"文字太长：最多 %d 字", maxChars); fail(m); break; }
+                }
+                if (busy.exchange(true)) { fail(generate ? L"上一句还在生成，请稍等" : L"上一个音频还在下载，请稍等"); break; }
+                {
+                    std::string voiceLabel = voice;
+                    {
+                        std::lock_guard<std::mutex> lock(g_ttsMutex);
+                        if (g_ttsStatus.contains("voices") && g_ttsStatus["voices"].is_array())
+                            for (const auto& v : g_ttsStatus["voices"])
+                                if (v.is_object() && DnfJStr(v, "id") == voice) voiceLabel = DnfJStr(v, "label").empty() ? voice : DnfJStr(v, "label");
+                    }
+                    const HWND hwnd = GetSafeHwnd();
+                    BroadcastStateToWeb();
+                    DnfRunDetached([generate, voice, voiceLabel, text, sha, title, hwnd]() {
+                        CString path, error;
+                        bool ok = generate ? DnfTtsSynthesize(voice, text, 15000, path, error) : DnfVoiceLibraryFetch(sha, path, error);
+                        std::string id;
+                        if (ok) {
+                            std::wstring stem = generate
+                                ? std::wstring(CA2W((voiceLabel + "-" + text).c_str(), CP_UTF8))
+                                : std::wstring(CA2W((title.empty() ? sha.substr(0, 8) : title).c_str(), CP_UTF8));
+                            const std::wstring name = DnfSaveCustomVoiceAs(path, stem, error);
+                            ok = !name.empty();
+                            if (ok) id = std::string(CW2A(name.c_str(), CP_UTF8));
+                        }
+                        (generate ? g_ttsGenerating : g_voiceLibraryDownloading) = false;
+                        std::string message;
+                        if (ok) message = DnfUtf8(CString(generate ? L"已生成并加入自定义语音：" : L"已下载到自定义语音：")) + id.substr(0, id.size() - 4) + DnfUtf8(L"，可以在场景规则里选用");
+                        else message = DnfUtf8(error);
+                        DnfPostInternalWebCmd(hwnd, json{ { "action", "internal_custom_voice_done" }, { "ok", ok }, { "id", id }, { "message", message } });
+                    });
+                }
+            } while (false);
+        }
+        else if (action == "cmd_voice_library_preview") {
+            const std::string rawSha = DnfJStr(j, "sha256"), title = DnfJStr(j, "title");
+            DnfRunDetached([rawSha, title]() {
+                CString path, error;
+                const std::string sha = DnfVoiceLibraryResolve(rawSha, title);
+                if (sha.empty() || !DnfVoiceLibraryFetch(sha, path, error)) return;
+                {
+                    std::lock_guard<std::mutex> playbackLock(g_killVoicePlaybackMutex);
+                    ++g_killVoicePlaybackEpoch;
+                    ::PlaySoundW(nullptr, nullptr, 0);
+                }
+                DnfEnqueueVoice(path, g_killVoicePlaybackEpoch.load(), true);
+            });
+        }
+        else if (action == "internal_custom_voice_done") {
+            {
+                std::lock_guard<std::mutex> lock(g_customVoiceMutex);
+                DnfRefreshCustomVoicesLocked();
+            }
+            if (m_pWebDlg) {
+                json reply{ { "action", "custom_voice_result" }, { "ok", DnfJBool(j, "ok", false) }, { "id", DnfJStr(j, "id") },
+                    { "message", DnfJStr(j, "message") } };
+                m_pWebDlg->SendStateToWeb(CString(CA2W(reply.dump().c_str(), CP_UTF8)));
+            }
+            BroadcastStateToWeb();
+        }
+        else if (action == "internal_tts_state") {
+            BroadcastStateToWeb();
         }
         else if (action == "cmd_set_kill_display_visible") {
             // Explicit state is idempotent: retries cannot accidentally reopen a hidden window.
@@ -18924,6 +20646,7 @@ json CDNFGameCaptureDlg::BuildSharedWebMatchSnapshotJson()
         player["kills"] = m_players[i].kills;
         player["deaths"] = m_players[i].deaths;
         player["akCount"] = m_players[i].akCount;
+        player["currentStreak"] = m_players[i].currentStreak;
         player["seatLabel"] = DnfJsonUtf8(GetPickSeatLabelForIndex(i));
         player["aliases"] = json::array();
         for (const auto& alias : m_players[i].aliases) {
@@ -18992,6 +20715,33 @@ json CDNFGameCaptureDlg::DnfBuildKillDisplayStateJson()
 
     data["killDisplaySettings"] = DnfBuildKillDisplaySettingsJson(m_iniPath);
     data["systemFonts"] = DnfBuildInstalledFontListJson();
+    // 场景规则：规则版本号（变化时页面重新拉取）、主窗口「测试」、实时血量与回合血量
+    data["sceneRulesRev"] = g_sceneRulesRev.load();
+    data["sceneTest"] = DnfSceneTestSnapshot();
+    data["sceneReset"] = DnfSceneResetSnapshot();
+    {
+        json hp;
+        hp["left"] = m_bIsRunning ? m_hpPercent[0].load() : -1;
+        hp["right"] = m_bIsRunning ? m_hpPercent[1].load() : -1;
+        DnfRoundHpPublic r;
+        {
+            std::lock_guard<std::mutex> pub(g_roundHpPubMutex);
+            r = g_roundHpPub;
+        }
+        const DWORD now = ::GetTickCount();
+        json roundJson;
+        roundJson["no"] = r.no;
+        roundJson["active"] = r.active;
+        roundJson["start"] = { r.start[0], r.start[1] };
+        roundJson["end"] = { r.end[0], r.end[1] };
+        roundJson["min"] = { r.low[0], r.low[1] };
+        roundJson["winner"] = r.winner;
+        roundJson["startAgoMs"] = r.no > 0 ? (long long)(now - r.startTick) : -1;
+        roundJson["endAgoMs"] = (r.no > 0 && r.endTick != 0) ? (long long)(now - r.endTick) : -1;
+        roundJson["durationMs"] = r.no > 0 ? (long long)((r.endTick != 0 && !r.active ? r.endTick : now) - r.startTick) : -1;
+        hp["round"] = roundJson;
+        data["hp"] = hp;
+    }
     return data;
 }
 
@@ -19021,6 +20771,11 @@ json CDNFGameCaptureDlg::DnfBuildSharedWebStateJson()
     data["killDisplayObsUrl"] = KILL_DISPLAY_OBS_URL_UTF8;
     data["killVoices"] = DnfBuildKillVoicesJson();
     data["killVoiceSync"] = g_voiceCloudCache.Status();
+    data["sceneRules"] = DnfSceneRulesSnapshot();
+    data["customVoices"] = DnfCustomVoicesJson();
+    DnfTtsSetAuth(m_cloudServerAuthV2, m_cloudMatchServerUrl, m_cloudServerSessionToken,
+        std::string(CW2A(GetMachineID(), CP_UTF8)), GetSafeHwnd());
+    data["ttsGen"] = DnfTtsStateJson();
     data["killDisplayHttpReady"] = m_bKillDisplayHttpReady;
     data["killDisplayHttpError"] = DnfJsonUtf8(m_killDisplayHttpError);
     data["killDisplayWindowVisible"] = IsKillDisplayWindowVisible();

@@ -202,12 +202,13 @@ describe('localhost admin console', () => {
     expect(response.body.ban.expiresAt).toBeNull();
   });
 
-  test('serves four authenticated hub entries and isolated workspaces', async () => {
+  test('serves five authenticated hub entries and isolated workspaces', async () => {
     const { app } = createFixture();
     const home = await request(app).get('/admin').auth('admin', adminPassword).expect(200);
     expect([...home.text.matchAll(/<a\b[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/g)]
       .map(match => [match[1], match[2]])).toEqual([
       ['/admin/licenses', '管理密钥'], ['/admin/broadcasters', '管理主播'], ['/admin/library', '管理共享库'], ['/admin/voices', '声音管理'],
+      ['/admin/tts', '语音生成额度'],
     ]);
     for (const id of ['broadcaster-list', 'license-list', 'submission-list', 'submission-dialog']) {
       expect(home.text).not.toContain(`id="${id}"`);
@@ -217,6 +218,7 @@ describe('localhost admin console', () => {
       ['broadcasters', 'broadcaster-list', 'license-list'],
       ['library', 'pending-list', 'license-list'],
       ['voices', 'clips', 'license-list'],
+      ['tts', 'license-body', 'license-list'],
     ]) {
       const path = `/admin/${workspace}`;
       for (const url of [path, path + '/app.js', path + '/style.css']) {

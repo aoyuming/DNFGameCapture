@@ -25,6 +25,8 @@ import {
 } from './player-library.js';
 import { deviceIdSchema, playerNameSchema } from './schemas.js';
 import { activateStoredLicense, disableLicense, LicenseError } from './license-store.js';
+import { TtsQuotaError, type TtsGenerator } from './tts-generate.js';
+import { VoiceError } from './voices.js';
 export { createLicense, listLicenses } from './license-store.js';
 import { listPlayerLibrary, readAutomaticIdentityEvidence } from './library-store.js';
 import { reconcileLibrarySubmission } from './library-submission-reconcile.js';
@@ -69,6 +71,8 @@ export interface V2ApiOptions {
   allowLegacyPermanentKeys?: boolean;
   resolveClientIp?(remoteAddress: string): string;
   attribution?: BroadcasterAttributionService;
+  /** 用户侧豆包语音生成（带额度 / 预算熔断）；不传则不开放 /tts 接口 */
+  tts?: TtsGenerator;
 }
 
 export interface SubmittedPlayerEntity {
@@ -323,6 +327,14 @@ function handleError(
   response: Response,
   _next: NextFunction,
 ): void {
+  if (error instanceof TtsQuotaError) {
+    response.status(error.status).json({ ok: false, code: error.code, ...error.details });
+    return;
+  }
+  if (error instanceof VoiceError) {
+    response.status(error.status).json({ ok: false, code: error.code });
+    return;
+  }
   if (error instanceof V2RequestError || error instanceof LicenseError) {
     response.status(error.status).json({ ok: false, code: error.code,
       ...(error instanceof V2RequestError ? error.details : {}) });
@@ -435,6 +447,32 @@ export function createV2Api(options: V2ApiOptions): Router {
       next(error);
     }
   });
+
+  if (options.tts) {
+    const tts = options.tts;
+    const licenseOf = (request: Request): number =>
+      (request as Request & { v2Session: SessionContext }).v2Session.license.id;
+    router.get('/tts/status', requireSession(options), (request, response, next) => {
+      try {
+        response.json(tts.status(licenseOf(request)));
+      } catch (error) {
+        next(error);
+      }
+    });
+    router.post('/tts/generate', requireSession(options), (request, response, next) => {
+      tts.generate(licenseOf(request), request.body).then(result => {
+        response.json({
+          ok: true,
+          cached: result.cached,
+          voice: result.voiceId,
+          text: result.text,
+          chars: result.chars,
+          usage: result.usage,
+          audio: result.wav.toString('base64'),
+        });
+      }, next);
+    });
+  }
 
   router.use(handleError);
   return router;

@@ -5,14 +5,14 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $ReleaseDir) { $ReleaseDir = Join-Path (Split-Path -Parent $root) 'x64\Release' }
-if (-not $OutputPath) { $OutputPath = Join-Path $root 'deployment-packages\update_v540.zip' }
+if (-not $OutputPath) { $OutputPath = Join-Path $root 'deployment-packages\update_v553.zip' }
 $ReleaseDir = (Resolve-Path -LiteralPath $ReleaseDir).Path
 $OutputPath = [IO.Path]::GetFullPath($OutputPath)
 if (Test-Path -LiteralPath $OutputPath) { throw "Output already exists: $OutputPath" }
 
 $exe = Join-Path $ReleaseDir 'DNFGameCapture.exe'
 $version = (Get-Item -LiteralPath $exe).VersionInfo.FileVersion
-if ($version -ne '5.4.0.0') { throw "Expected EXE version 5.4.0.0, got $version" }
+if ($version -ne '5.5.4.0') { throw "Expected EXE version 5.5.4.0, got $version" }
 $manifestUrl = 'https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/cloud-server-prod.json'
 $binaryText = [Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($exe))
 if (-not $binaryText.Contains($manifestUrl)) { throw 'The executable does not contain the production manifest URL' }
@@ -26,9 +26,26 @@ if ($manifest.environment -ne 'production' -or $manifest.protocolVersion -ne 2 -
 # SQLite databases, compatibility INIs, match state, logs or encrypted leases.
 $files = @('DNFGameCapture.exe', 'WebView2Loader.dll', '7za.exe', 'sprite(击杀大XX).NPK')
 $webFiles = @('autocomplete-worker.js', 'index.html', 'main.js', 'style.css',
-    'keys.css', 'keys.html', 'keys.js', 'kill.css', 'kill.html', 'kill.js')
+    'keys.css', 'keys.html', 'keys.js', 'kill.css', 'kill.html', 'kill.js',
+    'scene-rules.js', 'scene-rules-ui.js', 'scene-rules-ui.css')
 foreach ($name in $webFiles) {
     $files += "web前端\$name"
+}
+# Validate the fixed-phrase archive offline; no API key or synthesis is used.
+& (Join-Path $PSScriptRoot 'generate-kill-voices.ps1') -CheckOnly
+$voiceSourceRoot = Join-Path $root 'web前端\voice'
+$voiceFiles = @(Get-ChildItem -LiteralPath $voiceSourceRoot -Recurse -Filter '*.wav' -File)
+if ($voiceFiles.Count -eq 0) { throw 'Missing bundled voice WAV files' }
+foreach ($source in $voiceFiles) {
+    $suffix = $source.FullName.Substring($voiceSourceRoot.Length).TrimStart('\')
+    $relative = "web前端\voice\$suffix"
+    $releaseVoice = Join-Path $ReleaseDir $relative
+    if (-not (Test-Path -LiteralPath $releaseVoice -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $source.FullName -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $releaseVoice -Algorithm SHA256).Hash) {
+        throw "Missing/outdated release voice; copy the existing source WAV (do not regenerate): $relative"
+    }
+    $files += $relative
 }
 foreach ($relative in $files) {
     if (-not (Test-Path -LiteralPath (Join-Path $ReleaseDir $relative) -PathType Leaf)) {

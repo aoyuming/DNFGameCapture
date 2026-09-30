@@ -1,0 +1,88 @@
+{
+  "board": "https://www.101soundboards.com/boards/28402-classic-announcer-league-of-legends",
+  "voiceId": "lol-announcer",
+  "label": "LOL音效播报",
+  "conversion": "Mono PCM16 WAV, 24000Hz. User-authorized per-clip leading-prompt removal; original speech/tail retained with a 6ms boundary fade-in. Not a new recording or a claim of original-source purity.",
+  "rights": "League of Legends audio belongs to its rights holders; public distribution requires checking applicable permissions. No ownership/license grant is asserted.",
+  "notes": "No dedicated revenge line exists on this board; the slain-an-enemy clip is used. All theme-specific AK slots reuse Ace; all victory slots reuse Victory.",
+  "clips": [
+    {
+      "key": "double",
+      "title": "Double kill",
+      "page": "https://www.101soundboards.com/sounds/473101-double-kill",
+      "download": "https://hoovers.101soundboards.com/sb/board_sounds_rendered/gwowpr.mp3",
+      "mp3Sha256": "bd97e0ed4a995c9eeb7fbce32836fa2c4d217de867d0ea4de4c1081ae2e67ed9",
+      "originalConvertedWavSha256": "5d501c3baee0eb2515a6d464ebedef53116e3963ffeed3846e023156147784a7",
+      "wavSha256": "1e7b0e4c7e069c4b3f3fae7e548b927ae1edc78a761e38e319cafa6da5d8b122",
+      "cutStartSeconds": 0.76,
+      "fadeInMs": 6
+    },
+    {
+      "key": "triple",
+      "title": "Triple kill",
+      "page": "https://www.101soundboards.com/sounds/473131-triple-kill",
+      "download": "https://hoovers.101soundboards.com/sb/board_sounds_rendered/dgogan.mp3",
+      "mp3Sha256": "100942fd7ae1aff0ae3cb29704b9e9c1a71b8a96ae371ac24f148c474168c905",
+      "originalConvertedWavSha256": "d47177691787f3c79538a6aa5412d269810d231fc1fb64a8deeb5af738138090",
+      "wavSha256": "e007ae93257d9029e9ba0e02c57da9c5a3ad16fd7c862197b635ad0a50edf3f9",
+      "cutStartSeconds": 0.96,
+      "fadeInMs": 6
+    },
+    {
+      "key": "first",
+      "title": "First blood",
+      "page": "https://www.101soundboards.com/sounds/473147-first-blood",
+      "download": "https://hoovers.101soundboards.com/sb/board_sounds_rendered/brorll.mp3",
+      "mp3Sha256": "4eaa6f9326624414f8354fc81b1898d27828ee2ebcdb24bf7c0a1c63f3fbee3f",
+      "originalConvertedWavSha256": "801aa552e05913bf4f70f02a52a88c69a728eb1132c7086bb141870aa1e8d74d",
+      "wavSha256": "07461e87fb4696b49237756328f566db4b9ab39fe4acd80f413a934dc246b31b",
+      "cutStartSeconds": 1.38,
+      "fadeInMs": 6
+    },
+    {
+      "key": "shutdown",
+      "title": "Shut down",
+      "page": "https://www.101soundboards.com/sounds/473149-shut-down",
+      "download": "https://hoovers.101soundboards.com/sb/board_sounds_rendered/zjpjlj.mp3",
+      "mp3Sha256": "e0029444fc0cf8926bb2425d99641665fcd8907408792ff28855222bbcaa8b2f",
+      "originalConvertedWavSha256": "a2490138c31d90b0c5b342051edcd8635adde7305d33d3a024848aa548d25513",
+      "wavSha256": "fcdb7720b4b0f13a90b2489c008c2a313288457ef47fba4bbf5355271402d45e",
+      "cutStartSeconds": 1.19,
+      "fadeInMs": 6
+    },
+    {
+      "key": "revenge",
+      "title": "You have slain an enemy",
+      "page": "https://www.101soundboards.com/sounds/473119-you-have-slain-an-enemy",
+      "download": "https://hoovers.101soundboards.com/sb/board_sounds_rendered/xjwjeg.mp3",
+      "mp3Sha256": "e19b5569ed470b3be6ca7a3335e428500d353d75661c12ec4161f1f9bec16c6a",
+      "originalConvertedWavSha256": "b174889d20b0cbaa92241b0cb3600022e9149c7817e41e258c88994d635443ed",
+      "wavSha256": "9b19e3a0fa1e72d2dbf1b98c987e3b0efc88da8d4f66cccf801ee7ad4a643174",
+      "cutStartSeconds": 1.94,
+      "fadeInMs": 6
+    },
+    {
+      "key": "ak",
+      "title": "Ace / Aced (page caption: Based)",
+      "page": "https://www.101soundboards.com/sounds/473097-based",
+      "download": "https://hoovers.101soundboards.com/sb/board_sounds_rendered/oxpxzo.mp3",
+      "mp3Sha256": "03fee45f6d93bc5884d8400e978dbfc5765dbaeca01b94ea8f3efb0c310b879a",
+      "originalConvertedWavSha256": "65a8055bb40438d5dc9dc568717a2625f47ee1cc91dcf97ab2afe2cbd4ebfec7",
+      "wavSha256": "17fc2bd919214ddae8ec3508b7c4df77524d2fa4745ca0b5f1088806e72db59b",
+      "cutStartSeconds": 1.35,
+      "fadeInMs": 6
+    },
+    {
+      "key": "victory",
+      "title": "Victory",
+      "page": "https://www.101soundboards.com/sounds/473209-victory",
+      "download": "https://hoovers.101soundboards.com/sb/board_sounds_rendered/jpgpey.mp3",
+      "mp3Sha256": "4172ec1e334d61da65994d75fb607a5af52679e73bcf96be56d425b3c79399d7",
+      "originalConvertedWavSha256": "3e4187d5b126332cb86e30fe4d42947727be064ad7542ba776b8747561b33038",
+      "wavSha256": "dccc29eb3455103dfff65b218cffca6fecd3f040db3c81c975f5cde66844509a",
+      "cutStartSeconds": 1.77,
+      "fadeInMs": 6
+    }
+  ],
+  "verification": "Waveform boundaries and offline ASR checked; retained samples after the boundary fade are identical to the original. ASR of the short Ace clip is ambiguous; no human listening verification is asserted."
+}

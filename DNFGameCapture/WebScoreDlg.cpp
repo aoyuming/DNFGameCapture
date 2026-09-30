@@ -8,8 +8,10 @@ void WriteMatchLog(const CString& logLine);
 
 namespace {
     // 参考图1的紧凑 CSS 视口尺寸。窗口外框会按当前系统边框自动反推。
-    constexpr int kCompactClientWidth = 1140;
-    constexpr int kExpandedClientWidth = 1400;
+    // 加宽：主界面「连杀」列占了 50 多 px，选手名要保证完整显示「90老王」，
+    // 底部操作坞也不再被 @media(max-width:1140) 藏掉按钮。
+    constexpr int kCompactClientWidth = 1240;
+    constexpr int kExpandedClientWidth = 1450;
     constexpr int kReferenceClientHeight = 700;
     // The sync banner occupies 54 CSS px; leave 10 px of breathing room.
     constexpr int kRealtimeSyncExtraClientHeight = 64;

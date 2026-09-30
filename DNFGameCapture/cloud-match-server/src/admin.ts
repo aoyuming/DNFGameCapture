@@ -1,5 +1,8 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { VoiceStore } from './voices.js';
+import { doubaoSynthesize, VoiceStore } from './voices.js';
+import { TtsGenerator } from './tts-generate.js';
+import { createLibraryAdminApi as createVoiceLibraryAdminApi, VoiceLibrary } from './voice-library.js';
+import { buildTtsAdminPage, createTtsAdminApi, TTS_ADMIN_CSS, TTS_ADMIN_JS } from './tts-admin.js';
 import { createVoiceAdminApi } from './voice-routes.js';
 import { buildVoiceAdminPage, VOICE_ADMIN_CSS, VOICE_ADMIN_JS } from './voice-admin-page.js';
 import type Database from 'better-sqlite3';
@@ -62,6 +65,8 @@ export interface CreateCloudMatchAdminAppOptions {
   socketController: AdminSocketController;
   attribution?: BroadcasterAttributionService;
   voices?: VoiceStore;
+  tts?: TtsGenerator;
+  voiceLibrary?: VoiceLibrary;
 }
 
 const manualLicenseLinkSchema = z.object({
@@ -171,7 +176,10 @@ export function createCloudMatchAdminApp(
     }
     next();
   });
-  app.use('/admin/api/voices', createVoiceAdminApi(options.voices ?? new VoiceStore(db)));
+  const voiceStore = options.voices ?? new VoiceStore(db);
+  app.use('/admin/api/voices', createVoiceAdminApi(voiceStore));
+  app.use('/admin/api/voice-library', createVoiceLibraryAdminApi(options.voiceLibrary ?? new VoiceLibrary(db, voiceStore, doubaoSynthesize, now)));
+  app.use('/admin/api/tts', createTtsAdminApi(options.tts ?? new TtsGenerator(db, voiceStore, doubaoSynthesize, now)));
   app.use('/admin/api/library', createLibraryAdminApi(db, now));
   app.get('/admin/library', (_request, response) => {
     response.type('html').send(buildLibraryAdminPage(csrfToken));
@@ -190,6 +198,7 @@ export function createCloudMatchAdminApp(
   });
   for (const [path, buildPage, css, js] of [
     ['/admin/voices', buildVoiceAdminPage, VOICE_ADMIN_CSS, VOICE_ADMIN_JS],
+    ['/admin/tts', buildTtsAdminPage, TTS_ADMIN_CSS, TTS_ADMIN_JS],
     ['/admin/licenses', buildLicenseAdminPage, LICENSE_ADMIN_CSS, LICENSE_ADMIN_JS],
     ['/admin/broadcasters', buildBroadcasterAdminPage, BROADCASTER_ADMIN_CSS, BROADCASTER_ADMIN_JS],
   ] as const) {

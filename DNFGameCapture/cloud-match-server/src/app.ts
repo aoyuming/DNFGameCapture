@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { createServer, type Server as HttpServer } from 'node:http';
 import express, {
   type Express,
@@ -9,7 +10,9 @@ import express, {
 import { Server as SocketIoServer } from 'socket.io';
 
 import { createCloudMatchAdminApp } from './admin.js';
-import { VoiceStore, type Synthesize } from './voices.js';
+import { doubaoSynthesize, VoiceStore, type Synthesize } from './voices.js';
+import { TtsGenerator, ttsLimitsFromEnv } from './tts-generate.js';
+import { createPublicLibraryRoute, VoiceLibrary } from './voice-library.js';
 import { createPublicVoiceApi } from './voice-routes.js';
 import { createBroadcasterAttributionService } from './broadcaster-attribution.js';
 import { compareRoomSnapshots } from './comparison.js';
@@ -74,6 +77,18 @@ export interface CloudMatchApp {
   close(): Promise<void>;
 }
 
+// 可选：TTS_BLOCKLIST_FILE 指向一个 UTF-8 文本文件，每行一个额外的敏感词（# 开头为注释）。
+function readTtsBlocklist(): string[] {
+  const file = process.env.TTS_BLOCKLIST_FILE?.trim();
+  if (!file) return [];
+  try {
+    return readFileSync(file, 'utf8').split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith('#'));
+  } catch (error) {
+    console.warn('[tts] 无法读取 TTS_BLOCKLIST_FILE：', error instanceof Error ? error.message : error);
+    return [];
+  }
+}
+
 function handleExpressError(
   error: unknown,
   _request: Request,
@@ -136,6 +151,9 @@ export function createCloudMatchApp(
   const db = openDatabase(options.databasePath ?? serverConfig.databasePath);
   const attribution = createBroadcasterAttributionService(db);
   const voices = new VoiceStore(db, options.voiceSynthesize);
+  const tts = new TtsGenerator(db, voices, options.voiceSynthesize ?? doubaoSynthesize, now,
+    ttsLimitsFromEnv(), readTtsBlocklist());
+  const voiceLibrary = new VoiceLibrary(db, voices, options.voiceSynthesize ?? doubaoSynthesize, now);
   initializeSyncRelationSchema(db);
   pruneSyncRelationData(db, now());
   const expressApp = express();
@@ -146,6 +164,7 @@ export function createCloudMatchApp(
   expressApp.get('/health', (_request, response) => {
     response.json({ ok: true });
   });
+  expressApp.get('/api/voice/library', createPublicLibraryRoute(voiceLibrary));
   expressApp.use('/api/voice', createPublicVoiceApi(voices));
   expressApp.use('/api/v2', createV2Api({
     db,
@@ -154,6 +173,7 @@ export function createCloudMatchApp(
     allowLegacyPermanentKeys: options.allowLegacyPermanentKeys ?? serverConfig.allowLegacyPermanentKeys,
     resolveClientIp: (remoteAddress) => resolveClientIp('http', remoteAddress),
     attribution,
+    tts,
   }));
   // Keep the legacy registration endpoint small, while letting the v2
   // player-library router enforce its own larger payload limit.
@@ -201,6 +221,8 @@ export function createCloudMatchApp(
     now,
     csrfToken: adminCsrfToken,
     voices,
+    tts,
+    voiceLibrary,
     adminPassword,
     socketController: socketHandlers,
     attribution,
@@ -225,6 +247,8 @@ export function createCloudMatchApp(
             });
           }
         } finally {
+          tts.close();
+          voiceLibrary.close();
           await voices.close();
           socketHandlers.close();
           if (db.open) {

@@ -89,11 +89,13 @@ let pendingAliasPopoverName = '';
 let pendingAliasPopoverInput = null;
 let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
-const WEB_LAYOUT_VERSION = '20260929-5.5.3-main-actions-3';
+const WEB_LAYOUT_VERSION = '20260930-5.5.4-17';
 const ALIAS_POPOVER_OFFSET_X = 8;
 const CLOUD_MATCH_WEB_THEMES = new Set([
-    'dark-esports', 'frost-broadcast', 'black-gold'
+    'dark-esports', 'frost-broadcast', 'black-gold', 'mist-blue', 'glacier-blue'
 ]);
+// 亮色主题：名字 / 击杀数字需要按底色做对比度修正
+const RD_LIGHT_THEMES = new Set(['frost-broadcast', 'glacier-blue']);
 const KEY_MAPPING_SLOT_COUNT = 14;
 const KEY_MAPPING_DEFAULT_LABELS = ['Q', 'W', 'E', 'R', 'T', 'Y', 'Ctrl', 'A', 'S', 'D', 'F', 'G', 'H', 'Alt'];
 const KEY_MAPPING_DEFAULT_VKS = [81, 87, 69, 82, 84, 89, 17, 65, 83, 68, 70, 71, 72, 18];
@@ -103,6 +105,8 @@ let layoutDiagnosticsTimer = null;
 const randomToolState = {
     fixedIds: new Set(),
     fixedOrder: [],
+    // 固定到哪一组：id → 组下标（0 起）；-1 = 只保证入选、组别随机
+    fixedGroup: new Map(),
     lastResult: null,
     activeSuggestLine: -1
 };
@@ -141,7 +145,7 @@ function applyRealtimeReadOnlyState() {
     const banner = document.getElementById('realtime-readonly-banner');
     if (banner) banner.hidden = !locked;
 
-    document.querySelectorAll('.team-score-input, .name-input, .stat-kill, .stat-death, .stat-ak').forEach(input => {
+    document.querySelectorAll('.team-score-input, .name-input, .stat-kill, .stat-death, .stat-ak, .stat-streak').forEach(input => {
         input.disabled = locked;
         input.setAttribute('aria-disabled', String(locked));
     });
@@ -998,6 +1002,9 @@ if (window.chrome && window.chrome.webview) {
                 bridgeAckReceived = true;
                 console.info('[web bridge] C++ message channel acknowledged');
             }
+            else if (msg.action === 'custom_voice_result') {
+                window.SceneRulesUI?.voiceResult(msg);
+            }
             else if (msg.action === 'sync_state') {
                 hasReceivedInitialData = true;
 
@@ -1018,6 +1025,7 @@ if (window.chrome && window.chrome.webview) {
                 }
                 receivePlayerLibraryState(msg.data);
                 applyStateFromServer(msg.data);
+                try { window.SceneRulesUI?.receive(msg.data.sceneRules); window.SceneRulesUI?.receiveVoices(msg.data.customVoices); window.SceneRulesUI?.receiveTts?.(msg.data.ttsGen); } catch (err) { console.warn('[scene rules]', err); }
                 scheduleLayoutFit(true, 'sync-state');
 
                 if (!restorePendingAliasPopover()) {
@@ -1173,6 +1181,7 @@ function getRowData(row, teamId) {
         kills: parseInt(row.querySelector('.stat-kill').value) || 0,
         deaths: parseInt(row.querySelector('.stat-death').value) || 0,
         akCount: parseInt(row.querySelector('.stat-ak').value) || 0,
+        currentStreak: parseInt(row.querySelector('.stat-streak')?.value) || 0,
         aliases: name ? aliases : []
     };
 }
@@ -1454,7 +1463,9 @@ const KILL_DISPLAY_LAYOUT_DEFAULTS = {
     fxKillDelay: 0, fxKillIn: 0, fxKillMs: 3500,
     fxFsDelay: 0, fxFsIn: 0, fxFsMs: 3500,
     // 语音播报：开关（默认不播放，勾选后才播放）+ 音色序号（音色列表由 C++ 下发 state.killVoices）
-    fxVoiceOn: 0, fxVoice: 0
+    fxVoiceOn: 0, fxVoice: 0,
+    // 台词套：0 = 跟随展示风格；1..9 = 指定某个风格的台词（双杀！/ 双斩 / Double! …）
+    fxVoiceStyle: 0
 };
 
 // 由击杀展示窗口右上角「界面风格」面板维护的字段：主窗口不编辑，但保存时必须原样保留。
@@ -1488,7 +1499,8 @@ const KILL_DISPLAY_LAYOUT_PASSTHROUGH_FIELDS = [
     { key: 'fxFsIn', min: 0, max: 2000 },
     { key: 'fxFsMs', min: 1000, max: 10000 },
     { key: 'fxVoiceOn', min: 0, max: 1 },
-    { key: 'fxVoice', min: 0, max: 65535 }
+    { key: 'fxVoice', min: 0, max: 65535 },
+    { key: 'fxVoiceStyle', min: 0, max: 9 }
 ];
 
 const KILL_DISPLAY_LAYOUT_FIELDS = [
@@ -1824,7 +1836,7 @@ const FX_MANAGER_KEYS = [
     'fxEvtDouble', 'fxEvtTriple', 'fxEvtFirst', 'fxEvtShutdown', 'fxEvtRevenge', 'fxEvtAk', 'fxEvtVictory',
     'fxTextDelay', 'fxTextIn', 'fxTextMs', 'fxKillDelay', 'fxKillIn', 'fxKillMs',
     'fxFsDelay', 'fxFsIn', 'fxFsMs', 'fxFullscreenScale',
-    'fxVoiceOn', 'fxVoice'
+    'fxVoiceOn', 'fxVoice', 'fxVoiceStyle'
 ];
 // 云端音色列表由 C++ 缓存并下发；未连接前仅显示自动与本机离线语音。
 let killVoices = [
@@ -1849,6 +1861,8 @@ function renderFxVoiceOptions(layout) {
     }
     const current = killVoices.some(v => v.index === layout.fxVoice) ? layout.fxVoice : (killVoices[0]?.index ?? 0);
     if (document.activeElement !== select) select.value = String(current);
+    const style = document.getElementById('fxm-voice-style');
+    if (style && document.activeElement !== style) style.value = String(layout.fxVoiceStyle || 0);
     const preview = document.getElementById('fxm-preview-voice');
     if (preview && preview.dataset.signature !== signature) {
         const previous = preview.value;
@@ -1860,7 +1874,7 @@ function renderFxVoiceOptions(layout) {
 }
 
 function selectStreamerToolsTab(tab, focus = false) {
-    if (!['display', 'effects', 'voice'].includes(tab)) return;
+    if (!['display', 'effects', 'voice', 'rules'].includes(tab)) return;
     streamerToolsTab = tab;
     document.querySelectorAll('[data-streamer-tab]').forEach(button => {
         const active = button.dataset.streamerTab === tab;
@@ -1870,13 +1884,14 @@ function selectStreamerToolsTab(tab, focus = false) {
     });
     document.querySelectorAll('[data-streamer-pane]').forEach(pane => { pane.hidden = pane.dataset.streamerPane !== tab; });
     const reset = document.getElementById('btn-fx-manager-reset');
-    if (reset) reset.hidden = tab === 'display';
+    if (reset) reset.hidden = tab === 'display' || tab === 'rules';
 }
 
 function getVoicePreviewSelection(layout) {
     const ui = Number(document.getElementById('fxm-preview-skin')?.value ?? -1);
     const selectedVoice = Number(document.getElementById('fxm-preview-voice')?.value ?? -1);
-    const skin = Number.isInteger(ui) && ui >= 0 && ui <= 8 ? ui : layout.skin;
+    const styleSkin = layout.fxVoiceStyle >= 1 && layout.fxVoiceStyle <= 9 ? layout.fxVoiceStyle - 1 : layout.skin;
+    const skin = Number.isInteger(ui) && ui >= 0 && ui <= 8 ? ui : styleSkin;
     const voice = killVoices.some(v => v.index === selectedVoice) ? selectedVoice : layout.fxVoice;
     const candidate = document.getElementById('fxm-preview-event')?.value;
     const event = ['double', 'triple', 'first', 'shutdown', 'revenge', 'ak', 'victory'].includes(candidate) ? candidate : 'victory';
@@ -1938,6 +1953,8 @@ function setFxManagerValue(key, value) {
     killDisplaySettings.layout[key] = value;
     applyKillDisplaySettings(killDisplaySettings);
     queueKillDisplaySettingsSync();
+    // 触发事件勾选 = 场景规则里对应预设的开关（双向同步）
+    if (/^fxEvt/.test(key)) window.SceneRulesUI?.onEventToggle(key, value);
 }
 
 function openFxManager() {
@@ -1963,6 +1980,7 @@ function resetFxManagerDefaults() {
     FX_MANAGER_KEYS.forEach(key => { killDisplaySettings.layout[key] = KILL_DISPLAY_LAYOUT_DEFAULTS[key]; });
     applyKillDisplaySettings(killDisplaySettings);
     queueKillDisplaySettingsSync();
+    window.SceneRulesUI?.syncFromLayout();
 }
 
 function initFxManager() {
@@ -1998,14 +2016,18 @@ function initFxManager() {
     document.getElementById('fxm-voice-select')?.addEventListener('change', function () {
         setFxManagerValue('fxVoice', clampNumber(this.value, 0, 65535, 0));
     });
+    document.getElementById('fxm-voice-style')?.addEventListener('change', function () {
+        setFxManagerValue('fxVoiceStyle', clampNumber(this.value, 0, 9, 0));
+    });
     panel.querySelectorAll('[data-streamer-tab]').forEach(button => {
         button.addEventListener('click', () => selectStreamerToolsTab(button.dataset.streamerTab));
         button.addEventListener('keydown', event => {
-            const tabs = ['display', 'effects', 'voice'];
+            const tabs = ['display', 'effects', 'voice', 'rules'];
             if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
             event.preventDefault();
             const index = tabs.indexOf(button.dataset.streamerTab);
-            const next = event.key === 'Home' ? 0 : event.key === 'End' ? 2 : (index + (event.key === 'ArrowRight' ? 1 : 2)) % 3;
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+                : (index + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length;
             selectStreamerToolsTab(tabs[next], true);
         });
     });
@@ -2506,7 +2528,8 @@ function getRandomGroupRowData(row) {
         errorMsg: nameElem?.getAttribute('data-error-msg') || '',
         kills: row.querySelector('.stat-kill')?.value || '0',
         deaths: row.querySelector('.stat-death')?.value || '0',
-        akCount: row.querySelector('.stat-ak')?.value || '-'
+        akCount: row.querySelector('.stat-ak')?.value || '-',
+        currentStreak: row.querySelector('.stat-streak')?.value || '0'
     };
 }
 
@@ -2521,6 +2544,8 @@ function setRandomGroupRowData(row, data) {
     row.querySelector('.stat-kill').value = data?.kills || '0';
     row.querySelector('.stat-death').value = data?.deaths || '0';
     row.querySelector('.stat-ak').value = data?.akCount || '-';
+    const streak = row.querySelector('.stat-streak');
+    if (streak) streak.value = data?.currentStreak || '0';
 }
 
 function shuffleInPlace(items) {
@@ -2553,7 +2578,8 @@ function cloneRandomRowData(data) {
         errorMsg: data?.errorMsg || '',
         kills: data?.kills || '0',
         deaths: data?.deaths || '0',
-        akCount: data?.akCount || '-'
+        akCount: data?.akCount || '-',
+        currentStreak: data?.currentStreak || '0'
     };
 }
 
@@ -2565,7 +2591,8 @@ function makeRandomRowData(name, seatNumber = '') {
         errorMsg: '',
         kills: '0',
         deaths: '0',
-        akCount: '-'
+        akCount: '-',
+        currentStreak: '0'
     };
 }
 
@@ -2793,18 +2820,34 @@ function syncRandomFixedState(participants) {
     const ids = new Set(participants.map(p => p.id));
     randomToolState.fixedOrder = randomToolState.fixedOrder.filter(id => ids.has(id));
     randomToolState.fixedIds = new Set(randomToolState.fixedOrder);
+    for (const id of [...randomToolState.fixedGroup.keys()]) {
+        if (!randomToolState.fixedIds.has(id)) randomToolState.fixedGroup.delete(id);
+    }
 }
 
-function toggleRandomFixed(id) {
-    if (randomToolState.fixedIds.has(id)) {
+// value：'' = 不固定；'-1' = 固定入选、组别随机；'0'…'N-1' = 固定到第 N 组
+function setRandomFixed(id, value) {
+    if (!id) return;
+    const group = value === '' ? null : Number(value);
+    if (group === null || !Number.isInteger(group)) {
         randomToolState.fixedIds.delete(id);
         randomToolState.fixedOrder = randomToolState.fixedOrder.filter(item => item !== id);
+        randomToolState.fixedGroup.delete(id);
     } else {
-        randomToolState.fixedIds.add(id);
-        randomToolState.fixedOrder.push(id);
+        if (!randomToolState.fixedIds.has(id)) {
+            randomToolState.fixedIds.add(id);
+            randomToolState.fixedOrder.push(id);
+        }
+        randomToolState.fixedGroup.set(id, group >= 0 ? group : -1);
     }
     invalidateRandomToolResult('固定人员已更新，请重新随机分组。');
     renderRandomParticipants();
+}
+
+// 「分成几组」输入框当前的组数；非法输入按默认 2 组显示固定选项
+function getRandomGroupCountInput() {
+    const value = Number((document.getElementById('random-group-sizes')?.value || '').trim());
+    return Number.isInteger(value) && value > 0 ? Math.min(value, 50) : 2;
 }
 
 function renderRandomParticipants() {
@@ -2818,16 +2861,24 @@ function renderRandomParticipants() {
         list.innerHTML = '<div class="random-empty">暂无参与人员。</div>';
         return;
     }
+    const groupCount = getRandomGroupCountInput();
     list.innerHTML = participants.map(p => {
         const fixed = randomToolState.fixedIds.has(p.id);
+        const group = fixed ? (randomToolState.fixedGroup.get(p.id) ?? -1) : null;
+        const optionCount = Math.max(groupCount, Number.isInteger(group) ? group + 1 : 0);
+        const options = ['<option value="">不固定</option>', '<option value="-1">固定·组随机</option>'];
+        for (let g = 0; g < optionCount; g++) {
+            options.push(`<option value="${g}">固定到 ${g + 1} 组${g >= groupCount ? '（超出组数）' : ''}</option>`);
+        }
         return `<div class="random-participant-row">
             <span class="random-person-name" title="${escapeHtml(p.label)}">${escapeHtml(p.label)}</span>
             <span class="random-person-meta">${escapeHtml(p.meta || '')}</span>
-            <button class="random-fixed-btn${fixed ? ' active' : ''}" data-id="${escapeHtml(p.id)}">${fixed ? '已固定' : '固定'}</button>
+            <select class="random-fixed-select${fixed ? ' active' : ''}" data-id="${escapeHtml(p.id)}" data-value="${fixed ? group : ''}" title="固定此人：只保证入选，或指定分到哪一组" aria-label="固定 ${escapeHtml(p.label)}">${options.join('')}</select>
         </div>`;
     }).join('');
-    list.querySelectorAll('.random-fixed-btn').forEach(btn => {
-        btn.addEventListener('click', () => toggleRandomFixed(btn.getAttribute('data-id') || ''));
+    list.querySelectorAll('.random-fixed-select').forEach(select => {
+        select.value = select.dataset.value || '';
+        select.addEventListener('change', () => setRandomFixed(select.getAttribute('data-id') || '', select.value));
     });
 }
 
@@ -2905,9 +2956,36 @@ function buildRandomGrouping(participants, sizes) {
         };
     }
 
-    const slots = buildRandomSlotOrder(sizes);
-    const groups = sizes.map(() => []);
-    const selected = [...fixed, ...randomPool.slice(0, capacity - fixed.length)];
+    // 先把指定了组的人放进对应组；其余固定的人（组随机）和随机池再按剩余名额轮流填满。
+    const groupCount = sizes.length;
+    const pinned = sizes.map(() => []);
+    const floating = [];
+    for (const participant of fixed) {
+        const group = randomToolState.fixedGroup.get(participant.id);
+        if (!Number.isInteger(group) || group < 0) { floating.push(participant); continue; }
+        if (group >= groupCount) {
+            return { error: `${formatRandomParticipant(participant)} 固定在 ${group + 1} 组，但当前只分 ${groupCount} 组。` };
+        }
+        pinned[group].push(participant);
+    }
+    // 组的人数（如 5 人分 2 组 = 3 + 2）优先把较大的名额给固定人数多的组；并列时保持随机。
+    let finalSizes = sizes;
+    if (pinned.some(list => list.length)) {
+        const sortedSizes = [...sizes].sort((a, b) => b - a);
+        const order = shuffleInPlace(Array.from({ length: groupCount }, (_, idx) => idx))
+            .sort((a, b) => pinned[b].length - pinned[a].length);
+        finalSizes = Array(groupCount);
+        order.forEach((groupIdx, k) => { finalSizes[groupIdx] = sortedSizes[k]; });
+    }
+    for (let g = 0; g < groupCount; g++) {
+        if (pinned[g].length > finalSizes[g]) {
+            return { error: `${g + 1}组固定了 ${pinned[g].length} 人，超过该组名额 ${finalSizes[g]} 人。` };
+        }
+    }
+    const groups = pinned.map(list => [...list]);
+    const slots = buildRandomSlotOrder(finalSizes.map((size, g) => size - pinned[g].length));
+    const openCount = slots.length;
+    const selected = [...floating, ...randomPool.slice(0, Math.max(0, openCount - floating.length))];
     selected.forEach((participant, idx) => {
         const groupIdx = slots[idx];
         if (Number.isInteger(groupIdx)) groups[groupIdx].push(participant);
@@ -2915,8 +2993,8 @@ function buildRandomGrouping(participants, sizes) {
     return {
         type: 'groups',
         groups,
-        leftover: randomPool.slice(Math.max(0, capacity - fixed.length)),
-        sizes,
+        leftover: randomPool.slice(Math.max(0, openCount - floating.length)),
+        sizes: finalSizes,
         fixedCount: fixed.length
     };
 }
@@ -4985,6 +5063,8 @@ function applyStateFromServer(state) {
             row.querySelector('.stat-kill').value = '0';
             row.querySelector('.stat-death').value = '0';
             row.querySelector('.stat-ak').value = '-';
+            const streak = row.querySelector('.stat-streak');
+            if (streak) streak.value = '0';
         });
         resetSeatLabelsToDefault();
         isSyncingFromServer = false;
@@ -5011,11 +5091,66 @@ function applyStateFromServer(state) {
         row.querySelector('.stat-kill').value = p.kills;
         row.querySelector('.stat-death').value = p.deaths;
         row.querySelector('.stat-ak').value = p.akCount === 0 ? '-' : p.akCount;
+        const streak = row.querySelector('.stat-streak');
+        if (streak && document.activeElement !== streak) streak.value = Number(p.currentStreak) || 0;
     });
+    rememberScoresForStreakPrompt();
     refreshPickLabels();
     isSyncingFromServer = false;
     updateStartButtonGuard();
     applyRealtimeReadOnlyState();
+}
+
+// 手动改大比分后询问是否清零所有选手的连杀：停手约 1 秒后问一次；程序识别 / 同步带来的比分变化不问
+let streakPromptTimer = 0;
+let streakPromptScores = '';
+function currentScoreKey() {
+    return (document.querySelector('#team-red .team-score-input')?.value || '0') + ':' + (document.querySelector('#team-blue .team-score-input')?.value || '0');
+}
+function rememberScoresForStreakPrompt() {
+    if (!streakPromptTimer) streakPromptScores = currentScoreKey();
+}
+function watchScoreForStreakPrompt(input) {
+    const check = () => setTimeout(() => {
+        if (currentScoreKey() === streakPromptScores) return;
+        clearTimeout(streakPromptTimer);
+        streakPromptTimer = setTimeout(askResetStreaks, 1000);
+    }, 0);
+    ['mousedown', 'wheel', 'keyup', 'blur', 'change'].forEach(ev => input.addEventListener(ev, check));
+    input.addEventListener('focus', () => { if (!streakPromptTimer) streakPromptScores = currentScoreKey(); });
+}
+function askResetStreaks() {
+    if (document.activeElement?.classList?.contains('team-score-input')) {   // 还在改：失焦或停手后再问
+        streakPromptTimer = setTimeout(askResetStreaks, 800);
+        return;
+    }
+    if (customModal.classList.contains('active')) { streakPromptTimer = setTimeout(askResetStreaks, 800); return; }
+    streakPromptTimer = 0;
+    const scores = currentScoreKey();
+    if (scores === streakPromptScores) return;
+    streakPromptScores = scores;
+    const hasStreak = [...document.querySelectorAll('.stat-streak')].some(i => (parseInt(i.value) || 0) > 0);
+    // 比分变了 = 新的一局：场景规则里的「选手存活」一律全部复活；其他记录由主播勾选
+    const row = (id, label, checked, hint) => `<label style="display:flex;gap:8px;align-items:flex-start;text-align:left;margin:6px 0;cursor:pointer">`
+        + `<input type="checkbox" id="${id}"${checked ? ' checked' : ''} style="margin-top:3px">`
+        + `<span>${label}${hint ? `<br><small style="opacity:.65">${hint}</small>` : ''}</span></label>`;
+    const html = `比分已手动改为 <b>${scores.replace(':', ' : ')}</b>（红 : 蓝），要同步调整哪些数据？`
+        + `<div style="margin:12px auto 0;max-width:360px">`
+        + (hasStreak ? row('adj-streak', '所有选手<b>连杀</b>清零', true, '主界面「连杀」列和击杀特效的连杀数') : '')
+        + row('adj-drought', '「连续阵亡没人头」次数清零', false, '场景规则「连死 N 次没人头」用的计数')
+        + row('adj-history', '清空本场击杀记录、一血和复仇记录', false, '当作新的一场：「上一次 / 本场第 N 次击杀」、一血、复仇重新算')
+        + `<div style="text-align:left;margin-top:8px;font-size:12px;opacity:.65">场上选手会按新的一局全部算作存活（场景规则「选手存活状态」）。</div></div>`;
+    showConfirm(html, res => {
+        const streak = !!document.getElementById('adj-streak')?.checked;
+        const drought = !!document.getElementById('adj-drought')?.checked;
+        const history = !!document.getElementById('adj-history')?.checked;
+        if (res && streak) {
+            document.querySelectorAll('.stat-streak').forEach(i => { i.value = '0'; });
+            triggerSync();
+        }
+        // 不管选没选，都通知展示窗口：比分变了，全部复活
+        window.chrome?.webview?.postMessage({ action: 'cmd_scene_reset', drought: !!res && drought, history: !!res && history });
+    }, { okText: '应用', cancelText: '都不调整' });
 }
 
 const triggerSync = () => {
@@ -6554,6 +6689,7 @@ function createPlayerRow(seatNumber = '') {
             <div class="stat-item"><input type="text" class="stat-kill" value="0"></div>
             <div class="stat-item"><input type="text" class="stat-death" value="0"></div>
             <div class="stat-item"><input type="text" class="stat-ak" value="-"></div>
+            <div class="stat-item"><input type="text" class="stat-streak" value="0" title="当前连杀（手动改比分时可选择清零）"></div>
         </div>`;
 
     const nameInput = row.querySelector('.name-input');
@@ -6570,6 +6706,7 @@ function createPlayerRow(seatNumber = '') {
     bindProNumberControls(row.querySelector('.stat-kill'));
     bindProNumberControls(row.querySelector('.stat-death'));
     bindProNumberControls(row.querySelector('.stat-ak'), true);
+    bindProNumberControls(row.querySelector('.stat-streak'));
 
     const seatInput = row.querySelector('.seat-label-input');
     seatInput.addEventListener('focus', function () {
@@ -7381,7 +7518,7 @@ for (let i = 0; i < 4; i++) {
 refreshPickLabels();
 applyRealtimeReadOnlyState();
 
-document.querySelectorAll('.team-score-input').forEach(input => { input.type = 'text'; bindProNumberControls(input); });
+document.querySelectorAll('.team-score-input').forEach(input => { input.type = 'text'; bindProNumberControls(input); watchScoreForStreakPrompt(input); });
 updateStartButtonGuard();
 
 document.addEventListener('click', (e) => {
@@ -7900,6 +8037,7 @@ randomRosterInput?.addEventListener('blur', () => {
 });
 document.getElementById('random-group-sizes')?.addEventListener('input', () => {
     invalidateRandomToolResult('分组数量已更新，请重新随机。');
+    renderRandomParticipants();
 });
 document.getElementById('random-draw-count')?.addEventListener('input', () => {
     invalidateRandomToolResult('抽签人数已更新，请重新抽签或随机分组。');
@@ -7932,7 +8070,7 @@ function clearAllTeamsData() {
         input.classList.remove('input-error');
         input.removeAttribute('data-error-msg');
     });
-    document.querySelectorAll('.stat-kill, .stat-death').forEach(input => input.value = '0');
+    document.querySelectorAll('.stat-kill, .stat-death, .stat-streak').forEach(input => input.value = '0');
     document.querySelectorAll('.stat-ak').forEach(input => input.value = '-');
     document.querySelectorAll('.team-score-input').forEach(input => input.value = '0');
     resetSeatNumbers();
@@ -7962,7 +8100,7 @@ document.getElementById('btn-reset').addEventListener('click', () => {
     if (cloudMatchState?.realtimeFollowing === true) return;
     showConfirm('确定重置所有战绩吗？', (res) => {
         if (res) {
-            document.querySelectorAll('.stat-kill, .stat-death').forEach(i => i.value = '0');
+            document.querySelectorAll('.stat-kill, .stat-death, .stat-streak').forEach(i => i.value = '0');
             document.querySelectorAll('.stat-ak').forEach(i => i.value = '-');
             document.querySelectorAll('.team-score-input').forEach(i => i.value = '0');
             resetSeatLabelsToDefault();
@@ -8000,7 +8138,7 @@ document.addEventListener('keydown', event => {
 }, true);
 
 // 1) 先把所有战绩输入框的 Tab 顺序移除，这样 Tab 永远跳不到它们
-document.querySelectorAll('.stat-kill, .stat-death, .stat-ak').forEach(inp => {
+document.querySelectorAll('.stat-kill, .stat-death, .stat-ak, .stat-streak').forEach(inp => {
     inp.setAttribute('tabindex', '-1');
 });
 
@@ -8240,7 +8378,10 @@ setTimeout(() => scheduleLayoutFit(true, 'startup-300ms'), 300);
     }
 
     // 外观面板里的主题下拉框与顶栏切换使用同一套名称（value 不变）。
-    const rdThemeNames = { 'dark-esports': '夜幕导播台', 'frost-broadcast': '晨光简约', 'black-gold': '阿拉德金纹' };
+    const rdThemeNames = {
+        'dark-esports': '深空导播台', 'black-gold': '青玉白银', 'mist-blue': '雾蓝暮色',
+        'glacier-blue': '冰川淡蓝', 'frost-broadcast': '晨光暖白'
+    };
     document.querySelectorAll('#web-theme-select option').forEach(option => {
         if (rdThemeNames[option.value]) option.textContent = rdThemeNames[option.value];
     });
@@ -8586,7 +8727,7 @@ setTimeout(() => scheduleLayoutFit(true, 'startup-300ms'), 300);
 
     function rdUpdateContrast() {
         const root = document.documentElement;
-        if (root.dataset.theme !== 'frost-broadcast') {
+        if (!RD_LIGHT_THEMES.has(root.dataset.theme)) {
             if (rdContrastKey) {
                 root.classList.remove('rd-fix-name', 'rd-fix-stat', 'rd-fix-header');
                 rdContrastKey = '';

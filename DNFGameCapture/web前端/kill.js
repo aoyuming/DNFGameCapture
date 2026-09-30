@@ -1,6 +1,13 @@
 const KILL_STATE_URL = 'http://127.0.0.1:18777/api/state';
 const KILL_VOICE_URL = 'http://127.0.0.1:18777/api/voice/play';
 const KILL_SETTINGS_URL = 'http://127.0.0.1:18777/api/kill-display-settings';
+// 场景规则（scene-rules.js 提供规则定义与匹配；SceneRuntime 负责从主程序加载 / 热更新规则）
+const SCENE_RULES_URL = 'http://127.0.0.1:18777/api/scene-rules';
+const KILL_SAY_URL = 'http://127.0.0.1:18777/api/voice/say';
+const KILL_VOICE_FILE_URL = 'http://127.0.0.1:18777/api/voice/file';
+const KILL_TTS_URL = 'http://127.0.0.1:18777/api/voice/tts';
+const KILL_LIB_URL = 'http://127.0.0.1:18777/api/voice/lib';
+let SceneRuntime = null;
 // 全屏特效窗口（C++ CKillFxDlg）以 kill.html?mode=fx 打开同一页面：只渲染特效层，记分板隐藏。
 const KILL_FX_FULLSCREEN = /(?:^|[?&])mode=fx(?:&|$)/.test(location.search);
 if (KILL_FX_FULLSCREEN) document.documentElement.classList.add('kill-fx-fullscreen');
@@ -73,7 +80,7 @@ const KILL_DISPLAY_LAYOUT_DEFAULTS = {
     fxTextDelay: 0, fxTextIn: 0, fxTextMs: 3500,
     fxKillDelay: 0, fxKillIn: 0, fxKillMs: 3500,
     fxFsDelay: 0, fxFsIn: 0, fxFsMs: 3500,
-    fxVoiceOn: 0, fxVoice: 0,
+    fxVoiceOn: 0, fxVoice: 0, fxVoiceStyle: 0,
     showDeathNumber: 1,
     bgAlpha: 0,
     panelAlpha: 31,
@@ -123,7 +130,7 @@ const KILL_DISPLAY_LAYOUT_LIMITS = {
     fxTextDelay: [0, 5000], fxTextIn: [0, 2000], fxTextMs: [1000, 10000],
     fxKillDelay: [0, 5000], fxKillIn: [0, 2000], fxKillMs: [1000, 10000],
     fxFsDelay: [0, 5000], fxFsIn: [0, 2000], fxFsMs: [1000, 10000],
-    fxVoiceOn: [0, 1], fxVoice: [0, 65535],
+    fxVoiceOn: [0, 1], fxVoice: [0, 65535], fxVoiceStyle: [0, 9],
     showDeathNumber: [0, 1],
     bgAlpha: [0, 100],
     panelAlpha: [0, 100],
@@ -1816,18 +1823,18 @@ const KillFx = (() => {
         }
         return '';
     }
-    function ak(team, idx, name) {
+    function ak(team, idx, name, ov = null) {
         if (cur.dur) { // 按持续时间整体缩放 AK 编排（默认 4.3 秒）
             const c2 = { host: cur.host, k: Math.max(0.3, Math.min(3, cur.dur / 4300)), dur: 0 };
-            withCtx(c2, () => ak(team, idx, name));
+            withCtx(c2, () => ak(team, idx, name, ov));
             return;
         }
         const wrap = div('fx-ak' + (theme.bands ? ' bands' : ''));
         const flash = ['ink', 'glass', 'broadcast'].includes(skin) ? '' : '<div class="fx-flash"></div>';
         wrap.innerHTML = `<div class="fx-ak-dim"></div><div class="fx-ak-band t"></div><div class="fx-ak-band b"></div>
             ${akDeco(team)}
-            <div class="fx-ak-core"><div class="fx-ak-text" data-text="${esc(theme.akText)}">${esc(theme.akText)}</div>
-            <div class="fx-ak-sub"><b>${esc(name)}</b> ${esc(theme.akSub)}</div>${theme.akEn ? `<div class="fx-ak-en">${esc(theme.akEn)}</div>` : ''}</div>
+            <div class="fx-ak-core"><div class="fx-ak-text" data-text="${esc(ov?.title || theme.akText)}">${esc(ov?.title || theme.akText)}</div>
+            <div class="fx-ak-sub"><b>${esc(name)}</b> ${esc(ov?.sub || theme.akSub)}</div>${theme.akEn ? `<div class="fx-ak-en">${esc(theme.akEn)}</div>` : ''}</div>
             ${skin === 'ink' ? '<div class="fx-ak-seal">团灭</div>' : ''}${flash}`;
         add(wrap, 4300);
         const { cx, cy } = center();
@@ -1851,7 +1858,15 @@ const KillFx = (() => {
     // 每种大场面对应「特效管理」里的触发事件开关
     const EVENT_KEY = { 2: 'fxEvtDouble', 3: 'fxEvtTriple', first: 'fxEvtFirst', shutdown: 'fxEvtShutdown', revenge: 'fxEvtRevenge', ak: 'fxEvtAk', victory: 'fxEvtVictory' };
 
-    function play({ team = 'red', killerRow = 0, victimRow = 0, level = 1, name = '', victim = '' }) {
+    // 复仇被双杀 / 三杀 / AK 等更高优先级盖住时，主特效播完再追加一次短促的复仇（水墨风格为「雪耻」）
+    const REVENGE_FOLLOW_MS = 1500;
+
+    // 场景规则扩展：
+    //   scene   = 规则动作 { effect, style, title, sub, voice, voiceText, durationMs }（文字已替换好变量）；
+    //   follows = 主特效之后追加播放 [{ level, scene, ms }]；ruled = 由场景规则决定（不再看「触发事件」勾选）；
+    //   kind    = 'scene' 表示血量 / 每局开始等非击杀事件：没有击杀行，不播文字特效。
+    function play({ team = 'red', killerRow = 0, victimRow = 0, level = 1, name = '', victim = '', revengeAfter = false,
+        scene = null, follows = null, ruled = false, kind = 'kill' }) {
         if (!enabled) return;
         syncSkin();
         layer.style.setProperty('--fx-team', TEAM_RGB[team]);
@@ -1860,39 +1875,83 @@ const KillFx = (() => {
         if (level === 'victory') cancelVoiceRequests();
 
         // 文字特效（行高亮 / +1 / 数字跳动 / 刀光 / 阵亡标记）：只在击杀小窗播放
-        if (level !== 'victory' && !KILL_FX_FULLSCREEN && L.fxTextOn !== 0) {
+        if (kind !== 'scene' && level !== 'victory' && !KILL_FX_FULLSCREEN && L.fxTextOn !== 0) {
             group(L.fxTextDelay, L.fxTextIn, L.fxTextMs, () => {
                 if (level === 'ak') rowHit(team, killerRow, 3, 1800);
                 else rowHit(team, killerRow, typeof level === 'string' ? 1 : level, level === 1 ? 1500 : 2000);
                 rowDead(enemy, victimRow);
             });
         }
-        if (level === 1) return;
 
         // 击杀特效（横幅 / AK / 粒子）：全屏窗口开启时只在全屏窗口播放，小窗不再触发
-        const eventOn = L[EVENT_KEY[level]] !== 0;
-        const bigOn = eventOn && (KILL_FX_FULLSCREEN || (L.fxKillOn !== 0 && L.fxFullscreen !== 1));
-        if (bigOn) {
-            const [d, i, u] = KILL_FX_FULLSCREEN ? [L.fxFsDelay, L.fxFsIn, L.fxFsMs] : [L.fxKillDelay, L.fxKillIn, L.fxKillMs];
-            group(d, i, u, () => playBig(team, killerRow, level, name, victim));
+        const ownsBig = KILL_FX_FULLSCREEN || (L.fxKillOn !== 0 && L.fxFullscreen !== 1);
+        // 语音由负责大场面的窗口请求（全屏特效开启时 = 全屏窗口，否则 = 击杀小窗），不会重复朗读；
+        // 只在软件内置窗口里触发（OBS 浏览器源里没有 chrome.webview，不播）。
+        const ownsVoice = L.fxVoiceOn === 1 && !!window.chrome?.webview && (KILL_FX_FULLSCREEN || L.fxFullscreen !== 1);
+        const [d, i, u0] = KILL_FX_FULLSCREEN ? [L.fxFsDelay, L.fxFsIn, L.fxFsMs] : [L.fxKillDelay, L.fxKillIn, L.fxKillMs];
+        const u = scene && scene.durationMs > 0 ? scene.durationMs : u0;
+        const delay = Math.max(0, Number(d) || 0);
+        const hasBig = level !== 1 && level !== 0;
+        const eventOn = ruled || L[EVENT_KEY[level]] !== 0;
+        if (hasBig && eventOn && ownsBig) {
+            group(d, i, u, () => playBig(team, killerRow, level, name, victim, scene));
         } else if (level === 'ak' && !KILL_FX_FULLSCREEN) {
             // 小窗不播 AK 大场面时，仍给 AK 标记加上常亮光效
             setTimeout(() => rowOf(team, killerRow)?.querySelector('.kill-ak-mark')?.classList.add('fx-ak-glow'), 600);
         }
 
-        // 语音播报（双杀 / 三杀 / 一血 / 终结 / 复仇 / AK）：读当前风格横幅上的文字（C++ 按 event + skin 选词）。
-        // 由负责大场面的窗口请求（全屏特效开启时 = 全屏窗口，否则 = 击杀小窗），不会重复朗读；
-        // 只在软件内置窗口里触发（OBS 浏览器源里没有 chrome.webview，不播）。
-        const voiceEvent = VOICE_EVENT[level];
-        if (voiceEvent && eventOn && L.fxVoiceOn === 1 && window.chrome?.webview
-            && (KILL_FX_FULLSCREEN || L.fxFullscreen !== 1)) {
-            const delay = Math.max(0, Number(KILL_FX_FULLSCREEN ? L.fxFsDelay : L.fxKillDelay) || 0);
-            const voiceSkin = skin;
-            scheduleKillVoice(voiceEvent, voiceSkin, L.fxVoice, delay);
+        // 语音播报：默认读当前风格横幅上的文字（C++ 按 event + skin 选词）；场景规则可改成别的台词或自定义文字
+        if (eventOn && ownsVoice) speakFor(level, scene, delay, ruled);
+
+        // 追加播放：主特效的持续时间走完后再播（默认 = 复仇 / 雪耻 1.5 秒）
+        const extra = Array.isArray(follows) ? follows
+            : (revengeAfter && level !== 'revenge' && L.fxEvtRevenge !== 0 ? [{ level: 'revenge', scene: null, ms: REVENGE_FOLLOW_MS }] : []);
+        if (!extra.length) return;
+        let after = delay + (hasBig ? Math.max(1000, Math.min(10000, Number(u) || 3500)) : 0);
+        extra.forEach(f => {
+            const ms = Math.max(500, Math.min(10000, Number(f.ms) || REVENGE_FOLLOW_MS));
+            const fLevel = f.level;
+            if (fLevel !== 1 && fLevel !== 0 && ownsBig) group(after, i, ms, () => playBig(team, killerRow, fLevel, name, victim, f.scene));
+            if (ownsVoice) speakFor(fLevel, f.scene, after, true);
+            after += ms;
+        });
+    }
+
+    function speakFor(level, scene, delay, ruled) {
+        const L = killDisplaySettings?.layout || {};
+        const mode = scene ? (scene.voice || 'default') : 'default';
+        if (mode === 'none') return;
+        if (mode === 'text') {
+            const text = String(scene.voiceText || '').trim();
+            if (text) scheduleKillSay(text, delay);
+            return;
         }
+        if (mode === 'file') {
+            if (scene.voiceFile) scheduleKillSay(scene.voiceFile, delay, true);
+            return;
+        }
+        if (mode === 'lib') {
+            // 服务器音频库：C++ 按需下载（不计费、本地缓存）后排队播放
+            // voicePrefix：先用同一音色念这段（例如选手的搞名），紧接着播服务器音频；C++ 保证两段按顺序排队
+            if (scene.voiceLib || scene.voiceLibTitle) scheduleKillSay(scene.voiceLib || '', delay, 'lib:' + String(scene.voiceLibTitle || ''), String(scene.voicePrefix || ''));
+            return;
+        }
+        if (mode === 'tts') {
+            // 豆包音色合成：C++ 先查本地缓存，没有才向服务器生成（扣主播额度）；失败时自动用 Windows 系统语音念
+            const text = String(scene.voiceText || '').trim();
+            if (text) scheduleKillSay(text, delay, 'tts:' + String(scene.voiceTts || ''));
+            return;
+        }
+        const ev = mode.startsWith('event:') ? mode.slice(6) : VOICE_EVENT[level];
+        if (ev && Object.values(VOICE_EVENT).includes(ev)) scheduleKillVoice(ev, voiceSkinFor(L), L.fxVoice, delay, ruled || mode !== 'default');
     }
 
     const VOICE_EVENT = { 2: 'double', 3: 'triple', first: 'first', shutdown: 'shutdown', revenge: 'revenge', ak: 'ak', victory: 'victory' };
+    // 台词套：0 = 跟随当前展示风格；1..9 = 固定使用第 (n-1) 套风格的台词（C++ 支持以序号传 skin）
+    function voiceSkinFor(L) {
+        const style = Number(L?.fxVoiceStyle) || 0;
+        return style >= 1 && style <= 9 ? String(style - 1) : skin;
+    }
     const voiceTimers = new Set();
     let voiceSettingsSignature = '';
     function cancelVoiceRequests() {
@@ -1901,38 +1960,75 @@ const KillFx = (() => {
     }
     function syncVoiceSettings() {
         const L = killDisplaySettings?.layout || {};
-        const signature = JSON.stringify(['fxEnabled', 'fxVoiceOn', 'fxVoice', 'skin', 'fxFullscreen',
+        const signature = JSON.stringify(['fxEnabled', 'fxVoiceOn', 'fxVoice', 'fxVoiceStyle', 'skin', 'fxFullscreen',
             ...Object.values(EVENT_KEY)].map(key => L[key]));
         if (signature !== voiceSettingsSignature) cancelVoiceRequests();
         voiceSettingsSignature = signature;
     }
-    function scheduleKillVoice(eventName, skinId, voice, delay) {
+    function scheduleKillVoice(eventName, skinId, voice, delay, ruled = false) {
         syncVoiceSettings();
         const id = setTimeout(() => {
             voiceTimers.delete(id);
-            requestKillVoice(eventName, skinId, voice);
+            requestKillVoice(eventName, skinId, voice, ruled);
         }, delay);
         voiceTimers.add(id);
     }
-    function requestKillVoice(eventName, skinId, voice) {
+    // 场景规则的自定义语音文字：C++ 用 Windows 系统语音合成（按文字缓存），与击杀语音共用开关 / 取消逻辑
+    // isFile = true：text 是「自定义语音」里导入的本地音频文件名；isFile = 'tts:<音色>'：用豆包音色合成 text
+    function scheduleKillSay(text, delay, isFile = false, prefix = '') {
+        syncVoiceSettings();
+        const voice = killDisplaySettings?.layout?.fxVoice;
+        const id = setTimeout(() => {
+            voiceTimers.delete(id);
+            requestKillSay(text, voice, isFile, prefix);
+        }, delay);
+        voiceTimers.add(id);
+    }
+    function requestKillSay(text, voice, isFile = false, prefix = '') {
+        const L = killDisplaySettings?.layout || {};
+        if (!enabled || document.hidden || !window.chrome?.webview || L.fxVoiceOn !== 1 || L.fxEnabled === 0
+            || L.fxVoice !== voice || (KILL_FX_FULLSCREEN ? L.fxFullscreen !== 1 : L.fxFullscreen === 1)) return;
+        if (typeof isFile === 'string' && isFile.startsWith('lib:')) {
+            const pre = String(prefix || '').trim().slice(0, 30);
+            fetch(`${KILL_LIB_URL}?sha=${encodeURIComponent(String(text))}&title=${encodeURIComponent(isFile.slice(4))}`
+                + (pre ? `&prefix=${encodeURIComponent(pre)}&index=${Number(voice) || 0}` : ''), { method: 'POST', cache: 'no-store' }).catch(() => {});
+            return;
+        }
+        if (typeof isFile === 'string' && isFile.startsWith('tts:')) {
+            const ttsVoice = isFile.slice(4);
+            fetch(`${KILL_TTS_URL}?voice=${encodeURIComponent(ttsVoice)}&index=${Number(voice) || 0}`, { method: 'POST', cache: 'no-store',
+                headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: String(text).slice(0, 120) }).catch(() => {});
+            return;
+        }
+        if (isFile) {
+            fetch(`${KILL_VOICE_FILE_URL}?id=${encodeURIComponent(String(text))}`, { method: 'POST', cache: 'no-store' }).catch(() => {});
+            return;
+        }
+        fetch(KILL_SAY_URL, { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+            body: String(text).slice(0, 120) }).catch(() => {});
+    }
+    function requestKillVoice(eventName, skinId, voice, ruled = false) {
         // 延迟期间取消勾选、关闭特效或切换播放窗口后，不得再发出旧的播放请求。
         const L = killDisplaySettings?.layout || {};
         const level = Object.keys(VOICE_EVENT).find(key => VOICE_EVENT[key] === eventName);
         if (!enabled || document.hidden || !window.chrome?.webview || L.fxVoiceOn !== 1 || L.fxEnabled === 0
-            || !level || L[EVENT_KEY[level]] === 0 || L.fxVoice !== voice
+            || !level || (!ruled && L[EVENT_KEY[level]] === 0) || L.fxVoice !== voice
             || (KILL_FX_FULLSCREEN ? L.fxFullscreen !== 1 : L.fxFullscreen === 1)) return;
         const url = `${KILL_VOICE_URL}?event=${encodeURIComponent(eventName)}&skin=${encodeURIComponent(skinId || '')}&voice=${Number(voice) || 0}`;
         fetch(url, { method: 'POST', cache: 'no-store' }).catch(() => {});
     }
 
+    let bigOverride = null; // 场景规则自定义的胜利标题 / 副标题（playBig 调用 victory 前设置）
     function victory(team) {
-        const copy = {
+        const ov = bigOverride; bigOverride = null;
+        const copy0 = {
             dnf: ['胜利', '荣耀归于胜者'], classic: ['VICTORY', 'THE BATTLE IS WON'],
             neon: ['VICTORY', 'MISSION COMPLETE'], ink: ['大捷', '凯歌还 · 胜局定'],
             glass: ['胜利', '这一刻，属于你'], pixel: ['VICTORY!', 'STAGE CLEAR'],
             inferno: ['凯旋', '烈焰铸就胜名'], broadcast: ['比赛胜利', 'WINNER · FIRST TO SEVEN'],
             frost: ['凯旋', '冰封全场 · 荣耀归来']
         }[skin] || ['胜利', 'VICTORY'];
+        const copy = [ov?.title || copy0[0], ov?.sub || copy0[1]];
         const wrap = div('fx-victory fx-victory-' + skin);
         const crown = '<svg viewBox="0 0 96 64" aria-hidden="true"><path d="M12 16l18 17L48 8l18 25 18-17-9 36H21z" fill="currentColor"/><path d="M22 59h52" fill="none" stroke="currentColor" stroke-width="4"/></svg>';
         const laurel = '<svg viewBox="0 0 80 180" aria-hidden="true"><path d="M64 166C9 137 8 62 56 12" fill="none" stroke="currentColor" stroke-width="2"/>'
@@ -1948,14 +2044,21 @@ const KillFx = (() => {
         later(() => burst(cx, cy * .6, 50, { speed: 3, life: 70, size: 2.4 }), 550);
     }
 
-    function playBig(team, killerRow, level, name, victim) {
+    function playBig(team, killerRow, level, name, victim, scene = null) {
+        const ov = scene && (scene.title || scene.sub) ? { title: scene.title, sub: scene.sub } : null;
+        bigOverride = ov;
         if (level === 'victory') { victory(team); return; }
+        bigOverride = null;
         const { cx, cy } = center();
-        if (level === 'ak') { later(() => ak(team, killerRow, name), 250); return; }
+        if (level === 'ak') { later(() => ak(team, killerRow, name, ov), 250); return; }
+        if (level === 'custom') { customBanner(team, name, scene || {}); return; }
+        if (!LEVEL_TEXT[level]) return;
 
         let [title, sub] = LEVEL_TEXT[level];
         if (skin === 'ink') title = INK_TEXT[level];
         if (skin === 'pixel') { title = PIXEL_TEXT[level]; }
+        if (ov?.title) title = ov.title;
+        if (ov?.sub) sub = ov.sub;
         const extra = level === 'shutdown' && victim ? `终结了 ${esc(victim)} 的连杀`
             : level === 'revenge' && victim ? `向 ${esc(victim)} 复仇` : '';
         if (level === 2) {
@@ -1974,6 +2077,27 @@ const KillFx = (() => {
             if (level === 'first') later(() => burst(cx, cy, 36, { speed: 3.5, life: 45, hue: theme.p === 'ember' ? 0 : undefined }), 150);
             if (level === 'shutdown') { add(div('fx-ring'), 900); later(() => burst(cx, cy, 44, { speed: 4.5, life: 50, shard: true }), 150); }
             if (level === 'revenge') later(() => burst(cx, cy, 30, { speed: 3, life: 55, hue: TEAM_HUE[team] }), 150);
+        }
+    }
+
+    // 场景规则「自定义横幅」：小 = 一血同款迷你横幅；大 = 双杀同款；超大 = 三杀同款（边框光 + 冲击环 + 震屏）
+    function customBanner(team, name, scene) {
+        const { cx, cy } = center();
+        const title = scene.title || '精彩';
+        const sub = scene.sub || '';
+        if (scene.style === 'mini') {
+            banner(team, title, sub, name, 1900, '', true);
+            later(() => burst(cx, cy, 36, { speed: 3.5, life: 45 }), 150);
+        } else if (scene.style === 'huge') {
+            add(div('fx-edge'), cur.dur || 2500);
+            add(div('fx-ring'), 900);
+            later(() => add(div('fx-ring'), 900), 160);
+            banner(team, title, sub, name, 2600);
+            shake();
+            later(() => burst(cx, cy, 80, { speed: 5.5, life: 60, size: 2.6, shard: true }), 180);
+        } else {
+            banner(team, title, sub, name, 2200);
+            later(() => burst(cx, cy, 40, { speed: 4, life: 50 }), 200);
         }
     }
     return { play, burst, setEnabled, syncVoiceSettings, cancelVoiceRequests, THEMES };
@@ -2020,12 +2144,173 @@ const KillFxTracker = (() => {
     const roundOf = d => (Number(d?.redScore) || 0) + (Number(d?.blueScore) || 0);
 
     let prev = null;            // Map<key, {kills, deaths, ak, streak, team, name}>
+    // 场景规则用的比赛记录：本场击杀顺序 / 本局阵亡的选手（比分变动 = 新的一局，全部复活）/ 连续阵亡没拿人头
+    let killLog = [];
+    let deadKeys = new Set();
+    let deadRound = null;
+    let drought = new Map();
+    const normPlayer = s => String(s || '').trim().toLowerCase();
+    // 搞名：主窗口保存规则时附带的「选手名 → 以搞结尾的别名」表；名字本身以搞结尾就用它；都没有 = 原名
+    function gaoOf(name) {
+        const n = String(name || '').trim();
+        const map = (typeof SceneRuntime !== 'undefined' && SceneRuntime && SceneRuntime.gao) ? SceneRuntime.gao() : null;
+        return (map && map[normPlayer(n)]) || n;
+    }
+    function playerStateCtx(snap, allAlive = false) {
+        const alive = {}, teams = {};
+        (snap || new Map()).forEach((p, key) => {
+            const n = normPlayer(p.name);
+            if (!n) return;
+            alive[n] = allAlive || !deadKeys.has(key);
+            teams[n] = p.team;
+        });
+        return { alive, teams };
+    }
+    function markDeath(d) {
+        if (!d || d.counted) return 0;
+        d.counted = true;
+        deadKeys.add(d.key);
+        const n = (drought.get(d.key) || 0) + 1;
+        drought.set(d.key, n);
+        return n;
+    }
     let prevRound = 0;          // prev 对应的局序号
     let killsByRound = new Map(); // 局序号 -> Set<"凶手key>死者key">，用于复仇判定
     let firstBlood = false;
     let queue = [];
     let timer = null;
     let enabled = true;
+
+    /* ---------- 场景规则 ----------
+     * 规则由 SceneRuntime（本文件末尾）从主程序加载；scene-rules.js 未加载时退回内置优先级逻辑。 */
+    const ruleMemo = {};             // 冷却记录
+    let prevScores = { red: 0, blue: 0 };
+    let lastRoundNo;                 // 主程序识别到「开始!!!」的回合序号
+    let lastTestId;                  // 主窗口「测试」按钮
+    const hpFired = new Set();       // 血量规则：每条规则每方每回合只触发一次
+    const sceneRules = () => (typeof SceneRules !== 'undefined' && typeof SceneRuntime !== 'undefined' && SceneRuntime)
+        ? SceneRuntime.rules() : null;
+    const EFFECT_LEVEL = { none: 1, double: 2, triple: 3 };
+    const levelOf = effect => EFFECT_LEVEL[effect] || effect || 1;
+    const teamColor = t => (t === 1 ? 'blue' : 'red');
+    const teamLabel = t => (t === 1 ? '蓝队' : '红队');
+    const hpNum = v => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? Math.round(n) : null; };
+    // 画面左侧是哪一队（0 = 红，1 = 蓝）：与 renderKillDisplay 相同，只取决于 isFlipped
+    const leftTeamOf = data => (data?.isFlipped === true ? 1 : 0);
+    function sceneOf(r, ctx) {
+        const a = r.action || {};
+        return {
+            effect: a.effect, style: a.style, voice: a.voice, voiceFile: a.voiceFile || '', voiceTts: a.voiceTts || '', voiceLib: a.voiceLib || '', voiceLibTitle: a.voiceLibTitle || '', durationMs: Number(a.durationMs) || 0,
+            // 只保留汉字 / 字母 / 数字：表情、符号豆包念不了，会退回 Windows 语音
+            voicePrefix: SceneRules.fillText(a.voicePrefix, ctx).replace(/[^\p{Script=Han}A-Za-z0-9]/gu, ''),
+            title: SceneRules.fillText(a.title, ctx), sub: SceneRules.fillText(a.sub, ctx),
+            voiceText: SceneRules.fillText(a.voiceText, ctx)
+        };
+    }
+    function ruledEvent(res, ctx) {
+        if (!res || !res.main) return null;
+        return {
+            level: levelOf(res.main.action.effect), scene: sceneOf(res.main, ctx), ruled: true,
+            follows: res.follows.map(f => ({ level: levelOf(f.action.effect), scene: sceneOf(f, ctx), ms: f.appendMs }))
+        };
+    }
+    // 血量数据（主程序实时计算，0-100；-1 = 未识别）。hp.left / hp.right 是画面左右，队伍在左还是右取决于 isFlipped。
+    // 游戏画面上哪一队在左边：和展示页面的左右（isFlipped）无关——主播常把自己队伍翻到展示页左侧，但游戏里不一定在左边。
+    // 每次击杀时从「哪边血条归零 / 哪边赢了这一局」推断，整场比赛内沿用；推断不出来时才退回 isFlipped。
+    let physLeftTeam = null;
+    function learnPhysSide(data, killerTeam) {
+        const hp = data?.hp || {};
+        const r = hp.round || {};
+        const ended = r.no > 0 && !r.active && Number(r.endAgoMs) >= 0 && Number(r.endAgoMs) < 8000;
+        let s = null;   // 击杀者在游戏画面的哪一边：0 = 左，1 = 右
+        if (ended && (r.winner === 0 || r.winner === 1)) s = r.winner;
+        else {
+            const L = hpNum(hp.left), R = hpNum(hp.right);
+            if (L === 0 && R > 0) s = 1;
+            else if (R === 0 && L > 0) s = 0;
+        }
+        if (s !== null) physLeftTeam = s === 0 ? killerTeam : 1 - killerTeam;
+    }
+    function hpOf(data, team) {
+        const hp = data?.hp || {};
+        const r = hp.round || {};
+        const left = physLeftTeam !== null ? physLeftTeam : (data?.isFlipped === true ? 1 : 0);
+        const s = team === left ? 0 : 1;
+        const o = 1 - s;
+        const pick = (arr, i) => (Array.isArray(arr) ? hpNum(arr[i]) : null);
+        const cur = [hpNum(hp.left), hpNum(hp.right)];
+        // 击杀往往和回合结束同时到达：刚结束 8 秒内用「结束血量」（比实时读数更准：死者已归 0）
+        const ended = r.no > 0 && !r.active && Number(r.endAgoMs) >= 0 && Number(r.endAgoMs) < 8000;
+        return {
+            now: ended && pick(r.end, s) != null ? pick(r.end, s) : cur[s],
+            enemyNow: ended && pick(r.end, o) != null ? pick(r.end, o) : cur[o],
+            start: pick(r.start, s), enemyStart: pick(r.start, o), min: pick(r.min, s),
+            roundSec: Number(r.durationMs) >= 0 && r.no > 0 ? Math.round(Number(r.durationMs) / 1000) : null
+        };
+    }
+    function scoreCtx(data, team) {
+        const red = Number(data?.redScore) || 0, blue = Number(data?.blueScore) || 0;
+        const my = team === 1 ? blue : red, en = team === 1 ? red : blue;
+        return { myScore: my, enemyScore: en, scoreDiff: my - en, redScore: red, blueScore: blue };
+    }
+    function ingestScene(data, rules) {
+        const r = data?.hp?.round;
+        // 主窗口「测试」：首次拿到数据时只记下编号，不回放
+        const test = data?.sceneTest;
+        const testId = Number(test?.id) || 0;
+        if (lastTestId === undefined) lastTestId = testId;
+        else if (testId !== lastTestId) { lastTestId = testId; playTest(test.rule, data); }
+        if (!rules) return;
+        // 每局开始（识别到「开始!!!」）
+        const no = Number(r?.no) || 0;
+        if (lastRoundNo === undefined) lastRoundNo = no;
+        else if (no !== lastRoundNo) {
+            lastRoundNo = no;
+            if (no > 0 && r.active) {
+                const red = Number(data?.redScore) || 0, blue = Number(data?.blueScore) || 0;
+                const ctx = { eventKey: 'round#' + no + '#' + red + ':' + blue, redScore: red, blueScore: blue,
+                    isMatchPoint: red === 6 || blue === 6, roundNo: red + blue + 1, hour: new Date().getHours(),
+                    history: killLog, historyHasCurrent: false, historyRound: roundOf(data), ...playerStateCtx(prev, true) };
+                const evt = ruledEvent(SceneRules.evaluate(rules, 'round', ctx, ruleMemo), ctx);
+                if (evt) enqueue({ ...evt, team: 'red', killerRow: -1, victimRow: -1, name: '', victim: '', kind: 'scene' });
+            }
+        }
+        // 血量：条件从不满足变成满足时触发，每条规则每方每回合一次
+        if (!r || !r.active || no <= 0) return;
+        const hpRules = rules.filter(x => x.enabled && x.trigger === 'hp');
+        if (!hpRules.length) return;
+        [0, 1].forEach(team => {
+            const h = hpOf(data, team);
+            const ctx = { eventKey: 'hp#' + no + '#' + team, team: teamColor(team), teamLabel: teamLabel(team), teamLeft: team === leftTeamOf(data),
+                selfHp: h.now, enemyHp: h.enemyNow, selfStartHp: h.start, enemyStartHp: h.enemyStart,
+                roundSec: h.roundSec, ...scoreCtx(data, team), roundNo: no, hour: new Date().getHours(),
+                isMatchPoint: (Number(data?.redScore) || 0) === 6 || (Number(data?.blueScore) || 0) === 6,
+                history: killLog, historyHasCurrent: false, historyRound: roundOf(data), ...playerStateCtx(prev) };
+            hpRules.forEach(rule => {
+                const key = rule.id + '|' + team + '|' + no;
+                if (hpFired.has(key)) return;
+                const res = SceneRules.evaluate([rule], 'hp', ctx, ruleMemo);
+                if (!res.main) return;
+                hpFired.add(key);
+                if (hpFired.size > 400) hpFired.clear();
+                const evt = ruledEvent({ main: res.main, follows: [] }, ctx);
+                enqueue({ ...evt, team: teamColor(team), killerRow: -1, victimRow: -1, name: teamLabel(team), victim: '', kind: 'scene' });
+            });
+        });
+    }
+    // 「测试」：用一组示例数据播放这条规则（不看条件）
+    function playTest(rule, data) {
+        if (typeof SceneRules === 'undefined' || !rule) return;
+        const r = SceneRules.normalizeRule(rule);
+        if (!r) return;
+        const ctx = { eventKey: 'test', killer: '90老王', victim: '对手', teamLabel: '红队', killerLeft: true, victimLeft: false, streak: 2, killerKills: 3, killerDeaths: 1,
+            killerHp: 23, killerStartHp: 100, victimStartHp: 100, selfHp: 15, enemyHp: 80, selfStartHp: 100, enemyStartHp: 100,
+            roundSec: 42, myScore: 5, enemyScore: 4, redScore: 6, blueScore: 5, roundNo: 12 };
+        const evt = ruledEvent({ main: r, follows: [] }, ctx);
+        const isKill = r.trigger === 'kill';
+        enqueue({ ...evt, team: 'red', killerRow: isKill ? 0 : -1, victimRow: -1,
+            name: '90老王', victim: '对手', kind: isKill ? 'kill' : 'scene' });
+    }
 
     function snapshot(players) {
         const map = new Map();
@@ -2044,8 +2329,30 @@ const KillFxTracker = (() => {
         return map;
     }
 
+    // 主窗口手动改比分后的调整（C++ 状态里的 sceneReset.id 变化时执行一次）
+    let lastSceneResetId;
+    function checkSceneReset(data) {
+        const sr = data?.sceneReset;
+        const id = Number(sr?.id) || 0;
+        if (lastSceneResetId === undefined) { lastSceneResetId = id; return; }
+        if (id === lastSceneResetId) return;
+        lastSceneResetId = id;
+        deadKeys.clear();                       // 比分变了 = 新的一局，全部复活
+        deadRound = roundOf(data);
+        if (sr?.drought) drought = new Map();   // 连续阵亡没人头清零
+        if (sr?.history) {                      // 当作新的一场：击杀记录 / 一血 / 复仇
+            killLog = [];
+            killsByRound = new Map();
+            firstBlood = false;
+        }
+    }
+
     function resetMatch() {
         killsByRound = new Map();
+        killLog = [];
+        physLeftTeam = null;
+        deadKeys = new Set();
+        drought = new Map();
         queue = [];
         firstBlood = false;
         if (timer) { clearTimeout(timer); timer = null; }
@@ -2100,18 +2407,34 @@ const KillFxTracker = (() => {
 
     function ingest(data) {
         const victory = victoryTracker.ingest(data, enabled && !document.hidden && killDisplaySettings?.layout?.fxEvtVictory !== 0);
+        const rules = sceneRules();
+        const scoresBefore = prevScores;
+        prevScores = { red: Number(data?.redScore) || 0, blue: Number(data?.blueScore) || 0 };
+        try { checkSceneReset(data); } catch (err) { /* ignore */ }
         if (!enabled || document.hidden) return;
+        try { ingestScene(data, rules); } catch (err) { /* 场景规则异常不影响击杀特效 */ }
         if (victory) {
             queue = [];
             if (timer) { clearTimeout(timer); timer = null; }
             prev = snapshot(Array.isArray(data?.players) ? data.players : []);
             prevRound = roundOf(data);
+            if (rules) {
+                // 场景规则：胜利规则决定播什么（「触发事件」里的胜利开关已同步成预设规则的开关）
+                const t = victory.team === 'blue' ? 1 : 0;
+                const ctx = { eventKey: 'victory#' + prevScores.red + ':' + prevScores.blue, winnerTeam: victory.team,
+                    winnerLeft: t === leftTeamOf(data), teamLabel: teamLabel(t), ...scoreCtx(data, t), hour: new Date().getHours(),
+                    history: killLog, historyHasCurrent: false, historyRound: Math.max(0, roundOf(data) - 1), ...playerStateCtx(prev) };
+                const evt = ruledEvent(SceneRules.evaluate(rules, 'victory', ctx, ruleMemo), ctx);
+                if (evt) enqueue({ ...victory, ...evt, name: evt.level === 'victory' ? victory.name : teamLabel(t), kind: 'scene' });
+                return;
+            }
             enqueue(victory); // Victory takes precedence over the final kill/AK of the match.
             return;
         }
         // 本次新增的击杀归属上一次状态所在的局：决胜击杀与大比分 +1 会在同一次刷新里到达。
         const killRound = prevRound;
         prevRound = roundOf(data);
+        if (deadRound !== killRound) { deadKeys.clear(); deadRound = killRound; }
         const players = Array.isArray(data?.players) ? data.players : [];
         if (!players.length) { prev = null; return; }
 
@@ -2144,7 +2467,9 @@ const KillFxTracker = (() => {
         });
         const prevOf = prev;
         prev = cur;
-        if (!killers.length) return;
+        // 没对应到击杀者的阵亡（例如同一帧里多人阵亡）也要记成阵亡 / 连续没人头
+        const settleDeaths = () => [0, 1].forEach(team => deathsByTeam[team].forEach(markDeath));
+        if (!killers.length) { settleDeaths(); return; }
 
         killers.sort((a, b) => a.c.team - b.c.team);
 
@@ -2166,15 +2491,58 @@ const KillFxTracker = (() => {
                 const isAk = n >= 4 || (k.da > 0 && i === k.dk - 1);
                 const vCount = v ? (v.prevStreak || 0) : 0;
                 const revenge = !!v && isRevenge(killRound, k.key, v.key);
+                // 比赛记录：先记死者（本局阵亡 + 连续没人头），再清零击杀者的没人头次数，最后记这一次击杀
+                const victimDrought = v ? (v.counted ? drought.get(v.key) || 0 : markDeath(v)) : 0;
+                const killerDrought = drought.get(k.key) || 0;
+                drought.set(k.key, 0);
+                killLog.push({ killer: k.c.name, victim: v ? v.c.name : '', killerTeam: teamColor(k.c.team),
+                    killerLeft: k.c.team === leftTeamOf(data), streak: isAk ? Math.max(4, n) : n, round: killRound });
+                if (killLog.length > 1000) killLog.shift();
 
-                // 优先级：AK > 一血 > 终结 > 复仇 > 连杀数
+                if (rules) {
+                    // 场景规则：从上到下第一条满足条件的规则 = 主特效；排在后面、勾了「追加播放」的规则在主特效后追加
+                    learnPhysSide(data, k.c.team);
+                    const h = hpOf(data, k.c.team);
+                    const ctx = {
+                        eventKey: `${k.key}>${v ? v.key : ''}#${killRound}#${k.c.kills - (k.dk - 1 - i)}`,
+                        killer: k.c.name, victim: v ? v.c.name : '', killerTeam: teamColor(k.c.team), teamLabel: teamLabel(k.c.team),
+                        killerLeft: k.c.team === leftTeamOf(data), victimLeft: !!v && enemyTeam === leftTeamOf(data),
+                        streak: isAk ? Math.max(4, n) : n, killerKills: k.c.kills - (k.dk - 1 - i), killerDeaths: k.c.deaths, killerAk: k.c.ak,
+                        victimKills: v ? v.c.kills : null, victimDeaths: v ? v.c.deaths : null, victimStreak: vCount,
+                        isFirst: !firstBlood, isRevenge: revenge, isAk,
+                        killerHp: h.now, killerStartHp: h.start, victimStartHp: h.enemyStart, killerMinHp: h.min,
+                        hpLost: h.start != null && h.now != null ? Math.max(0, h.start - h.now) : null, roundSec: h.roundSec,
+                        ...scoreCtx(data, k.c.team), isMatchPoint: scoresBefore.red === 6 || scoresBefore.blue === 6,
+                        roundNo: killRound + 1, hour: new Date().getHours(),
+                        victimDrought, killerDrought, killerGao: gaoOf(k.c.name), victimGao: v ? gaoOf(v.c.name) : '',
+                        history: killLog, historyHasCurrent: true, historyRound: killRound, ...playerStateCtx(cur)
+                    };
+                    firstBlood = true;
+                    if (v) recordKill(killRound, k.key, v.key);
+                    const evt = ruledEvent(SceneRules.evaluate(rules, 'kill', ctx, ruleMemo), ctx)
+                        || { level: 1, scene: null, follows: [], ruled: true };
+                    enqueue({
+                        ...evt,
+                        team: teamColor(k.c.team),
+                        killerRow: rowIndexOf(teamColor(k.c.team), k.c.name),
+                        victimRow: v ? rowIndexOf(teamColor(enemyTeam), v.c.name) : -1,
+                        name: k.c.name,
+                        victim: v ? v.c.name : ''
+                    });
+                    if (isAk) break;
+                    continue;
+                }
+
+                // 内置优先级（scene-rules.js 未加载时）：AK > 三杀 / 双杀 > 一血 > 终结 > 复仇 > 单杀。
+                // 同时满足复仇时不丢：主特效播完后再追加 1.5 秒的复仇（KillFx.play 的 revengeAfter）。
                 let level;
                 if (isAk) level = 'ak';
+                else if (n >= 2) level = n;
                 else if (!firstBlood) level = 'first';
                 else if (vCount >= 2) level = 'shutdown';
                 else if (revenge) level = 'revenge';
                 else level = n;
-                if (level === 'ak' || level === 'first') firstBlood = true;
+                firstBlood = true;
 
                 if (v) recordKill(killRound, k.key, v.key);
 
@@ -2184,11 +2552,13 @@ const KillFxTracker = (() => {
                     victimRow: v ? rowIndexOf(enemyTeam === 1 ? 'blue' : 'red', v.c.name) : -1,
                     level,
                     name: k.c.name,
-                    victim: v ? v.c.name : ''
+                    victim: v ? v.c.name : '',
+                    revengeAfter: revenge && level !== 'revenge'
                 });
                 if (isAk) break;
             }
         });
+        settleDeaths();
     }
 
     return { ingest, setEnabled, resetMatch, resync };
@@ -2199,8 +2569,41 @@ const KillFxTracker = (() => {
     const origRender = renderKillDisplay;
     renderKillDisplay = function (data) {
         origRender(data);
+        try { if (SceneRuntime) SceneRuntime.sync(data); } catch (err) { /* ignore */ }
         try { KillFxTracker.ingest(data); } catch (err) { /* ignore */ }
     };
+
+    // 场景规则：主程序保存在 %APPDATA%\DNFGameCapture\scene_rules.json；
+    // 状态里的 sceneRulesRev 变化时重新拉取（主窗口编辑后约 0.5 秒生效）。没有保存过 = 用预设（开关跟随「触发事件」勾选）。
+    if (typeof SceneRules !== 'undefined') {
+        SceneRuntime = (() => {
+            let saved = null;     // null = 从未保存，使用预设
+            let gao = {};         // 选手名（小写）→ 搞名
+            let rev = null;
+            let loading = false;
+            function load(r) {
+                if (loading) return;
+                loading = true;
+                fetch(SCENE_RULES_URL, { cache: 'no-store' })
+                    .then(res => res.json())
+                    .then(j => {
+                        const list = j && j.data && Array.isArray(j.data.rules) ? j.data.rules : null;
+                        saved = list ? SceneRules.normalize(list) : null;
+                        gao = j && j.data && j.data.gao && typeof j.data.gao === 'object' ? j.data.gao : {};
+                        if (SceneRules.setAliases) SceneRules.setAliases(j && j.data ? j.data.aliases : null);
+                        rev = r;
+                    })
+                    .catch(() => {})
+                    .finally(() => { loading = false; });
+            }
+            function sync(data) {
+                const r = Number(data?.sceneRulesRev) || 0;
+                if (r !== rev) load(r);
+            }
+            function rules() { return saved || SceneRules.presets(killDisplaySettings?.layout); }
+            return { sync, rules, gao: () => gao };
+        })();
+    }
 
     const origSyncSkinPanel = syncKillSkinPanel;
     syncKillSkinPanel = function () {

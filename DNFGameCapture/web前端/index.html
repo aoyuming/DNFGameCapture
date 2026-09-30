@@ -4,8 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DNF点将工具</title>
-    <meta name="dnf-web-layout-version" content="20260929-5.5.3-main-actions-3">
-    <link rel="stylesheet" href="style.css?v=20260929-5.5.3-main-actions-3">
+    <meta name="dnf-web-layout-version" content="20260930-5.5.4-17">
+    <link rel="stylesheet" href="style.css?v=20260930-5.5.4-17">
+    <link rel="stylesheet" href="scene-rules-ui.css?v=20260930-5.5.4-17">
 </head>
 <body>
     <svg class="rd-sprite" width="0" height="0" aria-hidden="true" focusable="false">
@@ -35,9 +36,11 @@
         <div class="rd-status" id="rd-status" data-state="stopped" role="status" aria-live="polite"><span class="rd-dot"></span><b id="rd-status-text">未运行</b><span class="rd-status-extra" id="rd-status-extra"></span></div>
         <div class="rd-top-spacer"></div>
         <div class="rd-theme-switch" id="rd-theme-switch" role="group" aria-label="界面风格">
-            <button type="button" data-rd-theme="dark-esports">夜幕导播台</button>
-            <button type="button" data-rd-theme="black-gold">阿拉德金纹</button>
-            <button type="button" data-rd-theme="frost-broadcast">晨光简约</button>
+            <button type="button" data-rd-theme="dark-esports">深空导播台</button>
+            <button type="button" data-rd-theme="black-gold">青玉白银</button>
+            <button type="button" data-rd-theme="mist-blue">雾蓝暮色</button>
+            <button type="button" data-rd-theme="glacier-blue">冰川淡蓝</button>
+            <button type="button" data-rd-theme="frost-broadcast">晨光暖白</button>
         </div>
         <div class="rd-top-spacer"></div>
         <div class="rd-top-actions">
@@ -86,6 +89,7 @@
                                 <span>击杀</span>
                                 <span>死亡</span>
                                 <span>AK</span>
+                                <span>连杀</span>
                             </div>
                         </div>
                         <div class="rows-container"></div>
@@ -98,6 +102,7 @@
                                 <span>击杀</span>
                                 <span>死亡</span>
                                 <span>AK</span>
+                                <span>连杀</span>
                             </div>
                         </div>
                         <div class="rows-container"></div>
@@ -501,6 +506,8 @@
                             <option value="dark-esports">暗黑电竞</option>
                             <option value="frost-broadcast">霜白直播台</option>
                             <option value="black-gold">黑金赛事</option>
+                            <option value="mist-blue">雾蓝暮色</option>
+                            <option value="glacier-blue">冰川淡蓝</option>
                         </select>
                     </label>
                     <button class="appearance-close" id="btn-appearance-close" title="关闭">&times;</button>
@@ -582,6 +589,7 @@
                 <button id="streamer-tab-display" type="button" role="tab" data-streamer-tab="display" aria-controls="streamer-pane-display" aria-selected="true">展示与输出</button>
                 <button id="streamer-tab-effects" type="button" role="tab" data-streamer-tab="effects" aria-controls="streamer-pane-effects" aria-selected="false" tabindex="-1">特效管理</button>
                 <button id="streamer-tab-voice" type="button" role="tab" data-streamer-tab="voice" aria-controls="streamer-pane-voice" aria-selected="false" tabindex="-1">声音管理</button>
+                <button id="streamer-tab-rules" type="button" role="tab" data-streamer-tab="rules" aria-controls="streamer-pane-rules" aria-selected="false" tabindex="-1">场景规则</button>
             </nav>
             <div class="fxm-body">
                 <section id="streamer-pane-display" class="streamer-pane" role="tabpanel" aria-labelledby="streamer-tab-display" data-streamer-pane="display">
@@ -635,7 +643,7 @@
                 </section>
                 </div>
                 <div class="fxm-events">
-                    <div class="fxm-events-title">触发事件<small>（击杀特效、全屏特效与语音播报共用）</small></div>
+                    <div class="fxm-events-title">触发事件<small>（击杀特效、全屏特效与语音播报共用；同时是「场景规则」里对应预设规则的开关，更多玩法请到「场景规则」页签）</small></div>
                     <div class="fxm-chips">
                         <label class="fxm-chip"><input type="checkbox" data-fx-toggle="fxEvtDouble"><span>双杀</span></label>
                         <label class="fxm-chip"><input type="checkbox" data-fx-toggle="fxEvtTriple"><span>三杀</span></label>
@@ -653,7 +661,33 @@
                     <label class="fxm-switch" title="击杀事件朗读播报"><input type="checkbox" data-fx-toggle="fxVoiceOn" aria-label="语音播报"><i aria-hidden="true"></i></label>
                     <div class="fxm-voice-text"><strong>语音播报</strong><small>默认关闭，勾选后才下载并播放（含试听）。音色列表由服务器同步，音频按版本缓存，不调用付费生成 API。</small><small id="voice-cloud-status" role="status">等待同步</small></div>
                     <label class="fxm-voice-pick"><span>音色</span><select id="fxm-voice-select" title="选择播报音色"></select></label>
+                    <label class="fxm-voice-pick"><span>台词</span><select id="fxm-voice-style" title="选择该音色读哪一套台词；默认跟随当前展示风格">
+                        <option value="0">跟随展示UI（默认）</option>
+                        <option value="1">DNF 金边：双杀！· AK！一人团灭！</option><option value="2">经典简洁：双杀！· ACE！一人团灭！</option><option value="3">电竞霓虹：双杀！· AK！一人团灭！</option>
+                        <option value="4">水墨国风：双斩 · 雪耻 · 全歼！</option><option value="5">玻璃极简：双杀！· AK！一人团灭！</option><option value="6">像素街机：Double! · AK! Perfect!</option>
+                        <option value="7">烈焰熔岩：双杀！· AK！焚尽一切！</option><option value="8">赛事转播：双杀！· ACE！一人团灭！</option><option value="9">寒冰水晶：双杀！· AK！冰封全场！</option>
+                    </select></label>
 
+                </section>
+                <section class="cvl" id="custom-voice-library" aria-labelledby="cvl-title">
+                    <div class="cvl-head"><div><strong id="cvl-title">自定义语音</strong><small>导入本地音频（WAV / MP3 / WMA，单个不超过 20MB），在「场景规则」里给任意规则选用，比如把双杀、一血换成自己录的声音。直播播放受上方「语音播报」开关控制；试听不受限制。</small></div>
+                        <button class="fxm-btn primary" id="cvl-import" type="button">导入本地音频</button></div>
+                    <div class="cvl-list" id="cvl-list"></div>
+                    <div class="cvl-gen" id="cvl-gen">
+                        <div class="cvl-sub"><strong>用豆包音色生成</strong><small id="cvl-tts-quota">需要在线授权</small></div>
+                        <div class="cvl-gen-row">
+                            <select id="cvl-tts-voice" title="生成用的音色"></select>
+                            <input type="text" id="cvl-tts-text" maxlength="30" placeholder="输入一句话，最多 30 字，例如：欢迎来到今晚的决斗赛！">
+                            <button class="fxm-btn primary" id="cvl-tts-generate" type="button">生成</button>
+                        </div>
+                        <small class="cvl-note">每生成一句按字数扣本卡密的生成额度，同一音色的同一句话再生成不重复扣。需要按选手名变化的播报，可在场景规则里选「自定义文字（豆包音色合成）」并使用变量。</small>
+                    </div>
+                    <div class="cvl-lib" id="cvl-lib">
+                        <div class="cvl-sub"><strong>服务器音频库</strong><small id="cvl-lib-status">管理员发布的音频，试听和下载都不扣额度；下载后在场景规则里使用</small>
+                            <button class="fxm-btn scr-small" id="cvl-lib-refresh" type="button">刷新</button></div>
+                        <div class="cvl-list" id="cvl-lib-list"></div>
+                    </div>
+                    <p class="streamer-hint" id="cvl-status" role="status">多条语音同时触发时会排队播放，一句播完再播下一句。</p>
                 </section>
                 <section class="streamer-preview" aria-labelledby="streamer-preview-title">
                     <div class="streamer-section-heading"><strong id="streamer-preview-title">声音试听</strong><small>自由组合UI风格与音色，仅试听，不改变当前展示。</small></div>
@@ -668,6 +702,17 @@
                     <div class="streamer-preview-actions"><button class="fxm-btn primary fxm-voice-test" id="btn-fx-voice-test" type="button">播放试听</button><button class="fxm-btn" id="btn-fx-voice-stop" type="button">停止试听</button></div>
                     <p class="streamer-hint" id="streamer-preview-hint" role="status">请先开启语音播报和全部特效，试听仅复用已有音频，不调用付费生成。</p>
                 </section>
+                </section>
+                <section id="streamer-pane-rules" class="streamer-pane scr-pane" role="tabpanel" aria-labelledby="streamer-tab-rules" data-streamer-pane="rules" hidden>
+                    <div class="streamer-section-heading scr-heading"><div><strong>场景规则</strong><small>从上到下匹配：第一条满足条件的规则决定播放什么；勾了「追加播放」的规则会在主特效之后接着播。修改后自动保存，展示窗口实时生效。</small></div>
+                        <div class="scr-head-actions"><button class="fxm-btn primary" id="scr-add" type="button">＋ 新建规则</button><button class="fxm-btn" id="scr-reset-all" type="button">全部恢复默认</button></div>
+                    </div>
+                    <div class="scr-layout">
+                        <div class="scr-list" id="scr-list" role="list" aria-label="场景规则列表"></div>
+                        <div class="scr-editor" id="scr-editor"></div>
+                    </div>
+                    <datalist id="scr-player-names"></datalist>
+                    <p class="streamer-hint" id="scr-status" role="status">示例：「击杀者 是 90老王（含别名）且 剩余血量 ≤ 10%」→ 自定义横幅「残血反杀」+ 语音。</p>
                 </section>
             </div>
             <footer class="fxm-footer">
@@ -727,6 +772,8 @@
         </section>
     </div>
 
-    <script src="main.js?v=20260929-5.5.3-main-actions-3" defer></script>
+    <script src="scene-rules.js?v=20260930-5.5.4-17" defer></script>
+    <script src="main.js?v=20260930-5.5.4-17" defer></script>
+    <script src="scene-rules-ui.js?v=20260930-5.5.4-17" defer></script>
 </body>
 </html>
