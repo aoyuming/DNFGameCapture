@@ -12,7 +12,7 @@ if (Test-Path -LiteralPath $OutputPath) { throw "Output already exists: $OutputP
 
 $exe = Join-Path $ReleaseDir 'DNFGameCapture.exe'
 $version = (Get-Item -LiteralPath $exe).VersionInfo.FileVersion
-if ($version -ne '5.5.4.0') { throw "Expected EXE version 5.5.4.0, got $version" }
+if ($version -ne '5.5.6.0') { throw "Expected EXE version 5.5.6.0, got $version" }
 $manifestUrl = 'https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/cloud-server-prod.json'
 $binaryText = [Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($exe))
 if (-not $binaryText.Contains($manifestUrl)) { throw 'The executable does not contain the production manifest URL' }
@@ -27,7 +27,7 @@ if ($manifest.environment -ne 'production' -or $manifest.protocolVersion -ne 2 -
 $files = @('DNFGameCapture.exe', 'WebView2Loader.dll', '7za.exe', 'sprite(击杀大XX).NPK')
 $webFiles = @('autocomplete-worker.js', 'index.html', 'main.js', 'style.css',
     'keys.css', 'keys.html', 'keys.js', 'kill.css', 'kill.html', 'kill.js',
-    'scene-rules.js', 'scene-rules-ui.js', 'scene-rules-ui.css')
+    'scene-rules.js', 'scene-rules-ui.js', 'scene-rules-ui.css', 'scene-state-ui.js')
 foreach ($name in $webFiles) {
     $files += "web前端\$name"
 }

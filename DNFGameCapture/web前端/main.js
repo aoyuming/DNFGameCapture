@@ -89,7 +89,7 @@ let pendingAliasPopoverName = '';
 let pendingAliasPopoverInput = null;
 let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
-const WEB_LAYOUT_VERSION = '20260930-5.5.4-17';
+const WEB_LAYOUT_VERSION = '20260930-5.5.6-2';
 const ALIAS_POPOVER_OFFSET_X = 8;
 const CLOUD_MATCH_WEB_THEMES = new Set([
     'dark-esports', 'frost-broadcast', 'black-gold', 'mist-blue', 'glacier-blue'
@@ -1005,6 +1005,9 @@ if (window.chrome && window.chrome.webview) {
             else if (msg.action === 'custom_voice_result') {
                 window.SceneRulesUI?.voiceResult(msg);
             }
+            else if (msg.action === 'scene_state') {
+                try { window.SceneStateUI?.receive(msg.data); } catch (err) { console.warn('[scene state]', err); }
+            }
             else if (msg.action === 'sync_state') {
                 hasReceivedInitialData = true;
 
@@ -1874,7 +1877,7 @@ function renderFxVoiceOptions(layout) {
 }
 
 function selectStreamerToolsTab(tab, focus = false) {
-    if (!['display', 'effects', 'voice', 'rules'].includes(tab)) return;
+    if (!['display', 'effects', 'voice', 'rules', 'scene'].includes(tab)) return;
     streamerToolsTab = tab;
     document.querySelectorAll('[data-streamer-tab]').forEach(button => {
         const active = button.dataset.streamerTab === tab;
@@ -1884,7 +1887,8 @@ function selectStreamerToolsTab(tab, focus = false) {
     });
     document.querySelectorAll('[data-streamer-pane]').forEach(pane => { pane.hidden = pane.dataset.streamerPane !== tab; });
     const reset = document.getElementById('btn-fx-manager-reset');
-    if (reset) reset.hidden = tab === 'display' || tab === 'rules';
+    if (reset) reset.hidden = tab === 'display' || tab === 'rules' || tab === 'scene';
+    if (tab === 'scene') window.SceneStateUI?.refresh();
 }
 
 function getVoicePreviewSelection(layout) {
@@ -5130,27 +5134,14 @@ function askResetStreaks() {
     if (scores === streakPromptScores) return;
     streakPromptScores = scores;
     const hasStreak = [...document.querySelectorAll('.stat-streak')].some(i => (parseInt(i.value) || 0) > 0);
-    // 比分变了 = 新的一局：场景规则里的「选手存活」一律全部复活；其他记录由主播勾选
-    const row = (id, label, checked, hint) => `<label style="display:flex;gap:8px;align-items:flex-start;text-align:left;margin:6px 0;cursor:pointer">`
-        + `<input type="checkbox" id="${id}"${checked ? ' checked' : ''} style="margin-top:3px">`
-        + `<span>${label}${hint ? `<br><small style="opacity:.65">${hint}</small>` : ''}</span></label>`;
-    const html = `比分已手动改为 <b>${scores.replace(':', ' : ')}</b>（红 : 蓝），要同步调整哪些数据？`
-        + `<div style="margin:12px auto 0;max-width:360px">`
-        + (hasStreak ? row('adj-streak', '所有选手<b>连杀</b>清零', true, '主界面「连杀」列和击杀特效的连杀数') : '')
-        + row('adj-drought', '「连续阵亡没人头」次数清零', false, '场景规则「连死 N 次没人头」用的计数')
-        + row('adj-history', '清空本场击杀记录、一血和复仇记录', false, '当作新的一场：「上一次 / 本场第 N 次击杀」、一血、复仇重新算')
-        + `<div style="text-align:left;margin-top:8px;font-size:12px;opacity:.65">场上选手会按新的一局全部算作存活（场景规则「选手存活状态」）。</div></div>`;
-    showConfirm(html, res => {
-        const streak = !!document.getElementById('adj-streak')?.checked;
-        const drought = !!document.getElementById('adj-drought')?.checked;
-        const history = !!document.getElementById('adj-history')?.checked;
-        if (res && streak) {
-            document.querySelectorAll('.stat-streak').forEach(i => { i.value = '0'; });
-            triggerSync();
-        }
-        // 不管选没选，都通知展示窗口：比分变了，全部复活
-        window.chrome?.webview?.postMessage({ action: 'cmd_scene_reset', drought: !!res && drought, history: !!res && history });
-    }, { okText: '应用', cancelText: '都不调整' });
+    // 比分变了 = 新的一局：不再弹窗，直接重置本局数据——所有选手连杀清零、场上全部复活。
+    // 「连续阵亡没人头」、击杀记录、一血、复仇是跨局计算的，保留不动（需要时在「主播工具 → 情景状态」里手动清）。
+    if (hasStreak) {
+        document.querySelectorAll('.stat-streak').forEach(i => { i.value = '0'; });
+        triggerSync();
+    }
+    window.chrome?.webview?.postMessage({ action: 'cmd_scene_reset', drought: false, history: false });
+    if (typeof showToast === 'function') showToast(`比分改为 ${scores.replace(':', ' : ')}：已按新的一局处理（连杀清零、全部复活）`);
 }
 
 const triggerSync = () => {

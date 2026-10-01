@@ -128,3 +128,43 @@
 .cvl-quota-bad { color: var(--rd-danger, #e5484d) !important; }
 .scr-lib-desc { font-size: 12px; color: var(--rd-muted, #999); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .scr-editor > * { flex-shrink: 0; }
+
+/* 主播工具 → 情景状态（scene-state-ui.js） */
+.fx-manager-panel:has(#streamer-pane-scene:not([hidden])) { width: min(1120px, 97vw); }
+.scs-pane select#scs-source { min-width: 220px; }
+.scs-body { display: flex; flex-direction: column; gap: 12px; max-height: min(66vh, 660px); overflow: auto; padding-right: 2px; }
+.scs-empty { padding: 36px 12px; text-align: center; color: var(--rd-muted, #999); line-height: 1.8; border: 1px dashed var(--rd-line, rgba(255,255,255,.14)); border-radius: var(--rd-radius-sm, 9px); }
+.scs-muted { color: var(--rd-muted, #999); font-size: 11.5px; font-weight: 400; }
+.scs-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.scs-card { display: flex; flex-direction: column; gap: 5px; padding: 10px 12px; border: 1px solid var(--rd-line, rgba(255,255,255,.08)); border-radius: var(--rd-radius-sm, 9px); background: var(--rd-surface-2, rgba(255,255,255,.04)); min-width: 0; }
+.scs-card small { color: var(--rd-muted, #999); font-size: 11.5px; }
+.scs-card b { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scs-card .fxm-btn, .scs-card select { align-self: flex-start; min-width: 0; }
+.scs-section-title { display: flex; align-items: baseline; gap: 8px; margin: 2px 0 6px; font-weight: 600; font-size: 13px; }
+.scs-teams { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.scs-team { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: var(--rd-radius-sm, 9px); border: 1px solid var(--rd-line, rgba(255,255,255,.08)); }
+.scs-team-0 { border-left: 3px solid #e5484d; }
+.scs-team-1 { border-left: 3px solid #3e8ef7; }
+.scs-team-title { font-size: 12px; color: var(--rd-muted, #999); }
+.scs-player { display: flex; align-items: center; gap: 10px; padding: 5px 6px; border-radius: 7px; background: var(--rd-surface-2, rgba(255,255,255,.04)); font-size: 12.5px; }
+.scs-player.is-dead .scs-pname { text-decoration: line-through; opacity: .55; }
+.scs-pname { flex: 1 1 auto; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scs-alive, .scs-num { display: inline-flex; align-items: center; gap: 4px; flex: none; cursor: pointer; }
+.scs-num input { width: 52px; }
+.scs-streak { flex: none; color: var(--rd-muted, #999); font-size: 11.5px; }
+.scs-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 12px; }
+.scs-list { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow: auto; }
+.scs-list-sm { max-height: 110px; margin-bottom: 8px; }
+.scs-kill, .scs-cd { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 6px; background: var(--rd-surface-2, rgba(255,255,255,.04)); font-size: 12.5px; }
+.scs-cd > span:first-child { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scs-cd .fxm-btn { min-width: 0; padding: 2px 10px; }
+.scs-kround { color: var(--rd-muted, #999); font-size: 11px; flex: none; }
+.scs-kteam-0 { color: #ff6b70; font-weight: 600; }
+.scs-kteam-1 { color: #5aa2ff; font-weight: 600; }
+.scs-kstreak { font-size: 11px; padding: 0 6px; border-radius: 999px; background: var(--rd-accent-soft, rgba(124,108,255,.14)); color: var(--rd-accent, #7c6cff); }
+.scs-x { margin-left: auto; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 5px; cursor: pointer; background: transparent; color: var(--rd-muted, #999); font-size: 15px; line-height: 22px; }
+.scs-x:hover { background: var(--rd-surface, rgba(255,255,255,.08)); color: var(--rd-danger, #e5484d); }
+.scs-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 4px; border-top: 1px dashed var(--rd-line, rgba(255,255,255,.12)); }
+.scs-actions .fxm-btn { min-width: 0; }
+.scs-actions .fxm-btn.danger { color: var(--rd-danger, #e5484d); border-color: var(--rd-danger, #e5484d); margin-left: auto; }
+@media (max-width: 860px) { .scs-summary { grid-template-columns: 1fr 1fr; } .scs-teams, .scs-grid { grid-template-columns: 1fr; } }

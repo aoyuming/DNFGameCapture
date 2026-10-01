@@ -2650,6 +2650,57 @@ static json DnfSceneTestSnapshot()
     return json{ { "id", g_sceneTestId.load() }, { "rule", g_sceneTestRule } };
 }
 
+/* 情景状态面板：展示窗口（kill.js：击杀小窗 / 全屏特效 / OBS 浏览器源）每秒回报场景规则用的比赛记录
+ * （本局存活、连续没人头、一血、击杀记录、冷却……），主窗口「主播工具 → 情景状态」读取并可手动修改。
+ * 修改以编号递增的操作列表下发，展示窗口按编号只执行一次（隐藏的窗口也会执行）。 */
+static std::mutex g_sceneStateMutex;
+static json g_sceneStateReports = json::object();   // src -> { at, data }
+static int g_sceneEditNextId = 0;
+static json g_sceneEditList = json::array();         // 最近 30 条 { id, ops }
+static const ULONGLONG kSceneStateStaleMs = 15000;
+
+static void DnfStoreSceneState(std::string src, const json& data)
+{
+    if (src.empty() || src.size() > 64 || !data.is_object()) return;
+    const ULONGLONG now = ::GetTickCount64();
+    std::lock_guard<std::mutex> lock(g_sceneStateMutex);
+    for (auto it = g_sceneStateReports.begin(); it != g_sceneStateReports.end();) {
+        const ULONGLONG at = it.value().value("at", 0ULL);
+        if (now - at > kSceneStateStaleMs * 4) it = g_sceneStateReports.erase(it);
+        else ++it;
+    }
+    if (g_sceneStateReports.size() >= 12 && !g_sceneStateReports.contains(src)) return;
+    g_sceneStateReports[src] = json{ { "at", now }, { "data", data } };
+}
+
+static json DnfSceneStateSnapshot()
+{
+    const ULONGLONG now = ::GetTickCount64();
+    json out = json::array();
+    std::lock_guard<std::mutex> lock(g_sceneStateMutex);
+    for (auto it = g_sceneStateReports.begin(); it != g_sceneStateReports.end(); ++it) {
+        const ULONGLONG at = it.value().value("at", 0ULL);
+        if (now - at > kSceneStateStaleMs) continue;
+        out.push_back(json{ { "src", it.key() }, { "ageMs", (long long)(now - at) }, { "data", it.value()["data"] } });
+    }
+    return json{ { "reports", out }, { "editId", g_sceneEditNextId } };
+}
+
+static bool DnfRequestSceneEdit(const json& ops)
+{
+    if (!ops.is_array() || ops.empty() || ops.size() > 50) return false;
+    std::lock_guard<std::mutex> lock(g_sceneStateMutex);
+    g_sceneEditList.push_back(json{ { "id", ++g_sceneEditNextId }, { "ops", ops } });
+    while (g_sceneEditList.size() > 30) g_sceneEditList.erase(g_sceneEditList.begin());
+    return true;
+}
+
+static json DnfSceneEditSnapshot()
+{
+    std::lock_guard<std::mutex> lock(g_sceneStateMutex);
+    return json{ { "id", g_sceneEditNextId }, { "list", g_sceneEditList } };
+}
+
 static std::string DnfHttpQueryParam(const std::string& request, const char* name)
 {
     const size_t lineEnd = request.find("\r\n");
@@ -2822,6 +2873,20 @@ static void DnfHandleKillDisplayHttpClient(SOCKET client)
             return;
         }
         DnfHttpSendResponse(client, 200, "OK", "application/json; charset=utf-8", DnfSceneRulesSnapshot().dump());
+        return;
+    }
+    // 情景状态：展示窗口回报（POST ?src=<窗口实例>，body = 状态 JSON）
+    if (route == "/api/scene-state") {
+        if (method != "POST") {
+            DnfHttpSendResponse(client, 200, "OK", "application/json; charset=utf-8", DnfSceneStateSnapshot().dump());
+            return;
+        }
+        const std::string body = DnfHttpRequestBody(request);
+        json parsed = body.size() <= 256 * 1024 ? json::parse(body, nullptr, false) : json();
+        const bool ok = !parsed.is_discarded() && parsed.is_object();
+        if (ok) DnfStoreSceneState(DnfUrlDecode(DnfHttpQueryParam(request, "src")), parsed);
+        DnfHttpSendResponse(client, ok ? 200 : 400, ok ? "OK" : "Bad Request", "application/json; charset=utf-8",
+            ok ? "{\"ok\":true}" : "{\"ok\":false}");
         return;
     }
     if (route == "/api/voices") {
@@ -4745,112 +4810,146 @@ static int DnfDetectStartBanner(HDC hSrc, int fw, int fh)
 }
 
 // ===================================================
-// 「红队胜!! / 蓝队胜!!」横幅识别（纯颜色）
+// 「红队胜!! / 蓝队胜!!」横幅识别（固定采样点，红蓝共用同一组位置）
 //   用途：主播掉线时场上少一个大 X，「整队被歼」凑不满 4 个 X，本局不会结束，
 //   连杀、比分、存活状态会串到下一局。认到这个横幅即可当作一局结束。
-//   左半区是纯色大字（红队=亮红，蓝队=亮蓝），右半区是「胜!!」黑字白边，
-//   两块同时成立才算命中，避免技能特效或地图底色误判。
-//   判据全部是「占区域面积的比例」，与游戏窗口分辨率无关。
-//   坐标按 2560x1440 实测，取横幅在画面中的固定位置。
+//   两种横幅形状一致，只是左边大字的颜色不同，所以：
+//     彩色点（12 个，落在「红队 / 蓝队」大字上）：红队胜按红色判断、蓝队胜按蓝色判断，各有自己的标准色；
+//     黑色点（10 个，落在「胜!!」黑字上）：两种横幅一样，三个通道都 ≤ kWinBannerTol。
+//   红字 / 蓝字带金属高光，绿色通道随帧大幅变化，所以彩色点只严格比主色通道（±kWinBannerTol），
+//   其余通道只要求「仍是这个颜色」：
+//     红：R 在标准值 ±20、B ≤ 40、G ≤ 110 且 G < R-100（排除橙黄火焰 / 特效）
+//     蓝：B 在标准值 ±20、R ≤ 40、G ≤ B-60（排除青色 / 白色）
+//   某一侧 12 个彩色点至少命中 kWinColorNeed 个、10 个黑色点全部命中才算识别到（命中 1 帧即结算）。
+//   坐标按 2560x1440 标定，按游戏窗口实际分辨率等比换算；每个点取 3x3 像素平均，抗压缩噪点。
 // ===================================================
-static const float kWinBannerColor[4] = { 0.3570f, 0.4170f, 0.5040f, 0.5620f }; // 「红队/蓝队」两个大字
-static const float kWinBannerGlyph[4] = { 0.5070f, 0.4170f, 0.6500f, 0.5620f }; // 「胜!!」黑字白边
+struct DnfWinColorPoint { int x, y, red, blue; };   // red = 红队胜时该点 R 标准值，blue = 蓝队胜时该点 B 标准值
+struct DnfWinBlackPoint { int x, y; };
+static const DnfWinColorPoint kWinColorPoints[] = {
+    { 911, 774, 177, 196 },
+    { 949, 663, 195, 228 },
+    { 964, 733, 186, 246 },
+    { 1029, 748, 223, 239 },
+    { 1064, 692, 251, 246 },
+    { 1065, 632, 193, 137 },
+    { 1152, 707, 247, 237 },
+    { 1157, 772, 173, 207 },
+    { 1168, 649, 214, 146 },
+    { 1223, 714, 249, 244 },
+    { 1271, 779, 211, 154 },
+    { 1273, 651, 200, 222 }
+};
+static const DnfWinBlackPoint kWinBlackPoints[] = {
+    { 1298, 787 },
+    { 1335, 694 },
+    { 1409, 627 },
+    { 1412, 776 },
+    { 1476, 709 },
+    { 1480, 625 },
+    { 1525, 787 },
+    { 1553, 656 },
+    { 1632, 737 },
+    { 1683, 625 }
+};
+static const int kWinColorCount = (int)(sizeof(kWinColorPoints) / sizeof(kWinColorPoints[0]));
+static const int kWinBlackCount = (int)(sizeof(kWinBlackPoints) / sizeof(kWinBlackPoints[0]));
+static const int kWinBannerTol = 20;
+static const int kWinColorNeed = 8;      // 彩色点至少命中几个（黑色点仍要求全部命中）
+static const int kWinBannerFrames = 1;   // 命中 1 帧即结算（22 个点全部满足已足够严格）
+static const float kWinBannerBox[4] = { 0.3450f, 0.4250f, 0.6650f, 0.5600f }; // 采样点外接框（比例），预览里画出来
+
+// 预览画面实时显示用：每个点本帧是否命中（位 i = 第 i 个点）
+static std::atomic<unsigned> g_winBannerRedMask{ 0 };
+static std::atomic<unsigned> g_winBannerBlueMask{ 0 };
+static std::atomic<unsigned> g_winBannerBlackMask{ 0 };
+static std::atomic<int> g_winBannerSide{ 0 };
 
 struct DnfWinBannerStat {
     int side = 0;        // 1=红队胜，2=蓝队胜，0=没识别到
-    double red = 0.0;    // 左区亮红占比
-    double blue = 0.0;   // 左区亮蓝占比
-    double dark = 0.0;   // 右区黑字占比
-    double white = 0.0;  // 右区白边占比
-    double cov = 0.0;    // 主色横向覆盖（有主色像素的列占比）
-    double vcov = 0.0;   // 主色纵向覆盖（行占比）
-    double edge = 0.0;   // 左区白边横向覆盖（大字都有银色描边）
+    int redHit = 0;      // 红队胜命中点数（彩色点按红判断 + 黑色点）
+    int blueHit = 0;     // 蓝队胜命中点数（彩色点按蓝判断 + 黑色点）
+    int redTotal = kWinColorCount + kWinBlackCount;
+    int blueTotal = kWinColorCount + kWinBlackCount;
+    double red = 0.0;    // 红队胜命中比例（日志 / 调参用）
+    double blue = 0.0;   // 蓝队胜命中比例
 };
 
-// 每 2 像素采 1 个，比例判据与游戏窗口分辨率无关
 static DnfWinBannerStat DnfDetectWinBanner(HDC hSrc, int fw, int fh)
 {
     DnfWinBannerStat st;
-    if (!hSrc || fw < 640 || fh < 360) return st;
-    const int x0 = (int)(kWinBannerColor[0] * fw);
-    const int x1 = (int)(kWinBannerGlyph[2] * fw);
-    const int y0 = (int)(kWinBannerColor[1] * fh);
-    const int y1 = (int)(kWinBannerColor[3] * fh);
-    const int bw = x1 - x0, bh = y1 - y0;
-    const int splitX = (int)(kWinBannerGlyph[0] * fw) - x0;
-    if (bw < 120 || bh < 40 || splitX < 40 || splitX >= bw) return st;
-
-    BITMAPINFO bmi = {};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = bw;
-    bmi.bmiHeader.biHeight = -bh;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-    void* bits = nullptr;
-    HBITMAP dib = ::CreateDIBSection(hSrc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
-    if (!dib || !bits) { if (dib) ::DeleteObject(dib); return st; }
-    HDC hDst = ::CreateCompatibleDC(NULL);
-    HGDIOBJ oldDst = ::SelectObject(hDst, dib);
-    if (::BitBlt(hDst, 0, 0, bw, bh, hSrc, x0, y0, SRCCOPY)) {
-        ::GdiFlush();
-        const BYTE* px = static_cast<const BYTE*>(bits);
-        const int sw = (bw + 1) / 2, sh = (bh + 1) / 2;
-        const int splitS = splitX / 2;
-        if (sw > 1 && sh > 1 && splitS > 0 && splitS < sw) {
-            std::vector<int> redCol(sw, 0), blueCol(sw, 0), edgeCol(sw, 0), darkCol(sw, 0);
-            std::vector<int> redRow(sh, 0), blueRow(sh, 0), edgeRow(sh, 0);
-            long red = 0, blue = 0, dark = 0, white = 0, colorN = 0, glyphN = 0;
-            for (int r = 0; r < sh; ++r) {
-                const BYTE* row = px + ((size_t)(r * 2) * (size_t)bw) * 4;
-                for (int c = 0; c < sw; ++c) {
-                    const int b = row[(size_t)(c * 2) * 4 + 0];
-                    const int g = row[(size_t)(c * 2) * 4 + 1];
-                    const int rr = row[(size_t)(c * 2) * 4 + 2];
-                    if (c < splitS) {
-                        ++colorN;
-                        if (rr > 130 && g < 90 && b < 90) { ++red; ++redCol[c]; ++redRow[r]; }
-                        else if (b > 140 && b - rr > 90 && b - g > 60) { ++blue; ++blueCol[c]; ++blueRow[r]; }
-                        if (rr > 190 && g > 190 && b > 190) { ++edgeCol[c]; ++edgeRow[r]; }
-                    } else {
-                        ++glyphN;
-                        if (rr < 80 && g < 80 && b < 90) { ++dark; ++darkCol[c]; }
-                        else if (rr > 190 && g > 190 && b > 190) ++white;
+    unsigned redMask = 0, blueMask = 0, blackMask = 0;
+    if (hSrc && fw >= 640 && fh >= 360) {
+        const int x0 = (int)(kWinBannerBox[0] * fw);
+        const int y0 = (int)(kWinBannerBox[1] * fh);
+        const int bw = (int)(kWinBannerBox[2] * fw) - x0;
+        const int bh = (int)(kWinBannerBox[3] * fh) - y0;
+        BITMAPINFO bmi = {};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = bw;
+        bmi.bmiHeader.biHeight = -bh;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        HBITMAP dib = (bw >= 60 && bh >= 20) ? ::CreateDIBSection(hSrc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0) : NULL;
+        if (dib && bits) {
+            HDC hDst = ::CreateCompatibleDC(NULL);
+            HGDIOBJ oldDst = ::SelectObject(hDst, dib);
+            if (::BitBlt(hDst, 0, 0, bw, bh, hSrc, x0, y0, SRCCOPY)) {
+                ::GdiFlush();
+                const BYTE* px = static_cast<const BYTE*>(bits);
+                // 换算到当前分辨率后取 3x3 平均
+                const auto sample = [&](int px2560, int py1440, int& r, int& g, int& b) {
+                    const int cx = (int)((double)px2560 * fw / 2560.0 + 0.5) - x0;
+                    const int cy = (int)((double)py1440 * fh / 1440.0 + 0.5) - y0;
+                    long sr = 0, sg = 0, sb = 0, n = 0;
+                    for (int dy = -1; dy <= 1; ++dy) {
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            const int x = cx + dx, y = cy + dy;
+                            if (x < 0 || y < 0 || x >= bw || y >= bh) continue;
+                            const BYTE* q = px + ((size_t)y * (size_t)bw + (size_t)x) * 4;
+                            sb += q[0]; sg += q[1]; sr += q[2]; ++n;
+                        }
                     }
+                    if (n == 0) { r = g = b = -999; return; }
+                    r = (int)(sr / n); g = (int)(sg / n); b = (int)(sb / n);
+                };
+                for (int i = 0; i < kWinColorCount; ++i) {
+                    const auto& p = kWinColorPoints[i];
+                    int r, g, b;
+                    sample(p.x, p.y, r, g, b);
+                    if (std::abs(r - p.red) <= kWinBannerTol && b >= 0 && b <= 40 && g >= 0 && g <= 110 && g < r - 100)
+                        redMask |= (1u << i);
+                    if (std::abs(b - p.blue) <= kWinBannerTol && r >= 0 && r <= 40 && g >= 0 && g <= b - 60)
+                        blueMask |= (1u << i);
+                }
+                for (int i = 0; i < kWinBlackCount; ++i) {
+                    int r, g, b;
+                    sample(kWinBlackPoints[i].x, kWinBlackPoints[i].y, r, g, b);
+                    if (r >= 0 && r <= kWinBannerTol && g >= 0 && g <= kWinBannerTol && b >= 0 && b <= kWinBannerTol)
+                        blackMask |= (1u << i);
                 }
             }
-            if (colorN > 0 && glyphN > 0) {
-                st.red = (double)red / (double)colorN;
-                st.blue = (double)blue / (double)colorN;
-                st.dark = (double)dark / (double)glyphN;
-                st.white = (double)white / (double)glyphN;
-                int dom = 0;
-                if (st.red >= 0.12 && st.red >= st.blue * 4.0) dom = 1;
-                else if (st.blue >= 0.12 && st.blue >= st.red * 4.0) dom = 2;
-                const auto covCols = [&](const std::vector<int>& v, int lo, int hi) {
-                    if (hi <= lo) return 0.0;
-                    int hit = 0;
-                    for (int i = lo; i < hi; ++i) if (v[i] > 0) ++hit;
-                    return (double)hit / (double)(hi - lo);
-                };
-                const auto covRows = [&](const std::vector<int>& v) {
-                    int hit = 0;
-                    for (size_t i = 0; i < v.size(); ++i) if (v[i] > 0) ++hit;
-                    return (double)hit / (double)v.size();
-                };
-                if (dom == 1) {
-                    st.cov = covCols(redCol, 0, splitS); st.vcov = covRows(redRow); st.edge = covCols(edgeCol, 0, splitS);
-                } else if (dom == 2) {
-                    st.cov = covCols(blueCol, 0, splitS); st.vcov = covRows(blueRow); st.edge = covCols(edgeCol, 0, splitS);
-                }
-                // 大字必须是横贯左区的一条宽带，右区还得有「胜!!」的黑字
-                if (dom && st.cov >= 0.55 && st.vcov >= 0.45 && st.edge >= 0.45 && st.dark >= 0.20) st.side = dom;
-            }
+            ::SelectObject(hDst, oldDst);
+            ::DeleteDC(hDst);
         }
+        if (dib) ::DeleteObject(dib);
     }
-    ::SelectObject(hDst, oldDst);
-    ::DeleteDC(hDst);
-    ::DeleteObject(dib);
+    const auto bitsOf = [](unsigned m) { int n = 0; while (m) { n += (int)(m & 1u); m >>= 1; } return n; };
+    const int blackHit = bitsOf(blackMask);
+    st.redHit = bitsOf(redMask) + blackHit;
+    st.blueHit = bitsOf(blueMask) + blackHit;
+    st.red = (double)st.redHit / (double)st.redTotal;
+    st.blue = (double)st.blueHit / (double)st.blueTotal;
+    const int redColor = bitsOf(redMask), blueColor = bitsOf(blueMask);
+    if (blackHit == kWinBlackCount) {
+        if (redColor >= kWinColorNeed && redColor > blueColor) st.side = 1;
+        else if (blueColor >= kWinColorNeed && blueColor > redColor) st.side = 2;
+    }
+    g_winBannerRedMask.store(redMask);
+    g_winBannerBlueMask.store(blueMask);
+    g_winBannerBlackMask.store(blackMask);
+    g_winBannerSide.store(st.side);
     return st;
 }
 
@@ -12859,20 +12958,20 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
         s_winBannerSide = wbHit ? winBanner.side : 0;
         const wchar_t* wbName = winBanner.side == 1 ? L"红队胜" : (winBanner.side == 2 ? L"蓝队胜" : L"无");
         CString wbDiag;
-        wbDiag.Format(L"[队胜识别] 横幅=%s 连续%d帧 | 左区 红%.1f%% 蓝%.1f%% 横覆盖%.0f%% 纵覆盖%.0f%% 描边%.0f%% | 右区 黑%.1f%% 白%.1f%% | 允许结算=%s",
-            wbName, s_winBannerHits, winBanner.red * 100.0, winBanner.blue * 100.0,
-            winBanner.cov * 100.0, winBanner.vcov * 100.0, winBanner.edge * 100.0,
-            winBanner.dark * 100.0, winBanner.white * 100.0, m_bCanTriggerTeamScore ? L"是" : L"否（局间冷却中）");
+        wbDiag.Format(L"[队胜识别] 横幅=%s 连续%d帧 | 红队胜采样点 命中%d/%d | 蓝队胜采样点 命中%d/%d（每点 RGB ±%d；彩色点≥%d/%d 且黑色点全中） | 允许结算=%s",
+            wbName, s_winBannerHits, winBanner.redHit, winBanner.redTotal, winBanner.blueHit, winBanner.blueTotal,
+            kWinBannerTol, kWinColorNeed, kWinColorCount, m_bCanTriggerTeamScore ? L"是" : L"否（局间冷却中）");
         if (wbHit && wbNow - s_winBannerLogTick >= 400) {
             s_winBannerLogTick = wbNow;
             AppLog(L"🔎 " + wbDiag, RGB(120, 220, 255));
         }
         else if (wbNow - s_winBannerLogTick >= 3000 &&
-                 (winBanner.red >= 0.05 || winBanner.blue >= 0.05 || winBanner.dark >= 0.25)) {
+                 (winBanner.red >= 0.75 || winBanner.blue >= 0.75)) {   // 差几个点没命中时记一笔，便于调点位
             s_winBannerLogTick = wbNow;
             WriteMatchLog(wbDiag + L"（未达触发条件，仅作调参参考）");
         }
-        if (wbHit && s_winBannerHits >= 2 && m_bCanTriggerTeamScore && !s_winBannerLatched) {
+        // s_winBannerHits 从第 2 个同侧命中帧开始计 1，所以 >= kWinBannerFrames-1 = 连续 kWinBannerFrames 帧
+        if (wbHit && s_winBannerHits >= kWinBannerFrames - 1 && m_bCanTriggerTeamScore && !s_winBannerLatched) {
             s_winBannerLatched = true;
             s_winBannerHits = 0;
             const int bannerTeam = winBanner.side - 1;   // 0=红队 1=蓝队（选手 team，不受翻面影响）
@@ -13428,6 +13527,9 @@ void CDNFGameCaptureDlg::OnBnClickedReset() {
             m_totalScoreBlue = 0;
             m_recentEvents.clear();
             ResetMatchCooldownState(L"手动战绩归零");
+            // 与 Web 端「重置战绩」一致：先选顺序一起复位
+            m_bRedPickFirst = false;
+            ::WritePrivateProfileString(L"Settings", L"RedPickFirst", L"0", m_iniPath);
             for (int i = 0; i < 8; i++) {
                 m_players[i].kills = 0; m_players[i].deaths = 0;
                 m_players[i].currentStreak = 0; m_players[i].akCount = 0;
@@ -13441,6 +13543,8 @@ void CDNFGameCaptureDlg::OnBnClickedReset() {
         WriteScoreToFile();
         if (m_editVisualLogs.m_hWnd) m_editVisualLogs.SetWindowText(L"");
         NotifyIdentityRoundReset(L"手动战绩归零/重置对局");
+        // 重置战绩 = 新开一轮比赛：情景数据一起清空（与 Web 端一致）
+        DnfRequestSceneEdit(json::array({ json{ { "op", "full" } } }));
         OutputDebugAuthInfo();
         m_status.SetWindowText(L"战绩已归零！");
     }
@@ -14555,6 +14659,60 @@ void CDNFGameCaptureDlg::Draw(CDC& dc, HBITMAP previewFrame, int previewW, int p
             dc.SetTextColor(RGB(60, 230, 90));
             dc.TextOut(c.x, c.y, L"开始✓");
         }
+    }
+
+    // ===================================================
+    // 「红队胜!! / 蓝队胜!!」采样点实时显示（运行或校准时）
+    //   外框：灰 = 没识别到，红 / 蓝 = 本帧识别到红队胜 / 蓝队胜
+    //   彩色点（大字上）：实心红 = 满足红队胜颜色，实心蓝 = 满足蓝队胜颜色，灰圈 = 都不满足
+    //   黑色点（「胜!!」上）：实心绿 = 是黑色，灰圈 = 不是
+    //   框上方文字：两种横幅各命中多少点
+    // ===================================================
+    if ((m_bIsRunning || m_bDeathXCalibrationMode) && m_previewRect.Width() > 0 && m_previewRect.Height() > 0) {
+        const unsigned redMask = g_winBannerRedMask.load();
+        const unsigned blueMask = g_winBannerBlueMask.load();
+        const unsigned blackMask = g_winBannerBlackMask.load();
+        const int side = g_winBannerSide.load();
+        const CPoint a = DeathXPointToClient(ScorePointF{ kWinBannerBox[0], kWinBannerBox[1] });
+        const CPoint b = DeathXPointToClient(ScorePointF{ kWinBannerBox[2], kWinBannerBox[3] });
+        const COLORREF boxCol = side == 1 ? RGB(255, 60, 60) : (side == 2 ? RGB(60, 140, 255) : RGB(150, 150, 150));
+        CPen boxPen(PS_SOLID, side ? 3 : 1, boxCol);
+        CPen* oldPen = dc.SelectObject(&boxPen);
+        CBrush* oldBrush = (CBrush*)dc.SelectStockObject(NULL_BRUSH);
+        dc.Rectangle(a.x, a.y, b.x, b.y);
+        const auto dot = [&](int x2560, int y1440, bool filled, COLORREF col) {
+            const CPoint c = DeathXPointToClient(ScorePointF{ x2560 / 2560.0f, y1440 / 1440.0f });
+            CPen pen(PS_SOLID, 1, filled ? RGB(255, 255, 255) : RGB(140, 140, 140));
+            CBrush br(col);
+            CPen* op = dc.SelectObject(&pen);
+            CBrush* ob = filled ? dc.SelectObject(&br) : (CBrush*)dc.SelectStockObject(NULL_BRUSH);
+            dc.Ellipse(c.x - 4, c.y - 4, c.x + 5, c.y + 5);
+            dc.SelectObject(ob);
+            dc.SelectObject(op);
+        };
+        int redN = 0, blueN = 0, blackN = 0;
+        for (int i = 0; i < kWinColorCount; ++i) {
+            const bool r = (redMask & (1u << i)) != 0, bl = (blueMask & (1u << i)) != 0;
+            redN += r ? 1 : 0; blueN += bl ? 1 : 0;
+            dot(kWinColorPoints[i].x, kWinColorPoints[i].y, r || bl, r ? RGB(255, 40, 40) : RGB(40, 120, 255));
+        }
+        for (int i = 0; i < kWinBlackCount; ++i) {
+            const bool k = (blackMask & (1u << i)) != 0;
+            blackN += k ? 1 : 0;
+            dot(kWinBlackPoints[i].x, kWinBlackPoints[i].y, k, RGB(60, 230, 90));
+        }
+        dc.SelectObject(oldBrush);
+        dc.SelectObject(oldPen);
+        CString t;
+        t.Format(L"队胜识别 红%d/%d 蓝%d/%d 黑%d/%d%s", redN, kWinColorCount, blueN, kWinColorCount, blackN, kWinBlackCount,
+            side == 1 ? L" → 红队胜" : (side == 2 ? L" → 蓝队胜" : L""));
+        CRect tr(0, 0, 0, 0);
+        dc.DrawText(t, &tr, DT_SINGLELINE | DT_CALCRECT);
+        CRect lab(a.x, a.y - tr.Height() - 6, a.x + tr.Width() + 10, a.y - 2);
+        dc.FillSolidRect(&lab, RGB(20, 20, 20));
+        dc.SetBkMode(TRANSPARENT);
+        dc.SetTextColor(boxCol);
+        dc.DrawText(t, &lab, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
     // ===================================================
@@ -19969,6 +20127,17 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
         else if (action == "cmd_scene_reset") {
             DnfRequestSceneReset(DnfJBool(j, "drought", false), DnfJBool(j, "history", false));
         }
+        else if (action == "cmd_scene_edit") {
+            // 主播工具 → 情景状态：手动修改场景规则用的比赛记录（所有展示窗口各执行一次）
+            if (j.contains("ops")) DnfRequestSceneEdit(j["ops"]);
+        }
+        else if (action == "cmd_scene_state_get") {
+            if (m_pWebDlg) {
+                json reply{ { "action", "scene_state" }, { "data", DnfSceneStateSnapshot() } };
+                CString jsonStr = CA2W(reply.dump().c_str(), CP_UTF8);
+                m_pWebDlg->SendStateToWeb(jsonStr);
+            }
+        }
         else if (action == "cmd_custom_voice_import") {
             // 自定义语音：选择本地音频（可多选），复制到 %APPDATA%\DNFGameCapture\custom-voice
             const DWORD bufferChars = 32768;
@@ -20539,15 +20708,32 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
         }
         else if (action == "cmd_undo_event") {
             int eventId = j["id"].get<int>();
+            // 先通知展示窗口：下一次战绩变化是撤销 / 恢复，静默修正情景数据，不当作击杀播放
+            // 附带这条记录的凶手 / 死者：撤销中间某一条时，展示窗口删的是这一条而不是凶手最近的一条
+            {
+                json rewriteOp{ { "op", "statsRewrite" } };
+                std::lock_guard<std::mutex> lock(m_dataMutex);
+                for (const auto& ev : m_recentEvents) {
+                    if (ev.id != eventId) continue;
+                    rewriteOp["killer"] = std::string(CW2A(ev.killer, CP_UTF8));
+                    rewriteOp["victim"] = std::string(CW2A(ev.dead, CP_UTF8));
+                    break;
+                }
+                DnfRequestSceneEdit(json::array({ rewriteOp }));
+            }
             bool ok = ToggleReviewEvent(eventId);
             if (!ok) {
+                DnfRequestSceneEdit(json::array({ json{ { "op", "statsRewriteCancel" } } }));
                 AppLog(L"⚠️ [复盘操作] 事件不存在或当前状态不可操作。", RGB(255, 180, 0));
             }
             PostMessage(WM_UPDATE_ALL_UI, 0, 0);
         }
         else if (action == "cmd_match_history_undo") {
             CString error;
+            DnfRequestSceneEdit(json::array({ json{ { "op", "statsRewrite" } } }));
             if (!UndoMatchHistory(error)) {
+                if (error.IsEmpty() || error.Find(L"已撤销") < 0)
+                    DnfRequestSceneEdit(json::array({ json{ { "op", "statsRewriteCancel" } } }));
                 DnfSendWebToast(m_pWebDlg, L"match_history_error",
                     error.IsEmpty() ? L"没有可以撤销的场上操作。" : error);
             }
@@ -20558,7 +20744,10 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
         }
         else if (action == "cmd_match_history_redo") {
             CString error;
+            DnfRequestSceneEdit(json::array({ json{ { "op", "statsRewrite" } } }));
             if (!RedoMatchHistory(error)) {
+                if (error.IsEmpty() || error.Find(L"已重做") < 0)
+                    DnfRequestSceneEdit(json::array({ json{ { "op", "statsRewriteCancel" } } }));
                 DnfSendWebToast(m_pWebDlg, L"match_history_error",
                     error.IsEmpty() ? L"没有可以重做的场上操作。" : error);
             }
@@ -20570,7 +20759,10 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
         else if (action == "cmd_match_history_restore") {
             const std::uint64_t entryId = j.value("id", std::uint64_t{ 0 });
             CString error;
+            DnfRequestSceneEdit(json::array({ json{ { "op", "statsRewrite" } } }));
             if (entryId == 0 || !RestoreMatchHistoryToEntry(entryId, error)) {
+                if (error.IsEmpty() || error.Find(L"保存失败") < 0)
+                    DnfRequestSceneEdit(json::array({ json{ { "op", "statsRewriteCancel" } } }));
                 DnfSendWebToast(m_pWebDlg, L"match_history_error",
                     error.IsEmpty() ? L"选中的操作记录已不存在。" : error);
             }
@@ -20612,6 +20804,8 @@ LRESULT CDNFGameCaptureDlg::OnWebCmdReceived(WPARAM wParam, LPARAM lParam)
             }
             if (m_editVisualLogs.m_hWnd) m_editVisualLogs.SetWindowText(L"");
             NotifyIdentityRoundReset(clearPlayers ? L"Web端清空场上数据/重置战绩/清空复盘事件" : L"Web端重置战绩/清空复盘事件");
+            // 重置战绩 = 新开一轮比赛：所有展示窗口的情景数据（击杀记录 / 一血 / 复仇 / 存活 / 连续没人头 / 冷却）全部清空
+            DnfRequestSceneEdit(json::array({ json{ { "op", "full" } } }));
             m_status.SetWindowText(clearPlayers ? L"场上数据已清空！" : L"战绩已归零！");
             PostMessage(WM_UPDATE_ALL_UI, 0, 0);
         }
@@ -20719,6 +20913,7 @@ json CDNFGameCaptureDlg::DnfBuildKillDisplayStateJson()
     data["sceneRulesRev"] = g_sceneRulesRev.load();
     data["sceneTest"] = DnfSceneTestSnapshot();
     data["sceneReset"] = DnfSceneResetSnapshot();
+    data["sceneEdit"] = DnfSceneEditSnapshot();
     {
         json hp;
         hp["left"] = m_bIsRunning ? m_hpPercent[0].load() : -1;

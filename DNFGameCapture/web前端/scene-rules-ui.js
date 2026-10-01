@@ -330,10 +330,20 @@ const SceneRulesUI = (() => {
     function playerPickerHtml(names, index, side) {
         names = Array.isArray(names) ? names : [];
         const s = side == null ? '' : ` data-side="${side}"`;
-        const chips = names.map((n, k) => `<span class="scr-chip${k === 0 ? ' is-main' : ''}">${esc(n)}${k === 0 ? '' : '<small>别名</small>'}<button type="button" data-act="del-name" data-i="${index}" data-k="${k}"${s} title="移除">×</button></span>`).join('');
+        // 匹配时按选手库别名分组判断（SceneRules.samePlayer），写一个名字就等于匹配他的所有别名；
+        // 这里只显示选手本身，别名数量放在徽标里、完整列表放在悬停提示里。旧规则里存下的别名同样折叠不显示。
+        const R = window.SceneRules;
+        if (R && R.setAliases) R.setAliases(aliasGroupMap());   // 主窗口也按选手库别名分组判断「同一个选手」
+        const same = (a, b) => (R && R.samePlayer ? R.samePlayer(a, b) : a === b);
+        const chips = names.map((n, k) => {
+            if (names.slice(0, k).some(p => same(p, n))) return '';   // 前面某个选手的别名：折叠
+            const alias = aliasesOf(n);
+            const tip = alias.length ? '同时匹配所有别名：' + alias.join('、') : '同时匹配选手库里的所有别名';
+            return `<span class="scr-chip is-main" title="${esc(tip)}">${esc(n)}${alias.length ? `<small>含 ${alias.length} 个别名</small>` : ''}<button type="button" data-act="del-name" data-i="${index}" data-k="${k}"${s} title="移除">×</button></span>`;
+        }).join('');
         return `<div class="scr-player">
-                <input type="text" list="scr-player-names" placeholder="${names.length ? '添加别名 / 其他选手，回车' : (side == null ? '输入或选择选手，回车' : (side === 0 ? '第一位选手，回车' : '第二位选手，回车'))}" data-cond="${index}" data-part="name"${s}>
-                <div class="scr-chips">${chips || '<span class="scr-muted">未选择（选中选手时自动带上他的所有别名）</span>'}</div>
+                <input type="text" list="scr-player-names" placeholder="${names.length ? '再添加其他选手，回车' : (side == null ? '输入或选择选手，回车' : (side === 0 ? '第一位选手，回车' : '第二位选手，回车'))}" data-cond="${index}" data-part="name"${s}>
+                <div class="scr-chips">${chips || '<span class="scr-muted">未选择（自动匹配该选手的所有别名）</span>'}</div>
             </div>`;
     }
     function conditionValueHtml(c, f, index) {
@@ -508,8 +518,8 @@ const SceneRulesUI = (() => {
         if (pair && !(Array.isArray(c.v) && c.v.length === 2)) c.v = [[], []];
         const cur = pair ? c.v[Number(side)] : c.v;
         const list = Array.isArray(cur) ? cur.slice() : [];
-        const add = list.length ? [name] : [name, ...aliasesOf(name)];
-        add.forEach(n => { if (!list.includes(n)) list.push(n); });
+        // 只存选手名：匹配时自动包含他的所有别名（别名以后在选手库里增删也会跟着生效）
+        if (!list.includes(name)) list.push(name);
         if (pair) c.v[Number(side)] = list.slice(0, 40);
         else c.v = list.slice(0, 40);
         changed(true);
@@ -541,7 +551,15 @@ const SceneRulesUI = (() => {
         else if (act === 'del-name') {
             const c = r.conditions[Number(btn.dataset.i)];
             const list = c && (btn.dataset.side != null ? (Array.isArray(c.v) ? c.v[Number(btn.dataset.side)] : null) : c.v);
-            if (Array.isArray(list)) { list.splice(Number(btn.dataset.k), 1); changed(true); }
+            if (Array.isArray(list)) {
+                // 移除选手时连同旧规则里存下的他的别名一起移除（界面上已折叠不显示）
+                const R = window.SceneRules;
+                const k = Number(btn.dataset.k);
+                const name = list[k];
+                const keep = list.filter((n, i) => i !== k && !(R && R.samePlayer && R.samePlayer(n, name)));
+                list.splice(0, list.length, ...keep);
+                changed(true);
+            }
         }
         else if (act === 'voice-test') {
             if (r.action.voiceFile) window.chrome?.webview?.postMessage({ action: 'cmd_custom_voice_test', id: r.action.voiceFile });
@@ -628,6 +646,13 @@ const SceneRulesUI = (() => {
     function resetAll() {
         const run = () => {
             rules = S().presets(currentLayout());
+            // 主播专属场景（马区 / 阿旺白给、连死 4 次……）不在通用预设里，原来只在第一次打开时加一次，
+            // 恢复默认后就永久消失了；这里按最新内容一并加回
+            BUNDLED_SCENES.forEach(scene => {
+                if (rules.some(r => r.id === scene.id)) return;
+                const r = S().normalizeRule(scene.make());
+                if (r) rules.push(r);
+            });
             selectedId = rules[0] ? rules[0].id : null;
             save(true);
             render();

@@ -18,8 +18,8 @@ fields['fxm-preview-skin'].value='-1';fields['fxm-preview-voice'].value='-1';res
 fields['fxm-preview-skin'].value='999';fields['fxm-preview-voice'].value='999';fields['fxm-preview-event'].value='invalid';result=c.getVoicePreviewSelection(layout);assert.equal(result.skin,8);assert.equal(result.voice,2);assert.equal(result.event,'victory');
 const preview=cpp.slice(cpp.indexOf('else if (action == "cmd_kill_voice_test")'),cpp.indexOf('else if (action == "cmd_toggle_kill_display")'));
 assert(preview.includes('++g_killVoicePlaybackEpoch;'));assert(preview.includes('cmd_stop_kill_voice_test'));assert(!preview.includes('WritePrivateProfile'));assert(!preview.includes('SetPolicy('));
-assert(read('DNFGameCaptureDlg.h').includes('#define CURRENT_VERSION L"5.5.4"'));
-const rc=fs.readFileSync(path.join(root,'DNFGameCapture.rc'));assert.equal(rc[0],255);assert.equal(rc[1],254);const text=rc.toString('utf16le');assert(text.includes('FILEVERSION 5,5,4,0'));assert(text.includes('PRODUCTVERSION 5,5,4,0'));
-assert(read('scripts/installer/DNFGameCapture-setup.iss').includes('#define AppVersion "5.5.4"'));assert(read('scripts/package-production-client.ps1').includes('5.5.4.0'));
-const webVersion=js.match(/const WEB_LAYOUT_VERSION = '([^']+)'/)[1];assert(webVersion.startsWith('20260930-5.5.4-'));assert(html.includes('content="'+webVersion+'"'));assert(html.includes('main.js?v='+webVersion));
-console.log('PASS: unified tools/TXT placement, explicit show/hide, independent preview across nine skins, fallback, audio cancellation, no live-setting mutation, consistent 5.5.4 version.');
+assert(read('DNFGameCaptureDlg.h').includes('#define CURRENT_VERSION L"5.5.6"'));
+const rc=fs.readFileSync(path.join(root,'DNFGameCapture.rc'));assert.equal(rc[0],255);assert.equal(rc[1],254);const text=rc.toString('utf16le');assert(text.includes('FILEVERSION 5,5,6,0'));assert(text.includes('PRODUCTVERSION 5,5,6,0'));
+assert(read('scripts/installer/DNFGameCapture-setup.iss').includes('#define AppVersion "5.5.6"'));assert(read('scripts/package-production-client.ps1').includes('5.5.6.0'));
+const webVersion=js.match(/const WEB_LAYOUT_VERSION = '([^']+)'/)[1];assert(webVersion.startsWith('20260930-5.5.6-'));assert(html.includes('content="'+webVersion+'"'));assert(html.includes('main.js?v='+webVersion));
+console.log('PASS: unified tools/TXT placement, explicit show/hide, independent preview across nine skins, fallback, audio cancellation, no live-setting mutation, consistent 5.5.6 version.');

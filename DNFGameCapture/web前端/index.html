@@ -4,9 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DNF点将工具</title>
-    <meta name="dnf-web-layout-version" content="20260930-5.5.4-17">
-    <link rel="stylesheet" href="style.css?v=20260930-5.5.4-17">
-    <link rel="stylesheet" href="scene-rules-ui.css?v=20260930-5.5.4-17">
+    <meta name="dnf-web-layout-version" content="20260930-5.5.6-2">
+    <link rel="stylesheet" href="style.css?v=20260930-5.5.6-2">
+    <link rel="stylesheet" href="scene-rules-ui.css?v=20260930-5.5.6-2">
 </head>
 <body>
     <svg class="rd-sprite" width="0" height="0" aria-hidden="true" focusable="false">
@@ -590,6 +590,7 @@
                 <button id="streamer-tab-effects" type="button" role="tab" data-streamer-tab="effects" aria-controls="streamer-pane-effects" aria-selected="false" tabindex="-1">特效管理</button>
                 <button id="streamer-tab-voice" type="button" role="tab" data-streamer-tab="voice" aria-controls="streamer-pane-voice" aria-selected="false" tabindex="-1">声音管理</button>
                 <button id="streamer-tab-rules" type="button" role="tab" data-streamer-tab="rules" aria-controls="streamer-pane-rules" aria-selected="false" tabindex="-1">场景规则</button>
+                <button id="streamer-tab-scene" type="button" role="tab" data-streamer-tab="scene" aria-controls="streamer-pane-scene" aria-selected="false" tabindex="-1">情景状态</button>
             </nav>
             <div class="fxm-body">
                 <section id="streamer-pane-display" class="streamer-pane" role="tabpanel" aria-labelledby="streamer-tab-display" data-streamer-pane="display">
@@ -714,6 +715,13 @@
                     <datalist id="scr-player-names"></datalist>
                     <p class="streamer-hint" id="scr-status" role="status">示例：「击杀者 是 90老王（含别名）且 剩余血量 ≤ 10%」→ 自定义横幅「残血反杀」+ 语音。</p>
                 </section>
+                <section id="streamer-pane-scene" class="streamer-pane scs-pane" role="tabpanel" aria-labelledby="streamer-tab-scene" data-streamer-pane="scene" hidden>
+                    <div class="streamer-section-heading scr-heading"><div><strong>情景状态</strong><small>场景规则正在使用的比赛记录（本局存活、连续没人头、一血、复仇、击杀记录、冷却），每秒刷新。修改会发给所有展示窗口，不影响比分和战绩。</small></div>
+                        <div class="scr-head-actions"><select id="scs-source" aria-label="数据来源窗口" hidden></select></div>
+                    </div>
+                    <div class="scs-body" id="scs-body"></div>
+                    <p class="streamer-hint" id="scs-status" role="status"></p>
+                </section>
             </div>
             <footer class="fxm-footer">
                 <button class="fxm-btn" id="btn-fx-manager-reset" hidden>恢复特效与声音默认</button>
@@ -772,8 +780,9 @@
         </section>
     </div>
 
-    <script src="scene-rules.js?v=20260930-5.5.4-17" defer></script>
-    <script src="main.js?v=20260930-5.5.4-17" defer></script>
-    <script src="scene-rules-ui.js?v=20260930-5.5.4-17" defer></script>
+    <script src="scene-rules.js?v=20260930-5.5.6-2" defer></script>
+    <script src="main.js?v=20260930-5.5.6-2" defer></script>
+    <script src="scene-rules-ui.js?v=20260930-5.5.6-2" defer></script>
+    <script src="scene-state-ui.js?v=20260930-5.5.6-2" defer></script>
 </body>
 </html>

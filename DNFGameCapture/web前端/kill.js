@@ -3,6 +3,7 @@ const KILL_VOICE_URL = 'http://127.0.0.1:18777/api/voice/play';
 const KILL_SETTINGS_URL = 'http://127.0.0.1:18777/api/kill-display-settings';
 // 场景规则（scene-rules.js 提供规则定义与匹配；SceneRuntime 负责从主程序加载 / 热更新规则）
 const SCENE_RULES_URL = 'http://127.0.0.1:18777/api/scene-rules';
+const SCENE_STATE_URL = 'http://127.0.0.1:18777/api/scene-state';
 const KILL_SAY_URL = 'http://127.0.0.1:18777/api/voice/say';
 const KILL_VOICE_FILE_URL = 'http://127.0.0.1:18777/api/voice/file';
 const KILL_TTS_URL = 'http://127.0.0.1:18777/api/voice/tts';
@@ -2358,6 +2359,199 @@ const KillFxTracker = (() => {
         if (timer) { clearTimeout(timer); timer = null; }
     }
 
+    /* ---------- 撤销 / 恢复 / 重做 / 回溯：静默同步情景数据 ----------
+     * 主程序在这些操作前下发 statsRewrite；5 秒内的下一次战绩变化不当作击杀播放，
+     * 而是按增减修正比赛记录：击杀变少 = 删除该选手最近的击杀记录（含复仇记录），
+     * 击杀变多 = 静默补记；死亡变少 = 复活并回退连续没人头，死亡变多 = 记阵亡。 */
+    let statsRewriteUntil = 0;
+    let statsRewriteHint = null;     // 复盘单条撤销 / 恢复时主程序附带的 { killer, victim }
+    const statsRewriteActive = () => statsRewriteUntil > Date.now();
+    // 连续没人头 / 复仇 / 本局阵亡 / 一血全部由击杀记录重新推导：一次跳过多步的回溯也不会累积误差
+    function rebuildFromLog(cur, round) {
+        const keyOfName = name => { for (const [key, c] of cur) if (c.name === name) return key; return ''; };
+        drought = new Map();
+        killsByRound = new Map();
+        deadKeys = new Set();
+        deadRound = round;
+        killLog.forEach(k => {
+            const kk = keyOfName(k.killer), vk = keyOfName(k.victim);
+            if (kk) drought.set(kk, 0);
+            if (!vk) return;
+            drought.set(vk, (drought.get(vk) || 0) + 1);
+            if (kk) {
+                let set = killsByRound.get(k.round);
+                if (!set) { set = new Set(); killsByRound.set(k.round, set); }
+                set.add(`${kk}>${vk}`);
+            }
+            if (k.round === round) deadKeys.add(vk);
+        });
+        killsByRound.forEach((_, r) => { if (r < round - 1) killsByRound.delete(r); });
+        firstBlood = killLog.length > 0;
+    }
+    function rewriteStats(prevSnap, cur, data, killRound) {
+        const hint = statsRewriteHint;
+        const pool = { 0: [], 1: [] };
+        const adds = [];
+        let changed = false;
+        cur.forEach((c, key) => {
+            const p = prevSnap.get(key);
+            if (!p) return;
+            const dk = c.kills - p.kills;
+            const dd = c.deaths - p.deaths;
+            if (dk || dd) changed = true;
+            for (let i = 0; i < -dk; i++) {
+                // 单条撤销：优先删「同一凶手 + 同一死者」最近的那条；否则删该凶手最近的一条（回溯 = 撤掉最后发生的击杀）
+                let at = -1;
+                if (hint && hint.killer === c.name && hint.victim) {
+                    for (let j = killLog.length - 1; j >= 0; j--) {
+                        if (killLog[j].killer === c.name && killLog[j].victim === hint.victim) { at = j; break; }
+                    }
+                }
+                if (at < 0) for (let j = killLog.length - 1; j >= 0; j--) if (killLog[j].killer === c.name) { at = j; break; }
+                if (at >= 0) killLog.splice(at, 1);
+            }
+            for (let i = 0; i < dd; i++) pool[c.team].push({ key, c });
+            if (dk > 0) adds.push({ key, c, dk });
+        });
+        if (!changed) return false;
+        // 单条恢复：优先把死者对应回原来那个人
+        if (hint && hint.victim) [0, 1].forEach(t => {
+            const i = pool[t].findIndex(v => v.c.name === hint.victim);
+            if (i > 0) pool[t].unshift(pool[t].splice(i, 1)[0]);
+        });
+        adds.forEach(k => {
+            const enemy = k.c.team === 1 ? 0 : 1;
+            for (let i = 0; i < k.dk; i++) {
+                const v = pool[enemy].shift();
+                killLog.push({ killer: k.c.name, victim: v ? v.c.name : '', killerTeam: teamColor(k.c.team),
+                    killerLeft: k.c.team === leftTeamOf(data), streak: Math.max(1, k.c.streak || 1), round: killRound });
+                if (killLog.length > 1000) killLog.shift();
+            }
+        });
+        // 快照分几次到达（先到击杀、后到阵亡）：把后到的阵亡补回刚才没对应上死者的击杀记录
+        [0, 1].forEach(t => {
+            const killerColor = teamColor(t === 1 ? 0 : 1);
+            pool[t] = pool[t].filter(v => {
+                for (let j = killLog.length - 1; j >= 0 && j >= killLog.length - 20; j--) {
+                    if (killLog[j].victim === '' && killLog[j].killerTeam === killerColor) { killLog[j].victim = v.c.name; return false; }
+                }
+                return true;
+            });
+        });
+        rebuildFromLog(cur, roundOf(data));
+        // 没对应到凶手的阵亡（同一帧多人阵亡等）击杀记录里没有，补记本局阵亡 / 连续没人头
+        [0, 1].forEach(t => pool[t].forEach(v => { deadKeys.add(v.key); drought.set(v.key, (drought.get(v.key) || 0) + 1); }));
+        return true;
+    }
+
+    /* ---------- 情景状态：回报给主程序 / 执行主窗口的手动修改 ---------- */
+    const SCENE_SRC = (KILL_FX_FULLSCREEN ? 'fx-' : 'board-') + Math.random().toString(36).slice(2, 8);
+    let lastSceneEditId;
+    let sceneReportSig = '';
+    let sceneReportAt = 0;
+    const clearCooldowns = id => {
+        if (!ruleMemo.lastFire) return;
+        if (id) delete ruleMemo.lastFire[id]; else ruleMemo.lastFire = {};
+    };
+    function applySceneOp(o) {
+        if (!o || typeof o !== 'object') return;
+        const key = String(o.key || '');
+        switch (o.op) {
+            case 'alive':
+                if (deadRound !== prevRound) { deadKeys.clear(); deadRound = prevRound; }
+                if (o.value) deadKeys.delete(key); else deadKeys.add(key);
+                break;
+            case 'drought': drought.set(key, Math.max(0, Math.min(99, Math.round(Number(o.value) || 0)))); break;
+            case 'firstBlood': firstBlood = !!o.value; break;
+            case 'physLeft': physLeftTeam = o.value === 0 || o.value === 1 ? o.value : null; break;
+            case 'reviveAll': deadKeys.clear(); deadRound = prevRound; break;
+            case 'clearDrought': drought = new Map(); break;
+            case 'clearHistory': killLog = []; killsByRound = new Map(); firstBlood = false; break;
+            case 'removeKill': {
+                const i = Number(o.index);
+                if (Number.isInteger(i) && i >= 0 && i < killLog.length) killLog.splice(i, 1);
+                break;
+            }
+            case 'revenge': {   // 删除一条复仇记录（上一局 凶手>死者）
+                const set = killsByRound.get(Number(o.round));
+                if (set) set.delete(String(o.pair || ''));
+                break;
+            }
+            case 'clearCooldown': clearCooldowns(o.id ? String(o.id) : ''); if (!o.id) hpFired.clear(); break;
+            case 'full':
+                resetMatch();
+                clearCooldowns('');
+                hpFired.clear();
+                deadRound = prevRound;
+                break;
+            case 'statsRewrite':
+                statsRewriteUntil = Date.now() + 5000;
+                statsRewriteHint = o.killer ? { killer: String(o.killer), victim: String(o.victim || '') } : null;
+                break;
+            case 'statsRewriteCancel': statsRewriteUntil = 0; statsRewriteHint = null; break;
+            default: break;
+        }
+    }
+    function checkSceneEdit(data) {
+        const se = data?.sceneEdit;
+        const id = Number(se?.id) || 0;
+        if (lastSceneEditId === undefined) { lastSceneEditId = id; return; }   // 打开页面前的修改不补执行
+        if (id <= lastSceneEditId) { if (id < lastSceneEditId) lastSceneEditId = id; return; }  // 主程序重启后编号归零
+        (Array.isArray(se?.list) ? se.list : []).forEach(e => {
+            if (!e || Number(e.id) <= lastSceneEditId) return;
+            (Array.isArray(e.ops) ? e.ops : []).forEach(o => { try { applySceneOp(o); } catch (err) { /* ignore */ } });
+        });
+        lastSceneEditId = id;
+        sceneReportAt = 0;   // 立刻回报修改后的状态
+    }
+    function exportSceneState(data) {
+        const round = roundOf(data);
+        const deadValid = deadRound === round;
+        const players = [];
+        (Array.isArray(data?.players) ? data.players : []).forEach(p => {
+            if (!p || !p.name) return;
+            const key = keyOf(p);
+            players.push({ key, name: p.name, team: Number(p.team) === 1 ? 1 : 0,
+                alive: !(deadValid && deadKeys.has(key)), drought: drought.get(key) || 0,
+                streak: Number(p.currentStreak) || 0, gao: gaoOf(p.name) });
+        });
+        const rules = sceneRules() || [];
+        const now = Date.now();
+        const cooldowns = [];
+        Object.entries(ruleMemo.lastFire || {}).forEach(([id, at]) => {
+            const r = rules.find(x => x.id === id);
+            if (!r || !(r.cooldownSec > 0)) return;
+            const left = Math.ceil((r.cooldownSec * 1000 - (now - at)) / 1000);
+            if (left > 0) cooldowns.push({ id, name: r.name, left, total: r.cooldownSec });
+        });
+        const revenge = [];
+        (killsByRound.get(round - 1) || new Set()).forEach(pair => revenge.push({ round: round - 1, pair }));
+        const start = Math.max(0, killLog.length - 30);
+        return {
+            mode: KILL_FX_FULLSCREEN ? 'fx' : 'board', visible: !document.hidden, enabled, rulesOn: !!sceneRules(),
+            round, firstBlood, physLeftTeam, flipped: data?.isFlipped === true, players,
+            killTotal: killLog.length,
+            killLog: killLog.slice(start).map((k, i) => ({ index: start + i, killer: k.killer, victim: k.victim,
+                killerTeam: k.killerTeam, streak: k.streak, round: k.round })),
+            revenge, cooldowns, hpFired: hpFired.size
+        };
+    }
+    function reportSceneState(data) {
+        lastSceneData = data;
+        const now = Date.now();
+        if (now - sceneReportAt < 1000) return;
+        const body = JSON.stringify(exportSceneState(data));
+        if (body === sceneReportSig && now - sceneReportAt < 5000) return;
+        sceneReportSig = body;
+        sceneReportAt = now;
+        // text/plain：不触发跨域预检
+        fetch(SCENE_STATE_URL + '?src=' + encodeURIComponent(SCENE_SRC), { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body })
+            .catch(() => { /* 主程序未运行 */ });
+    }
+    // 状态只在数据变化时 ingest；另起心跳，保证击杀处理后的最新记录与「窗口仍在运行」都能回报
+    let lastSceneData = null;
+    setInterval(() => { try { if (lastSceneData) reportSceneState(lastSceneData); } catch (err) { /* ignore */ } }, 1000);
+
     function recordKill(round, killerKey, victimKey) {
         let set = killsByRound.get(round);
         if (!set) { set = new Set(); killsByRound.set(round, set); }
@@ -2406,14 +2600,17 @@ const KillFxTracker = (() => {
     function resync() { prev = null; victoryTracker.resync(); }
 
     function ingest(data) {
-        const victory = victoryTracker.ingest(data, enabled && !document.hidden && killDisplaySettings?.layout?.fxEvtVictory !== 0);
+        try { checkSceneEdit(data); } catch (err) { /* ignore */ }
+        const silent = statsRewriteActive();   // 撤销 / 重做带来的比分变化不播胜利特效
+        const victory = victoryTracker.ingest(data, !silent && enabled && !document.hidden && killDisplaySettings?.layout?.fxEvtVictory !== 0);
         const rules = sceneRules();
         const scoresBefore = prevScores;
         prevScores = { red: Number(data?.redScore) || 0, blue: Number(data?.blueScore) || 0 };
         try { checkSceneReset(data); } catch (err) { /* ignore */ }
+        try { reportSceneState(data); } catch (err) { /* ignore */ }
         if (!enabled || document.hidden) return;
         try { ingestScene(data, rules); } catch (err) { /* 场景规则异常不影响击杀特效 */ }
-        if (victory) {
+        if (victory && !silent) {
             queue = [];
             if (timer) { clearTimeout(timer); timer = null; }
             prev = snapshot(Array.isArray(data?.players) ? data.players : []);
@@ -2447,9 +2644,24 @@ const KillFxTracker = (() => {
         cur.forEach(p => { total += p.kills + p.deaths; });
         const roster = [...cur.keys()].sort().join('|');
         const prevRoster = [...prev.keys()].sort().join('|');
-        if (total === 0 || roster !== prevRoster) {
+        // 撤销 / 回溯期间名单变化也照样修正（只处理前后都在场的选手）
+        if (total === 0 || (roster !== prevRoster && !silent)) {
+            // 只在「战绩刚归零」时重置一次；战绩持续为 0（如刚重置战绩、还没打）时每次刷新都重置
+            // 会把队列清空，导致「测试播放」和开局规则的特效入队后立刻被丢掉
+            let prevTotal = 0;
+            prev.forEach(p => { prevTotal += p.kills + p.deaths; });
             prev = cur;
-            if (total === 0) resetMatch();
+            if (total === 0 && prevTotal > 0) resetMatch();
+            return;
+        }
+
+        if (silent) {
+            if (rewriteStats(prev, cur, data, killRound)) {
+                // 快照可能分几次刷新到达：第一次变化后再静默 1.5 秒，避免后半段被当成击杀播放
+                statsRewriteUntil = Math.min(statsRewriteUntil, Date.now() + 1500);
+                sceneReportAt = 0;   // 立刻回报修正后的状态
+            }
+            prev = cur;
             return;
         }
 

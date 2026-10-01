@@ -3,7 +3,7 @@
 ; 只打包运行必需文件；卸载时彻底清理程序目录、用户数据、临时文件和授权信息（保留试用期记录）。
 
 #define AppTitle "DNF点将工具"
-#define AppVersion "5.5.4"
+#define AppVersion "5.5.6"
 #define AppExe "DNFGameCapture.exe"
 #define ProjDir AddBackslash(SourcePath) + "..\.."
 #define ReleaseDir ProjDir + "\..\x64\Release"
@@ -65,6 +65,7 @@ Source: "{#WebDir}\kill.js"; DestDir: "{app}\web前端"; Flags: ignoreversion
 Source: "{#WebDir}\scene-rules.js"; DestDir: "{app}\web前端"; Flags: ignoreversion
 Source: "{#WebDir}\scene-rules-ui.js"; DestDir: "{app}\web前端"; Flags: ignoreversion
 Source: "{#WebDir}\scene-rules-ui.css"; DestDir: "{app}\web前端"; Flags: ignoreversion
+Source: "{#WebDir}\scene-state-ui.js"; DestDir: "{app}\web前端"; Flags: ignoreversion
 Source: "{#WebDir}\keys.html"; DestDir: "{app}\web前端"; Flags: ignoreversion
 Source: "{#WebDir}\keys.css"; DestDir: "{app}\web前端"; Flags: ignoreversion
 Source: "{#WebDir}\keys.js"; DestDir: "{app}\web前端"; Flags: ignoreversion
