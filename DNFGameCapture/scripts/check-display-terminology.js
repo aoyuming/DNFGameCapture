@@ -9,17 +9,12 @@ const displayFiles = [
     'DNFGameCaptureDlg.h',
     'DNFGameCaptureDlg_IdentityPatch.cpp',
     'TemporalIdentityMatcher.hpp',
-    '云函数/index.js',
     'web前端/index.html',
     'web前端/main.js',
     'web前端/kill.html',
     'web前端/kill.js',
     'web前端/style.css',
     'cloud-match-server/src/admin-page.ts',
-    '秘钥后台管理/admin.js',
-    '秘钥后台管理/admin-web.js',
-    '秘钥后台管理/web-admin/index.html',
-    '秘钥后台管理/web-admin/app.js',
     '用户指南.md',
     'README.md'
 ];
