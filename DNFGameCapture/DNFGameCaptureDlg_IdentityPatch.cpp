@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "DNFGameCaptureDlg.h"
 #include "PlayerIdentityOcrCache.h"
+#include <algorithm>
 #include <cwctype>
 
 void WriteMatchLog(const CString& logLine);
@@ -19,7 +20,11 @@ namespace {
     }
 
     static TDnfPanelSide TeamToPanelSide(int team) {
-        return team == 1 ? TDnfPanelSide::LeftNameArea : TDnfPanelSide::RightAreaName;
+        // 与项目固定约定保持一致：team 0 = 红队 = 索引 0-3 = 物理左侧；
+        // team 1 = 蓝队 = 索引 4-7 = 物理右侧。
+        // 原实现方向相反（team==1 -> 左框），会让击杀后清错侧：
+        // 设计意图是"只切死者侧，杀手侧保留"。
+        return team == 0 ? TDnfPanelSide::LeftNameArea : TDnfPanelSide::RightAreaName;
     }
 
 
@@ -195,7 +200,7 @@ std::vector<TDnfCandidateIdentity> CDNFGameCaptureDlg::BuildIdentityCandidatesFo
     return DnfCachedCandidates(m_identityOcrCache, m_players);
 }
 
-TDnfPanelMatchResult CDNFGameCaptureDlg::MatchIdentityPanel(TDnfPanelSide side)
+TDnfPanelMatchResult CDNFGameCaptureDlg::MatchIdentityPanel(TDnfPanelSide side, int targetTeam)
 {
     std::lock_guard<std::mutex> dataLock(m_dataMutex);
     std::lock_guard<std::mutex> identityLock(m_identityMutex);
@@ -208,12 +213,25 @@ TDnfPanelMatchResult CDNFGameCaptureDlg::MatchIdentityPanel(TDnfPanelSide side)
 
     DnfPrepareIdentityCache(m_identityOcrCache, std::atomic_load(&m_playerLibrarySnapshot),
         m_players, m_identityMatcher, now, dbg);
-    const auto candidates = DnfCachedCandidates(m_identityOcrCache, m_players);
+    // 【队伍收窄】融合层同样只在目标队伍里找候选：
+    //   死者 = 物理死亡侧所属队伍，杀手 = 对面队伍（targetTeam 由调用方传 -1 表示不收窄）。
+    auto candidates = DnfCachedCandidates(m_identityOcrCache, m_players);
+    if (targetTeam == 0 || targetTeam == 1) {
+        const size_t before = candidates.size();
+        candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
+            [targetTeam](const TDnfCandidateIdentity& c) { return c.team != targetTeam; }),
+            candidates.end());
+        CString scopeMsg;
+        scopeMsg.Format(L"[融合匹配][%s] 队伍收窄：目标队伍=%d，候选 %d -> %d\r\n",
+            side == TDnfPanelSide::LeftNameArea ? L"左框" : L"右框",
+            targetTeam, (int)before, (int)candidates.size());
+        dbg(scopeMsg);
+    }
     TDnfPanelMatchResult result;
     if (candidates.empty()) {
         CString msg;
-        msg.Format(L"[融合匹配][%s] 候选列表为空，请检查红蓝队上场数据。\r\n",
-            side == TDnfPanelSide::LeftNameArea ? L"左框" : L"右框");
+        msg.Format(L"[融合匹配][%s] 候选列表为空，请检查红蓝队上场数据。目标队伍=%d\r\n",
+            side == TDnfPanelSide::LeftNameArea ? L"左框" : L"右框", targetTeam);
         dbg(msg);
         result.debugText = msg;
     }

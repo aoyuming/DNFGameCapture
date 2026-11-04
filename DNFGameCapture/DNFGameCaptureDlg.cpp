@@ -10499,6 +10499,30 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
     int deadArea = triggerSide;
     bool killerIsLeft = (killerArea == 0);
 
+    // ============================================================
+    // 【队伍收窄】物理侧固定映射到队伍：左框=红队(0)，右框=蓝队(1)。
+    // 死者 = 触发击杀的那一侧；杀手只能出自对面队伍。
+    // 这里一次性把两侧的目标队伍定下来，后续所有匹配层都只在这个范围里找。
+    // 若目标队伍名单不完整（有 1 人缺位），收窄会显著增加漏识别，
+    // 因此该侧自动回退到"上场 8 人"，并写日志说明原因。
+    // ============================================================
+    const int deadTeam = PhysicalSideToTeam(deadArea);
+    const int killerTeam = PhysicalSideToTeam(killerArea);
+    const bool deadTeamComplete = IsRosterCompleteForTeam(deadTeam);
+    const bool killerTeamComplete = IsRosterCompleteForTeam(killerTeam);
+    const int killerTargetTeam = killerTeamComplete ? killerTeam : -1;
+    {
+        CString scopeDiag;
+        scopeDiag.Format(L"[队伍收窄] 物理死亡侧=%s(队伍%d/红队=0) 物理杀手侧=%s(队伍%d)；"
+            L"死者候选范围=%s；杀手候选范围=%s；"
+            L"说明=大X出现在哪一侧，死者就属于该侧队伍，杀手只在对面队伍里找；翻转红蓝不影响本规则。",
+            deadArea == 0 ? L"左" : L"右", deadTeam,
+            killerArea == 0 ? L"左" : L"右", killerTeam,
+            deadTeamComplete ? L"本队 4 人（已收窄）" : L"上场 8 人（本队名单不完整，回退）",
+            killerTeamComplete ? L"对面队伍 4 人（已收窄）" : L"上场 8 人（对面名单不完整，回退）");
+        WriteMatchLog(scopeDiag);
+    }
+
     CString triggerDiag;
     triggerDiag.Format(L"[击杀触发诊断] 进入OCR匹配：当前是否翻转红蓝=%s；物理死亡侧=%s；物理杀手侧=%s；说明=翻转红蓝只影响界面/OBS左右显示，不改变OCR区域、X检测位置和物理侧候选队伍。",
         m_bFlipSides ? L"是" : L"否",
@@ -10705,6 +10729,12 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
                 isKiller ? L"找杀手" : L"找死者", frameIdx, (LPCTSTR)ocrResult);
             WriteMatchLog(logMsg);
 
+            // 【队伍收窄】候选范围只保留目标队伍：
+            //   死者 = 物理死亡侧所属队伍，杀手 = 对面队伍。
+            // 目标队伍名单不完整时回退到上场 8 人，避免漏识别。
+            const int targetTeam = isKiller ? killerTargetTeam : PhysicalSideToTeam(deadArea);
+            const bool scopeByTeam = IsRosterCompleteForTeam(targetTeam);
+
             TDnfSimpleAliasMeta ocrMeta = DnfParseAliasMeta(ocrResult);
 
             CString weakOcrId = ocrMeta.realId.IsEmpty() ? ocrResult : ocrMeta.realId;
@@ -10730,6 +10760,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
                 m_dataMutex.lock();
                 for (int p = 0; p < 8; p++) {
                     if (m_players[p].name.IsEmpty()) continue;
+                    if (scopeByTeam && m_players[p].team != targetTeam) continue;
                     for (size_t a = 0; a < m_players[p].aliases.size(); a++) {
                         TDnfSimpleAliasMeta aliasMeta = DnfParseAliasMeta(m_players[p].aliases[a].name);
                         TDnfPreparedIdMatch preparedExact = DnfPrepareIdMatch(aliasMeta, ocrMeta);
@@ -10807,6 +10838,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
             m_dataMutex.lock();
             for (int p = 0; p < 8; p++) {
                 if (m_players[p].name.IsEmpty()) continue;
+                if (scopeByTeam && m_players[p].team != targetTeam) continue;
 
                 int teamPenalty = 0;
                 if (isKiller && lockedDeadTeam != -1 && m_players[p].team == lockedDeadTeam)
@@ -11135,6 +11167,11 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
                 WriteMatchLog(msg);
             };
 
+            // 【队伍收窄】本轮只在目标队伍里收集候选：
+            //   死者 = 物理死亡侧所属队伍，杀手 = 对面队伍。
+            const int targetTeam = isKiller ? killerTargetTeam : PhysicalSideToTeam(deadArea);
+            const bool scopeByTeam = IsRosterCompleteForTeam(targetTeam);
+
             for (const auto& f : frames) {
                 CString raw = f.text;
                 raw.Trim();
@@ -11206,6 +11243,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
                 std::lock_guard<std::mutex> lock(m_dataMutex);
                 for (int p = 0; p < 8; ++p) {
                     if (m_players[p].name.IsEmpty()) continue;
+                    if (scopeByTeam && m_players[p].team != targetTeam) continue;
                     for (size_t a = 0; a < m_players[p].aliases.size(); ++a) {
                         TDnfSimpleAliasMeta am = DnfParseAliasMeta(m_players[p].aliases[a].name);
                         CString matchId = am.matchId.IsEmpty() ? m_players[p].aliases[a].name : am.matchId;
@@ -11509,7 +11547,9 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
         int& outBestP, int& outBestA, int& lockedTeam) -> bool
         {
             TDnfPanelSide side = (areaIndex == 0) ? TDnfPanelSide::LeftNameArea : TDnfPanelSide::RightAreaName;
-            TDnfPanelMatchResult fusion = MatchIdentityPanel(side);
+            // 【队伍收窄】只喂目标队伍候选：死者 = 物理死亡侧所属队伍，杀手 = 对面队伍。
+            const int fusionTargetTeam = isKiller ? killerTargetTeam : PhysicalSideToTeam(deadArea);
+            TDnfPanelMatchResult fusion = MatchIdentityPanel(side, fusionTargetTeam);
 
             CString tag = isKiller ? L"杀手" : L"死者";
             CString sideText = (side == TDnfPanelSide::LeftNameArea) ? L"左框" : L"右框";
@@ -12039,6 +12079,23 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
     }
 
     // ★ 不再需要手动释放 historyClones，因为帧已在循环内逐个释放
+}
+
+// ============================================================
+// 【队伍收窄】辅助：目标队伍 4 个座位是否都已填选手。
+// 项目固定约定：team 0 = 红队 = 索引 0-3（物理左侧）；
+//              team 1 = 蓝队 = 索引 4-7（物理右侧）。
+// ============================================================
+bool CDNFGameCaptureDlg::IsRosterCompleteForTeam(int team)
+{
+    if (team != 0 && team != 1) return false;
+    const int start = (team == 0) ? 0 : 4;
+    const int end = start + 4;
+    std::lock_guard<std::mutex> lock(m_dataMutex);
+    for (int i = start; i < end; ++i) {
+        if (m_players[i].name.IsEmpty()) return false;
+    }
+    return true;
 }
 
 void CDNFGameCaptureDlg::StartCaptureSwitchWorker()

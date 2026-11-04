@@ -12,7 +12,7 @@ if (Test-Path -LiteralPath $OutputPath) { throw "Output already exists: $OutputP
 
 $exe = Join-Path $ReleaseDir 'DNFGameCapture.exe'
 $version = (Get-Item -LiteralPath $exe).VersionInfo.FileVersion
-if ($version -ne '5.5.6.0') { throw "Expected EXE version 5.5.6.0, got $version" }
+if ($version -ne '5.5.7.0') { throw "Expected EXE version 5.5.7.0, got $version" }
 $manifestUrl = 'https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/cloud-server-prod.json'
 $binaryText = [Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($exe))
 if (-not $binaryText.Contains($manifestUrl)) { throw 'The executable does not contain the production manifest URL' }

@@ -89,7 +89,7 @@ let pendingAliasPopoverName = '';
 let pendingAliasPopoverInput = null;
 let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
-const WEB_LAYOUT_VERSION = '20260930-5.5.6-2';
+const WEB_LAYOUT_VERSION = '20261104-5.5.7-1';
 const ALIAS_POPOVER_OFFSET_X = 8;
 const CLOUD_MATCH_WEB_THEMES = new Set([
     'dark-esports', 'frost-broadcast', 'black-gold', 'mist-blue', 'glacier-blue'

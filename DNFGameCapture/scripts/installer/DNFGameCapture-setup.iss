@@ -3,7 +3,7 @@
 ; 只打包运行必需文件；卸载时彻底清理程序目录、用户数据、临时文件和授权信息（保留试用期记录）。
 
 #define AppTitle "DNF点将工具"
-#define AppVersion "5.5.6"
+#define AppVersion "5.5.7"
 #define AppExe "DNFGameCapture.exe"
 #define ProjDir AddBackslash(SourcePath) + "..\.."
 #define ReleaseDir ProjDir + "\..\x64\Release"
