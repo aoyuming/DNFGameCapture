@@ -21,7 +21,7 @@ describe('license admin page contract', () => {
 
   test('provides batch recovery, retry and accessible modal surfaces', () => {
     const html = page.buildLicenseAdminPage('token');
-    for (const id of ['issued-keys', 'copy-all-keys', 'export-keys', 'retry-mutation', 'license-dialog', 'dialog-preview', 'audit-list']) {
+    for (const id of ['issued-keys', 'copy-all-keys', 'export-keys', 'retry-mutation', 'license-dialog', 'dialog-preview', 'audit-list', 'dialog-policy', 'dialog-policy-field']) {
       expect(html).toContain(`id="${id}"`);
     }
     expect(html).toMatch(/<dialog[^>]+aria-labelledby="dialog-title"/);
@@ -42,6 +42,7 @@ describe('license admin page contract', () => {
     expect(page.LICENSE_ADMIN_JS).not.toMatch(/localStorage|sessionStorage|https?:\/\//);
     expect(page.LICENSE_ADMIN_JS).toContain('broadcasterName');
     expect(page.buildLicenseAdminPage('token')).toContain('激活主播');
+    expect(page.buildLicenseAdminPage('token')).toContain('归并为同一选手别名');
   });
 
   test('bounds stalled requests and names backend audit fields in Chinese', () => {

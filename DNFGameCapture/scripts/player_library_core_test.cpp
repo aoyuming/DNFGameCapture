@@ -130,6 +130,50 @@ void ReviewRegressions(const fs::path& dir) {
         s = db.ImportV2(payload);
         CHECK(s->FindName(L"BadAlias") && s->FindName(L"A")->cloudId == "C2");
     });
+    run("power-prefix cleanup is backed up and applied only once per policy", [&] {
+        const auto options = fixture("power-prefix-cleanup");
+        PlayerLibraryDatabase db(options);
+        db.Initialize();
+        auto snapshot = db.ReplaceLegacy({
+            {L"90老王", {L"game-1"}}, {L"老王", {L"game-2"}},
+            {L"91 老王", {L"game-3"}}, {L"91新主播", {L"game-4"}}, {L"普通选手", {L"game-5"}},
+        });
+        snapshot = db.ApplyPowerPrefixPolicy("merge_power_prefixes");
+        CHECK(snapshot->FindName(L"老王") && snapshot->FindName(L"90老王") && snapshot->FindName(L"91 老王"));
+        CHECK(snapshot->FindName(L"老王")->entityId == snapshot->FindName(L"90老王")->entityId);
+        CHECK(snapshot->FindName(L"老王")->entityId == snapshot->FindName(L"91 老王")->entityId);
+        CHECK(snapshot->FindName(L"老王")->gameIds.size() == 3);
+        CHECK(snapshot->FindName(L"新主播") && snapshot->FindName(L"91新主播"));
+        CHECK(snapshot->FindName(L"普通选手"));
+        CHECK(snapshot->identityMetadata.contains("powerPrefixPolicies"));
+
+        const auto revision = snapshot->revision;
+        snapshot = db.ExecuteIdentity({{"action", "create_player"}, {"name", "92新加选手"}, {"ids", json::array()}, {"revision", snapshot->revision}});
+        const auto beforeSecondPass = snapshot->revision;
+        snapshot = db.ApplyPowerPrefixPolicy("merge_power_prefixes");
+        CHECK(snapshot->revision == beforeSecondPass);
+        CHECK(snapshot->FindName(L"92新加选手"));
+        CHECK(snapshot->revision >= revision);
+
+        bool foundBackup = false;
+        for (const auto& entry : fs::directory_iterator(options.databasePath.parent_path())) {
+            if (entry.is_directory() && entry.path().filename().wstring().find(L"power-prefix-") == 0 &&
+                fs::exists(entry.path() / L"player_library.db")) foundBackup = true;
+        }
+        CHECK(foundBackup);
+    });
+    run("power-prefix removal deletes prefixed-only players but keeps clean names and IDs", [&] {
+        PlayerLibraryDatabase db(fixture("power-prefix-remove"));
+        db.Initialize();
+        auto snapshot = db.ReplaceLegacy({
+            {L"90老王", {L"game-1"}}, {L"普通选手", {L"game-2"}},
+        });
+        snapshot = db.ApplyPowerPrefixPolicy("remove_power_prefixes");
+        CHECK(!snapshot->FindName(L"90老王"));
+        CHECK(snapshot->FindName(L"普通选手"));
+        CHECK(snapshot->Lookup(L"game-1").candidates.empty());
+        CHECK(snapshot->Lookup(L"game-2").candidates.size() == 1);
+    });
     run("partial ownership planning has no input-order winner", [&] {
         for (bool reverse : {false, true}) {
             PlayerLibraryDatabase db(fixture(reverse ? "review-plan-reverse" : "review-plan-forward")); db.Initialize();

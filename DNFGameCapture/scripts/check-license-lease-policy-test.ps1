@@ -3,6 +3,32 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $testSource = Join-Path $PSScriptRoot 'license_lease_policy_test.cpp'
 $leaseSource = Join-Path $root 'LicenseLease.cpp'
+$dialogSource = Get-Content -Raw (Join-Path $root 'DNFGameCaptureDlg.cpp')
+
+$leaseStart = $dialogSource.IndexOf('bool CDNFGameCaptureDlg::TryActivateFromLicenseLease', [StringComparison]::Ordinal)
+$leaseEnd = $dialogSource.IndexOf('bool CDNFGameCaptureDlg::BeginLicenseLeaseEndpointRefresh', $leaseStart, [StringComparison]::Ordinal)
+if ($leaseStart -lt 0 -or $leaseEnd -le $leaseStart) { throw 'Could not locate lease activation flow.' }
+$leaseActivation = $dialogSource.Substring($leaseStart, $leaseEnd - $leaseStart)
+$refreshIndex = $leaseActivation.IndexOf('BeginLicenseLeaseEndpointRefresh()', [StringComparison]::Ordinal)
+$applyIndex = $leaseActivation.IndexOf('ApplyAuthorizedPlayerNamePolicy();', [StringComparison]::Ordinal)
+if ($refreshIndex -lt 0 -or $applyIndex -lt $refreshIndex) {
+    throw 'Lease startup must refresh the current server policy before applying its cached fallback.'
+}
+if (-not $leaseActivation.Contains('!DnfIsKnownPlayerNamePolicy(lease.playerNamePolicy)')) {
+    throw 'A lease with a missing or unknown name policy must require online authorization.'
+}
+$failureStart = $dialogSource.IndexOf('LRESULT CDNFGameCaptureDlg::OnCloudAuthFail', [StringComparison]::Ordinal)
+$failureEnd = $dialogSource.IndexOf('LRESULT CDNFGameCaptureDlg::OnUpdateAuthTime', $failureStart, [StringComparison]::Ordinal)
+$authFailure = $dialogSource.Substring($failureStart, $failureEnd - $failureStart)
+if (-not $authFailure.Contains('ApplyAuthorizedPlayerNamePolicy();')) {
+    throw 'A failed online policy refresh must fall back to the validated lease policy.'
+}
+$bindingStart = $dialogSource.IndexOf('static bool DnfCheckServerV2Binding(const CString& endpoint,', [StringComparison]::Ordinal)
+$bindingEnd = $dialogSource.IndexOf('static bool DnfReadV2Revision', $bindingStart, [StringComparison]::Ordinal)
+$binding = $dialogSource.Substring($bindingStart, $bindingEnd - $bindingStart)
+foreach ($needle in @('reply.find("playerNamePolicy")', 'outPlayerNamePolicy = value;', 'value != "none"')) {
+    if (-not $binding.Contains($needle)) { throw "Online authorization must validate and return the name policy: $needle" }
+}
 
 foreach ($path in @($testSource, $leaseSource)) {
     if (-not (Test-Path -LiteralPath $path)) {

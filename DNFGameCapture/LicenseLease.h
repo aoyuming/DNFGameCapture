@@ -24,6 +24,7 @@ struct DnfLicenseLeaseRecord {
     // Legacy leases keep both fields empty and require online renewal.
     std::wstring environment;
     std::wstring endpointManifestUrl;
+    std::wstring playerNamePolicy;
 };
 
 enum class DnfLicenseLeaseValidation {
@@ -37,6 +38,7 @@ enum class DnfLicenseLeaseValidation {
 };
 
 bool DnfIsLicenseLeaseEligible(std::int64_t cardDuration) noexcept;
+bool DnfIsKnownPlayerNamePolicy(const std::wstring& policy) noexcept;
 std::int64_t DnfGetLicenseLeaseValidUntil(
     const DnfLicenseLeaseRecord& lease) noexcept;
 DnfLicenseLeaseValidation DnfValidateLicenseLease(

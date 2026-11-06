@@ -56,7 +56,7 @@ struct PlayerIdentityGroupRecord {
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"5.5.7"    //当前版本号
+#define CURRENT_VERSION L"5.5.9"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -635,6 +635,9 @@ private:
     std::map<std::uint64_t, std::function<void(const dnf::player_library::Result&)>> m_playerLibraryRequests;
     std::uint64_t m_playerLibraryLastSentRevision = 0;
     bool m_playerLibraryReady = false;
+    std::string m_cloudPlayerNamePolicy = "none";
+    bool m_playerNamePolicyReady = true;
+    bool m_playerNamePolicyAttemptedThisRun = false;
     bool m_playerLibraryExitPending = false;
     CString m_playerLibraryError;
     DnfSyncedPlayerLibraryQueue m_matchLibraryQueue;
@@ -644,6 +647,7 @@ private:
     std::uint64_t m_matchLibraryRequestId = 0;
     std::uint64_t m_matchLibraryMatchEpoch = 0;
     void StartPlayerLibrary();
+    void ApplyAuthorizedPlayerNamePolicy();
     void PollPlayerLibrary();
     void PublishPlayerLibrary(dnf::player_library::SnapshotPtr snapshot);
     bool ApplyPlayerLibraryDelta(dnf::player_library::SnapshotPtr before,

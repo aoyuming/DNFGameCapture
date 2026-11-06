@@ -6,6 +6,7 @@ export interface LicenseRecord {
   expiresAt: number | null;
   disabledAt: number | null;
   boundDeviceId: string | null;
+  playerNamePolicy: 'none' | 'remove_power_prefixes' | 'merge_power_prefixes';
 }
 
 export type LicenseFailureCode = 'expired' | 'disabled' | 'invalid_time';

@@ -19,7 +19,7 @@ export function buildLicenseAdminPage(csrfToken: string): string {
 <div class="license-heading"><h2 id="issued-heading">本次生成 <span id="issued-count" class="muted"></span></h2><div class="license-actions"><button id="copy-all-keys" type="button">复制全部</button><button id="export-keys" type="button">导出文本</button><button id="hide-issued-keys" type="button">隐藏本批密钥</button></div></div>
 <div id="issued-keys" class="license-key-list"></div></section></section>
 <section aria-labelledby="licenses-heading"><div class="license-heading"><h2 id="licenses-heading">密钥列表 <span id="license-count" class="muted">0</span></h2><label>搜索<input id="license-search" type="search" placeholder="备注 / 设备 / 编号"></label></div>
-  <div class="table-scroll" tabindex="0" role="region" aria-label="密钥列表"><table><thead><tr><th scope="col">编号 / 备注</th><th scope="col">状态</th><th scope="col">有效期</th><th scope="col">激活主播 / 绑定设备</th><th scope="col">卡密</th><th scope="col">管理</th></tr></thead><tbody id="license-list"></tbody></table></div>
+  <div class="table-scroll" tabindex="0" role="region" aria-label="密钥列表"><table><thead><tr><th scope="col">编号 / 备注</th><th scope="col">状态</th><th scope="col">有效期</th><th scope="col">激活主播 / 绑定设备</th><th scope="col">战力名前缀</th><th scope="col">卡密</th><th scope="col">管理</th></tr></thead><tbody id="license-list"></tbody></table></div>
 <p id="license-empty" class="empty" hidden>暂无匹配密钥</p></section>
 <div id="copy-fallback-wrap" class="license-copy-fallback" hidden><label>待复制密钥<textarea id="copy-fallback" readonly spellcheck="false" rows="4"></textarea></label></div>
 </main>
@@ -28,6 +28,7 @@ export function buildLicenseAdminPage(csrfToken: string): string {
 <div id="dialog-error" class="message error" role="alert" hidden></div>
 <label id="dialog-preset-field" hidden>延长时长<select id="dialog-preset"></select></label>
 <label id="dialog-device-field" hidden>目标授权设备<select id="dialog-device"></select></label>
+<label id="dialog-policy-field" hidden>选手名称处理<select id="dialog-policy"><option value="remove_power_prefixes">剔除数字前缀选手</option><option value="merge_power_prefixes">归并为同一选手别名</option><option value="none">不处理</option></select></label>
 <label id="dialog-key-field" hidden>原始卡密<input id="dialog-key" maxlength="256" autocomplete="off" spellcheck="false"></label>
 <p id="dialog-preview" class="license-preview"></p><div id="audit-list" hidden></div>
 <div class="license-dialog-footer"><button id="dialog-cancel" type="button">取消</button><button id="dialog-retry" type="button" hidden>重试原操作</button><button id="dialog-submit" class="primary" type="submit">确认</button></div>
@@ -188,6 +189,11 @@ export const LICENSE_ADMIN_JS = String.raw`
       const device = devices.find(device => device.deviceId === item.boundDeviceId);
       const binding = node('td', device?.broadcasterName ? '主播：' + device.broadcasterName : item.boundDeviceId || '未绑定');
       if (device?.broadcasterName) binding.append(node('span', '授权设备：' + item.boundDeviceId, 'muted')); row.append(binding);
+      const policyNames = { remove_power_prefixes: '清理一次', merge_power_prefixes: '归并别名', none: '不处理' };
+      const policyCell = node('td');
+      policyCell.append(node('span', policyNames[item.playerNamePolicy] || '清理一次'));
+      policyCell.append(button('设置', () => openDialog('policy', item)));
+      row.append(policyCell);
       const keyCell = node('td', undefined, 'license-key-cell'), keyActions = node('div', undefined, 'license-actions');
       if (revealed.has(item.id)) {
         keyCell.append(keyInput(revealed.get(item.id), '密钥 ' + item.id));
@@ -299,18 +305,19 @@ export const LICENSE_ADMIN_JS = String.raw`
   function openDialog(action, item) {
     if (busy || pending) return;
     dialog = { action, item: { ...item }, stale: false };
-    const titles = { extend: '延长有效期', rebind: '更换绑定设备', key: '补录原始密钥', disable: item.disabledAt !== null ? '启用密钥' : '禁用密钥', audit: '操作记录' };
+    const titles = { extend: '延长有效期', rebind: '更换绑定设备', key: '补录原始密钥', disable: item.disabledAt !== null ? '启用密钥' : '禁用密钥', audit: '操作记录', policy: '配置选手名称处理' };
     $('dialog-title').textContent = titles[action]; $('dialog-subtitle').textContent = '#' + item.id + ' · ' + (item.label || '未备注');
     $('dialog-error').hidden = true; $('dialog-preview').hidden = false;
     $('dialog-cancel').textContent = action === 'audit' ? '关闭' : '取消';
-    $('dialog-submit').textContent = '确认' + (action === 'extend' ? '延长' : action === 'rebind' ? '换绑' : action === 'key' ? '补录' : item.disabledAt !== null ? '启用' : '禁用');
-    $('dialog-preset-field').hidden = action !== 'extend'; $('dialog-device-field').hidden = action !== 'rebind'; $('dialog-key-field').hidden = action !== 'key';
+    $('dialog-submit').textContent = '确认' + (action === 'extend' ? '延长' : action === 'rebind' ? '换绑' : action === 'key' ? '补录' : action === 'policy' ? '保存' : item.disabledAt !== null ? '启用' : '禁用');
+    $('dialog-preset-field').hidden = action !== 'extend'; $('dialog-device-field').hidden = action !== 'rebind'; $('dialog-key-field').hidden = action !== 'key'; $('dialog-policy-field').hidden = action !== 'policy';
     $('dialog-key').required = action === 'key'; $('dialog-key').value = '';
     $('audit-list').hidden = action !== 'audit'; $('audit-list').replaceChildren();
     presetOptions($('dialog-preset')); $('dialog-preset').selectedIndex = 0;
     $('dialog-device').replaceChildren(); const unbind = node('option', '解除绑定（下次使用时绑定）'); unbind.value = ''; $('dialog-device').append(unbind);
     for (const device of devices) { const option = node('option', (device.broadcasterName ? '主播 ' + device.broadcasterName : '授权设备') + ' · ' + device.deviceId); option.value = device.deviceId; $('dialog-device').append(option); }
     if (devices.some(device => device.deviceId === item.boundDeviceId)) $('dialog-device').value = item.boundDeviceId;
+    $('dialog-policy').value = item.playerNamePolicy || 'remove_power_prefixes';
     preview(); controls(); $('license-dialog').showModal();
   }
   function preview() {
@@ -334,11 +341,12 @@ export const LICENSE_ADMIN_JS = String.raw`
       text = device ? '确认绑定至：' + (device.broadcasterName || device.deviceId) + '\n' + device.deviceId : '确认解除绑定，下次使用时绑定设备。';
       text += '\n有效期不变，不会重新计时。旧服务端授权会话将撤销，已签发的离线授权不会被远程清除。';
     } else if (action === 'key') text = '仅补录与当前记录匹配的原始卡密，不会更换卡密或改变有效期。';
+    else if (action === 'policy') text = '策略只对本机选手库执行一次，执行前会创建恢复备份。归并时将“90老王”“91 老王”归并到“老王”，并合并游戏ID；投稿时只保留去掉数字前缀后的名称。';
     else if (action === 'disable') text = item.disabledAt !== null ? '确认恢复此密钥使用资格？原有效期和绑定设备保持不变。' : '确认禁用此密钥？已签发的离线授权不会被远程清除。';
     else { text = '正在读取操作记录'; }
     $('dialog-preview').textContent = text;
   }
-  const auditActions = { create: '生成', batch_create: '批量生成', generate: '生成', enroll_legacy: '旧永久卡登记', activate: '激活', activation: '激活', extend: '延长', rebind: '换绑', disable: '禁用', enable: '启用', key: '补录密钥', recover_key: '补录密钥', key_recovery: '补录密钥', key_backfill: '补录密钥', reveal: '查看密钥' };
+  const auditActions = { create: '生成', batch_create: '批量生成', generate: '生成', enroll_legacy: '旧永久卡登记', activate: '激活', activation: '激活', extend: '延长', rebind: '换绑', disable: '禁用', enable: '启用', player_name_policy: '名称策略', key: '补录密钥', recover_key: '补录密钥', key_recovery: '补录密钥', key_backfill: '补录密钥', reveal: '查看密钥' };
   const detailNames = { preset: '时长选项', count: '数量', batchCount: '批次数量', label: '备注', revision: '版本', deviceId: '授权设备', boundDeviceId: '绑定设备', beforeDeviceId: '原授权设备', previousDeviceId: '原授权设备', expiresAt: '到期时间', beforeExpiresAt: '原到期时间', previousExpiresAt: '原到期时间', activatedAt: '激活时间', durationSeconds: '有效时长', beforeDurationSeconds: '原有效时长', firstActivation: '首次激活', disabled: '禁用', activationMode: '计时方式', before: '变更前', after: '变更后' };
   function auditDetails(value, field = '') {
     if (value === null) return field === 'durationSeconds' || field === 'beforeDurationSeconds' ? '永久' : '无';
@@ -383,10 +391,11 @@ export const LICENSE_ADMIN_JS = String.raw`
     const { action, item } = dialog; let body;
     if (action === 'extend') body = { preset: $('dialog-preset').value };
     else if (action === 'rebind') body = { deviceId: $('dialog-device').value || null };
+    else if (action === 'policy') body = { policy: $('dialog-policy').value };
     else if (action === 'disable') body = { disabled: item.disabledAt === null };
     else if (action === 'key') body = { key: $('dialog-key').value.trim() };
     else return;
-    $('dialog-error').hidden = true; mutate('/' + item.id + '/' + action, { ...body, revision: item.revision });
+    $('dialog-error').hidden = true; mutate('/' + item.id + '/' + (action === 'policy' ? 'player-name-policy' : action), { ...body, revision: item.revision });
   });
   $('copy-all-keys').addEventListener('click', () => run(() => copy(issued.map(item => item.key).join('\r\n'))));
   $('hide-issued-keys').addEventListener('click', () => { issuedHidden = !issuedHidden; renderIssued(); controls(); });

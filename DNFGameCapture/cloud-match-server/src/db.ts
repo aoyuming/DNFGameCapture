@@ -273,6 +273,7 @@ function initializeSchema(db: Database.Database): void {
     const licenseColumns = db.pragma('table_info(licenses)') as Array<{ name: string }>;
     for (const [name, definition] of [
       ['activation_mode', "TEXT NOT NULL DEFAULT 'fixed' CHECK(activation_mode IN ('fixed','first_use'))"],
+      ['player_name_policy', "TEXT NOT NULL DEFAULT 'remove_power_prefixes' CHECK(player_name_policy IN ('none','remove_power_prefixes','merge_power_prefixes'))"],
       ['duration_seconds', 'INTEGER CHECK(duration_seconds IS NULL OR duration_seconds>0)'],
       ['activated_at', 'INTEGER'], ['key_ciphertext', 'TEXT'], ['revision', 'INTEGER NOT NULL DEFAULT 0'],
     ]) {

@@ -34,6 +34,7 @@ export interface ManagedLicense extends LicenseRecord {
 type StoredLicense = Omit<ManagedLicense, 'hasKey'> & { keyCiphertext: string | null };
 const columns = `id,key_hash AS keyHash,label,expires_at AS expiresAt,disabled_at AS disabledAt,
   bound_device_id AS boundDeviceId,created_at AS createdAt,updated_at AS updatedAt,revision,
+  player_name_policy AS playerNamePolicy,
   activation_mode AS activationMode,duration_seconds AS durationSeconds,activated_at AS activatedAt,key_ciphertext AS keyCiphertext`;
 function storedLicense(db: Database.Database, id: number): StoredLicense {
   const row = db.prepare(`SELECT ${columns} FROM licenses WHERE id=?`).get(id) as StoredLicense | undefined;
@@ -182,6 +183,25 @@ export function recoverLicenseKey(db: Database.Database, id: number, key: string
     if (hashLicenseKey(key) !== row.keyHash) throw new LicenseError(400, 'key_mismatch');
     db.prepare('UPDATE licenses SET key_ciphertext=?,updated_at=?,revision=revision+1 WHERE id=?').run(encryptLicenseKey(db, key), now, id);
     audit(db, id, 'recover_key', now, {}); return id;
+  });
+  return { license: getManagedLicense(db, id), replayed: result.replayed };
+}
+
+export function setLicensePlayerNamePolicy(
+  db: Database.Database,
+  id: number,
+  policy: LicenseRecord['playerNamePolicy'],
+  revision: number,
+  requestId: string,
+  now: number,
+) {
+  const result = operation(db, requestId, { action: 'player_name_policy', id, policy, revision }, now, () => {
+    const row = storedLicense(db, id); verifyRevision(row, revision);
+    if (row.playerNamePolicy !== policy) {
+      db.prepare('UPDATE licenses SET player_name_policy=?,updated_at=?,revision=revision+1 WHERE id=?').run(policy, now, id);
+      audit(db, id, 'player_name_policy', now, { before: row.playerNamePolicy, after: policy });
+    }
+    return id;
   });
   return { license: getManagedLicense(db, id), replayed: result.replayed };
 }

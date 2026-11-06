@@ -112,6 +112,28 @@ test('rebind invalidates old sessions and does not reset expiry or activation', 
   await f.activate(key, device).expect(409);
 });
 
+test('per-license player name policy is revision guarded, audited and refreshed in active sessions', async () => {
+  const f = await fixture();
+  const created = (await f.post('', { preset: 'permanent', count: 1, requestId: 'name-policy-create-001' }).expect(201)).body.licenses[0];
+  const activated = (await f.activate(created.key).expect(200)).body;
+  expect(activated.playerNamePolicy).toBe('remove_power_prefixes');
+  const card = (await f.get()).body.licenses[0];
+  const changed = (await f.post(`/${card.id}/player-name-policy`, {
+    policy: 'merge_power_prefixes', revision: card.revision, requestId: 'name-policy-merge-001',
+  }).expect(200)).body.license;
+  expect(changed).toMatchObject({ playerNamePolicy: 'merge_power_prefixes', revision: card.revision + 1 });
+  await f.post(`/${card.id}/player-name-policy`, {
+    policy: 'none', revision: card.revision, requestId: 'name-policy-stale-001',
+  }).expect(409);
+  const validated = await request(f.app.expressApp).post('/api/v2/auth/validate').send({
+    sessionToken: activated.sessionToken, deviceId: device,
+  }).expect(200);
+  expect(validated.body.playerNamePolicy).toBe('merge_power_prefixes');
+  const audit = (await f.get(`/${card.id}/audit`)).body.events;
+  expect(audit[0]).toMatchObject({ action: 'player_name_policy', details: { before: 'remove_power_prefixes', after: 'merge_power_prefixes' } });
+  expect(JSON.stringify(audit)).not.toContain(card.key);
+});
+
 test('legacy fixed dates survive and hash-only keys can be backfilled after successful activation', async () => {
   const f = await fixture(); const key = generateLicenseKey();
   f.app.db.prepare('INSERT INTO licenses(key_hash,label,expires_at,created_at,updated_at) VALUES(?,?,?,?,?)')

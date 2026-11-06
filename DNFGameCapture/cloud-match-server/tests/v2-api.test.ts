@@ -9,7 +9,7 @@ import { hashLicenseKey } from '../src/auth.js';
 import { createBroadcasterAttributionService } from '../src/broadcaster-attribution.js';
 import { setClientBan } from '../src/client-ban.js';
 import { openDatabase } from '../src/db.js';
-import { mergePublicLibrary, mutatePublicLibrary } from '../src/library-admin-data.js';
+import { mergePublicLibrary, mutatePublicLibrary, readAdminSubmission } from '../src/library-admin-data.js';
 import {
   approvePlayerLibrarySubmission,
   createV2Api,
@@ -56,6 +56,86 @@ afterEach(() => {
 });
 
 describe('test-server v2 API', () => {
+  test('sends the per-license name policy and filters prefixed identities before review', async () => {
+    const { app, db } = createFixture();
+    const activated = await request(app).post('/api/v2/auth/activate').send({
+      key: 'CDK-TEST-ONE', deviceId: 'device-test-0001',
+    }).expect(200);
+    expect(activated.body.playerNamePolicy).toBe('remove_power_prefixes');
+    db.prepare("UPDATE licenses SET player_name_policy='merge_power_prefixes'").run();
+    const submitted = await request(app).post('/api/v2/player-library/submit')
+      .set('Authorization', `Bearer ${activated.body.sessionToken}`)
+      .set('X-DNF-Device-Id', 'device-test-0001')
+      .send({ entities: [
+        { entityId: 'clean', names: ['老王', '王搞'], gameIds: ['clean-id'] },
+        { entityId: 'power-90', names: ['90老王'], gameIds: ['power-id-1'] },
+        { entityId: 'power-91', names: ['91 老王'], gameIds: ['power-id-2'] },
+        { entityId: 'noise', names: ['92陌生人'], gameIds: ['noise-id'] },
+      ] }).expect(202);
+    const pending = readAdminSubmission(db, submitted.body.submissionId)!;
+    expect(pending.entities).toEqual([
+      { entityId: 'clean', names: ['老王', '王搞'], gameIds: ['clean-id', 'power-id-1', 'power-id-2'] },
+      { entityId: 'noise', names: ['陌生人'], gameIds: ['noise-id'] },
+    ]);
+  });
+
+  test('filters power-prefixed entities from library downloads and identity resolution', async () => {
+    const { app, db } = createFixture();
+    mutatePublicLibrary(db, 0, now, 'import', [
+      { entityId: 'clean', names: ['老王', '王搞'], gameIds: ['clean-id'] },
+      { entityId: 'mixed', names: ['普通别名', '90老王'], gameIds: ['mixed-id'] },
+      { entityId: 'prefixed-only', names: ['91老王'], gameIds: ['hidden-id'] },
+    ]);
+    const activated = await request(app).post('/api/v2/auth/activate').send({
+      key: 'CDK-TEST-ONE', deviceId: 'device-test-0001',
+    }).expect(200);
+    const auth = (value: request.Test) => value.set('Authorization', `Bearer ${activated.body.sessionToken}`)
+      .set('X-DNF-Device-Id', 'device-test-0001');
+
+    const downloaded = await auth(request(app).get('/api/v2/player-library')).expect(200);
+    expect(downloaded.body.entities).toEqual([
+      { entityId: 'clean', names: ['王搞', '老王'], gameIds: ['clean-id'] },
+      { entityId: 'mixed', names: ['普通别名'], gameIds: ['mixed-id'] },
+    ]);
+    expect((await auth(request(app).post('/api/v2/player-library/resolve').send({ gameIds: ['hidden-id'] })).expect(200)).body)
+      .toMatchObject({ entityId: null, matchedBy: 'none', candidateEntityIds: [] });
+    expect(listPlayerLibrary(db).entities).toHaveLength(3);
+  });
+
+  test('merges prefixed entities in the licensed library view and redirects identity resolution', async () => {
+    const { app, db } = createFixture();
+    mutatePublicLibrary(db, 0, now, 'import', [
+      { entityId: 'clean', names: ['老王', '王搞'], gameIds: ['clean-id'] },
+      { entityId: 'power-90', names: ['90老王'], gameIds: ['power-id-1'] },
+      { entityId: 'power-91', names: ['91 老王'], gameIds: ['power-id-2'] },
+      { entityId: 'legacy-power', names: ['曾用名'], gameIds: ['legacy-id'] },
+    ]);
+    mergePublicLibrary(db, 1, now, 'power-90', ['power-90', 'legacy-power']);
+    db.prepare("UPDATE licenses SET player_name_policy='merge_power_prefixes'").run();
+    const activated = await request(app).post('/api/v2/auth/activate').send({
+      key: 'CDK-TEST-ONE', deviceId: 'device-test-0001',
+    }).expect(200);
+    const auth = (value: request.Test) => value.set('Authorization', `Bearer ${activated.body.sessionToken}`)
+      .set('X-DNF-Device-Id', 'device-test-0001');
+
+    const downloaded = await auth(request(app).get('/api/v2/player-library')).expect(200);
+    expect(downloaded.body.entities).toHaveLength(1);
+    expect(downloaded.body.entities[0]).toMatchObject({
+      entityId: 'clean',
+    });
+    expect([...downloaded.body.entities[0].gameIds].sort()).toEqual(['clean-id', 'power-id-1', 'power-id-2', 'legacy-id'].sort());
+    expect([...downloaded.body.entities[0].names].sort()).toEqual(['王搞', '老王', '曾用名'].sort());
+    expect(downloaded.body.entityRedirects).toEqual([
+      { fromEntityId: 'legacy-power', toEntityId: 'clean' },
+      { fromEntityId: 'power-90', toEntityId: 'clean' },
+      { fromEntityId: 'power-91', toEntityId: 'clean' },
+    ]);
+    expect((await auth(request(app).post('/api/v2/player-library/resolve')
+      .send({ gameIds: ['legacy-id'], activeEntityIds: ['legacy-power'] })).expect(200)).body)
+      .toMatchObject({ entityId: 'clean', candidateEntityIds: ['clean'] });
+    expect(listPlayerLibrary(db).entities).toHaveLength(3);
+  });
+
   test('blocks activation, validation, and protected APIs while a client ban is active', async () => {
     const { app, db } = createFixture();
     const activated = await request(app).post('/api/v2/auth/activate').send({

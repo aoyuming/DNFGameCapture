@@ -5,7 +5,7 @@ import { generateLicenseKey, isNativeLicenseKey, normalizeLicenseKey } from './a
 import { deviceIdSchema } from './schemas.js';
 import { LicenseVaultError } from './license-vault.js';
 import { createLicense, disableLicense, extendLicense, generateLicenseBatch, licenseAudit,
-  LicenseError, LICENSE_PRESETS, listLicenseDevices, listLicenses, MAX_LICENSE_BATCH, rebindLicense, recoverLicenseKey, revealLicense } from './license-store.js';
+  LicenseError, LICENSE_PRESETS, listLicenseDevices, listLicenses, MAX_LICENSE_BATCH, rebindLicense, recoverLicenseKey, revealLicense, setLicensePlayerNamePolicy } from './license-store.js';
 
 const requestId = z.string().min(8).max(80).regex(/^[A-Za-z0-9_-]+$/);
 const revision = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -59,6 +59,11 @@ export function createLicenseAdminApi(db: Database.Database, now: () => number) 
   router.post('/:id/key', (request, response) => {
     const body = parse(guard.extend({ key: z.string().trim().min(1).max(256) }).strict(), request.body); checkKey(body.key);
     response.json({ ok: true, ...recoverLicenseKey(db, idOf(request.params.id), body.key, body.revision, body.requestId, now()) });
+  });
+  router.post('/:id/player-name-policy', (request, response) => {
+    const body = parse(guard.extend({ policy: z.enum(['none', 'remove_power_prefixes', 'merge_power_prefixes']) }).strict(), request.body);
+    response.json({ ok: true, ...setLicensePlayerNamePolicy(db, idOf(request.params.id), body.policy,
+      body.revision, body.requestId, now()) });
   });
   router.post('/:id/disable', (request, response) => {
     const body = parse(z.object({ disabled: z.boolean(), revision: revision.optional(), requestId: requestId.optional() }).strict(), request.body);

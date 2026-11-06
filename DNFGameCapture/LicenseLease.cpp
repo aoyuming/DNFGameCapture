@@ -17,7 +17,7 @@ namespace {
 constexpr wchar_t DNF_LICENSE_LEASE_REG_PATH[] = L"Software\\DNFCapture";
 constexpr wchar_t DNF_LICENSE_LEASE_REG_VALUE[] = L"LicenseLeaseV1";
 constexpr std::uint32_t DNF_LICENSE_LEASE_MAGIC = 0x314C4644; // DFL1
-constexpr std::uint32_t DNF_LICENSE_LEASE_VERSION = 3;
+constexpr std::uint32_t DNF_LICENSE_LEASE_VERSION = 4;
 constexpr DWORD DNF_LICENSE_LEASE_MAX_BYTES = 64 * 1024;
 constexpr std::size_t DNF_LICENSE_LEASE_MAX_TEXT_BYTES = 16 * 1024;
 
@@ -145,6 +145,7 @@ bool SerializeLease(const DnfLicenseLeaseRecord& lease,
         !AppendText(output, lease.serverSessionToken) ||
         !AppendText(output, lease.environment) ||
         !AppendText(output, lease.endpointManifestUrl) ||
+        !AppendText(output, lease.playerNamePolicy) ||
         output.size() > DNF_LICENSE_LEASE_MAX_BYTES) {
         SecureWipe(output);
         return false;
@@ -173,6 +174,7 @@ bool DeserializeLease(const BYTE* bytes, std::size_t length,
         (version >= 2 && !ReadText(cursor, end, lease.serverSessionToken)) ||
         (version >= 3 && (!ReadText(cursor, end, lease.environment) ||
             !ReadText(cursor, end, lease.endpointManifestUrl))) ||
+        (version >= 4 && !ReadText(cursor, end, lease.playerNamePolicy)) ||
         cursor != end) {
         lease = {};
         return false;
@@ -186,6 +188,13 @@ bool DnfIsLicenseLeaseEligible(std::int64_t cardDuration) noexcept
 {
     return cardDuration == DNF_LICENSE_PERMANENT_EXPIRY ||
         cardDuration >= DNF_LICENSE_MONTH_SECONDS;
+}
+
+bool DnfIsKnownPlayerNamePolicy(const std::wstring& policy) noexcept
+{
+    return policy == L"none" ||
+        policy == L"remove_power_prefixes" ||
+        policy == L"merge_power_prefixes";
 }
 
 std::int64_t DnfGetLicenseLeaseValidUntil(

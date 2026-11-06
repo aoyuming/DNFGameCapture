@@ -22,6 +22,7 @@ public:
     RequestId Initialize();
     RequestId SubmitLegacy(LegacyLibrary library, nlohmann::json identityMetadata = nullptr);
     RequestId ImportV2(nlohmann::json payload);
+    RequestId ApplyPowerPrefixPolicy(std::string policy);
     RequestId ExecuteIdentity(nlohmann::json command);
     RequestId RequestRefresh();
     SnapshotPtr GetSnapshot() const noexcept;

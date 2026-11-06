@@ -26,5 +26,6 @@ Assert-Contains $poll 'if \(rosterChanged\)[\s\S]*?SaveConfigToFile' 'Committed 
 Assert-Contains $source 'reply\["importSource"\] = std::string\(CW2A\(endpoint' 'Remote revisions must retain their immutable request endpoint.'
 Assert-Contains $delta 'renameId && key == newIdKey && oldIds.count\(oldIdKey\)' 'A pending ID rename must not resurrect a temporarily removed ID.'
 Assert-Contains $poll 'if \(rosterChanged\)[\s\S]*?SyncDataToTree' 'The native tree must refresh after rename score callbacks.'
+Assert-Contains $poll 'm_playerLibraryRequests\.empty\(\) && !m_playerNamePolicyReady\) ApplyAuthorizedPlayerNamePolicy' 'Completed name-policy cleanup must not be reset by the poll tail.'
 Assert-Contains $source '"rename_id" : "rename_name"' 'Native renames must retain normalized entity links.'
 Write-Host 'Player library integration checks passed.'

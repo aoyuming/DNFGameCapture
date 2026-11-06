@@ -6,6 +6,7 @@
 #include <icu.h>
 #include <algorithm>
 #include <chrono>
+#include <cwctype>
 #include <cstring>
 #include <fstream>
 #include <set>
@@ -210,6 +211,13 @@ std::vector<std::wstring> ReadStrings(const json& value, bool names = false) {
 json Strings(const std::vector<std::wstring>& values) { auto result = json::array(); for (const auto& v : values) result.push_back(ToUtf8(v)); return result; }
 template<class T> void AddUnique(std::vector<T>& values, const T& value) { if (std::find(values.begin(), values.end(), value) == values.end()) values.push_back(value); }
 std::set<std::wstring> Keys(const std::vector<std::wstring>& ids) { std::set<std::wstring> keys; for (const auto& id : ids) keys.insert(CanonicalKey(id, IdentifierKind::Game)); return keys; }
+std::optional<std::wstring> PowerPrefixCleanName(const std::wstring& name) {
+    std::size_t digits = 0;
+    while (digits < name.size() && std::iswdigit(name[digits])) ++digits;
+    if (!digits) return std::nullopt;
+    auto clean = Trim(name.substr(digits));
+    return clean.empty() ? std::nullopt : std::optional<std::wstring>(std::move(clean));
+}
 bool ValidCloudId(const std::string& id) {
     return !id.empty() && id.size() <= 128 && std::all_of(id.begin(), id.end(), [](unsigned char c) {
         return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
@@ -1090,6 +1098,186 @@ SnapshotPtr PlayerLibraryDatabase::ImportV2(const json& payload, ImportReport* r
     else result = p.Persist(std::move(s), tx, !unchanged);
     if (report) *report = std::move(outcome);
     return result;
+}
+
+SnapshotPtr PlayerLibraryDatabase::ApplyPowerPrefixPolicy(const std::string& policy) {
+    Require(policy == "none" || policy == "remove_power_prefixes" || policy == "merge_power_prefixes",
+        "Unknown power-prefix policy");
+    auto& p = *impl_;
+    Require(p.db != nullptr, "Library is not initialized");
+    const auto old = LoadSnapshot();
+    if (policy == "none") return old;
+    const auto applied = old->identityMetadata.value("powerPrefixPolicies", json::array());
+    Require(applied.is_array(), "Invalid power-prefix policy marker");
+    if (std::find(applied.begin(), applied.end(), json(policy)) != applied.end()) return old;
+
+    struct PrefixName { EntityId entityId; std::wstring name; std::wstring clean; };
+    std::vector<PrefixName> prefixes;
+    for (const auto& entity : old->entities) for (const auto& name : entity.names) {
+        if (const auto clean = PowerPrefixCleanName(name)) prefixes.push_back({entity.entityId, name, *clean});
+    }
+
+    fs::path backupFolder;
+    if (!prefixes.empty()) {
+        backupFolder = p.options.databasePath.parent_path() / (L"power-prefix-" + Suffix());
+        fs::create_directory(backupFolder);
+        sqlite3* backupDb = nullptr;
+        const auto backupFile = ToUtf8((backupFolder / L"player_library.db").wstring());
+        if (sqlite3_open(backupFile.c_str(), &backupDb) != SQLITE_OK) {
+            if (backupDb) sqlite3_close(backupDb);
+            throw std::runtime_error("Cannot create power-prefix recovery backup");
+        }
+        sqlite3_backup* backup = sqlite3_backup_init(backupDb, "main", p.db, "main");
+        const int copied = backup ? sqlite3_backup_step(backup, -1) : SQLITE_ERROR;
+        const int finished = backup ? sqlite3_backup_finish(backup) : SQLITE_ERROR;
+        sqlite3_close(backupDb);
+        Require(copied == SQLITE_DONE && finished == SQLITE_OK,
+            "Power-prefix recovery backup failed; library was not changed");
+        for (const auto& path : {p.options.legacyPath, p.options.identityGroupsPath,
+            p.options.legacyPath.parent_path() / L"alias_cloud_baseline.json",
+            p.options.legacyPath.parent_path() / L"players_config.txt"}) {
+            Require(!fs::is_symlink(path), "Refusing to back up a linked player-library file");
+            if (fs::exists(path)) fs::copy_file(path, backupFolder / path.filename());
+        }
+    }
+
+    Transaction tx(p.db);
+    Require(p.Load()->revision == old->revision, "Library changed during power-prefix backup");
+    Snapshot s = *old;
+    p.PrepareIntern(s);
+    if (policy == "remove_power_prefixes") {
+        std::set<std::wstring> removed;
+        for (const auto& prefix : prefixes) removed.insert(prefix.name);
+        for (auto& entity : s.entities) {
+            entity.names.erase(std::remove_if(entity.names.begin(), entity.names.end(), [&](const auto& name) {
+                return removed.count(name) != 0;
+            }), entity.names.end());
+        }
+        s.entities.erase(std::remove_if(s.entities.begin(), s.entities.end(), [](const auto& entity) {
+            return entity.names.empty();
+        }), s.entities.end());
+        if (s.identityMetadata.contains("groups")) {
+            auto groups = json::array();
+            for (auto group : s.identityMetadata["groups"]) {
+                auto names = ReadStrings(group["names"], true);
+                names.erase(std::remove_if(names.begin(), names.end(), [&](const auto& name) {
+                    return removed.count(name) != 0;
+                }), names.end());
+                for (const auto* field : {"beforeMerge", "beforeEntities"}) if (group.contains(field))
+                    for (const auto& name : removed) group[field].erase(ToUtf8(name));
+                if (names.size() >= 2) { group["names"] = Strings(names); groups.push_back(std::move(group)); }
+            }
+            s.identityMetadata["groups"] = std::move(groups);
+        }
+        if (s.identityMetadata.contains("autoSplitNameSets")) {
+            auto sets = json::array();
+            for (auto names : s.identityMetadata["autoSplitNameSets"]) {
+                auto values = ReadStrings(names, true);
+                values.erase(std::remove_if(values.begin(), values.end(), [&](const auto& name) {
+                    return removed.count(name) != 0;
+                }), values.end());
+                if (values.size() >= 2) sets.push_back(Strings(values));
+            }
+            s.identityMetadata["autoSplitNameSets"] = std::move(sets);
+        }
+    } else {
+        std::map<std::wstring, EntityId> cleanOwners, suffixOwners;
+        for (const auto& entity : old->entities) for (const auto& name : entity.names) {
+            if (!PowerPrefixCleanName(name)) cleanOwners.emplace(CanonicalKey(name, IdentifierKind::Game), entity.entityId);
+        }
+        suffixOwners = cleanOwners;
+        std::map<EntityId, EntityId> parents;
+        for (const auto& entity : old->entities) parents.emplace(entity.entityId, entity.entityId);
+        auto root = [&](EntityId id) {
+            EntityId current = id;
+            while (parents.at(current) != current) current = parents.at(current);
+            while (parents.at(id) != id) { const auto next = parents.at(id); parents[id] = current; id = next; }
+            return current;
+        };
+        std::map<std::wstring, EntityId> aliasTargets;
+        for (const auto& prefix : prefixes) {
+            const auto key = CanonicalKey(prefix.clean, IdentifierKind::Game);
+            auto found = suffixOwners.find(key);
+            if (found == suffixOwners.end()) found = suffixOwners.emplace(key, prefix.entityId).first;
+            const auto target = cleanOwners.find(key);
+            const EntityId targetId = target == cleanOwners.end() ? found->second : target->second;
+            aliasTargets.emplace(prefix.name, targetId);
+            const auto sourceRoot = root(prefix.entityId), targetRoot = root(targetId);
+            if (sourceRoot != targetRoot) parents[sourceRoot] = targetRoot;
+        }
+
+        std::map<EntityId, PlayerEntity> merged;
+        std::map<EntityId, std::set<EntityId>> members;
+        for (const auto& entity : old->entities) {
+            const auto target = root(entity.entityId);
+            auto found = merged.find(target);
+            if (found == merged.end()) {
+                PlayerEntity value = entity; value.names.clear(); value.gameIds.clear();
+                found = merged.emplace(target, std::move(value)).first;
+            }
+            members[target].insert(entity.entityId);
+            for (const auto& name : entity.names) AddUnique(found->second.names, name);
+            for (const auto id : entity.gameIds) AddUnique(found->second.gameIds, id);
+        }
+        for (const auto& prefix : prefixes) {
+            auto& entity = merged.at(root(aliasTargets.at(prefix.name)));
+            AddUnique(entity.names, prefix.clean);
+        }
+
+        auto groups = json::array();
+        for (const auto& existing : s.identityMetadata.value("groups", json::array())) {
+            const auto names = ReadStrings(existing["names"], true);
+            const bool intersects = std::any_of(names.begin(), names.end(), [&](const auto& name) {
+                const auto* owner = old->FindName(name);
+                return owner && std::any_of(prefixes.begin(), prefixes.end(), [&](const auto& prefix) {
+                    return root(prefix.entityId) == root(aliasTargets.at(prefix.name)) &&
+                        root(owner->entityId) == root(prefix.entityId);
+                });
+            });
+            if (!intersects) groups.push_back(existing);
+        }
+        for (const auto& [targetId, memberIds] : members) {
+            const bool affected = std::any_of(prefixes.begin(), prefixes.end(), [&](const auto& prefix) {
+                return root(prefix.entityId) == targetId;
+            });
+            if (!affected) continue;
+            const auto& entity = merged.at(targetId);
+            auto before = json::object(), originals = json::object();
+            auto generated = json::array();
+            std::set<std::wstring> names(entity.names.begin(), entity.names.end());
+            for (auto id : memberIds) {
+                const auto& original = old->entities.at(old->entityIndex.at(id));
+                for (const auto& name : original.names) {
+                    before[ToUtf8(name)] = Strings(old->legacy.at(name));
+                    json record = {{"entityId", original.entityId}};
+                    if (original.cloudId) record["cloudId"] = *original.cloudId;
+                    originals[ToUtf8(name)] = std::move(record);
+                }
+            }
+            for (const auto& prefix : prefixes) if (root(prefix.entityId) == targetId) {
+                if (!old->FindName(prefix.clean)) {
+                    generated.push_back(ToUtf8(prefix.clean));
+                    before[ToUtf8(prefix.clean)] = json::array();
+                    originals[ToUtf8(prefix.clean)] = {{"entityId", prefix.entityId}};
+                }
+            }
+            const auto nameList = std::vector<std::wstring>(names.begin(), names.end());
+            if (nameList.size() < 2) continue;
+            json group = {{"groupId", "power-prefix-" + IdentityFingerprint(nameList)},
+                {"source", "manual"}, {"names", Strings(nameList)},
+                {"beforeMerge", before}, {"beforeEntities", originals}};
+            if (!generated.empty()) group["powerPrefixGeneratedNames"] = std::move(generated);
+            groups.push_back(std::move(group));
+        }
+        s.entities.clear();
+        for (auto& [id, entity] : merged) s.entities.push_back(std::move(entity));
+        s.identityMetadata["groups"] = std::move(groups);
+    }
+    auto policies = s.identityMetadata.value("powerPrefixPolicies", json::array());
+    policies.push_back(policy);
+    s.identityMetadata["powerPrefixPolicies"] = std::move(policies);
+    if (!backupFolder.empty()) s.identityMetadata["powerPrefixBackup"] = ToUtf8(backupFolder.wstring());
+    return p.Persist(std::move(s), tx);
 }
 
 SnapshotPtr PlayerLibraryDatabase::ResetLocal(const json& command) {

@@ -49,6 +49,8 @@ public:
     // Public pulls may opt into skipOwnershipConflicts. Report is published only
     // after commit; malformed data, stale revisions and storage errors still fail.
     SnapshotPtr ImportV2(const nlohmann::json& payload, ImportReport* report = nullptr);
+    // Applies a per-license power-prefix cleanup once, transactionally. Changes are backed up first.
+    SnapshotPtr ApplyPowerPrefixPolicy(const std::string& policy);
     // action (also cmd_identity_*): create_player, merge, add_alias, rename_name, rename_id, update_ids,
     // unmerge, delete_alias, ignore_overlap, ignore_overlaps, refresh. Mutation requires uint64 revision.
     // ignore_overlaps: non-empty pairs:[{leftName,rightName}], all must be current

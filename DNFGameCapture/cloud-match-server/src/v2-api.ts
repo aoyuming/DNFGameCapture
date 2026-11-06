@@ -31,6 +31,8 @@ export { createLicense, listLicenses } from './license-store.js';
 import { listPlayerLibrary, readAutomaticIdentityEvidence } from './library-store.js';
 import { reconcileLibrarySubmission } from './library-submission-reconcile.js';
 import { identityKey, type AutomaticIdentityEvidence } from './library-identity-policy.js';
+import { applyPlayerNamePolicy, projectPlayerNamePolicy } from './player-name-policy.js';
+import { canonicalEntityRedirects, type EntityRedirect } from './library-store.js';
 export { listPlayerLibrary } from './library-store.js';
 import {
   LibraryAdminError, libraryReviewGuardSchema, mutatePublicLibrary, parseAdminEntities,
@@ -213,6 +215,7 @@ export function loadSession(
   if (getActiveClientBan(db, [deviceId], nowSec)) return null;
   const row = db.prepare(
     `SELECT s.device_id, s.expires_at, l.id, l.key_hash, l.expires_at AS license_expires_at,
+            l.player_name_policy,
             l.disabled_at, l.bound_device_id
      FROM auth_sessions AS s
      JOIN licenses AS l ON l.id = s.license_id
@@ -225,6 +228,7 @@ export function loadSession(
     license_expires_at: number | null;
     disabled_at: number | null;
     bound_device_id: string | null;
+    player_name_policy: LicenseRecord['playerNamePolicy'];
   } | undefined;
   if (!row || nowSec >= row.expires_at || row.bound_device_id !== deviceId) return null;
   const license: LicenseRecord = {
@@ -233,6 +237,7 @@ export function loadSession(
     expiresAt: row.license_expires_at,
     disabledAt: row.disabled_at,
     boundDeviceId: row.bound_device_id,
+    playerNamePolicy: row.player_name_policy,
   };
   if (!isLicenseUsable(license, nowSec).ok) return null;
   db.prepare('UPDATE auth_sessions SET last_seen_at = ? WHERE token_hash = ?').run(nowSec, hashSessionToken(token));
@@ -297,6 +302,27 @@ function currentPolicy(db: Database.Database, deviceId: string): number | null {
   ).get(deviceId) as { ocr_disabled_until: number | null } | undefined)?.ocr_disabled_until ?? null;
 }
 
+function playerLibraryForPolicy(
+  library: ReturnType<typeof listPlayerLibrary>,
+  policy: LicenseRecord['playerNamePolicy'],
+): ReturnType<typeof listPlayerLibrary> {
+  const projection = projectPlayerNamePolicy(library.entities, policy);
+  const redirects: EntityRedirect[] = [];
+  for (const redirect of library.entityRedirects) {
+    const target = projection.entityIdMap.get(redirect.toEntityId);
+    if (target) redirects.push({ fromEntityId: redirect.fromEntityId, toEntityId: target });
+  }
+  for (const entity of library.entities) {
+    const target = projection.entityIdMap.get(entity.entityId);
+    if (target && target !== entity.entityId) redirects.push({ fromEntityId: entity.entityId, toEntityId: target });
+  }
+  return {
+    revision: library.revision,
+    entities: projection.entities,
+    entityRedirects: canonicalEntityRedirects(projection.entities, redirects),
+  };
+}
+
 function authResponse(
   options: V2ApiOptions,
   deviceId: string,
@@ -312,6 +338,7 @@ function authResponse(
     // JSON null conversion rules.
     licenseExpiresAt: license.expiresAt ?? 0xFFFFFFFF,
     ocrDisabledUntil: currentPolicy(options.db, deviceId),
+    playerNamePolicy: license.playerNamePolicy,
     capabilities: [
       'server_auth_v2',
       'player_library_v2',
@@ -387,7 +414,8 @@ export function createV2Api(options: V2ApiOptions): Router {
 
   router.get('/player-library', requireSession(options), (request, response, next) => {
     try {
-      const library = listPlayerLibrary(options.db);
+      const session = (request as Request & { v2Session: SessionContext }).v2Session;
+      const library = playerLibraryForPolicy(listPlayerLibrary(options.db), session.license.playerNamePolicy);
       if (jsonByteLength(library) > MAX_LIBRARY_BYTES) throw new V2RequestError(413, 'library_too_large');
       response.json({ ok: true, ...library, aliasAppendSupported: true });
     } catch (error) {
@@ -399,7 +427,8 @@ export function createV2Api(options: V2ApiOptions): Router {
     try {
       const parsed = resolveSchema.safeParse(request.body);
       if (!parsed.success) throw new V2RequestError(400, 'invalid_request');
-      const library = listPlayerLibrary(options.db);
+      const session = (request as Request & { v2Session: SessionContext }).v2Session;
+      const library = playerLibraryForPolicy(listPlayerLibrary(options.db), session.license.playerNamePolicy);
       const redirects = new Map(library.entityRedirects.map(item => [item.fromEntityId, item.toEntityId]));
       const activeIds = parsed.data.activeEntityIds?.map(id => redirects.get(id) ?? id);
       if (activeIds && new Set(activeIds).size !== activeIds.length) throw new V2RequestError(400, 'ambiguous_active_roster');
@@ -416,7 +445,10 @@ export function createV2Api(options: V2ApiOptions): Router {
         throw new V2RequestError(400, 'invalid_library');
       }
       const session = (request as Request & { v2Session: SessionContext }).v2Session;
-      const normalized = normalizeSubmittedEntities(parsed.data.entities, session.deviceId);
+      const normalized = applyPlayerNamePolicy(
+        normalizeSubmittedEntities(parsed.data.entities, session.deviceId),
+        session.license.playerNamePolicy,
+      );
       const result = options.db.transaction(() => {
         const current = listPlayerLibrary(options.db);
         if (!normalized.length) return { ok: true, status: 'no_changes', revision: current.revision,

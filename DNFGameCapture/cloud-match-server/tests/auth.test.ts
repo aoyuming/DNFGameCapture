@@ -17,6 +17,7 @@ const active: LicenseRecord = {
   expiresAt: 2_000,
   disabledAt: null,
   boundDeviceId: null,
+  playerNamePolicy: 'remove_power_prefixes',
 };
 
 describe('server authorization primitives', () => {

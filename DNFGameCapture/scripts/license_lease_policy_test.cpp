@@ -36,6 +36,15 @@ void TestEligibilityBoundary()
         "permanent cards must be lease eligible");
 }
 
+void TestPlayerNamePolicyRecognition()
+{
+    Require(DnfIsKnownPlayerNamePolicy(L"none"), "explicit no-op policy is recognized");
+    Require(DnfIsKnownPlayerNamePolicy(L"remove_power_prefixes"), "cleanup policy is recognized");
+    Require(DnfIsKnownPlayerNamePolicy(L"merge_power_prefixes"), "merge policy is recognized");
+    Require(!DnfIsKnownPlayerNamePolicy(L""), "legacy lease without policy must require refresh");
+    Require(!DnfIsKnownPlayerNamePolicy(L"unknown"), "unknown policy must fail closed");
+}
+
 void TestFiveDayWindow()
 {
     auto lease = MakeLease();
@@ -131,6 +140,7 @@ void TestEndpointRefreshPolicy()
 int main()
 {
     TestEligibilityBoundary();
+    TestPlayerNamePolicyRecognition();
     TestFiveDayWindow();
     TestActualExpiryWins();
     TestIdentityAndClockChecks();

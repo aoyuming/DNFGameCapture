@@ -1,6 +1,6 @@
 # DNF点将工具（DNFGameCapture）项目说明
 
-当前版本：**5.5.7**（EXE FileVersion / ProductVersion `5.5.7.0`，前端缓存标识 `20261104-5.5.7-1`）
+当前版本：**5.5.9**（EXE FileVersion / ProductVersion `5.5.9.0`，前端缓存标识 `20261107-5.5.9-1`）
 
 面向 DNF 擂台 / 赛事直播的自动人头记分与主播工具。
 

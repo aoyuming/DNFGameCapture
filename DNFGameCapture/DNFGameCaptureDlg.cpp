@@ -80,6 +80,7 @@ struct DnfCloudAuthSuccess {
     bool leaseEndpointRefresh = false;
     bool serverAuthV2 = false;
     std::string serverSessionToken;
+    std::string playerNamePolicy;
 };
 
 struct DnfCloudAuthFailure {
@@ -218,7 +219,8 @@ static bool DnfPostCloudJson(const std::string& jsonUtf8, std::string& responseU
 static bool DnfCheckServerV2Binding(const CString& endpoint,
     const CString& manifestUrl, const CString& key, const CString& deviceId,
     long long duration, long long& outExpTime, CString& outCloudServerUrl,
-    std::string& outSessionToken, CString& errorMsg, bool& networkFailure,
+    std::string& outSessionToken, std::string& outPlayerNamePolicy,
+    CString& errorMsg, bool& networkFailure,
     long long& outBannedUntil);
 static bool DnfFetchV2PublicAliasDb(const CString& endpoint,
     const std::string& sessionToken, const std::string& deviceId,
@@ -6307,6 +6309,10 @@ LRESULT CDNFGameCaptureDlg::OnCloudAuthFail(WPARAM wParam, LPARAM lParam) {
         }
         if (authFailure->leaseEndpointRefresh && !authFailure->accountBanned) {
             m_cloudMatchLeaseRefreshInFlight = false;
+            // Keep offline startup functional when the policy refresh cannot
+            // reach the server. The cached policy was validated before use;
+            // it is only a fallback, never the preferred source.
+            ApplyAuthorizedPlayerNamePolicy();
             CString refreshLog = L"五天租约中的服务器地址连接失败，在线刷新地址也未成功；"
                 L"当前授权与租约保持有效，程序将继续重连原地址。原因：" +
                 authFailure->message;
@@ -6401,6 +6407,7 @@ LRESULT CDNFGameCaptureDlg::OnUpdateAuthTime(WPARAM wParam, LPARAM lParam) {
             L"程序将继续重连原地址。原因：" + reason;
         WriteMatchLog(L"[云端验证] " + refreshLog);
         AppLog(L"⚠️ [云端连接] " + refreshLog, RGB(255, 190, 80));
+        ApplyAuthorizedPlayerNamePolicy();
         BroadcastStateToWeb();
         return 0;
     }
@@ -6423,6 +6430,8 @@ LRESULT CDNFGameCaptureDlg::OnUpdateAuthTime(WPARAM wParam, LPARAM lParam) {
         if (authSuccess->serverAuthV2) {
             refreshedLease.environment = dnf::cloud_release::CurrentEnvironment();
             refreshedLease.endpointManifestUrl = dnf::cloud_release::CurrentManifestUrl();
+            refreshedLease.playerNamePolicy = std::wstring(CA2W(
+                authSuccess->playerNamePolicy.c_str(), CP_UTF8));
         }
     }
     if (authSuccess->leaseEndpointRefresh &&
@@ -6435,12 +6444,22 @@ LRESULT CDNFGameCaptureDlg::OnUpdateAuthTime(WPARAM wParam, LPARAM lParam) {
             L"程序将继续重连原地址。原因：" + reason;
         WriteMatchLog(L"[云端验证] " + refreshLog);
         AppLog(L"⚠️ [云端连接] " + refreshLog, RGB(255, 190, 80));
+        ApplyAuthorizedPlayerNamePolicy();
         BroadcastStateToWeb();
         return 0;
     }
 
     m_cloudExpireTime = cloudTime;
     m_bIsAuthValid = refreshedAuthValid;
+    if (authSuccess->serverAuthV2) {
+        m_cloudPlayerNamePolicy = authSuccess->playerNamePolicy;
+        m_playerNamePolicyReady = m_cloudPlayerNamePolicy == "none";
+        m_playerNamePolicyAttemptedThisRun = false;
+    } else {
+        m_cloudPlayerNamePolicy = "none";
+        m_playerNamePolicyReady = true;
+        m_playerNamePolicyAttemptedThisRun = true;
+    }
 
     DisableCloudMatchForAuthorization(CString());
     if (!serverUrlValid) {
@@ -6457,6 +6476,7 @@ LRESULT CDNFGameCaptureDlg::OnUpdateAuthTime(WPARAM wParam, LPARAM lParam) {
             WriteMatchLog(L"[云端验证] 服务器地址缓存保存失败；本次连接仍继续。\n");
         }
         StartSavedCloudMatchSession();
+        ApplyAuthorizedPlayerNamePolicy();
 
         if (authSuccess->leaseEndpointRefresh) {
             AppLog(L"✅ [云端连接] 已从授权服务刷新服务器地址并重新连接。",
@@ -6859,6 +6879,10 @@ bool CDNFGameCaptureDlg::TryActivateFromLicenseLease(const CString& normalizedKe
         WriteMatchLog(L"[云端验证] 旧租约没有服务器会话令牌，本次改为在线授权。");
         return false;
     }
+    if (m_cloudServerAuthV2 && !DnfIsKnownPlayerNamePolicy(lease.playerNamePolicy)) {
+        WriteMatchLog(L"[云端验证] 旧租约没有明确的选手名称策略，本次改为在线授权。");
+        return false;
+    }
 
     DisableCloudMatchForAuthorization(CString());
     m_cloudExpireTime = lease.expireTime;
@@ -6869,6 +6893,11 @@ bool CDNFGameCaptureDlg::TryActivateFromLicenseLease(const CString& normalizedKe
     if (m_cloudServerAuthV2) {
         m_cloudServerSessionToken = std::string(CW2A(
             lease.serverSessionToken.c_str(), CP_UTF8));
+        const std::string cachedPolicy = std::string(CW2A(
+            lease.playerNamePolicy.c_str(), CP_UTF8));
+        m_cloudPlayerNamePolicy = cachedPolicy;
+        m_playerNamePolicyReady = false;
+        m_playerNamePolicyAttemptedThisRun = false;
     }
     lease.lastUsedAt = now;
     if (!DnfSaveProtectedLicenseLease(lease)) {
@@ -6879,6 +6908,17 @@ bool CDNFGameCaptureDlg::TryActivateFromLicenseLease(const CString& normalizedKe
     m_cloudMatchLeaseRefreshInFlight = false;
     m_cloudMatchLeaseDisconnectedSinceTick = ::GetTickCount64();
     StartSavedCloudMatchSession();
+    // A cached lease keeps the client usable offline, but its name policy can
+    // be older than the administrator's current setting. Refresh the policy
+    // in the background so a restart picks up cleanup/merge changes without
+    // requiring the user to delete the local lease manually.
+    if (m_cloudServerAuthV2) {
+        if (!BeginLicenseLeaseEndpointRefresh()) {
+            ApplyAuthorizedPlayerNamePolicy();
+        }
+    } else {
+        ApplyAuthorizedPlayerNamePolicy();
+    }
 
     CString leaseLog;
     leaseLog.Format(L"[云端验证] 已使用加密授权租约，跳过本次云函数请求；下次最晚验证=%s。",
@@ -6930,12 +6970,13 @@ bool CDNFGameCaptureDlg::BeginLicenseLeaseEndpointRefresh()
         CString cloudServerUrl;
         CString cloudResult;
         std::string sessionToken;
+        std::string playerNamePolicy;
         bool networkFailure = false;
         long long bannedUntil = -1;
         if (useServerAuthV2) {
             const bool ok = DnfCheckServerV2Binding(endpoint, manifestUrl,
                 licenseKey, machineId, duration, cloudExpTime, cloudServerUrl,
-                sessionToken, cloudResult, networkFailure, bannedUntil);
+                sessionToken, playerNamePolicy, cloudResult, networkFailure, bannedUntil);
             if (ok) cloudResult = L"OK";
         }
         else {
@@ -6954,6 +6995,7 @@ bool CDNFGameCaptureDlg::BeginLicenseLeaseEndpointRefresh()
             success->requestGeneration = requestGeneration;
             success->serverAuthV2 = useServerAuthV2;
             success->serverSessionToken = std::move(sessionToken);
+            success->playerNamePolicy = std::move(playerNamePolicy);
             success->leaseEndpointRefresh = true;
             if (!::PostMessage(hWnd, WM_UPDATE_AUTH_TIME, 0,
                 reinterpret_cast<LPARAM>(success))) {
@@ -7017,11 +7059,12 @@ bool CDNFGameCaptureDlg::BeginLicenseCloudCheck(const CString& inputKey, bool ma
             long long cloudExpTime = 0;
             CString cloudServerUrl;
             std::string sessionToken;
+            std::string playerNamePolicy;
             bool networkFailure = false;
             if (useServerAuthV2) {
                 const bool ok = DnfCheckServerV2Binding(endpoint, manifestUrl,
                     normalized, hwid, duration, cloudExpTime, cloudServerUrl,
-                    sessionToken, cloudResult, networkFailure, bannedUntil);
+                    sessionToken, playerNamePolicy, cloudResult, networkFailure, bannedUntil);
                 if (ok) cloudResult = L"OK";
                 serviceFailure = networkFailure;
                 accountBanned = !ok && cloudResult.Find(L"account_banned") >= 0;
@@ -7043,6 +7086,7 @@ bool CDNFGameCaptureDlg::BeginLicenseCloudCheck(const CString& inputKey, bool ma
                     success->requestGeneration = requestGeneration;
                     success->serverAuthV2 = useServerAuthV2;
                     success->serverSessionToken = std::move(sessionToken);
+                    success->playerNamePolicy = std::move(playerNamePolicy);
                     if (!::PostMessage(hWnd, WM_UPDATE_AUTH_TIME, 0,
                         reinterpret_cast<LPARAM>(success))) {
                         delete success;
@@ -7494,12 +7538,14 @@ static bool DnfFetchServerEndpointManifest(const CString& manifestUrl,
 static bool DnfCheckServerV2Binding(const CString& endpoint,
     const CString& manifestUrl, const CString& key, const CString& deviceId,
     long long duration, long long& outExpTime, CString& outCloudServerUrl,
-    std::string& outSessionToken, CString& errorMsg, bool& networkFailure,
+    std::string& outSessionToken, std::string& outPlayerNamePolicy,
+    CString& errorMsg, bool& networkFailure,
     long long& outBannedUntil)
 {
     outExpTime = 0;
     outCloudServerUrl.Empty();
     outSessionToken.clear();
+    outPlayerNamePolicy.clear();
     errorMsg.Empty();
     networkFailure = false;
     outBannedUntil = -1;
@@ -7597,6 +7643,20 @@ static bool DnfCheckServerV2Binding(const CString& endpoint,
         }
         outExpTime = expiry->get<long long>();
         outSessionToken = token->get<std::string>();
+        const auto policy = reply.find("playerNamePolicy");
+        if (policy == reply.end() || !policy->is_string()) {
+            errorMsg = L"服务器授权响应缺少有效的选手名称策略";
+            networkFailure = true;
+            return false;
+        }
+        const auto value = policy->get<std::string>();
+        if (value != "none" && value != "remove_power_prefixes" &&
+            value != "merge_power_prefixes") {
+            errorMsg = L"服务器授权响应包含未知的选手名称策略";
+            networkFailure = true;
+            return false;
+        }
+        outPlayerNamePolicy = value;
         return true;
     }
     networkFailure = true;
@@ -8847,6 +8907,12 @@ LRESULT CDNFGameCaptureDlg::OnCloudProgress(WPARAM wParam, LPARAM lParam)
 void CDNFGameCaptureDlg::StartManualAliasDbSync(bool pull,
     const std::string& aliasDbPayload, int mainCount, int pairCount)
 {
+    if (!pull && !m_playerNamePolicyReady) {
+        const CString message = L"正在整理本机数字前缀选手，整理完成后才能投稿。";
+        DnfSendWebToast(m_pWebDlg, L"alias_submit_result", message);
+        AppLog(L"⚠️ [自动游戏ID库] " + message, RGB(255, 190, 80));
+        return;
+    }
     if (m_playerLibraryStore && IsPlayerLibraryBusy()) {
         DnfSendWebToast(m_pWebDlg, L"alias_sync_result", L"选手库正在加载或保存，请完成后再同步。");
         return;
@@ -16739,6 +16805,7 @@ void CDNFGameCaptureDlg::StartPlayerLibrary()
             ResetAliasDbCloudBaseline();
             if (result.snapshot->identityMetadata.contains("localResetBackup")) CaptureResetMatchLibraryBaseline();
             WriteMatchLog(L"[选手库] SQLite 后台加载完成，旧 INI 保留为兼容导出。");
+            ApplyAuthorizedPlayerNamePolicy();
         }
         else {
             WriteMatchLog(L"[选手库] 数据库加载失败，保留旧库只读使用：" + m_playerLibraryError);
@@ -16748,6 +16815,34 @@ void CDNFGameCaptureDlg::StartPlayerLibrary()
     };
     SetTimer(10, 100, nullptr);
     WriteMatchLog(L"[选手库] 正在后台加载与建立索引，主界面可继续操作。");
+}
+
+void CDNFGameCaptureDlg::ApplyAuthorizedPlayerNamePolicy()
+{
+    if (m_cloudPlayerNamePolicy == "none") {
+        m_playerNamePolicyReady = true;
+        m_playerNamePolicyAttemptedThisRun = true;
+        return;
+    }
+    m_playerNamePolicyReady = false;
+    if (!m_playerLibraryStore || !m_playerLibraryReady ||
+        !m_playerLibraryRequests.empty() || m_playerNamePolicyAttemptedThisRun) return;
+
+    m_playerNamePolicyAttemptedThisRun = true;
+    const auto policy = m_cloudPlayerNamePolicy;
+    const auto request = m_playerLibraryStore->ApplyPowerPrefixPolicy(policy);
+    m_playerLibraryRequests[request] = [this, policy](const auto& result) {
+        if (!result.ok) {
+            m_playerNamePolicyReady = false;
+            WriteMatchLog(L"[选手库] 名称前缀整理失败，投稿暂缓；重启后会重试：" +
+                CString(CA2W(result.error.c_str(), CP_UTF8)));
+            return;
+        }
+        m_playerNamePolicyReady = true;
+        if (result.snapshot) PublishPlayerLibrary(result.snapshot);
+        WriteMatchLog(L"[选手库] 本机名称前缀策略已完成：" + CString(
+            policy == "merge_power_prefixes" ? L"数字前缀归并为别名。" : L"清理数字前缀选手。"));
+    };
 }
 
 void CDNFGameCaptureDlg::PublishPlayerLibrary(dnf::player_library::SnapshotPtr snapshot)
@@ -16900,6 +16995,7 @@ void CDNFGameCaptureDlg::PollPlayerLibrary()
         DoRealExit();
         return;
     }
+    if (m_playerLibraryReady && m_playerLibraryRequests.empty() && !m_playerNamePolicyReady) ApplyAuthorizedPlayerNamePolicy();
     if (m_playerLibraryReady && m_playerLibraryRequests.empty()) MaybeStartAliasDbAutoSync();
 }
 
@@ -17939,6 +18035,13 @@ void CDNFGameCaptureDlg::MaybeStartAliasDbAutoSync(bool force)
 
 void CDNFGameCaptureDlg::StartAliasDbAutoSyncAttempt()
 {
+    if (!m_playerNamePolicyReady) {
+        m_aliasAutoSyncAttemptedThisRun = false;
+        m_aliasAutoSyncLastPushStatus = L"pending";
+        m_aliasAutoSyncLastPushMessage = L"正在整理数字前缀选手，整理完成后投稿";
+        BroadcastStateToWeb();
+        return;
+    }
     if (m_aliasAutoSyncInFlight || !m_aliasAutoSyncEnabled ||
         m_bAliasDirectMode) return;
 

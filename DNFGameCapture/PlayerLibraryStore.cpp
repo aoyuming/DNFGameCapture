@@ -37,6 +37,7 @@ struct PlayerLibraryStore::State {
                 case 1: snapshot = database->ReplaceLegacy(command.library, command.payload); break;
                 case 2: snapshot = database->ImportV2(command.payload, &result.importReport); break;
                 case 3: snapshot = database->ExecuteIdentity(command.payload); break;
+                case 5: snapshot = database->ApplyPowerPrefixPolicy(command.payload.get<std::string>()); break;
                 default: snapshot = database->LoadSnapshot(); break;
                 }
                 std::atomic_store(&state->published, snapshot);
@@ -73,6 +74,7 @@ RequestId PlayerLibraryStore::Enqueue(int kind, LegacyLibrary library, nlohmann:
 RequestId PlayerLibraryStore::Initialize() { return Enqueue(0, {}, nullptr); }
 RequestId PlayerLibraryStore::SubmitLegacy(LegacyLibrary library, nlohmann::json metadata) { return Enqueue(1, std::move(library), std::move(metadata)); }
 RequestId PlayerLibraryStore::ImportV2(nlohmann::json payload) { return Enqueue(2, {}, std::move(payload)); }
+RequestId PlayerLibraryStore::ApplyPowerPrefixPolicy(std::string policy) { return Enqueue(5, {}, std::move(policy)); }
 RequestId PlayerLibraryStore::ExecuteIdentity(nlohmann::json command) { return Enqueue(3, {}, std::move(command)); }
 RequestId PlayerLibraryStore::RequestRefresh() { return Enqueue(4, {}, nullptr); }
 SnapshotPtr PlayerLibraryStore::GetSnapshot() const noexcept { return std::atomic_load(&state_->published); }
