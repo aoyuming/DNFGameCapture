@@ -22,4 +22,4 @@ assert(read('DNFGameCaptureDlg.h').includes('#define CURRENT_VERSION L"5.5.7"'))
 const rc=fs.readFileSync(path.join(root,'DNFGameCapture.rc'));assert.equal(rc[0],255);assert.equal(rc[1],254);const text=rc.toString('utf16le');assert(text.includes('FILEVERSION 5,5,7,0'));assert(text.includes('PRODUCTVERSION 5,5,7,0'));
 assert(read('scripts/installer/DNFGameCapture-setup.iss').includes('#define AppVersion "5.5.7"'));assert(read('scripts/package-production-client.ps1').includes('5.5.7.0'));
 const webVersion=js.match(/const WEB_LAYOUT_VERSION = '([^']+)'/)[1];assert(webVersion.startsWith('20261104-5.5.7-'));assert(html.includes('content="'+webVersion+'"'));assert(html.includes('main.js?v='+webVersion));
-console.log('PASS: unified tools/TXT placement, explicit show/hide, independent preview across nine skins, fallback, audio cancellation, no live-setting mutation, consistent 5.5.6 version.');
+console.log('PASS: unified tools/TXT placement, explicit show/hide, independent preview across nine skins, fallback, audio cancellation, no live-setting mutation, consistent 5.5.7 version.');

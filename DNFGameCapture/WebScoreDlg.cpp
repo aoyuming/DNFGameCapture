@@ -510,6 +510,8 @@ void CWebScoreDlg::InitWebView2()
                                     static_cast<unsigned int>(mappingResult));
                                 WriteMatchLog(mappingLog);
                             }
+                            pageUri += L"?appVersion=";
+                            pageUri += CURRENT_VERSION;
                             WriteMatchLog(L"[WebView启动] 正在导航本地页面：" + pageUri);
                             const HRESULT navigateResult = m_webview->Navigate(pageUri.GetString());
                             if (FAILED(navigateResult)) {
