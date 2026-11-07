@@ -19,6 +19,8 @@
 #include "PlayerLibraryStore.h"
 #include "PlayerLibraryPushPolicy.h"
 #include "PlayerIdentityOcrCache.h"
+#include "OcrMatchRanking.h"
+#include "OcrTeamMapping.h"
 #include "OcrServiceHealth.h"
 #include <functional>
 #include <map>
@@ -56,7 +58,7 @@ struct PlayerIdentityGroupRecord {
 #pragma comment(lib, "urlmon.lib")
 
 // 定义你当前软件的版本号，以及你服务器上 update.txt 的网址  
-#define CURRENT_VERSION L"5.5.9"    //当前版本号
+#define CURRENT_VERSION L"6.0.0"    //当前版本号
 #define BRIDGE_VERSION  L"2.3.4" //桥接更新版本号
 #define UPDATE_CHECK_URL_V1 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update.txt"//第一版单EXE更新版本地址
 #define UPDATE_CHECK_URL_V2 L"https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/update_v2.txt"
@@ -342,13 +344,11 @@ private:
     // =========================================================
     void UpdateIdentityPanelCache(int areaIndex, const CString& rawOcrText, std::uint64_t monitoringGeneration);
     std::vector<TDnfCandidateIdentity> BuildIdentityCandidatesForPanel(TDnfPanelSide side);
-    // targetTeam: 0/1 = 只在该队伍里找候选；-1 = 不按队伍收窄（名单不完整时的回退）。
-    TDnfPanelMatchResult MatchIdentityPanel(TDnfPanelSide side, int targetTeam = -1);
-    // 物理侧 -> 队伍换算（项目固定映射）：0 = 左框 = 红队(team 0)，1 = 右框 = 蓝队(team 1)。
-    static int PhysicalSideToTeam(int physicalSide) { return (physicalSide == 0) ? 0 : 1; }
-    // 目标队伍 4 个座位是否都已填选手；不完整时收窄会让漏识别变多，需要回退。
+    // targetTeam: 0/1 = 只在该队伍里找候选；-1 = 全场候选。
+    TDnfPanelMatchResult MatchIdentityPanel(TDnfPanelSide side, int targetTeam = -1, int excludedTeam = -1);
+    // 目标队伍 4 个座位是否都已填选手，仅用于诊断显示，不决定候选范围。
     bool IsRosterCompleteForTeam(int team);
-    void NotifyIdentityKillConfirmed(int deadTeam, const CString& deadName);
+    void NotifyIdentityKillConfirmed(int deadPhysicalSide, const CString& deadName);
     void NotifyIdentityRoundReset(const CString& reason);
     void AddReviewEvent(const RecentEvent& ev);
     void AddReviewEventUnlocked(const RecentEvent& ev);

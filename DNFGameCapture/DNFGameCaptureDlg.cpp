@@ -10564,34 +10564,42 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
     int killerArea = (triggerSide == 0) ? 1 : 0;
     int deadArea = triggerSide;
     bool killerIsLeft = (killerArea == 0);
+    bool flippedSides = false;
+    {
+        std::lock_guard<std::mutex> dataLock(m_dataMutex);
+        flippedSides = m_bFlipSides;
+    }
+    const auto teamForPhysicalSide = [flippedSides](int physicalSide) {
+        return dnf::identity::PhysicalSideToTeam(physicalSide, flippedSides);
+    };
 
     // ============================================================
-    // 【队伍收窄】物理侧固定映射到队伍：左框=红队(0)，右框=蓝队(1)。
+    // 【队伍收窄】物理面板到队伍的映射必须应用红蓝翻转设置。
     // 死者 = 触发击杀的那一侧；杀手只能出自对面队伍。
     // 这里一次性把两侧的目标队伍定下来，后续所有匹配层都只在这个范围里找。
-    // 若目标队伍名单不完整（有 1 人缺位），收窄会显著增加漏识别，
-    // 因此该侧自动回退到"上场 8 人"，并写日志说明原因。
+    // 首阶段始终只搜索目标队伍中现有的选手；队伍名单不完整也不提前扩大到全场。
+    // 只有该侧所有队伍内策略都未通过时，才运行全场最高分兜底。
     // ============================================================
-    const int deadTeam = PhysicalSideToTeam(deadArea);
-    const int killerTeam = PhysicalSideToTeam(killerArea);
+    const int deadTeam = teamForPhysicalSide(deadArea);
+    const int killerTeam = teamForPhysicalSide(killerArea);
     const bool deadTeamComplete = IsRosterCompleteForTeam(deadTeam);
     const bool killerTeamComplete = IsRosterCompleteForTeam(killerTeam);
-    const int killerTargetTeam = killerTeamComplete ? killerTeam : -1;
+    const int killerTargetTeam = killerTeam;
     {
         CString scopeDiag;
-        scopeDiag.Format(L"[队伍收窄] 物理死亡侧=%s(队伍%d/红队=0) 物理杀手侧=%s(队伍%d)；"
+        scopeDiag.Format(L"[队伍收窄] 物理死亡侧=%s(候选队伍=%d) 物理杀手侧=%s(候选队伍=%d)；"
             L"死者候选范围=%s；杀手候选范围=%s；"
-            L"说明=大X出现在哪一侧，死者就属于该侧队伍，杀手只在对面队伍里找；翻转红蓝不影响本规则。",
+            L"说明=队伍候选已按红蓝翻转设置映射。",
             deadArea == 0 ? L"左" : L"右", deadTeam,
             killerArea == 0 ? L"左" : L"右", killerTeam,
-            deadTeamComplete ? L"本队 4 人（已收窄）" : L"上场 8 人（本队名单不完整，回退）",
-            killerTeamComplete ? L"对面队伍 4 人（已收窄）" : L"上场 8 人（对面名单不完整，回退）");
+            deadTeamComplete ? L"本队 4 人" : L"本队现有选手（名单不完整，仍先收窄）",
+            killerTeamComplete ? L"对面队伍 4 人" : L"对面队伍现有选手（名单不完整，仍先收窄）");
         WriteMatchLog(scopeDiag);
     }
 
     CString triggerDiag;
-    triggerDiag.Format(L"[击杀触发诊断] 进入OCR匹配：当前是否翻转红蓝=%s；物理死亡侧=%s；物理杀手侧=%s；说明=翻转红蓝只影响界面/OBS左右显示，不改变OCR区域、X检测位置和物理侧候选队伍。",
-        m_bFlipSides ? L"是" : L"否",
+    triggerDiag.Format(L"[击杀触发诊断] 进入OCR匹配：当前是否翻转红蓝=%s；物理死亡侧=%s；物理杀手侧=%s；说明=翻转红蓝会改变物理左右侧到红蓝队伍的候选映射，但不改变OCR区域、X检测位置和死者/杀手物理侧判定。",
+        flippedSides ? L"是" : L"否",
         triggerSide == 0 ? L"左边" : L"右边",
         killerArea == 0 ? L"左边" : L"右边");
     WriteMatchLog(triggerDiag);
@@ -10601,6 +10609,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
     int killerBestP = -1, killerBestA = -1;
     int deadBestP = -1, deadBestA = -1;
     int lockedKillerTeam = -1, lockedDeadTeam = -1;
+    bool scoreAllPlayersForCurrentPass = false;
 
     // 首轮全局最优记录：首轮只收集，扫完再统一决定是否锁定。
     int globalKillerBestScore = -1, globalKillerBestP = -1, globalKillerBestA = -1, globalKillerPassLine = 999;
@@ -10632,6 +10641,22 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
     struct FrameData { CString text; int frameIdx; };
     std::vector<FrameData> historyKTexts;
     std::vector<FrameData> historyDTexts;
+
+    struct FirstRoundCandidate {
+        int playerIndex = -1;
+        int team = -1;
+        int score = -1;
+        int realIdLength = 0;
+        int aliasIndex = -1;
+        int passLine = 999;
+        bool hasMetaContext = false;
+        CString ownerName;
+        CString aliasName;
+        CString frameText;
+        int frameIndex = -1;
+    };
+    std::vector<FirstRoundCandidate> killerPlayerScores;
+    std::vector<FirstRoundCandidate> deadPlayerScores;
 
     // 日志输出辅助
     auto PushVisualLog = [&](const CString& msg, COLORREF color) {
@@ -10728,59 +10753,92 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
     }
     PostMessage(WM_UPDATE_OCR_DROPDOWNS, 1, 0);
 
+    auto refreshFirstRoundDecision = [&](bool isKiller) {
+        auto& candidates = isKiller ? killerPlayerScores : deadPlayerScores;
+        int& bestScore = isKiller ? globalKillerBestScore : globalDeadBestScore;
+        int& bestP = isKiller ? globalKillerBestP : globalDeadBestP;
+        int& bestA = isKiller ? globalKillerBestA : globalDeadBestA;
+        int& bestPassLine = isKiller ? globalKillerPassLine : globalDeadPassLine;
+        CString& bestName = isKiller ? globalKillerName : globalDeadName;
+        CString& bestAlias = isKiller ? globalKillerAlias : globalDeadAlias;
+        CString& bestFrameText = isKiller ? globalKillerFrameText : globalDeadFrameText;
+        int& bestFrameIdx = isKiller ? globalKillerFrameIdx : globalDeadFrameIdx;
+        int& bestRealLen = isKiller ? globalKillerBestRealLen : globalDeadBestRealLen;
+        bool& bestMeta = isKiller ? globalKillerBestHasMetaContext : globalDeadBestHasMetaContext;
+        int& secondScore = isKiller ? globalKillerSecondScore : globalDeadSecondScore;
+        CString& secondName = isKiller ? globalKillerSecondName : globalDeadSecondName;
+        CString& secondAlias = isKiller ? globalKillerSecondAlias : globalDeadSecondAlias;
+
+        bestScore = -1;
+        bestP = -1;
+        bestA = -1;
+        bestPassLine = 999;
+        bestName.Empty();
+        bestAlias.Empty();
+        bestFrameText.Empty();
+        bestFrameIdx = -1;
+        bestRealLen = 0;
+        bestMeta = false;
+        secondScore = -1;
+        secondName.Empty();
+        secondAlias.Empty();
+
+        const auto top = dnf::identity::TopTwoOcrPlayers(candidates);
+        const auto copyCandidate = [&](int index, int& score, CString& name, CString& alias) {
+            if (index < 0) return;
+            const auto& candidate = candidates[index];
+            score = candidate.score;
+            name = candidate.ownerName;
+            alias = candidate.aliasName;
+        };
+        if (top.first >= 0) {
+            const auto& candidate = candidates[top.first];
+            bestScore = candidate.score;
+            bestP = candidate.playerIndex;
+            bestA = candidate.aliasIndex;
+            bestPassLine = candidate.passLine;
+            bestName = candidate.ownerName;
+            bestAlias = candidate.aliasName;
+            bestFrameText = candidate.frameText;
+            bestFrameIdx = candidate.frameIndex;
+            bestRealLen = candidate.realIdLength;
+            bestMeta = candidate.hasMetaContext;
+        }
+        copyCandidate(top.second, secondScore, secondName, secondAlias);
+    };
+
+    auto resetFirstRoundDecision = [&](bool isKiller) {
+        (isKiller ? killerPlayerScores : deadPlayerScores).clear();
+        refreshFirstRoundDecision(isKiller);
+    };
+
+    auto mergeFirstRoundCandidate = [&](bool isKiller, FirstRoundCandidate candidate) {
+        if (candidate.playerIndex < 0 || candidate.playerIndex >= 8) return;
+        auto& candidates = isKiller ? killerPlayerScores : deadPlayerScores;
+        dnf::identity::KeepBestOcrScorePerPlayer(candidates, std::move(candidate));
+        refreshFirstRoundDecision(isKiller);
+    };
+
     auto recordFirstRoundCandidate = [&](bool isKiller, int score, int p, int a, int passLine,
         int realLen, bool hasMetaContext, const CString& aliasName, const CString& ocrText, int frameIdx) {
-            int& bestScore = isKiller ? globalKillerBestScore : globalDeadBestScore;
-            int& bestP = isKiller ? globalKillerBestP : globalDeadBestP;
-            int& bestA = isKiller ? globalKillerBestA : globalDeadBestA;
-            int& bestPassLine = isKiller ? globalKillerPassLine : globalDeadPassLine;
-            CString& bestName = isKiller ? globalKillerName : globalDeadName;
-            CString& bestAlias = isKiller ? globalKillerAlias : globalDeadAlias;
-            CString& bestFrameText = isKiller ? globalKillerFrameText : globalDeadFrameText;
-            int& bestFrameIdx = isKiller ? globalKillerFrameIdx : globalDeadFrameIdx;
-            int& bestRealLen = isKiller ? globalKillerBestRealLen : globalDeadBestRealLen;
-            bool& bestMeta = isKiller ? globalKillerBestHasMetaContext : globalDeadBestHasMetaContext;
-            int& secondScore = isKiller ? globalKillerSecondScore : globalDeadSecondScore;
-            CString& secondName = isKiller ? globalKillerSecondName : globalDeadSecondName;
-            CString& secondAlias = isKiller ? globalKillerSecondAlias : globalDeadSecondAlias;
-
-            CString ownerName;
-            {
-                std::lock_guard<std::mutex> lock(m_dataMutex);
-                if (p >= 0 && p < 8) ownerName = m_players[p].name;
-            }
-
-            bool replaceBest = false;
-            if (score > bestScore) {
-                replaceBest = true;
-            }
-            else if (score == bestScore && score > 0 && realLen > bestRealLen) {
-                replaceBest = true;
-            }
-
-            if (replaceBest) {
-                if (bestP != -1) {
-                    secondScore = bestScore;
-                    secondName = bestName;
-                    secondAlias = bestAlias;
-                }
-                bestScore = score;
-                bestP = p;
-                bestA = a;
-                bestPassLine = passLine;
-                bestName = ownerName;
-                bestAlias = aliasName;
-                bestFrameText = ocrText;
-                bestFrameIdx = frameIdx;
-                bestRealLen = realLen;
-                bestMeta = hasMetaContext;
-            }
-            else if (score > secondScore) {
-                secondScore = score;
-                secondName = ownerName;
-                secondAlias = aliasName;
-            }
-        };
+        if (p < 0 || p >= 8) return;
+        FirstRoundCandidate candidate;
+        candidate.playerIndex = p;
+        candidate.aliasIndex = a;
+        candidate.passLine = passLine;
+        candidate.score = score;
+        candidate.realIdLength = realLen;
+        candidate.hasMetaContext = hasMetaContext;
+        candidate.aliasName = aliasName;
+        candidate.frameText = ocrText;
+        candidate.frameIndex = frameIdx;
+        {
+            std::lock_guard<std::mutex> lock(m_dataMutex);
+            candidate.ownerName = m_players[p].name;
+            candidate.team = m_players[p].team;
+        }
+        mergeFirstRoundCandidate(isKiller, std::move(candidate));
+    };
 
     auto processMatch = [&](CString ocrResult, bool& resolved, CString& finalName,
         bool isKiller, int& outBestP, int& outBestA,
@@ -10795,11 +10853,11 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
                 isKiller ? L"找杀手" : L"找死者", frameIdx, (LPCTSTR)ocrResult);
             WriteMatchLog(logMsg);
 
-            // 【队伍收窄】候选范围只保留目标队伍：
-            //   死者 = 物理死亡侧所属队伍，杀手 = 对面队伍。
-            // 目标队伍名单不完整时回退到上场 8 人，避免漏识别。
-            const int targetTeam = isKiller ? killerTargetTeam : PhysicalSideToTeam(deadArea);
-            const bool scopeByTeam = IsRosterCompleteForTeam(targetTeam);
+            // 【队伍收窄】先只评分目标队伍；所有目标队伍候选未能通过时才在后续阶段放开范围。
+            const int targetTeam = isKiller ? killerTargetTeam : teamForPhysicalSide(deadArea);
+            const bool scopeByTeam = !scoreAllPlayersForCurrentPass && (targetTeam == 0 || targetTeam == 1);
+            const int excludedTeam = scoreAllPlayersForCurrentPass ?
+                (isKiller ? lockedDeadTeam : lockedKillerTeam) : -1;
 
             TDnfSimpleAliasMeta ocrMeta = DnfParseAliasMeta(ocrResult);
 
@@ -10827,6 +10885,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
                 for (int p = 0; p < 8; p++) {
                     if (m_players[p].name.IsEmpty()) continue;
                     if (scopeByTeam && m_players[p].team != targetTeam) continue;
+                    if (excludedTeam >= 0 && m_players[p].team == excludedTeam) continue;
                     for (size_t a = 0; a < m_players[p].aliases.size(); a++) {
                         TDnfSimpleAliasMeta aliasMeta = DnfParseAliasMeta(m_players[p].aliases[a].name);
                         TDnfPreparedIdMatch preparedExact = DnfPrepareIdMatch(aliasMeta, ocrMeta);
@@ -10869,24 +10928,25 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
                         isKiller ? L"杀手" : L"死者",
                         aliasName.IsEmpty() ? L"未知游戏ID" : aliasName.GetString());
                     WriteMatchLog(collectLog);
+                }
+                else {
+                    // 非收集模式保留精确唯一命中；当前击杀流程统一使用收集模式，避免单帧提前锁定。
+                    resolved = true;
+                    finalName = m_players[exactMatchP].name;
+                    outBestP = exactMatchP;
+                    outBestA = exactMatchA;
+
+                    CString successLog;
+                    successLog.Format(L"  └ [🎯别名命中] 职业/别名 [%s] 唯一指向: %s",
+                        (LPCTSTR)ocrResult, (LPCTSTR)finalName);
+                    PushVisualLog(successLog, RGB(0, 255, 200));
+
+                    m_dataMutex.lock();
+                    if (isKiller) lockedKillerTeam = m_players[exactMatchP].team;
+                    else          lockedDeadTeam = m_players[exactMatchP].team;
+                    m_dataMutex.unlock();
                     return false;
                 }
-                // 唯一别名，直接锁定！安全且精确
-                resolved = true;
-                finalName = m_players[exactMatchP].name; // 🚨 【换成这行】：底层查重统一使用选手！
-                outBestP = exactMatchP;
-                outBestA = exactMatchA;
-
-                CString successLog;
-                successLog.Format(L"  └ [🎯别名命中] 职业/别名 [%s] 唯一指向: %s",
-                    (LPCTSTR)ocrResult, (LPCTSTR)finalName);
-                PushVisualLog(successLog, RGB(0, 255, 200));
-
-                m_dataMutex.lock();
-                if (isKiller) lockedKillerTeam = m_players[exactMatchP].team;
-                else          lockedDeadTeam = m_players[exactMatchP].team;
-                m_dataMutex.unlock();
-                return false;
             }
             else if (exactMatchCount > 1) {
                 WriteMatchLog(L"  └ [⚠️别名冲突] 多个玩家拥有相同别名，等待ID帧...");
@@ -10900,11 +10960,13 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
             bool bestHasMetaContext = false;
             std::wstring bestName;
             CString bestAliasName;
+            std::vector<FirstRoundCandidate> frameCandidates;
 
             m_dataMutex.lock();
             for (int p = 0; p < 8; p++) {
                 if (m_players[p].name.IsEmpty()) continue;
                 if (scopeByTeam && m_players[p].team != targetTeam) continue;
+                if (excludedTeam >= 0 && m_players[p].team == excludedTeam) continue;
 
                 int teamPenalty = 0;
                 if (isKiller && lockedDeadTeam != -1 && m_players[p].team == lockedDeadTeam)
@@ -10961,6 +11023,20 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
                 if (curBestAlias == -1) continue;
                 if (maxScore == -1) break;
 
+                FirstRoundCandidate candidate;
+                candidate.playerIndex = p;
+                candidate.team = m_players[p].team;
+                candidate.score = curScore;
+                candidate.realIdLength = curRealLen;
+                candidate.aliasIndex = curBestAlias;
+                candidate.passLine = CNameMatcher::GetDynamicThreshold(curRealLen);
+                candidate.hasMetaContext = curBestMetaContext;
+                candidate.ownerName = m_players[p].name;
+                candidate.aliasName = curBestName.c_str();
+                candidate.frameText = ocrResult;
+                candidate.frameIndex = frameIdx;
+                frameCandidates.push_back(std::move(candidate));
+
                 if (curScore > maxScore || (curScore == maxScore && maxScore > 0 && curRealLen > bestRealLen)) {
                     maxScore = curScore;
                     bestP = p;
@@ -10987,13 +11063,12 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
                 return true;
             }
 
-            int passLine = CNameMatcher::GetDynamicThreshold(bestRealLen);
-
-            // 更新全局最优记录
-            if (bestP != -1) {
-                recordFirstRoundCandidate(isKiller, maxScore, bestP, bestA, passLine,
-                    bestRealLen, bestHasMetaContext, bestAliasName, ocrResult, frameIdx);
+            // 保留本帧所有选手的最高别名分，才能在全帧扫描后正确计算第一、第二名分差。
+            for (const auto& candidate : frameCandidates) {
+                mergeFirstRoundCandidate(isKiller, candidate);
             }
+
+            int passLine = CNameMatcher::GetDynamicThreshold(bestRealLen);
 
             if (collectOnly) {
                 CString collectLog;
@@ -11169,7 +11244,8 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
             CString roleText = isKiller ? L"杀手" : L"死者";
             CString sideText = areaIndex == 0 ? L"左框" : L"右框";
             TDnfPanelSide panelSide = (areaIndex == 0) ? TDnfPanelSide::LeftNameArea : TDnfPanelSide::RightAreaName;
-            CString candidateScopeText = L"上场8人";
+            CString candidateScopeText = scoreAllPlayersForCurrentPass ?
+                L"全场选手（排除对方已锁定队伍）" : L"目标队伍现有选手";
             const int ID_LOCK_SCORE = 35;
 
             struct Evidence {
@@ -11235,8 +11311,8 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
 
             // 【队伍收窄】本轮只在目标队伍里收集候选：
             //   死者 = 物理死亡侧所属队伍，杀手 = 对面队伍。
-            const int targetTeam = isKiller ? killerTargetTeam : PhysicalSideToTeam(deadArea);
-            const bool scopeByTeam = IsRosterCompleteForTeam(targetTeam);
+            const int targetTeam = isKiller ? killerTargetTeam : teamForPhysicalSide(deadArea);
+            const bool scopeByTeam = !scoreAllPlayersForCurrentPass && (targetTeam == 0 || targetTeam == 1);
 
             for (const auto& f : frames) {
                 CString raw = f.text;
@@ -11276,7 +11352,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
             CString head;
             head.Format(L"[简化兜底][%s-%s] 开始：候选范围=%s；翻转红蓝=%s；OCR原文={%s}；职业证据=%s(%d帧)；ID文本数量=%d；规则=第一轮ID匹配，第二轮#职业匹配，大区仅作为ID普通字符。",
                 (LPCTSTR)sideText, (LPCTSTR)roleText,
-                (LPCTSTR)candidateScopeText, m_bFlipSides ? L"是" : L"否",
+                (LPCTSTR)candidateScopeText, flippedSides ? L"是" : L"否",
                 ev.rawList.IsEmpty() ? L"空" : ev.rawList.GetString(),
                 ev.topJob.IsEmpty() ? L"无" : ev.topJob.GetString(), ev.topJobCount,
                 (int)ev.idTexts.size());
@@ -11501,8 +11577,8 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
             if (selectedIdx >= 0) {
                 const auto& picked = list[selectedIdx];
                 CString summary;
-                summary.Format(L"[简化兜底][%s-%s] 第一轮正常ID匹配：候选范围=上场8人；采用动态及格线；选中动态线=%d；最高ID分=%d；最高分同分候选数=%d；同分处理=固定选择遍历顺序第一个；并列=%s。",
-                    (LPCTSTR)sideText, (LPCTSTR)roleText,
+                summary.Format(L"[简化兜底][%s-%s] 第一轮正常ID匹配：候选范围=%s；采用动态及格线；选中动态线=%d；最高ID分=%d；最高分同分候选数=%d；同分处理=固定选择遍历顺序第一个；并列=%s。",
+                    (LPCTSTR)sideText, (LPCTSTR)roleText, (LPCTSTR)candidateScopeText,
                     picked.passLine, bestIdScore, tieCount,
                     tieList.IsEmpty() ? L"无" : tieList.GetString());
                 WriteMatchLog(summary);
@@ -11510,8 +11586,8 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
             }
 
             CString firstFail;
-            firstFail.Format(L"[简化兜底][%s-%s] 第一轮正常ID匹配未锁定：候选范围=上场8人；规则=动态及格线+短ID保护；当前最高可用ID分=%d；处理=进入第二轮职业匹配。",
-                (LPCTSTR)sideText, (LPCTSTR)roleText, bestIdScore);
+            firstFail.Format(L"[简化兜底][%s-%s] 第一轮正常ID匹配未锁定：候选范围=%s；规则=动态及格线+短ID保护；当前最高可用ID分=%d；处理=进入第二轮职业匹配。",
+                (LPCTSTR)sideText, (LPCTSTR)roleText, (LPCTSTR)candidateScopeText, bestIdScore);
             WriteMatchLog(firstFail);
 
             std::vector<int> jobIndices;
@@ -11569,7 +11645,7 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
                     (LPCTSTR)sideText, (LPCTSTR)roleText,
                     ev.topJob.IsEmpty() ? L"无" : ev.topJob.GetString());
                 WriteMatchLog(summary);
-                return acceptCandidate(onlyIdx, L"第二轮职业唯一匹配", L"#职业在上场8人可用候选中唯一，直接锁定");
+                return acceptCandidate(onlyIdx, L"第二轮职业唯一匹配", L"#职业在当前候选范围内唯一，直接锁定");
             }
 
             CString jobTieList;
@@ -11614,8 +11690,11 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
         {
             TDnfPanelSide side = (areaIndex == 0) ? TDnfPanelSide::LeftNameArea : TDnfPanelSide::RightAreaName;
             // 【队伍收窄】只喂目标队伍候选：死者 = 物理死亡侧所属队伍，杀手 = 对面队伍。
-            const int fusionTargetTeam = isKiller ? killerTargetTeam : PhysicalSideToTeam(deadArea);
-            TDnfPanelMatchResult fusion = MatchIdentityPanel(side, fusionTargetTeam);
+            const int fusionTargetTeam = scoreAllPlayersForCurrentPass ? -1 :
+                (isKiller ? killerTargetTeam : teamForPhysicalSide(deadArea));
+            const int excludedTeam = scoreAllPlayersForCurrentPass ?
+                (isKiller ? lockedDeadTeam : lockedKillerTeam) : -1;
+            TDnfPanelMatchResult fusion = MatchIdentityPanel(side, fusionTargetTeam, excludedTeam);
 
             CString tag = isKiller ? L"杀手" : L"死者";
             CString sideText = (side == TDnfPanelSide::LeftNameArea) ? L"左框" : L"右框";
@@ -11797,35 +11876,39 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
     // ============================================================
     // 【简化兜底】首轮统一决策未锁定后，再按两轮规则补充判断。
     // ============================================================
-    WriteMatchLog(L"[简化兜底] 首轮OCR结束：按两轮规则检查上场8人：先用非职业ID帧匹配，未锁定再用纯职业帧匹配 #职业。" );
+    WriteMatchLog(L"[简化兜底] 首轮OCR结束：按两轮规则检查目标队伍现有选手：先用非职业ID帧匹配，未锁定再用纯职业帧匹配 #职业。" );
     trySimpleMetaFallback(true, killerArea, historyKTexts, killerResolved, finalKillerName, killerBestP, killerBestA, lockedKillerTeam);
     trySimpleMetaFallback(false, deadArea, historyDTexts, deadResolved, finalDeadName, deadBestP, deadBestA, lockedDeadTeam);
 
-    // ---- 二轮降级匹配（杀手） ----
+    // 二轮增强评分也先收集全部帧，再统一采用最高分，不因首个过线帧提前锁定。
     if (!killerResolved && !historyKTexts.empty()) {
-        PushVisualLog(L"▶ [找杀手] 启动【二轮降级匹配】...", RGB(255, 165, 0));
+        resetFirstRoundDecision(true);
+        PushVisualLog(L"▶ [找杀手] 启动【队伍内二轮最高分复核】...", RGB(255, 165, 0));
         for (const auto& frame : historyKTexts) {
             int kScore = -2;
             processMatch(frame.text, killerResolved, finalKillerName, true,
-                killerBestP, killerBestA, kScore, true, frame.frameIdx, false);
-            if (killerResolved) break;
+                killerBestP, killerBestA, kScore, true, frame.frameIdx, true);
         }
+        acceptCollectedFirstRound(true, killerResolved, finalKillerName,
+            killerBestP, killerBestA, lockedKillerTeam);
     }
 
-    // ---- 二轮降级匹配（死者） ----
+    // ---- 队伍内二轮最高分复核（死者） ----
     if (!deadResolved && !historyDTexts.empty()) {
-        PushVisualLog(L"▶ [找死者] 启动【二轮降级匹配】...", RGB(255, 165, 0));
+        resetFirstRoundDecision(false);
+        PushVisualLog(L"▶ [找死者] 启动【队伍内二轮最高分复核】...", RGB(255, 165, 0));
         for (const auto& frame : historyDTexts) {
             int dScore = -2;
             processMatch(frame.text, deadResolved, finalDeadName, false,
-                deadBestP, deadBestA, dScore, true, frame.frameIdx, false);
-            if (deadResolved) break;
+                deadBestP, deadBestA, dScore, true, frame.frameIdx, true);
         }
+        acceptCollectedFirstRound(false, deadResolved, finalDeadName,
+            deadBestP, deadBestA, lockedDeadTeam);
     }
 
     // 二轮后再尝试一次简化兜底。
     if (!killerResolved || !deadResolved) {
-        WriteMatchLog(L"[简化兜底] 二轮OCR结束：再次按两轮规则检查上场8人：ID帧优先，职业帧只做第二轮兜底。" );
+        WriteMatchLog(L"[简化兜底] 二轮OCR结束：再次按两轮规则检查目标队伍现有选手：ID帧优先，职业帧只做第二轮兜底。" );
         trySimpleMetaFallback(true, killerArea, historyKTexts, killerResolved, finalKillerName, killerBestP, killerBestA, lockedKillerTeam);
         trySimpleMetaFallback(false, deadArea, historyDTexts, deadResolved, finalDeadName, deadBestP, deadBestA, lockedDeadTeam);
     }
@@ -11838,25 +11921,62 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
         tryFusionMatch(false, deadArea, deadResolved, finalDeadName,
             deadBestP, deadBestA, lockedDeadTeam);
 
-    //// ---- 全局兜底 ----
-    //if (!killerResolved && globalKillerBestP != -1
-    //    && globalKillerBestScore >= (globalKillerPassLine - 20)
-    //    && globalKillerBestScore >= 40)
-    //{
-    //    killerResolved = true;
-    //    killerBestP = globalKillerBestP;
-    //    killerBestA = globalKillerBestA;
-    //    finalKillerName = globalKillerName;
-    //}
-    //if (!deadResolved && globalDeadBestP != -1
-    //    && globalDeadBestScore >= (globalDeadPassLine - 20)
-    //    && globalDeadBestScore >= 40)
-    //{
-    //    deadResolved = true;
-    //    deadBestP = globalDeadBestP;
-    //    deadBestA = globalDeadBestA;
-    //    finalDeadName = globalDeadName;
-    //}
+    // 全场兜底只处理仍未识别的角色，重用同一批 OCR 帧和同一最高分/置信规则。
+    scoreAllPlayersForCurrentPass = true;
+    WriteMatchLog(L"[全场兜底-最高分] 队伍内首轮、二轮、简化规则及身份融合均未通过；现对未识别角色扫描全场候选并按最高分统一决策。");
+
+    auto collectWholeRosterScores = [&](bool isKiller, bool aggressive) {
+        bool& resolved = isKiller ? killerResolved : deadResolved;
+        if (resolved) return;
+        resetFirstRoundDecision(isKiller);
+        const auto& frames = isKiller ? historyKTexts : historyDTexts;
+        const CString roleText = isKiller ? L"杀手" : L"死者";
+        CString startLog;
+        startLog.Format(L"[全场兜底-最高分][%s] 开始：候选范围=全场选手；评分模式=%s；决策=全部OCR帧完成后按选手最高分排序。",
+            (LPCTSTR)roleText, aggressive ? L"增强" : L"标准");
+        WriteMatchLog(startLog);
+        for (const auto& frame : frames) {
+            if (cancelled()) return;
+            int frameScore = -2;
+            if (isKiller) {
+                processMatch(frame.text, killerResolved, finalKillerName, true,
+                    killerBestP, killerBestA, frameScore, aggressive, frame.frameIdx, true);
+            }
+            else {
+                processMatch(frame.text, deadResolved, finalDeadName, false,
+                    deadBestP, deadBestA, frameScore, aggressive, frame.frameIdx, true);
+            }
+        }
+        if (cancelled()) return;
+        acceptCollectedFirstRound(isKiller, resolved,
+            isKiller ? finalKillerName : finalDeadName,
+            isKiller ? killerBestP : deadBestP,
+            isKiller ? killerBestA : deadBestA,
+            isKiller ? lockedKillerTeam : lockedDeadTeam);
+    };
+
+    auto tryWholeRosterFallback = [&](bool isKiller, int areaIndex, const std::vector<FrameData>& frames,
+        bool& resolved, CString& finalName, int& outBestP, int& outBestA, int& lockedTeam) {
+        if (resolved) return;
+        collectWholeRosterScores(isKiller, false);
+        if (resolved || cancelled()) return;
+        trySimpleMetaFallback(isKiller, areaIndex, frames, resolved,
+            finalName, outBestP, outBestA, lockedTeam);
+        if (resolved || cancelled()) return;
+        collectWholeRosterScores(isKiller, true);
+        if (resolved || cancelled()) return;
+        trySimpleMetaFallback(isKiller, areaIndex, frames, resolved,
+            finalName, outBestP, outBestA, lockedTeam);
+        if (!resolved && !cancelled()) {
+            tryFusionMatch(isKiller, areaIndex, resolved, finalName,
+                outBestP, outBestA, lockedTeam);
+        }
+    };
+
+    tryWholeRosterFallback(true, killerArea, historyKTexts,
+        killerResolved, finalKillerName, killerBestP, killerBestA, lockedKillerTeam);
+    tryWholeRosterFallback(false, deadArea, historyDTexts,
+        deadResolved, finalDeadName, deadBestP, deadBestA, lockedDeadTeam);
 
     if (!killerResolved || !deadResolved) {
         // 匹配失败提示音：只响 2 下，避免实战时太吵。
@@ -12041,9 +12161,9 @@ void CDNFGameCaptureDlg::DoRetryMatchingTask(int triggerSide, std::uint64_t moni
 
             if (deadResolved && deadBestP != -1) {
                 // 【身份融合补丁】击杀成立后，只切死者侧身份段；杀手侧继续留场。
-                NotifyIdentityKillConfirmed(m_players[deadBestP].team, finalDeadName);
+                NotifyIdentityKillConfirmed(deadArea, finalDeadName);
             } else if (killerResolved && killerBestP != -1 && (triggerSide == 0 || triggerSide == 1)) {
-                NotifyIdentityKillConfirmed(triggerSide == 0 ? 1 : 0, L"");
+                NotifyIdentityKillConfirmed(deadArea, L"");
             }
 
             if (m_bPendingTeamScoreWin) {
@@ -12928,7 +13048,7 @@ void CDNFGameCaptureDlg::CheckColorTrigger()
 
     auto fireActiveXTrigger = [&](int deadSide, const CString& sourceReason, bool reciprocal = false) {
         CString line;
-        line.Format(L"[X触发诊断] %s侧大X进入OCR匹配：来源=%s；当前是否翻转红蓝=%s；物理死亡侧=%s；物理杀手侧=%s；说明=翻转红蓝只影响界面/OBS左右显示，不改变OCR区域、X检测位置和物理侧候选队伍。",
+        line.Format(L"[X触发诊断] %s侧大X进入OCR匹配：来源=%s；当前是否翻转红蓝=%s；物理死亡侧=%s；物理杀手侧=%s；说明=翻转红蓝会改变物理左右侧到红蓝队伍的候选映射，但不改变OCR区域、X检测位置和死者/杀手物理侧判定。",
             deadSide == 0 ? L"左" : L"右", sourceReason.GetString(), m_bFlipSides ? L"是" : L"否",
             deadSide == 0 ? L"左边" : L"右边", deadSide == 0 ? L"右边" : L"左边");
         WriteMatchLog(line);
@@ -13578,7 +13698,7 @@ void CDNFGameCaptureDlg::OnBnClickedApply() {
 }
 
 void CDNFGameCaptureDlg::OnBnClickedFlip() {
-    // 翻转红蓝只改变本机界面、网页和 OBS 输出的左右显示，实时同步期间也允许操作；
+    // 翻转红蓝改变本机显示方向及 OCR 物理侧到队伍的候选映射，实时同步期间也允许操作；
     // 远端实时快照以 preserveLocalFlip 方式应用，不会覆盖本机的翻转状态。
     if (m_cloudRealtimeFollowing) {
         // 实时同步时不推进比赛变更代次：代次用于判断实时快照应用后是否出现本地改动，
@@ -13598,7 +13718,7 @@ void CDNFGameCaptureDlg::OnBnClickedFlip() {
         m_bFlipSides = flipSides;
     }
     CString flipLog;
-    flipLog.Format(L"[红蓝翻转] 用户点击翻转红蓝：翻转后状态=%s；说明=只影响软件界面、网页和OBS输出左右显示；不改变游戏物理左/右框、简化兜底候选队伍、身份缓存、OCR区域和X检测位置。",
+    flipLog.Format(L"[红蓝翻转] 用户点击翻转红蓝：翻转后状态=%s；说明=影响软件界面、网页、OBS左右显示及物理左右侧到红蓝队伍的候选映射；不改变游戏物理左/右框、身份缓存、OCR区域和X检测位置。",
         flipSides ? L"开启" : L"关闭");
     WriteMatchLog(flipLog);
     WriteScoreToFile();

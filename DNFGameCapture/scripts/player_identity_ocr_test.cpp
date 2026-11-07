@@ -1,4 +1,6 @@
 #include "../PlayerIdentityOcrCache.h"
+#include "../OcrMatchRanking.h"
+#include "../OcrTeamMapping.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -48,6 +50,13 @@ OcrGameIdMetadata Parse(const std::wstring& value)
     result.fullMatchName = value;
     return result;
 }
+
+struct RankingCandidate {
+    int playerIndex = -1;
+    int team = -1;
+    int score = -1;
+    int realIdLength = 0;
+};
 
 void TestNormalizedCandidatesAndCacheLifetime()
 {
@@ -112,6 +121,38 @@ void TestScopeChangesAndReset()
     cache.Prepare(snapshot, roster, Parse);
     Require(cache.GameCandidates().empty(), "unnamed slots cannot be identified");
 }
+
+void TestPhysicalSideTeamMappingWithFlip()
+{
+    using dnf::identity::PhysicalSideToTeam;
+
+    Require(PhysicalSideToTeam(0, false) == 0 && PhysicalSideToTeam(1, false) == 1,
+        "without red-blue flip, left and right panels map to their corresponding teams");
+    Require(PhysicalSideToTeam(0, true) == 1 && PhysicalSideToTeam(1, true) == 0,
+        "red-blue flip must reverse physical-panel team candidates");
+}
+
+void TestHighestScoreIsPerPlayerAndFallbackExpandsScope()
+{
+    std::vector<RankingCandidate> candidates;
+    KeepBestOcrScorePerPlayer(candidates, {0, 0, 71, 4});
+    KeepBestOcrScorePerPlayer(candidates, {0, 0, 86, 4});
+    KeepBestOcrScorePerPlayer(candidates, {1, 0, 78, 5});
+    KeepBestOcrScorePerPlayer(candidates, {4, 1, 92, 6});
+
+    Require(candidates.size() == 3,
+        "repeated OCR frames for the same player must update that player, not create a second candidate");
+    const auto teamTop = TopTwoOcrPlayers(candidates, 0);
+    Require(teamTop.first >= 0 && candidates[teamTop.first].playerIndex == 0 &&
+        teamTop.second >= 0 && candidates[teamTop.second].playerIndex == 1,
+        "the constrained phase must rank the highest players in the expected team");
+    const auto allPlayersTop = TopTwoOcrPlayers(candidates);
+    Require(allPlayersTop.first >= 0 && candidates[allPlayersTop.first].playerIndex == 4,
+        "the final fallback must rank all players only after the team-scoped result");
+    const auto oppositeTeamTop = TopTwoOcrPlayers(candidates, -1, 1);
+    Require(oppositeTeamTop.first >= 0 && candidates[oppositeTeamTop.first].playerIndex == 0,
+        "global fallback must be able to exclude the already-resolved opponent team");
+}
 }
 
 int main()
@@ -119,5 +160,7 @@ int main()
     TestNormalizedCandidatesAndCacheLifetime();
     TestTemporaryAliasRemovalRemainsAuthoritative();
     TestScopeChangesAndReset();
+    TestPhysicalSideTeamMappingWithFlip();
+    TestHighestScoreIsPerPlayerAndFallbackExpandsScope();
     std::cout << "Player identity OCR tests passed.\n";
 }

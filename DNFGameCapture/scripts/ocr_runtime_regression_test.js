@@ -33,7 +33,8 @@ assert.match(ready, /if \(!m_bIsRunning\) OnBnClickedStart\(\)/,
 const taskStart = body('void CDNFGameCaptureDlg::StartOcrMatchingTask(', 'void CDNFGameCaptureDlg::EndOcrMatchingTask(');
 assert.match(taskStart, /DoRetryMatchingTask\(triggerSide, monitoringGeneration\)/);
 const retry = body('void CDNFGameCaptureDlg::DoRetryMatchingTask(', 'void CDNFGameCaptureDlg::OnBnClickedStart()');
-assert.match(retry, /MatchIdentityPanel\(side\)/, 'Game-ID temporal fusion must remain connected');
+assert.match(retry, /MatchIdentityPanel\(side,\s*fusionTargetTeam,\s*excludedTeam\)/,
+  'Game-ID temporal fusion must keep the active candidate scope');
 assert.match(retry, /std::lock_guard<std::mutex> dataLock\(m_dataMutex\);\s*if \(cancelled\(\)\) return;/,
   'Scoring must recheck cancellation while holding the roster lock');
 const identity = fs.readFileSync(path.join(__dirname, '../DNFGameCaptureDlg_IdentityPatch.cpp'), 'utf8');

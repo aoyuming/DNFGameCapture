@@ -227,6 +227,8 @@
     <ClInclude Include="PlayerLibraryStore.h" />
     <ClInclude Include="PlayerLibraryPushPolicy.h" />
     <ClInclude Include="PlayerIdentityOcrCache.h" />
+    <ClInclude Include="OcrMatchRanking.h" />
+    <ClInclude Include="OcrTeamMapping.h" />
     <ClInclude Include="PreviewLayout.h" />
     <ClInclude Include="HpBarCalibration.h" />
     <ClInclude Include="VoiceCloudCache.h" />

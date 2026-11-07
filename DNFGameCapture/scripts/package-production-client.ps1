@@ -1,18 +1,25 @@
 ﻿param(
     [string]$ReleaseDir = '',
-    [string]$OutputPath = ''
+    [string]$OutputPath = '',
+    [string]$ClientVersion = '6.0.0'
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-if (-not $ReleaseDir) { $ReleaseDir = Join-Path $root 'x64\Release' }
-if (-not $OutputPath) { $OutputPath = Join-Path $root 'deployment-packages\update_v559.zip' }
+if ($ClientVersion -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid client version: $ClientVersion" }
+$repoRoot = Split-Path -Parent $root
+if (-not $ReleaseDir) { $ReleaseDir = Join-Path $repoRoot 'x64\Release' }
+if (-not $OutputPath) {
+    $versionCode = $ClientVersion.Replace('.', '')
+    $OutputPath = Join-Path $ReleaseDir "update_v$versionCode.zip"
+}
 $ReleaseDir = (Resolve-Path -LiteralPath $ReleaseDir).Path
 $OutputPath = [IO.Path]::GetFullPath($OutputPath)
 if (Test-Path -LiteralPath $OutputPath) { throw "Output already exists: $OutputPath" }
 
 $exe = Join-Path $ReleaseDir 'DNFGameCapture.exe'
-$version = (Get-Item -LiteralPath $exe).VersionInfo.FileVersion
-if ($version -ne '5.5.9.0') { throw "Expected EXE version 5.5.9.0, got $version" }
+$exeVersion = (Get-Item -LiteralPath $exe).VersionInfo.FileVersion
+$expectedFileVersion = "$ClientVersion.0"
+if ($exeVersion -ne $expectedFileVersion) { throw "Expected EXE version $expectedFileVersion, got $exeVersion" }
 $manifestUrl = 'https://dnf-capture-update.oss-cn-beijing.aliyuncs.com/cloud-server-prod.json'
 $binaryText = [Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($exe))
 if (-not $binaryText.Contains($manifestUrl)) { throw 'The executable does not contain the production manifest URL' }

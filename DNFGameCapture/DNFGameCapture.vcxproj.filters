@@ -78,6 +78,12 @@
     <ClInclude Include="PlayerIdentityOcrCache.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="OcrMatchRanking.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="OcrTeamMapping.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="PreviewLayout.h">
       <Filter>头文件</Filter>
     </ClInclude>

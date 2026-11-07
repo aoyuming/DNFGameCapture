@@ -12,9 +12,12 @@ const resource = fs.readFileSync(path.join(root, 'DNFGameCapture.rc')).toString(
 
 const nativeVersion = header.match(/#define CURRENT_VERSION L"([^"]+)"/)?.[1];
 const webVersion = main.match(/const WEB_LAYOUT_VERSION = '.*?-(\d+\.\d+\.\d+)-/)?.[1];
+const fullWebVersion = main.match(/const WEB_LAYOUT_VERSION = '([^']+)'/)?.[1];
 assert.ok(nativeVersion, 'native client version must be defined');
 assert.equal(webVersion, nativeVersion, 'web top-bar version must match the native client version');
 assert.ok(/pageUri \+= L"\?appVersion=";[\s\S]{0,100}pageUri \+= CURRENT_VERSION;/.test(webHost),
   'WebView main document URL must change when the client version changes');
-assert.match(html, /<meta name="dnf-web-layout-version" content="20261107-5\.5\.9-1">/);
-assert.ok(/DNFGameCapture，版本 5\.5\.9/.test(resource), 'About dialog must show the current client version');
+assert.ok(fullWebVersion, 'web cache version must be defined');
+assert.ok(html.includes(`<meta name="dnf-web-layout-version" content="${fullWebVersion}">`),
+  'HTML cache version must match the JavaScript cache version');
+assert.ok(resource.includes(`DNFGameCapture，版本 ${nativeVersion}`), 'About dialog must show the current client version');
