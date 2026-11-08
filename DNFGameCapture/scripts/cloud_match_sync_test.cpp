@@ -216,6 +216,53 @@ void TestSyncedLibraryBatchIsAdditiveAndIndependentOfMatchStats()
     Require(!DnfBuildSyncedPlayerLibrary(team, payload) && payload.empty(), "invalid game evidence must discard the entire batch");
 }
 
+void TestSyncedLibraryHonorsLocalPowerPrefixPolicy()
+{
+    json source = { { "entities", json::array({
+        json{ { "names", { "90老王" } }, { "gameIds", { "power-90" } } },
+        json{ { "names", { "91老王" } }, { "gameIds", { "power-91" } } },
+        json{ { "names", { "老王" } }, { "gameIds", { "clean" } } },
+        json{ { "names", { "92新选手" } }, { "gameIds", { "power-new" } } },
+        json{ { "names", { "普通选手" } }, { "gameIds", { "normal" } } }
+    }) } };
+
+    auto removePolicy = source;
+    Require(DnfApplySyncedPlayerNamePolicy(removePolicy, "remove_power_prefixes"),
+        "remove-prefix policy applies to synced library payloads");
+    Require(removePolicy["entities"].size() == 2,
+        "prefixed-only synced names and their game IDs must not enter a remove-policy library");
+    Require(removePolicy["entities"][0]["names"] == json::array({ "老王" }) &&
+        removePolicy["entities"][0]["gameIds"] == json::array({ "clean" }),
+        "clean names retain only their own identity evidence");
+
+    auto mergePolicy = source;
+    Require(DnfApplySyncedPlayerNamePolicy(mergePolicy, "merge_power_prefixes"),
+        "merge-prefix policy applies to synced library payloads");
+    Require(mergePolicy["entities"].size() == 3,
+        "numeric variants of the same clean name merge into one incoming entity");
+    bool foundMergedWang = false;
+    for (const auto& entity : mergePolicy["entities"]) {
+        if (std::find(entity["names"].begin(), entity["names"].end(), "老王") != entity["names"].end()) {
+            const auto names = entity["names"];
+            const auto ids = entity["gameIds"];
+            foundMergedWang = names.size() == 3 && ids.size() == 3 &&
+                std::find(names.begin(), names.end(), "90老王") != names.end() &&
+                std::find(names.begin(), names.end(), "91老王") != names.end() &&
+                std::find(ids.begin(), ids.end(), "power-90") != ids.end() &&
+                std::find(ids.begin(), ids.end(), "power-91") != ids.end() &&
+                std::find(ids.begin(), ids.end(), "clean") != ids.end();
+        }
+    }
+    Require(foundMergedWang, "merge policy retains prefixed names as aliases and unions all game IDs");
+    const auto mergedOnce = mergePolicy;
+    Require(DnfApplySyncedPlayerNamePolicy(mergePolicy, "merge_power_prefixes") &&
+        mergePolicy == mergedOnce, "reapplying merge policy is idempotent");
+
+    auto noPolicy = source;
+    Require(DnfApplySyncedPlayerNamePolicy(noPolicy, "none") && noPolicy == source,
+        "unrestricted license policy leaves the synced batch unchanged");
+}
+
 void TestLibraryQueueRetainsEveryAcceptedBatch()
 {
     DnfSyncedPlayerLibraryQueue queue;
@@ -361,6 +408,7 @@ int main()
     TestSnapshotRevisionCorrelation();
     TestRetiredEvidenceIsIgnored();
     TestSyncedLibraryBatchIsAdditiveAndIndependentOfMatchStats();
+    TestSyncedLibraryHonorsLocalPowerPrefixPolicy();
     TestLibraryQueueRetainsEveryAcceptedBatch();
     TestStructuredDifferencePreview();
     TestRelativeOrientationUsesLocalAndTargetConsensusFlags();

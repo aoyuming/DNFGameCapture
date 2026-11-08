@@ -1,7 +1,7 @@
 ﻿param(
     [string]$ReleaseDir = '',
     [string]$OutputPath = '',
-    [string]$ClientVersion = '6.0.0'
+    [string]$ClientVersion = '6.0.2'
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot

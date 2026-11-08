@@ -17208,6 +17208,14 @@ bool CDNFGameCaptureDlg::QueueSyncedPlayerLibrary(const json& snapshot,
         AppLog(L"[选手库] 同步选手信息无效，本地库未修改。", RGB(255, 120, 80));
         return false;
     }
+    const auto sourceEntityCount = payload["entities"].size();
+    if (!DnfApplySyncedPlayerNamePolicy(payload, m_cloudPlayerNamePolicy)) {
+        AppLog(L"[选手库] 同步名称策略处理失败，本地库未修改。", RGB(255, 120, 80));
+        return false;
+    }
+    if (m_cloudPlayerNamePolicy != "none" && payload["entities"].size() != sourceEntityCount) {
+        AppLog(L"[选手库] 已按本机授权的名称策略过滤或归并跨主播同步选手。", RGB(210, 145, 255));
+    }
     if (payload["entities"].empty()) return true;
     m_matchLibrarySourceDevice = sourceDeviceId;
     m_matchLibrarySourceRevision = revision;

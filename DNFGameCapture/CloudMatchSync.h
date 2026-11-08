@@ -47,6 +47,10 @@ bool DnfConvertCloudMatchSnapshot(const nlohmann::json& cloudSnapshot,
 bool DnfBuildSyncedPlayerLibrary(const nlohmann::json& teamSnapshot,
     nlohmann::json& libraryPayload);
 
+// Apply the local license's one-time name policy to every later synced batch.
+bool DnfApplySyncedPlayerNamePolicy(nlohmann::json& libraryPayload,
+    const std::string& policy);
+
 // Keep accepted evidence in order; repeats may coalesce, distinct batches may not.
 class DnfSyncedPlayerLibraryQueue
 {

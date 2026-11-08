@@ -74,10 +74,17 @@ const sorted = sandbox.sortDirectory([
     { deviceId: 'online-old', online: true, receivedAt: 20 },
     { deviceId: 'expired', online: false, offlineExpiresAt: nowSeconds - 1 },
     { deviceId: 'offline-new', online: false, offlineExpiresAt: nowSeconds - 5 * 60 + 24 * 60 * 60 },
+    { deviceId: 'offline-11h', online: false, offlineExpiresAt: nowSeconds - 11 * 60 * 60 + 24 * 60 * 60 },
+    { deviceId: 'offline-13h', online: false, offlineExpiresAt: nowSeconds - 13 * 60 * 60 + 24 * 60 * 60 },
     { deviceId: 'online-new', online: true, receivedAt: 30 }
 ], nowSeconds);
 requireCondition(Array.from(sorted, item => item.deviceId).join(',') ===
-    'online-new,online-old,offline-new',
-    'Broadcaster directory must put online entries first, show only offline entries from the last 10 minutes, and drop expired entries.');
+    'online-new,online-old,offline-new,offline-old,offline-11h',
+    'Broadcaster directory must put online entries first, keep offline entries seen within 12 hours, and drop expired entries.');
+
+const longOfflineElapsed = sandbox.offlineElapsed(
+    nowSeconds - 11 * 60 * 60 + 24 * 60 * 60, nowSeconds);
+requireCondition(longOfflineElapsed === '离线 11小时',
+    `Long offline elapsed label is wrong: ${longOfflineElapsed}`);
 
 console.log('Unified broadcaster Web state tests passed.');

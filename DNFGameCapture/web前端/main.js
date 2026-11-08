@@ -89,7 +89,7 @@ let pendingAliasPopoverName = '';
 let pendingAliasPopoverInput = null;
 let activeAliasPopoverInput = null;
 let ignoreNextDocumentClickUntil = 0;
-const WEB_LAYOUT_VERSION = '20261107-6.0.0-1';
+const WEB_LAYOUT_VERSION = '20261108-6.0.2-2';
 const ALIAS_POPOVER_OFFSET_X = 8;
 const CLOUD_MATCH_WEB_THEMES = new Set([
     'dark-esports', 'frost-broadcast', 'black-gold', 'mist-blue', 'glacier-blue'
@@ -3400,14 +3400,18 @@ function cloudOfflineElapsed(offlineExpiresAt, nowSeconds = Date.now() / 1000) {
 }
 
 function sortBroadcasterDirectory(members, nowSeconds = Date.now() / 1000) {
+    const retentionSeconds = 24 * 60 * 60;
+    const onlineWindowSeconds = 12 * 60 * 60;
     return [...(members || [])]
         .filter(member => {
             if (member?.online === true) return true;
             const offlineExpiresAt = Number(member?.offlineExpiresAt || 0);
             if (!Number.isFinite(offlineExpiresAt) || offlineExpiresAt <= 0) return false;
-            // 服务端保留离线快照 24 小时，但列表只展示最近离线 10 分钟的主播。
-            const offlineAt = offlineExpiresAt - 24 * 60 * 60;
-            return offlineAt <= nowSeconds && offlineAt >= nowSeconds - 10 * 60;
+            // 离线到期时间 = 最后在线时间 + 24 小时（服务端保留期）。
+            // 列表只展示 12 小时内在线过的主播；60 秒容差用于吸收客户端时钟偏差。
+            const lastSeenAt = offlineExpiresAt - retentionSeconds;
+            const elapsed = nowSeconds - lastSeenAt;
+            return elapsed >= -60 && elapsed < onlineWindowSeconds;
         })
         .sort((a, b) => {
             const aOnline = a?.online === true;
@@ -3585,7 +3589,7 @@ function renderBroadcasterSidebar() {
     if (list) {
         if (!members.length) {
             const emptyText = state.connected
-                ? '暂无其他在线或最近离线主播'
+                ? '12 小时内暂无其他主播'
                 : '连接云端后显示主播列表';
             const existingEmpty = list.childElementCount === 1 ? list.querySelector(':scope > .broadcaster-list-empty') : null;
             if (existingEmpty) {
@@ -8364,7 +8368,10 @@ setTimeout(() => scheduleLayoutFit(true, 'startup-300ms'), 300);
     // ---------- 顶栏：版本、风格切换、日志、窗口控制与拖动 ----------
     const version = document.getElementById('rd-version');
     if (version) {
-        const match = String(typeof WEB_LAYOUT_VERSION !== 'undefined' ? WEB_LAYOUT_VERSION : '').match(/(\d+\.\d+\.\d+)/);
+        // 优先显示 C++ 通过 ?appVersion= 传入的 EXE 实际版本，避免前端资源版本与 EXE 版本不一致时误导用户。
+        // 没有该参数（例如直接打开页面）时再回退到前端资源版本号。
+        const exeVersion = new URLSearchParams(window.location.search).get('appVersion') || '';
+        const match = String(exeVersion || (typeof WEB_LAYOUT_VERSION !== 'undefined' ? WEB_LAYOUT_VERSION : '')).match(/(\d+\.\d+\.\d+)/);
         version.textContent = match ? `v${match[1]}` : '';
     }
 

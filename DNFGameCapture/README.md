@@ -1,8 +1,8 @@
 # DNF点将工具（DNFGameCapture）项目说明
 
-一键 Release x64 编译并生成客户端更新包：powershell -ExecutionPolicy Bypass -File scripts\build-and-package-client.ps1。更新包默认生成在仓库根目录 x64\Release\update_v600.zip，不会覆盖该目录中的本地配置或选手数据。
+一键 Release x64 编译并生成客户端更新包：powershell -ExecutionPolicy Bypass -File scripts\build-and-package-client.ps1。更新包默认生成在仓库根目录 x64\Release\update_v602.zip，不会覆盖该目录中的本地配置或选手数据。
 
-当前版本：**6.0.0**（EXE FileVersion / ProductVersion `6.0.0.0`，前端缓存标识 `20261107-6.0.0-1`）
+当前版本：**6.0.2**（EXE FileVersion / ProductVersion `6.0.2.0`，前端缓存标识 `20261108-6.0.2-1`）
 
 面向 DNF 擂台 / 赛事直播的自动人头记分与主播工具。
 
@@ -134,7 +134,7 @@
   powershell -ExecutionPolicy Bypass -File scripts\build-and-package-client.ps1
   ```
 
-  编译中间文件放在 `%LOCALAPPDATA%\DNFGameCapture\builds\`；更新包生成到仓库根目录 `x64\Release\update_v600.zip`（不是内层 `DNFGameCapture\x64\`）。重编译会在新包完整生成后替换同名 ZIP，不覆盖该目录中的 EXE、本地配置或选手数据。
+  编译中间文件放在 `%LOCALAPPDATA%\DNFGameCapture\builds\`；更新包生成到仓库根目录 `x64\Release\update_v602.zip`（不是内层 `DNFGameCapture\x64\`）。重编译会在新包完整生成后替换同名 ZIP，不覆盖该目录中的 EXE、本地配置或选手数据。
 - 测试服构建必须显式加 `/p:DnfCloudEnvironment=Test`，并使用单独输出目录；不要用正式版打包脚本发布测试构建。
 - 打包脚本会同步当前前端和随包语音资源，并校验 EXE 文件版本、正式服务器清单及运行文件白名单。
 - 改版本号要同步：`DNFGameCaptureDlg.h` 的 `CURRENT_VERSION`、`DNFGameCapture.rc`（UTF-16 LE，FILEVERSION / PRODUCTVERSION 和字符串）、`scripts/package-production-client.ps1`、`scripts/streamer-tools-test.cjs`、`scripts/installer/DNFGameCapture-setup.iss`。用 `node scripts/streamer-tools-test.cjs` 检查是否一致。

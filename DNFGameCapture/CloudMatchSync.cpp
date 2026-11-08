@@ -455,6 +455,106 @@ bool DnfBuildSyncedPlayerLibrary(const json& teamSnapshot, json& libraryPayload)
     return true;
 }
 
+namespace {
+
+bool StripNumericPowerPrefix(const std::string& name, std::string& cleanName)
+{
+    cleanName.clear();
+    const int length = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        name.data(), static_cast<int>(name.size()), nullptr, 0);
+    if (length <= 0) return false;
+    std::wstring wide(static_cast<std::size_t>(length), L'\0');
+    if (::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name.data(),
+        static_cast<int>(name.size()), wide.data(), length) != length) return false;
+
+    std::size_t digits = 0;
+    while (digits < wide.size() && std::iswdigit(wide[digits])) ++digits;
+    if (digits == 0) return false;
+    while (digits < wide.size() && std::iswspace(wide[digits])) ++digits;
+    if (digits == wide.size()) return false;
+
+    const int bytes = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+        wide.data() + digits, static_cast<int>(wide.size() - digits), nullptr, 0, nullptr, nullptr);
+    if (bytes <= 0) return false;
+    std::string suffix(static_cast<std::size_t>(bytes), '\0');
+    if (::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide.data() + digits,
+        static_cast<int>(wide.size() - digits), suffix.data(), bytes, nullptr, nullptr) != bytes) return false;
+    return DnfNormalizeCloudMatchUtf8Name(suffix, cleanName);
+}
+
+} // namespace
+
+bool DnfApplySyncedPlayerNamePolicy(json& libraryPayload, const std::string& policy)
+{
+    if (!libraryPayload.is_object() || !libraryPayload.contains("entities") ||
+        !libraryPayload["entities"].is_array()) return false;
+    if (policy == "none") return true;
+    if (policy != "remove_power_prefixes" && policy != "merge_power_prefixes") return false;
+
+    if (policy == "remove_power_prefixes") {
+        json retained = json::array();
+        for (auto entity : libraryPayload["entities"]) {
+            if (!entity.is_object() || !entity.contains("names") ||
+                !entity["names"].is_array() || !entity.contains("gameIds") ||
+                !entity["gameIds"].is_array()) return false;
+            json names = json::array();
+            for (const auto& name : entity["names"]) {
+                if (!name.is_string()) return false;
+                std::string clean;
+                if (!StripNumericPowerPrefix(name.get<std::string>(), clean)) names.push_back(name);
+            }
+            if (names.empty()) continue;
+            entity["names"] = std::move(names);
+            retained.push_back(std::move(entity));
+        }
+        libraryPayload["entities"] = std::move(retained);
+        return true;
+    }
+
+    struct EntityData {
+        std::set<std::string> names;
+        std::set<std::string> gameIds;
+    };
+    std::map<std::string, EntityData> merged;
+    for (const auto& entity : libraryPayload["entities"]) {
+        if (!entity.is_object() || !entity.contains("names") ||
+            !entity["names"].is_array() || entity["names"].empty() ||
+            !entity.contains("gameIds") || !entity["gameIds"].is_array()) return false;
+
+        std::string ownerName;
+        for (const auto& name : entity["names"]) {
+            if (!name.is_string()) return false;
+            const auto original = name.get<std::string>();
+            std::string clean;
+            if (StripNumericPowerPrefix(original, clean)) {
+                ownerName = clean;
+                break;
+            }
+            if (ownerName.empty()) ownerName = original;
+        }
+        if (ownerName.empty()) return false;
+        auto& destination = merged[ownerName];
+        for (const auto& name : entity["names"]) {
+            const auto original = name.get<std::string>();
+            std::string clean;
+            if (StripNumericPowerPrefix(original, clean)) destination.names.insert(clean);
+            destination.names.insert(original);
+        }
+        for (const auto& gameId : entity["gameIds"]) {
+            if (!gameId.is_string()) return false;
+            destination.gameIds.insert(gameId.get<std::string>());
+        }
+    }
+
+    json entities = json::array();
+    for (const auto& [ownerName, entity] : merged) {
+        (void)ownerName;
+        entities.push_back({ { "names", entity.names }, { "gameIds", entity.gameIds } });
+    }
+    libraryPayload["entities"] = std::move(entities);
+    return true;
+}
+
 json DnfBuildCloudMatchPreview(const json& localTeamSnapshot,
     const json& remoteTeamSnapshot, bool swapped)
 {

@@ -18,9 +18,10 @@ fields['fxm-preview-skin'].value='-1';fields['fxm-preview-voice'].value='-1';res
 fields['fxm-preview-skin'].value='999';fields['fxm-preview-voice'].value='999';fields['fxm-preview-event'].value='invalid';result=c.getVoicePreviewSelection(layout);assert.equal(result.skin,8);assert.equal(result.voice,2);assert.equal(result.event,'victory');
 const preview=cpp.slice(cpp.indexOf('else if (action == "cmd_kill_voice_test")'),cpp.indexOf('else if (action == "cmd_toggle_kill_display")'));
 assert(preview.includes('++g_killVoicePlaybackEpoch;'));assert(preview.includes('cmd_stop_kill_voice_test'));assert(!preview.includes('WritePrivateProfile'));assert(!preview.includes('SetPolicy('));
-assert(read('DNFGameCaptureDlg.h').includes('#define CURRENT_VERSION L"6.0.0"'));
-const rc=fs.readFileSync(path.join(root,'DNFGameCapture.rc'));assert.equal(rc[0],255);assert.equal(rc[1],254);const text=rc.toString('utf16le');assert(text.includes('FILEVERSION 6,0,0,0'));assert(text.includes('PRODUCTVERSION 6,0,0,0'));
-assert(read('scripts/installer/DNFGameCapture-setup.iss').includes('#define AppVersion "6.0.0"'));assert(read('scripts/package-production-client.ps1').includes('$expectedFileVersion = "$ClientVersion.0"'));
-const webVersion=js.match(/const WEB_LAYOUT_VERSION = '([^']+)'/)[1];assert(webVersion.startsWith('20261107-6.0.0-'));assert(html.includes('content="'+webVersion+'"'));assert(html.includes('main.js?v='+webVersion));
+assert(read('DNFGameCaptureDlg.h').includes('#define CURRENT_VERSION L"6.0.2"'));
+const rc=fs.readFileSync(path.join(root,'DNFGameCapture.rc'));assert.equal(rc[0],255);assert.equal(rc[1],254);const text=rc.toString('utf16le');assert(text.includes('FILEVERSION 6,0,2,0'));assert(text.includes('PRODUCTVERSION 6,0,2,0'));
+assert(read('scripts/installer/DNFGameCapture-setup.iss').includes('#define AppVersion "6.0.2"'));assert(read('scripts/package-production-client.ps1').includes('$expectedFileVersion = "$ClientVersion.0"'));
+assert(read('scripts/build-and-package-client.ps1').includes("[string]$ClientVersion = '6.0.2'"));
+const webVersion=js.match(/const WEB_LAYOUT_VERSION = '([^']+)'/)[1];assert(webVersion.startsWith('20261108-6.0.2-'));assert(html.includes('content="'+webVersion+'"'));assert(html.includes('main.js?v='+webVersion));
 assert(read('scripts/build-and-package-client.ps1').includes("Join-Path $repoRoot 'x64\\Release'"));
-console.log('PASS: unified tools/TXT placement, explicit show/hide, independent preview across nine skins, fallback, audio cancellation, no live-setting mutation, consistent 6.0.0 version and x64/Release package output.');
+console.log('PASS: unified tools/TXT placement, explicit show/hide, independent preview across nine skins, fallback, audio cancellation, no live-setting mutation, consistent 6.0.2 version and x64/Release package output.');

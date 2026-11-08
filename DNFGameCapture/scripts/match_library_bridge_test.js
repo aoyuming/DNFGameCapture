@@ -68,6 +68,8 @@ test('one-shot and realtime acceptance enqueue additive library imports', () => 
 test('sync imports use worker queue and coalesce identical evidence without replacing the library', () => {
   const queue = section('bool CDNFGameCaptureDlg::QueueSyncedPlayerLibrary(', 'void CDNFGameCaptureDlg::QueuePlayerIdentityCommand(');
   assert.match(queue, /DnfBuildSyncedPlayerLibrary/);
+  assert.match(queue, /DnfApplySyncedPlayerNamePolicy\(payload, m_cloudPlayerNamePolicy\)/);
+  assert.ok(queue.indexOf('DnfApplySyncedPlayerNamePolicy') < queue.indexOf('m_matchLibraryQueue.Enqueue'));
   assert.match(queue, /m_playerLibraryStore->ImportV2\(/);
   assert.match(queue, /m_matchLibraryRequestId/);
   assert.doesNotMatch(queue, /SubmitLegacy|SaveAliasDB\(|\.get\(\)|\.join\(/);
